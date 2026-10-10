@@ -3442,6 +3442,401 @@ describe('SourceImageObserver', () => {
     stopSecond();
     stopThird();
   });
+
+  it('gives the picture CSS decides for an image a number, new with each picture', () => {
+    const fixture = createFixture();
+    Object.defineProperty(fixture.image, 'currentSrc', {
+      configurable: true,
+      writable: true,
+      value: 'https://private.example/original.png',
+    });
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const style = pictureStyleFixture(fixture.document, fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const swapClass = () => {
+      events.length = 0;
+      fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+      return events;
+    };
+    const numberOf = (event: SourceImageObservationEvent | undefined) =>
+      (event as { input: { cssPicture?: number } }).input.cssPicture;
+    // An image that shows its own file says nothing more than before.
+    expect(events).toHaveLength(1);
+    expect(Object.hasOwn((events[0] as { input: object }).input, 'cssPicture'))
+      .toBe(false);
+    expect(Object.hasOwn(model.get(7)!, 'cssPicture')).toBe(false);
+    const plain = model.get(7)!;
+
+    // A class swaps the picture through `content`: no address, size or
+    // place changes, and no load event follows.
+    style.content = 'url("https://private.example/second.png")';
+    expect(swapClass()).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: false, captureChanged: true },
+    }]);
+    const second = numberOf(events[0])!;
+    expect(Number.isSafeInteger(second) && second > 0).toBe(true);
+    expect(model.get(7)).toMatchObject({
+      cssPicture: second,
+      contentRevision: plain.contentRevision,
+      captureRevision: plain.captureRevision! + 1,
+    });
+    // The number is all that travels: nothing of the picture.
+    expect(JSON.stringify(events)).not.toMatch(/(?:url|private\.example|second\.png)/iu);
+
+    // The same picture again is no new revision.
+    fixture.resize.trigger(fixture.image);
+    expect(swapClass()).toEqual([]);
+
+    // Its own file again: the number goes.
+    style.content = 'normal';
+    expect(swapClass()).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, captureChanged: true },
+    }]);
+    expect(Object.hasOwn((events[0] as { input: object }).input, 'cssPicture'))
+      .toBe(false);
+    expect(Object.hasOwn(model.get(7)!, 'cssPicture')).toBe(false);
+
+    // The same picture as before comes back under its number.
+    style.content = 'url("https://private.example/second.png")';
+    expect(numberOf(swapClass()[0])).toBe(second);
+
+    // Another picture, a part of the file, another fit, and another file
+    // under the same view box are each another number, never one used.
+    const used = new Set([second]);
+    const next = (change: () => void) => {
+      change();
+      const number = numberOf(swapClass()[0])!;
+      expect(used.has(number)).toBe(false);
+      used.add(number);
+      expect(model.get(7)!.cssPicture).toBe(number);
+    };
+    next(() => { style.content = 'url("https://private.example/third.png")'; });
+    next(() => { style.content = 'normal'; style.viewBox = 'inset(0px 50% 0px 0px)'; });
+    next(() => { style.viewBox = 'inset(0px 25% 0px 0px)'; });
+    next(() => { style.objectFit = 'contain'; });
+    next(() => { style.objectPosition = '0% 0%'; });
+    next(() => {
+      (fixture.image as HTMLImageElement & { currentSrc: string }).currentSrc =
+        'https://private.example/other-file.png';
+    });
+    stop();
+  });
+
+  it('gives no number to an image that paints its own file', () => {
+    const fixture = createFixture();
+    Object.defineProperty(fixture.image, 'currentSrc', {
+      configurable: true,
+      writable: true,
+      value: 'https://private.example/original.png',
+    });
+    const style = pictureStyleFixture(fixture.document, fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    // Each of these is as Chrome computes it, and paints the file.
+    for (const [content, viewBox] of [
+      ['""', 'none'],
+      ['"x"', 'none'],
+      ['counter(c)', 'none'],
+      ['open-quote', 'none'],
+      ['"x" url("https://private.example/second.png")', 'none'],
+      ['url("https://private.example/original.png")', 'none'],
+      ['url("https://private.example/original.png") / "alt"', 'none'],
+      ['normal', 'inset(0px)'],
+      ['normal', 'inset(0px 0% 0% 0px)'],
+    ] as const) {
+      style.content = content;
+      style.viewBox = viewBox;
+      events.length = 0;
+      fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+      for (const event of events) {
+        expect(Object.hasOwn((event as { input: object }).input, 'cssPicture'))
+          .toBe(false);
+      }
+    }
+    // The same address is another picture once the image's file is another.
+    style.content = 'url("https://private.example/original.png")';
+    style.viewBox = 'none';
+    (fixture.image as HTMLImageElement & { currentSrc: string }).currentSrc =
+      'https://private.example/from-srcset.png';
+    events.length = 0;
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect((events.at(-1) as { input: { cssPicture?: number } }).input.cssPicture)
+      .toEqual(expect.any(Number));
+    stop();
+  });
+
+  it('keeps a CSS picture\'s number for the image across readers of the page', () => {
+    const fixture = createFixture();
+    const style = pictureStyleFixture(fixture.document, fixture.image);
+    style.content = 'url("https://private.example/second.png")';
+    const first: SourceImageObservationEvent[] = [];
+    const stopFirst = fixture.observer.subscribe((event) => first.push(event));
+    const number = (first[0] as { input: { cssPicture?: number } }).input.cssPicture;
+    expect(number).toEqual(expect.any(Number));
+    stopFirst();
+
+    // The panel's reader starts again (a Refresh): another observer.
+    const again = new SourceImageObserver({
+      document: fixture.document as unknown as Document,
+      documentIdentity,
+      getNodeId: (candidate) => fixture.nodeIds.get(candidate),
+      createIntersectionObserver: (callback) => new FakeIntersectionObserver(callback, true),
+      createResizeObserver: () => new FakeResizeObserver(),
+      createMutationObserver: () => new FakeMutationObserver(),
+    });
+    const second: SourceImageObservationEvent[] = [];
+    const stopSecond = again.subscribe((event) => second.push(event));
+    expect((second[0] as { input: { cssPicture?: number } }).input.cssPicture)
+      .toBe(number);
+    stopSecond();
+  });
+
+  it('looks again at the pictures of the images on screen, and only a new picture is a change', () => {
+    const fixture = createFixture('<img id="below" src="https://private.example/below.png">');
+    const below = fixture.document.querySelector<HTMLImageElement>('#below')!;
+    setImageMetrics(below, { left: 0, top: 2_000, width: 200, height: 100 });
+    fixture.nodeIds.set(below, 8);
+    const style = pictureStyleFixture(fixture.document, fixture.image, below);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.body,
+      addedNodes: [below],
+      removedNodes: [],
+    } as unknown as MutationRecord]);
+    fixture.intersections[1]!.trigger(fixture.image, true);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    fixture.intersections[1]!.trigger(below, true);
+    const onScreen = model.get(7)!;
+    const near = model.get(8)!;
+    events.length = 0;
+
+    // Nothing changed: nothing is sent.
+    fixture.observer.refreshVisiblePictures();
+    expect(events).toEqual([]);
+
+    // Another paint fact changed with no mutation (a hover that fades the
+    // image): that is not this look's business.
+    style.opacity = '0.5';
+    fixture.observer.refreshVisiblePictures();
+    expect(events).toEqual([]);
+    expect(model.get(7)).toEqual(onScreen);
+    style.opacity = '1';
+
+    // The colour scheme gives both images another picture: the one on
+    // screen is a change now, the other when it is next looked at.
+    style.content = 'url("https://private.example/dark.png")';
+    fixture.observer.refreshVisiblePictures();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, captureChanged: true, cssPicture: expect.any(Number) },
+    }]);
+    expect(model.get(8)).toEqual(near);
+    events.length = 0;
+    fixture.observer.refreshVisiblePictures();
+    expect(events).toEqual([]);
+
+    // And back.
+    style.content = 'normal';
+    fixture.observer.refreshVisiblePictures();
+    expect(events).toMatchObject([{ kind: 'upsert', input: { nodeId: 7 } }]);
+    expect(Object.hasOwn(model.get(7)!, 'cssPicture')).toBe(false);
+    events.length = 0;
+    stop();
+    fixture.observer.refreshVisiblePictures();
+    expect(events).toEqual([]);
+  });
+
+  it('looks at the pictures on screen once the pointer and the focus have rested', () => {
+    const fixture = createFixture('<p id="text">Text</p><a id="link" href="#x">Link</a>');
+    const text = fixture.document.querySelector('#text')!;
+    const link = fixture.document.querySelector('#link')!;
+    const style = pictureStyleFixture(fixture.document, fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.intersections[1]!.trigger(fixture.image, true);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    events.length = 0;
+    const others = fixture.timers.size;
+    const send = (type: string, target: Element) => target.dispatchEvent(
+      new fixture.document.defaultView!.Event(type, { bubbles: true }),
+    );
+
+    // `.card:hover img { content: url() }`: the pointer comes onto the card
+    // beside the image, and the picture changes with no change to the
+    // document. Nothing is read until the pointer has rested.
+    style.content = 'url("https://private.example/hover.png")';
+    send('pointerover', text);
+    expect(events).toEqual([]);
+    expect(fixture.timers.size).toBe(others + 1);
+    // Events that keep coming start no second wait; the one wait starts again.
+    send('pointerout', text);
+    send('pointerover', fixture.image);
+    expect(fixture.timers.size).toBe(others + 1);
+    fixture.timers.runLatest();
+    expect(events).toEqual([]);
+    expect(fixture.timers.size).toBe(others + 1);
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, captureChanged: true, cssPicture: expect.any(Number) },
+    }]);
+    expect(fixture.timers.size).toBe(others);
+    events.length = 0;
+
+    // A state that only fades the image is no change here.
+    style.opacity = '0.5';
+    send('pointerover', fixture.image);
+    fixture.timers.runLatest();
+    expect(events).toEqual([]);
+    style.opacity = '1';
+
+    // The pointer leaves: the image's own file again.
+    style.content = 'normal';
+    send('pointerout', text);
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{ kind: 'upsert', input: { nodeId: 7 } }]);
+    expect(Object.hasOwn((events[0] as { input: object }).input, 'cssPicture'))
+      .toBe(false);
+    events.length = 0;
+
+    // The pointer crosses the image and is gone before the wait is over:
+    // a picture that could not be read any more is never reported.
+    style.content = 'url("https://private.example/hover.png")';
+    send('pointerover', fixture.image);
+    style.content = 'normal';
+    send('pointerout', fixture.image);
+    fixture.timers.runLatest();
+    fixture.timers.runLatest();
+    expect(events).toEqual([]);
+    expect(fixture.timers.size).toBe(others);
+
+    // `a:focus img { content: url() }`: the focus moves to the link around
+    // the image, and away again.
+    style.content = 'url("https://private.example/focus.png")';
+    send('focusin', link);
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, cssPicture: expect.any(Number) },
+    }]);
+    events.length = 0;
+    style.content = 'normal';
+    send('focusout', link);
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{ kind: 'upsert', input: { nodeId: 7 } }]);
+    events.length = 0;
+
+    // Stopped, the observer no longer listens, and a wait under way is given up.
+    style.content = 'url("https://private.example/hover.png")';
+    send('pointerover', text);
+    expect(fixture.timers.size).toBe(others + 1);
+    const removed: string[] = [];
+    const remove = fixture.document.removeEventListener.bind(fixture.document);
+    fixture.document.removeEventListener = ((type: string, ...rest: unknown[]) => {
+      removed.push(type);
+      return (remove as (...args: unknown[]) => void)(type, ...rest);
+    }) as typeof fixture.document.removeEventListener;
+    stop();
+    expect(removed).toEqual(expect.arrayContaining([
+      'pointerover', 'pointerout', 'focusin', 'focusout',
+    ]));
+    expect(fixture.timers.size).toBe(0);
+    send('pointerover', fixture.image);
+    expect(fixture.timers.size).toBe(0);
+    expect(events).toEqual([]);
+  });
+
+  it('does not flag an image for a background, a border or an object fit', () => {
+    const fixture = createFixture();
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: () => ({
+        display: 'block', visibility: 'visible', opacity: '1', filter: 'none',
+        mixBlendMode: 'normal', objectFit: 'cover', objectPosition: '10% 20%',
+        imageRendering: 'pixelated', overflowX: 'visible', overflowY: 'visible',
+        background: 'rgb(1, 2, 3) url("https://private.example/back.png")',
+        border: '2px solid rgb(4, 5, 6)', padding: '3px',
+        content: 'normal',
+        getPropertyValue: (name: string) =>
+          name === 'object-view-box' ? 'none' : '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events).toHaveLength(1);
+    expect(Object.hasOwn((events[0] as { input: object }).input, 'cssPicture'))
+      .toBe(false);
+    stop();
+  });
+
+  it('advances the observation of the images on screen only, and nothing else of them', () => {
+    const fixture = createFixture('<img id="below" src="https://private.example/below.png">');
+    const below = fixture.document.querySelector<HTMLImageElement>('#below')!;
+    setImageMetrics(below, { left: 0, top: 2_000, width: 200, height: 100 });
+    fixture.nodeIds.set(below, 8);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.body,
+      addedNodes: [below],
+      removedNodes: [],
+    } as unknown as MutationRecord]);
+    // The first image is on screen; the second is only near it.
+    fixture.intersections[1]!.trigger(fixture.image, true);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    fixture.intersections[1]!.trigger(below, true);
+    const onScreen = model.get(7)!;
+    const near = model.get(8)!;
+    expect(onScreen.visibility).toBe('visible');
+    expect(near.visibility).toBe('near');
+    events.length = 0;
+
+    fixture.observer.advanceVisibleObservation();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: false,
+      },
+    }]);
+    expect(model.get(7)).toEqual({
+      ...onScreen,
+      observationRevision: onScreen.observationRevision + 1,
+    });
+    expect(model.get(8)).toEqual(near);
+
+    // Each call is one more observation; a stopped observer sends nothing.
+    fixture.observer.advanceVisibleObservation();
+    expect(model.get(7)!.observationRevision)
+      .toBe(onScreen.observationRevision + 2);
+    events.length = 0;
+    stop();
+    fixture.observer.advanceVisibleObservation();
+    expect(events).toEqual([]);
+  });
 });
 
 function createFixture(
@@ -3697,6 +4092,18 @@ class FakeTimerScheduler {
     this.#callbacks.delete(entry[0]);
     entry[1]();
   }
+
+  get size(): number {
+    return this.#callbacks.size;
+  }
+
+  /** Fires the timer that was scheduled last. */
+  runLatest(): void {
+    const entry = [...this.#callbacks.entries()].at(-1);
+    if (!entry) throw new Error('Expected a scheduled timer.');
+    this.#callbacks.delete(entry[0]);
+    entry[1]();
+  }
 }
 
 class FakeFontSettleTarget {
@@ -3743,6 +4150,36 @@ function computedStyleFixture(
     value: () => paint,
   });
   return paint;
+}
+
+/**
+ * A computed style the given images share and the test changes; every other
+ * element has an ordinary one. The picture facts are fields of their own.
+ */
+function pictureStyleFixture(document: Document, ...images: Element[]) {
+  const ordinary = {
+    display: 'block', visibility: 'visible', contentVisibility: 'visible',
+    opacity: '1', clipPath: 'none', maskImage: 'none', perspective: 'none',
+    rotate: 'none', scale: 'none', transform: 'none', filter: 'none',
+    mixBlendMode: 'normal', objectFit: 'fill', objectPosition: '50% 50%',
+    imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+    background: 'none', border: '0px none', padding: '0px',
+    content: 'normal',
+    getPropertyValue: (name: string) =>
+      name === 'object-view-box' ? 'none' : '',
+  };
+  const style = {
+    ...ordinary,
+    viewBox: 'none',
+    getPropertyValue(name: string) {
+      return name === 'object-view-box' ? this.viewBox : '';
+    },
+  };
+  Object.defineProperty(document.defaultView!, 'getComputedStyle', {
+    configurable: true,
+    value: (element: Element) => images.includes(element) ? style : ordinary,
+  });
+  return style;
 }
 
 function eventNodeId(event: SourceImageObservationEvent): number {

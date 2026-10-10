@@ -513,6 +513,57 @@ describe('ImageScanScheduler', () => {
     expect(scheduler.takeNext()?.descriptor.observationRevision).toBe(2);
   });
 
+  it('tries a deferred image again on an observation alone, and leaves a read one read', () => {
+    // What the page sends when a pinch zoom ends: the observation of every
+    // image on screen advances, with the same content, capture and size.
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-only',
+      skipSmallImages: false,
+    });
+    const waiting = descriptor(6, 'visible', { captureRevision: 1 });
+    const read = descriptor(7, 'visible', { captureRevision: 1 });
+    scheduler.apply(upsert(waiting));
+    scheduler.apply(upsert(read));
+    expect(scheduler.defer(scheduler.takeNext()!)).toBe(true);
+    expect(scheduler.settle(scheduler.takeNext()!)).toBe(true);
+    expect(scheduler.queued).toBe(0);
+
+    expect(scheduler.apply(upsert({ ...read, observationRevision: 2 })))
+      .toEqual({ status: 'coalesced' });
+    expect(scheduler.apply(upsert({ ...waiting, observationRevision: 2 })))
+      .toEqual({ status: 'queued' });
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId))
+      .toEqual([6]);
+  });
+
+  it('takes the number of a CSS picture as part of what an image is', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-only',
+      skipSmallImages: false,
+    });
+    const plain = descriptor(8, 'visible', { captureRevision: 1 });
+    scheduler.apply(upsert(plain));
+    // The same revisions with a number, or with another, are not the same
+    // image facts.
+    expect(scheduler.apply(upsert({ ...plain, cssPicture: 3 })))
+      .toEqual({ status: 'rejected' });
+    const active = scheduler.takeNext()!;
+    expect(scheduler.settle({
+      ...active,
+      descriptor: { ...active.descriptor, cssPicture: 3 },
+    })).toBe(false);
+    expect(scheduler.settle(active)).toBe(true);
+    const flagged = {
+      ...plain,
+      cssPicture: 3,
+      captureRevision: 2,
+      observationRevision: 2,
+    };
+    expect(scheduler.apply(upsert(flagged))).toEqual({ status: 'queued' });
+    expect(scheduler.apply(upsert({ ...flagged, cssPicture: 4 })))
+      .toEqual({ status: 'rejected' });
+  });
+
   it('defers a non-consuming preview job until observation changes', () => {
     const scheduler = new ImageScanScheduler(documentIdentity, {
       policy: 'eager-all',

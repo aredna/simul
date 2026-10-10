@@ -62,7 +62,14 @@ loaded into memory.
    URL). File pixels hold only the image, so the screenshot's overlap and
    cover checks do not apply; text a page paints over the image is not read.
    A lazy image the page has not fetched is described by layout and URL and
-   read from a download.
+   read from a download. An image whose picture CSS alone decides (a computed
+   `content` that begins with an image other than the image's own file, or
+   an `object-view-box` that is not the whole file) is not read from its
+   file, which is not what it shows; it is read from the screen, and its
+   result is kept under a number the page gives that picture, not under the
+   image's address. An image that could not be read while the tab was
+   pinch-zoomed is offered again when the magnification ends: the page
+   script then advances the observation of the images on screen.
 6. A short-lived crop is handed to the offscreen extension document through
    extension-origin storage. The entry is deleted after the job and expires
    after two minutes if normal cleanup is interrupted.

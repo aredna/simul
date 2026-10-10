@@ -113,6 +113,26 @@ describe('PixelAcquisitionCoordinator', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('says how long before its pixels were handed over a screenshot was asked for', async () => {
+    // The capture lane is held for the rest of Chrome's quota interval, so
+    // the pixels come about half a second after the screenshot was made.
+    let now = 1_000;
+    const coordinator = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(
+        fakeSource([metrics, metrics]),
+        vi.fn(async () => {
+          now += 560;
+          return 'data:image/png;base64,AQID';
+        }),
+      ),
+      now: () => now,
+    });
+    expect(await coordinator.acquire(descriptor)).toMatchObject({
+      status: 'ready',
+      pixels: { screenshotAgeMs: 560 },
+    });
+  });
+
   it('defers hidden or changing images without capturing or accepting stale pixels', async () => {
     const hiddenCapture = vi.fn(async () => 'data:image/png;base64,AQID');
     const hidden = new PixelAcquisitionCoordinator(fakeEnvironment(

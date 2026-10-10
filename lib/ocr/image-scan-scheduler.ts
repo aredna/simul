@@ -827,7 +827,8 @@ function sameDescriptor(
     left.renderedWidth === right.renderedWidth &&
     left.renderedHeight === right.renderedHeight &&
     left.intrinsicWidth === right.intrinsicWidth &&
-    left.intrinsicHeight === right.intrinsicHeight
+    left.intrinsicHeight === right.intrinsicHeight &&
+    left.cssPicture === right.cssPicture
   );
 }
 

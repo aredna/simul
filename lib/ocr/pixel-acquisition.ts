@@ -41,6 +41,12 @@ export interface AcquiredImagePixels {
   readonly nearestElementLanguage?: SupportedLanguage;
   /** Absent means the viewport screenshot. */
   readonly pixelSource?: ImageFilePixelSource;
+  /**
+   * For a screenshot: how long before these pixels were handed over it was
+   * asked for. The capture lane is held for the rest of Chrome's quota
+   * interval, so that is about half a second even for a prompt capture.
+   */
+  readonly screenshotAgeMs?: number;
 }
 
 export type PixelAcquisitionResult =
@@ -214,8 +220,9 @@ export class PixelAcquisitionCoordinator {
     if (wait > 0) await this.#delay(wait, signal);
     signal?.throwIfAborted();
     let screenshotUrl: string;
+    const askedAt = this.#now();
     try {
-      this.#lastCaptureAt = this.#now();
+      this.#lastCaptureAt = askedAt;
       screenshotUrl = await this.environment.captureVisibleTab(signal);
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) throw error;
@@ -229,7 +236,15 @@ export class PixelAcquisitionCoordinator {
     if (!after || !sameImageCaptureMetrics(before, after)) {
       return { status: 'deferred', reason: 'unstable' };
     }
-    return this.#crop(descriptor, before, screenshotUrl, signal);
+    const cropped = await this.#crop(descriptor, before, screenshotUrl, signal);
+    if (cropped.status !== 'ready') return cropped;
+    return {
+      status: 'ready',
+      pixels: Object.freeze({
+        ...cropped.pixels,
+        screenshotAgeMs: Math.max(0, this.#now() - askedAt),
+      }),
+    };
   }
 
   async #crop(

@@ -46,6 +46,16 @@ export interface SourceImageDescriptor extends ImageDimensions {
   readonly observationRevision: number;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
+  /**
+   * Present when CSS alone decides which picture the image shows (`content`,
+   * `object-view-box`): its address then does not say what it paints, so no
+   * result is kept or reused by the image's address. The number stands for
+   * that picture of that image and says nothing of it: the page gives a new
+   * one whenever the computed values change, and never the same one to
+   * another picture or image of the document. A result read from the screen
+   * is kept under it.
+   */
+  readonly cssPicture?: number;
 }
 
 export type SourceImageChange =
@@ -171,7 +181,9 @@ export function readSourceImageDescriptor(
     'connected',
     'renderedWidth',
     'renderedHeight',
-  ], ['intrinsicWidth', 'intrinsicHeight', 'captureRevision'])) return undefined;
+  ], ['intrinsicWidth', 'intrinsicHeight', 'captureRevision', 'cssPicture'])) {
+    return undefined;
+  }
   const document = readSourceDocumentIdentity(input.document);
   if (
     !document ||
@@ -180,6 +192,8 @@ export function readSourceImageDescriptor(
     !isPositiveSafeInteger(input.contentRevision) ||
     (Object.hasOwn(input, 'captureRevision') &&
       !isPositiveSafeInteger(input.captureRevision)) ||
+    (Object.hasOwn(input, 'cssPicture') &&
+      !isPositiveSafeInteger(input.cssPicture)) ||
     !isPositiveSafeInteger(input.observationRevision) ||
     !isImageVisibilityTier(input.visibility) ||
     input.connected !== true
@@ -217,6 +231,9 @@ export function readSourceImageDescriptor(
           intrinsicWidth: dimensions.intrinsicWidth,
           intrinsicHeight: dimensions.intrinsicHeight,
         }
+      : {}),
+    ...(Object.hasOwn(input, 'cssPicture')
+      ? { cssPicture: input.cssPicture as number }
       : {}),
   });
 }

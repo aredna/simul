@@ -134,6 +134,64 @@ describe('SourceImageModel', () => {
     });
   });
 
+  it('carries the number of a CSS picture, and counts its change as another picture', () => {
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    model.upsert(upsert(7));
+    const plain = model.get(7)!;
+    expect(Object.hasOwn(plain, 'cssPicture')).toBe(false);
+
+    // The number alone, with no change reported beside it, is a new capture.
+    const quiet = {
+      contentChanged: false,
+      observationChanged: false,
+      captureChanged: false,
+    };
+    expect(model.upsert(upsert(7, { ...quiet, cssPicture: 4 }))).toMatchObject({
+      status: 'changed',
+      change: {
+        descriptor: {
+          cssPicture: 4,
+          contentRevision: 1,
+          captureRevision: 2,
+          observationRevision: 2,
+        },
+      },
+    });
+    const first = model.get(7)!;
+    expect(model.isCurrent(plain)).toBe(false);
+    expect(model.isCurrent(first)).toBe(true);
+    // The same revisions without the number, or with another, are not the
+    // current image.
+    const { cssPicture: _number, ...unflagged } = first;
+    expect(model.isCurrent(unflagged)).toBe(false);
+    expect(model.isCurrent({ ...first, cssPicture: 5 })).toBe(false);
+
+    // Unchanged, it is no new revision.
+    expect(model.upsert(upsert(7, { ...quiet, cssPicture: 4 })))
+      .toEqual({ status: 'unchanged' });
+
+    // Another picture by CSS is another capture too.
+    expect(model.upsert(upsert(7, { ...quiet, cssPicture: 9 }))).toMatchObject({
+      status: 'changed',
+      change: {
+        descriptor: { cssPicture: 9, captureRevision: 3, observationRevision: 3 },
+      },
+    });
+
+    expect(model.upsert(upsert(7, quiet))).toMatchObject({
+      status: 'changed',
+      change: { descriptor: { captureRevision: 4, observationRevision: 4 } },
+    });
+    expect(Object.hasOwn(model.get(7)!, 'cssPicture')).toBe(false);
+
+    // Only a positive whole number is one.
+    for (const value of [true, false, 0, -1, 1.5, '4', null, Number.NaN]) {
+      expect(model.upsert(upsert(7, { cssPicture: value as never })))
+        .toEqual({ status: 'rejected' });
+    }
+  });
+
   it('preserves tombstone watermarks when a node ID is removed and reused', () => {
     const model = new SourceImageModel();
     model.beginDocument(documentIdentity);

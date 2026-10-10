@@ -49,6 +49,7 @@ import { normalizeAccessibilityImageText } from './accessibility-image-text';
 import {
   imageTransformIsAxisAligned,
   styleAllowsImageCapture,
+  styleReplacesImagePicture,
 } from './image-capture-style';
 
 interface MessageEventPort {
@@ -68,6 +69,15 @@ export interface ImageSourcePort {
   postMessage(message: ImageSourceRecorderMessage): void;
   disconnect(): void;
 }
+
+/**
+ * How long a rectangle may wait for the frame that paints an image's new
+ * picture. A tab that is not painting (hidden, or its window covered) fires
+ * no frame at all; the rectangle is then given as it was before this wait.
+ */
+export const PICTURE_PAINT_WAIT_LIMIT_MS = 250;
+/** Rectangles that may wait for a frame at once; more are answered at once. */
+const MAX_WAITING_MEASURES = 32;
 
 export interface ImageSourceSessionEnvironment {
   readonly port: ImageSourcePort;
@@ -118,6 +128,23 @@ export class ImageSourceSession {
   #policyFingerprint: string | undefined;
   #controlImages = false;
   #accessibilityTextEnabled = false;
+  /** An image was refused a rectangle because the tab was pinch-zoomed. */
+  #refusedWhileMagnified = false;
+  /** The system's colour scheme, which a page's CSS may hang pictures on. */
+  #colorScheme: MediaQueryList | undefined;
+  /**
+   * Images whose picture changed and has not been painted since, each with
+   * the frame wait that will clear it; and the rectangles asked for them
+   * meanwhile. A change is reported before the tab paints it, and a
+   * screenshot taken at once would show the picture before.
+   */
+  readonly #unpainted = new Map<number, object>();
+  #openPaintWait: Set<number> | undefined;
+  #waitingMeasures: {
+    readonly requestId: string;
+    readonly descriptor: SourceImageDescriptor;
+  }[] = [];
+  readonly #paintTimers = new Set<number>();
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
 
@@ -129,6 +156,25 @@ export class ImageSourceSession {
       sourceDocumentSecretClassifier(environment.document);
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
+    // A pinch zoom fires here only, as it changes and when it ends.
+    try {
+      environment.window.visualViewport?.addEventListener?.(
+        'resize',
+        this.#onVisualViewportResize,
+        { passive: true },
+      );
+    } catch {
+      // Without the event an image waits for the page's next change.
+    }
+    // A change of the colour scheme is no change to the document either.
+    try {
+      this.#colorScheme = environment.window.matchMedia?.(
+        '(prefers-color-scheme: dark)',
+      );
+      this.#colorScheme?.addEventListener?.('change', this.#onColorSchemeChange);
+    } catch {
+      this.#colorScheme = undefined;
+    }
   }
 
   dispose(disconnect = false): void {
@@ -136,6 +182,34 @@ export class ImageSourceSession {
     this.#disposed = true;
     this.environment.port.onMessage.removeListener(this.#onMessage);
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
+    try {
+      this.environment.window.visualViewport?.removeEventListener?.(
+        'resize',
+        this.#onVisualViewportResize,
+      );
+    } catch {
+      // The window may already be gone.
+    }
+    try {
+      this.#colorScheme?.removeEventListener?.(
+        'change',
+        this.#onColorSchemeChange,
+      );
+    } catch {
+      // As above.
+    }
+    this.#colorScheme = undefined;
+    for (const timer of this.#paintTimers) {
+      try {
+        this.environment.window.clearTimeout(timer);
+      } catch {
+        // As above.
+      }
+    }
+    this.#paintTimers.clear();
+    this.#unpainted.clear();
+    this.#openPaintWait = undefined;
+    this.#waitingMeasures = [];
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
     this.#observer?.dispose();
@@ -263,22 +337,143 @@ export class ImageSourceSession {
           });
       return;
     }
+    if (
+      this.#unpainted.has(descriptor.nodeId) &&
+      this.#waitingMeasures.length < MAX_WAITING_MEASURES
+    ) {
+      // The rectangle is for a screenshot: it is given once the tab has
+      // painted the picture that the descriptor stands for.
+      this.#waitingMeasures.push({ requestId: message.requestId, descriptor });
+      return;
+    }
+    this.#answerMeasure(message.requestId, descriptor);
+  };
+
+  #answerMeasure(requestId: string, descriptor: SourceImageDescriptor): void {
+    if (!this.#model?.isCurrent(descriptor)) {
+      this.#post({
+        kind: 'simul:image-source-v2:metrics',
+        requestId,
+        status: 'stale',
+      });
+      return;
+    }
     const metrics = this.#measure(descriptor);
     this.#post(metrics
       ? {
           kind: 'simul:image-source-v2:metrics',
-          requestId: message.requestId,
+          requestId,
           status: 'ready',
           metrics,
         }
       : {
           kind: 'simul:image-source-v2:metrics',
-          requestId: message.requestId,
+          requestId,
           status: 'hidden',
         });
-  };
+  }
+
+  /**
+   * Marks an image's picture as not yet painted, until the tab has produced
+   * the frame that holds it: the first frame callback after the change runs
+   * before that frame is painted, the second after it. Images that change
+   * before the first callback share one wait.
+   */
+  #awaitPaint(nodeId: number): void {
+    let wait = this.#openPaintWait;
+    if (!wait) {
+      const opened = new Set<number>();
+      wait = opened;
+      this.#openPaintWait = opened;
+      const view = this.environment.window;
+      let settled = false;
+      let timer: number | undefined;
+      const close = (): void => {
+        if (this.#openPaintWait === opened) this.#openPaintWait = undefined;
+      };
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) {
+          this.#paintTimers.delete(timer);
+          try {
+            view.clearTimeout(timer);
+          } catch {
+            // The window may already be gone.
+          }
+        }
+        close();
+        this.#painted(opened);
+      };
+      try {
+        timer = view.setTimeout(settle, PICTURE_PAINT_WAIT_LIMIT_MS);
+        this.#paintTimers.add(timer);
+        view.requestAnimationFrame(() => {
+          close();
+          try {
+            view.requestAnimationFrame(settle);
+          } catch {
+            settle();
+          }
+        });
+      } catch {
+        // No frames to wait for: the timer answers, or nothing waits.
+        if (timer === undefined) {
+          close();
+          return;
+        }
+      }
+    }
+    wait.add(nodeId);
+    this.#unpainted.set(nodeId, wait);
+  }
+
+  #painted(wait: Set<number>): void {
+    if (this.#disposed) return;
+    for (const nodeId of wait) {
+      // An image that changed again waits for its later frame.
+      if (this.#unpainted.get(nodeId) === wait) this.#unpainted.delete(nodeId);
+    }
+    const waiting = this.#waitingMeasures;
+    this.#waitingMeasures = [];
+    for (const entry of waiting) {
+      if (this.#disposed) return;
+      if (this.#unpainted.has(entry.descriptor.nodeId)) {
+        this.#waitingMeasures.push(entry);
+      } else {
+        this.#answerMeasure(entry.requestId, entry.descriptor);
+      }
+    }
+  }
 
   readonly #onDisconnect = (): void => this.dispose(false);
+
+  /**
+   * The end of a pinch zoom changes nothing the image observer watches, so
+   * an image refused a rectangle while it lasted would wait for the page's
+   * next change. Once the magnification is gone, the images on screen are
+   * offered again. Nothing is sent unless one was refused, and nothing
+   * while the tab is still magnified.
+   */
+  readonly #onVisualViewportResize = (): void => {
+    if (
+      this.#disposed ||
+      !this.#refusedWhileMagnified ||
+      readVisualViewportSnapshot(this.environment.window)
+    ) return;
+    this.#refusedWhileMagnified = false;
+    this.#observer?.advanceVisibleObservation();
+  };
+
+  /**
+   * A picture that `@media (prefers-color-scheme)` swaps changes with no
+   * mutation, load or resize. The images on screen are looked at again;
+   * only one whose picture CSS now decides differently is a change.
+   */
+  readonly #onColorSchemeChange = (): void => {
+    if (this.#disposed) return;
+    this.#observer?.refreshVisiblePictures();
+  };
 
   #start(
     documentIdentity: ReplicaSourceDocumentIdentity,
@@ -343,11 +538,25 @@ export class ImageSourceSession {
   readonly #onObservation = (event: SourceImageObservationEvent): void => {
     const model = this.#model;
     if (!model || this.#disposed) return;
+    const before = event.kind === 'upsert'
+      ? model.get(event.input.nodeId)
+      : undefined;
     const result = event.kind === 'upsert'
       ? model.upsert(event.input)
       : model.remove(event.document, event.nodeId);
     if (result.status !== 'changed') return;
-    this.#post({ kind: 'simul:image-source-v2:change', change: result.change });
+    const change = result.change;
+    if (change.kind === 'remove') {
+      this.#unpainted.delete(change.nodeId);
+    } else if (
+      !before ||
+      before.contentRevision !== change.descriptor.contentRevision ||
+      before.captureRevision !== change.descriptor.captureRevision
+    ) {
+      // Another picture, or the same one elsewhere: not on screen yet.
+      this.#awaitPaint(change.descriptor.nodeId);
+    }
+    this.#post({ kind: 'simul:image-source-v2:change', change });
   };
 
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
@@ -365,8 +574,12 @@ export class ImageSourceSession {
     // A pinch zoom makes the tab's pixels show the magnified view, while
     // this rectangle is measured in the layout viewport: a crop taken then
     // is of another part of the page (D119). The image is not on screen as
-    // measured, so its own file is read instead.
-    if (readVisualViewportSnapshot(this.environment.window)) return undefined;
+    // measured, so its own file is read instead; when that cannot be done
+    // the image is offered again once the magnification ends.
+    if (readVisualViewportSnapshot(this.environment.window)) {
+      this.#refusedWhileMagnified = true;
+      return undefined;
+    }
     const rect = node.getBoundingClientRect();
     const viewportWidth = finitePositive(this.environment.window.innerWidth);
     const viewportHeight = finitePositive(this.environment.window.innerHeight);
@@ -478,6 +691,9 @@ export class ImageSourceSession {
       this.environment.window,
       (candidate) => this.#hasStickySecretAncestor(candidate),
     )) return undefined;
+    // CSS shows another picture than the file's, or a part of it: the file
+    // would give the words of a picture that is not on the page.
+    if (imageShowsCssPicture(node, this.environment.window)) return undefined;
     const layout = readImageFileLayout(node, this.environment.window);
     if (!layout) return undefined;
     const loaded = node.complete && node.naturalWidth > 0 &&
@@ -706,6 +922,22 @@ function imageFileIsPainted(
   }
   return finitePositive(rect.width) !== undefined &&
     finitePositive(rect.height) !== undefined;
+}
+
+/** Unreadable counts as yes: the file is then not known to be the picture. */
+function imageShowsCssPicture(
+  image: HTMLImageElement,
+  sourceWindow: Window,
+): boolean {
+  const style = safeComputedStyle(sourceWindow, image);
+  if (!style) return true;
+  let file = '';
+  try {
+    file = typeof image.currentSrc === 'string' ? image.currentSrc : '';
+  } catch {
+    return true;
+  }
+  return styleReplacesImagePicture(style, file);
 }
 
 /**

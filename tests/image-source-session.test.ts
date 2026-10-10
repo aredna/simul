@@ -7,6 +7,7 @@ import {
   hasSourceAriaControlledRegionAncestor,
   ImageSourceSession,
   nearestValidElementLanguage,
+  PICTURE_PAINT_WAIT_LIMIT_MS,
   readDirectImageAccessibilityText,
 } from '../lib/ocr/image-source-session';
 import { normalizeAccessibilityImageText } from '../lib/ocr/accessibility-image-text';
@@ -1366,6 +1367,697 @@ describe('image source capture safety', () => {
     session.dispose();
   });
 
+  it('offers the images on screen again when a pinch zoom ends, if one was refused', () => {
+    const { document } = parseHTML(
+      '<html><body><img id="image"></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'pinch-end-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'pinch-end-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const visualViewport = new FakeVisualViewport();
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800,
+        innerHeight: 600,
+        scrollX: 0,
+        scrollY: 0,
+        devicePixelRatio: 1,
+        visualViewport,
+        getComputedStyle: () => baseStyle,
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    // Only the visual viewport's own size and scale are listened to.
+    expect(visualViewport.listenerTypes()).toEqual(['resize']);
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-110000',
+      controlImages: true,
+      accessibilityTextEnabled: false,
+    });
+    const first = lastUpsertDescriptor(port.messages)!;
+    expect(first).toBeDefined();
+    const measure = (requestId: string, descriptor: SourceImageDescriptor) => {
+      port.emitMessage({
+        kind: 'simul:image-source-v2:measure',
+        requestId,
+        descriptor,
+      });
+      return port.messages.at(-1);
+    };
+    const sentBy = (act: () => void): unknown[] => {
+      const before = port.messages.length;
+      act();
+      return port.messages.slice(before);
+    };
+
+    // A pinch in and back out that no image was asked about sends nothing.
+    expect(sentBy(() => visualViewport.resizeTo(2))).toEqual([]);
+    expect(sentBy(() => visualViewport.resizeTo(1))).toEqual([]);
+
+    visualViewport.scale = 2;
+    expect(measure('pinched', first)).toMatchObject({ status: 'hidden' });
+    // Still magnified, at another scale: nothing may be read from the tab.
+    expect(sentBy(() => visualViewport.resizeTo(1.4))).toEqual([]);
+    expect(measure('still-pinched', first)).toMatchObject({ status: 'hidden' });
+
+    // The magnification ends: the image on screen is a new observation, and
+    // nothing else about it changes.
+    const offered = sentBy(() => visualViewport.resizeTo(1));
+    expect(offered).toEqual([{
+      kind: 'simul:image-source-v2:change',
+      change: {
+        kind: 'upsert',
+        descriptor: {
+          ...first,
+          observationRevision: first.observationRevision + 1,
+        },
+      },
+    }]);
+    const second = lastUpsertDescriptor(port.messages)!;
+    expect(measure('offered', second)).toMatchObject({
+      requestId: 'offered',
+      status: 'ready',
+    });
+
+    // Once: a later change of the viewport's size sends nothing more.
+    expect(sentBy(() => visualViewport.resizeTo(1))).toEqual([]);
+
+    // The next pinch that refuses an image is answered at its end again.
+    visualViewport.scale = 3;
+    expect(measure('pinched-again', second)).toMatchObject({ status: 'hidden' });
+    expect(sentBy(() => visualViewport.resizeTo(1))).toHaveLength(1);
+
+    visualViewport.scale = 2;
+    expect(measure('pinched-at-the-end', lastUpsertDescriptor(port.messages)!))
+      .toMatchObject({ status: 'hidden' });
+    session.dispose();
+    expect(visualViewport.listenerTypes()).toEqual([]);
+    expect(sentBy(() => visualViewport.resizeTo(1))).toEqual([]);
+  });
+
+  it('looks at the pictures on screen again when the system\'s colour scheme changes', () => {
+    const { document } = parseHTML(
+      '<html><body><img id="image"></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    // The picture a dark colour scheme gives the image, by CSS alone.
+    const picture = { content: 'normal' };
+    const style = (element: Element) => ({
+      ...baseStyle,
+      content: element === image ? picture.content : 'normal',
+      getPropertyValue: (name: string) =>
+        name === 'object-view-box' ? 'none' : '',
+    }) as unknown as CSSStyleDeclaration;
+    Object.defineProperty(document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: style,
+    });
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'colour-scheme-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'colour-scheme-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const queries: string[] = [];
+    const scheme = new FakeMediaQueryList();
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+        devicePixelRatio: 1,
+        getComputedStyle: style,
+        matchMedia: (query: string) => {
+          queries.push(query);
+          return scheme;
+        },
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    // One query, one listener.
+    expect(queries).toEqual(['(prefers-color-scheme: dark)']);
+    expect(scheme.listeners()).toBe(1);
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-110000',
+      controlImages: true,
+      accessibilityTextEnabled: false,
+    });
+    const light = lastUpsertDescriptor(port.messages)!;
+    expect(Object.hasOwn(light, 'cssPicture')).toBe(false);
+    const sentBy = (act: () => void): unknown[] => {
+      const before = port.messages.length;
+      act();
+      return port.messages.slice(before);
+    };
+
+    // A change of the scheme that changes no picture sends nothing.
+    expect(sentBy(() => scheme.change())).toEqual([]);
+
+    // The scheme goes dark and the page's CSS gives the image another
+    // picture: no mutation, no load, no resize reports it.
+    picture.content = 'url("https://cdn.example.test/dark.png")';
+    const dark = sentBy(() => scheme.change());
+    expect(dark).toMatchObject([{
+      kind: 'simul:image-source-v2:change',
+      change: {
+        kind: 'upsert',
+        descriptor: {
+          nodeId: 7,
+          contentRevision: light.contentRevision,
+          captureRevision: light.captureRevision! + 1,
+          cssPicture: expect.any(Number),
+        },
+      },
+    }]);
+    expect(JSON.stringify(dark)).not.toMatch(/(?:url|dark\.png|example)/iu);
+
+    // And light again: the image's own file, a new capture.
+    picture.content = 'normal';
+    const back = sentBy(() => scheme.change());
+    expect(back).toHaveLength(1);
+    expect(Object.hasOwn(lastUpsertDescriptor(port.messages)!, 'cssPicture'))
+      .toBe(false);
+    expect(lastUpsertDescriptor(port.messages)!.captureRevision)
+      .toBe(light.captureRevision! + 2);
+
+    session.dispose();
+    expect(scheme.listeners()).toBe(0);
+    picture.content = 'url("https://cdn.example.test/dark.png")';
+    expect(sentBy(() => scheme.change())).toEqual([]);
+  });
+
+  it('gives a rectangle for a screenshot once the tab has painted the image\'s new picture', () => {
+    // The page script reports a change of picture before the tab paints
+    // it. A screenshot taken at once showed the picture before, and its
+    // words were then kept for the new one.
+    const { document } = parseHTML(
+      '<html><body><img id="image"></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    const picture = { content: 'normal' };
+    const style = (element: Element) => ({
+      ...baseStyle,
+      content: element === image ? picture.content : 'normal',
+      getPropertyValue: (name: string) =>
+        name === 'object-view-box' ? 'none' : '',
+    }) as unknown as CSSStyleDeclaration;
+    Object.defineProperty(document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: style,
+    });
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'paint-wait-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'paint-wait-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const scheme = new FakeMediaQueryList();
+    const frames = new FakePaintClock();
+    const visualViewport = new FakeVisualViewport();
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+        devicePixelRatio: 1,
+        visualViewport,
+        getComputedStyle: style,
+        matchMedia: () => scheme,
+        requestAnimationFrame: frames.requestAnimationFrame,
+        setTimeout: frames.setTimeout,
+        clearTimeout: frames.clearTimeout,
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-110000',
+      controlImages: true,
+      accessibilityTextEnabled: false,
+    });
+    const answers = (requestId: string) => port.messages.filter((message) =>
+      (message as { requestId?: string }).requestId === requestId);
+    const measure = (requestId: string, descriptor: SourceImageDescriptor) =>
+      port.emitMessage({
+        kind: 'simul:image-source-v2:measure',
+        requestId,
+        descriptor,
+      });
+    const swap = (content: string): SourceImageDescriptor => {
+      picture.content = content;
+      scheme.change();
+      return lastUpsertDescriptor(port.messages)!;
+    };
+
+    // The image was just found: its first paint is a frame away too. One
+    // wait (two frame callbacks, and a timer in case no frame comes).
+    const first = lastUpsertDescriptor(port.messages)!;
+    expect(PICTURE_PAINT_WAIT_LIMIT_MS).toBe(250);
+    expect(frames.timers()).toEqual([250]);
+    measure('first', first);
+    expect(answers('first')).toEqual([]);
+    // The first frame callback runs before that frame is painted.
+    frames.frame();
+    expect(answers('first')).toEqual([]);
+    // The second runs after it.
+    frames.frame();
+    expect(answers('first')).toMatchObject([{ status: 'ready' }]);
+    expect(frames.timers()).toEqual([]);
+    // Painted: the next rectangle is given at once.
+    measure('painted', first);
+    expect(answers('painted')).toMatchObject([{ status: 'ready' }]);
+
+    // CSS gives the image another picture.
+    const dark = swap('url("https://cdn.example.test/dark.png")');
+    measure('dark', dark);
+    expect(answers('dark')).toEqual([]);
+    // Something that is not a rectangle does not wait.
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'file',
+      descriptor: dark,
+      includePixels: false,
+    });
+    frames.frame();
+    // The picture changes again before the frame after: the rectangle that
+    // was asked for is of a picture that is gone.
+    const darker = swap('url("https://cdn.example.test/darker.png")');
+    measure('darker', darker);
+    frames.frame();
+    expect(answers('dark')).toEqual([]);
+    expect(answers('darker')).toEqual([]);
+    frames.frame();
+    expect(answers('dark')).toMatchObject([{ status: 'stale' }]);
+    expect(answers('darker')).toMatchObject([{ status: 'ready' }]);
+    expect(frames.timers()).toEqual([]);
+
+    // A tab that paints no frame (hidden, or its window covered): the
+    // rectangle is given when the wait's limit passes.
+    const light = swap('normal');
+    measure('light', light);
+    expect(answers('light')).toEqual([]);
+    frames.timeout();
+    expect(answers('light')).toMatchObject([{ status: 'ready' }]);
+    // A frame that comes after all answers nothing twice.
+    frames.frame();
+    frames.frame();
+    expect(answers('light')).toHaveLength(1);
+
+    // A new observation of the same picture (the image is offered again
+    // at the end of a pinch) is nothing to wait for.
+    const waits = frames.requested();
+    visualViewport.scale = 2;
+    measure('pinched', light);
+    expect(answers('pinched')).toMatchObject([{ status: 'hidden' }]);
+    visualViewport.resizeTo(1);
+    const offered = lastUpsertDescriptor(port.messages)!;
+    expect(offered).toEqual({
+      ...light,
+      observationRevision: light.observationRevision + 1,
+    });
+    expect(frames.requested()).toBe(waits);
+    measure('offered', offered);
+    expect(answers('offered')).toMatchObject([{ status: 'ready' }]);
+
+    // No more than 32 rectangles wait at once: one more is answered as it
+    // would have been before.
+    const many = swap('url("https://cdn.example.test/many.png")');
+    for (let index = 0; index < 33; index += 1) measure(`many-${index}`, many);
+    expect(answers('many-31')).toEqual([]);
+    expect(answers('many-32')).toMatchObject([{ status: 'ready' }]);
+    frames.frame();
+    frames.frame();
+    expect(answers('many-0')).toMatchObject([{ status: 'ready' }]);
+    expect(answers('many-31')).toMatchObject([{ status: 'ready' }]);
+
+    // With the session, what waits goes: no answer, and no timer left.
+    const last = swap('url("https://cdn.example.test/dark.png")');
+    measure('last', last);
+    expect(frames.timers()).toEqual([PICTURE_PAINT_WAIT_LIMIT_MS]);
+    session.dispose();
+    expect(frames.timers()).toEqual([]);
+    frames.frame();
+    frames.frame();
+    expect(answers('last')).toEqual([]);
+  });
+
+  it('answers a rectangle at once where the window has no frames or timers', () => {
+    const { document } = parseHTML('<html><body><img id="image"></body></html>');
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    for (const [index, extra] of [
+      {},
+      { setTimeout: () => { throw new Error('refused'); } },
+      {
+        setTimeout: () => 1,
+        clearTimeout: () => { throw new Error('refused'); },
+        requestAnimationFrame: () => { throw new Error('refused'); },
+      },
+    ].entries()) {
+      const identity: ReplicaSourceDocumentIdentity = {
+        sessionId: `no-frames-session-${index}`,
+        pageEpoch: 1,
+        generation: 1,
+        documentId: `no-frames-document-${index}`,
+        frameId: 0,
+      };
+      const port = new FakeImageSourcePort(
+        createImageSourcePortName(identity.sessionId),
+      );
+      const session = new ImageSourceSession({
+        port,
+        document: document as unknown as Document,
+        window: {
+          innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+          devicePixelRatio: 1,
+          getComputedStyle: () => baseStyle,
+          ...extra,
+        } as unknown as Window,
+        resolveNode: (nodeId) => nodeId === 7 ? image : null,
+        getNodeId: (candidate) => candidate === image ? 7 : undefined,
+        createObserver: (environment) => new SourceImageObserver({
+          ...environment,
+          createIntersectionObserver: (callback) =>
+            new ImmediateIntersectionObserver(callback),
+          createResizeObserver: () => new NoopElementObserver(),
+          createMutationObserver: () => new NoopMutationObserver(),
+        }),
+      });
+      port.emitMessage({
+        kind: 'simul:image-source-v2:start',
+        document: identity,
+        policyFingerprint: 'read-v1-110000',
+        controlImages: true,
+        accessibilityTextEnabled: false,
+      });
+      port.emitMessage({
+        kind: 'simul:image-source-v2:measure',
+        requestId: `at-once-${index}`,
+        descriptor: lastUpsertDescriptor(port.messages)!,
+      });
+      // With a timer and no frames, the timer is what answers.
+      const answered = port.messages.some((message) =>
+        (message as { requestId?: string }).requestId === `at-once-${index}`);
+      expect(answered).toBe(index !== 2);
+      expect(() => session.dispose()).not.toThrow();
+    }
+  });
+
+  it('starts without matchMedia, and with one that throws or takes no listener', () => {
+    const { document } = parseHTML('<html><body><img id="image"></body></html>');
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'no-match-media-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'no-match-media-document',
+      frameId: 0,
+    };
+    for (const matchMedia of [
+      undefined,
+      () => { throw new Error('refused'); },
+      () => undefined,
+      () => ({ matches: false }),
+      () => ({
+        addEventListener: () => { throw new Error('refused'); },
+        removeEventListener: () => { throw new Error('refused'); },
+      }),
+      () => ({
+        addEventListener: () => undefined,
+        removeEventListener: () => { throw new Error('refused'); },
+      }),
+    ]) {
+      const port = new FakeImageSourcePort(
+        createImageSourcePortName(identity.sessionId),
+      );
+      const session = new ImageSourceSession({
+        port,
+        document: document as unknown as Document,
+        window: {
+          innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+          devicePixelRatio: 1, matchMedia,
+          getComputedStyle: () => baseStyle,
+        } as unknown as Window,
+        resolveNode: () => null,
+        getNodeId: () => undefined,
+        createObserver: (environment) => new SourceImageObserver({
+          ...environment,
+          createIntersectionObserver: () => new NoopElementObserver(),
+          createResizeObserver: () => new NoopElementObserver(),
+          createMutationObserver: () => new NoopMutationObserver(),
+        }),
+      });
+      port.emitMessage({ kind: 'simul:image-source-v2:start', document: identity });
+      expect(port.messages.at(-1)).toMatchObject({
+        kind: 'simul:image-source-v2:ready',
+      });
+      expect(() => session.dispose()).not.toThrow();
+    }
+  });
+
+  it('starts without a visual viewport, and with one that takes no listener', () => {
+    const { document } = parseHTML('<html><body><img id="image"></body></html>');
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'no-visual-viewport-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'no-visual-viewport-document',
+      frameId: 0,
+    };
+    for (const visualViewport of [
+      undefined,
+      null,
+      { scale: 1 },
+      {
+        scale: 1,
+        addEventListener: () => { throw new Error('refused'); },
+        removeEventListener: () => { throw new Error('refused'); },
+      },
+    ]) {
+      const port = new FakeImageSourcePort(
+        createImageSourcePortName(identity.sessionId),
+      );
+      const session = new ImageSourceSession({
+        port,
+        document: document as unknown as Document,
+        window: {
+          innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+          devicePixelRatio: 1, visualViewport,
+          getComputedStyle: () => baseStyle,
+        } as unknown as Window,
+        resolveNode: () => null,
+        getNodeId: () => undefined,
+        createObserver: (environment) => new SourceImageObserver({
+          ...environment,
+          createIntersectionObserver: () => new NoopElementObserver(),
+          createResizeObserver: () => new NoopElementObserver(),
+          createMutationObserver: () => new NoopMutationObserver(),
+        }),
+      });
+      port.emitMessage({ kind: 'simul:image-source-v2:start', document: identity });
+      expect(port.messages.at(-1)).toMatchObject({
+        kind: 'simul:image-source-v2:ready',
+      });
+      expect(() => session.dispose()).not.toThrow();
+    }
+  });
+
+  it('does not read an image from its file while CSS decides its picture', async () => {
+    const { document } = parseHTML(
+      '<html><body>' +
+      '<img id="image" src="https://cdn.example.test/first.png">' +
+      '</body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    Object.defineProperties(image, {
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 400 },
+      naturalHeight: { configurable: true, value: 200 },
+      offsetWidth: { configurable: true, value: 200 },
+      offsetHeight: { configurable: true, value: 100 },
+      currentSrc: { configurable: true, value: 'https://cdn.example.test/first.png' },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => rect(0, 5_000, 200, 100),
+      },
+    });
+    // The picture the page shows is another file's, through `content`.
+    const picture = { content: 'url("https://cdn.example.test/second.png")', viewBox: 'none' };
+    const style = (element: Element) => ({
+      ...baseStyle,
+      content: element === image ? picture.content : 'normal',
+      getPropertyValue: (name: string) => {
+        if (name === 'object-fit') return 'fill';
+        if (name === 'object-position') return '50% 50%';
+        if (name === 'object-view-box') {
+          return element === image ? picture.viewBox : 'none';
+        }
+        if (name.startsWith('border-') || name.startsWith('padding-')) return '0px';
+        return '';
+      },
+    }) as unknown as CSSStyleDeclaration;
+    // The observer reads styles through the image's own document.
+    Object.defineProperty(document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: style,
+    });
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'css-picture-file-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'css-picture-file-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const encodeImageRegion = vi.fn(async () => 'data:image/png;base64,AAAA');
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+        devicePixelRatio: 1,
+        getComputedStyle: style,
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: () => 7,
+      encodeImageRegion,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-100000',
+      controlImages: false,
+      accessibilityTextEnabled: true,
+    });
+    const answer = async (requestId: string) => {
+      // Asking refreshes the image first, so the newest descriptor is asked.
+      port.emitMessage({
+        kind: 'simul:image-source-v2:measure',
+        requestId: `${requestId}-refresh`,
+        descriptor: lastUpsertDescriptorForNode(port.messages, 7)!,
+      });
+      const descriptor = lastUpsertDescriptorForNode(port.messages, 7)!;
+      port.emitMessage({
+        kind: 'simul:image-source-v2:pixels',
+        requestId,
+        descriptor,
+        includePixels: true,
+      });
+      await vi.waitFor(() => expect(port.messages.at(-1)).toMatchObject({
+        requestId,
+      }));
+      return { descriptor, reply: port.messages.at(-1) as { status: string } };
+    };
+
+    const swapped = await answer('content');
+    expect(swapped.descriptor.cssPicture).toEqual(expect.any(Number));
+    expect(swapped.reply).toEqual({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'content',
+      descriptor: swapped.descriptor,
+      status: 'blocked',
+    });
+    expect(encodeImageRegion).not.toHaveBeenCalled();
+
+    picture.content = 'normal';
+    picture.viewBox = 'inset(10px 20px)';
+    const cropped = await answer('view-box');
+    expect(cropped.descriptor.cssPicture).toEqual(expect.any(Number));
+    expect(cropped.descriptor.cssPicture).not.toBe(swapped.descriptor.cssPicture);
+    expect(cropped.reply.status).toBe('blocked');
+    expect(encodeImageRegion).not.toHaveBeenCalled();
+
+    // A `content` that is text, the image's own file by `content`, and a
+    // view box of the whole file paint the file: it is read as before.
+    for (const [index, [content, viewBox]] of ([
+      ['""', 'none'],
+      ['"x" url("https://cdn.example.test/second.png")', 'none'],
+      ['url("https://cdn.example.test/first.png")', 'none'],
+      ['normal', 'inset(0px)'],
+    ] as const).entries()) {
+      picture.content = content;
+      picture.viewBox = viewBox;
+      const own = await answer(`own-file-${index}`);
+      expect(Object.hasOwn(own.descriptor, 'cssPicture')).toBe(false);
+      expect(own.reply).toMatchObject({
+        status: 'ready',
+        file: { url: 'https://cdn.example.test/first.png' },
+      });
+    }
+
+    // Its own file again: read as before.
+    picture.content = 'normal';
+    picture.viewBox = 'none';
+    const plain = await answer('plain');
+    expect(Object.hasOwn(plain.descriptor, 'cssPicture')).toBe(false);
+    expect(plain.reply).toMatchObject({
+      status: 'ready',
+      file: {
+        url: 'https://cdn.example.test/first.png',
+        pixels: { dataUrl: 'data:image/png;base64,AAAA' },
+      },
+    });
+    session.dispose();
+  });
+
   it('rejects hidden, rotated, and secret-control-overlapped pixels but allows public controls', () => {
     const { document } = parseHTML(
       '<html><body><img id="image"><input id="private">' +
@@ -2108,6 +2800,104 @@ class FakeEvent<T extends (...args: never[]) => void> {
 
   emit(...args: Parameters<T>): void {
     for (const listener of this.#listeners) listener(...args);
+  }
+}
+
+/** What `matchMedia()` gives: the listeners of its `change`. */
+class FakeMediaQueryList {
+  matches = false;
+  readonly #listeners = new Set<() => void>();
+
+  addEventListener(type: string, listener: () => void): void {
+    if (type === 'change') this.#listeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: () => void): void {
+    if (type === 'change') this.#listeners.delete(listener);
+  }
+
+  listeners(): number {
+    return this.#listeners.size;
+  }
+
+  change(): void {
+    this.matches = !this.matches;
+    for (const listener of [...this.#listeners]) listener();
+  }
+}
+
+/** `requestAnimationFrame` and timers of a window, fired by the test. */
+class FakePaintClock {
+  readonly #frames: (() => void)[] = [];
+  readonly #timers = new Map<number, { readonly callback: () => void; readonly milliseconds: number }>();
+  #handle = 0;
+  #requested = 0;
+
+  readonly requestAnimationFrame = (callback: () => void): number => {
+    this.#requested += 1;
+    this.#frames.push(callback);
+    return this.#requested;
+  };
+
+  readonly setTimeout = (callback: () => void, milliseconds: number): number => {
+    this.#handle += 1;
+    this.#timers.set(this.#handle, { callback, milliseconds });
+    return this.#handle;
+  };
+
+  readonly clearTimeout = (handle: number): void => {
+    this.#timers.delete(handle);
+  };
+
+  /** One frame: the callbacks requested before it. */
+  frame(): void {
+    for (const callback of this.#frames.splice(0)) callback();
+  }
+
+  /** The waiting timers' delays. */
+  timers(): number[] {
+    return [...this.#timers.values()].map(({ milliseconds }) => milliseconds);
+  }
+
+  /** Fires every waiting timer. */
+  timeout(): void {
+    for (const [handle, { callback }] of [...this.#timers]) {
+      this.#timers.delete(handle);
+      callback();
+    }
+  }
+
+  requested(): number {
+    return this.#requested;
+  }
+}
+
+/** `window.visualViewport`: a scale, and the listeners of its events. */
+class FakeVisualViewport {
+  scale = 1;
+  offsetLeft = 0;
+  offsetTop = 0;
+  readonly #listeners = new Map<string, Set<() => void>>();
+
+  addEventListener(type: string, listener: () => void): void {
+    const listeners = this.#listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.#listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: () => void): void {
+    this.#listeners.get(type)?.delete(listener);
+    if (this.#listeners.get(type)?.size === 0) this.#listeners.delete(type);
+  }
+
+  listenerTypes(): string[] {
+    return [...this.#listeners.keys()];
+  }
+
+  /** A pinch step: the new scale, then the event Chrome fires for it. */
+  resizeTo(scale: number): void {
+    this.scale = scale;
+    for (const listener of [...(this.#listeners.get('resize') ?? [])]) listener();
   }
 }
 

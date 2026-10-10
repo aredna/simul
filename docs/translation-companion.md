@@ -349,6 +349,45 @@ settles without a capture when it returns (D87); one whose pixels change
 between reads, such as a slide caught mid-transition, is never kept, so it
 cannot hide real text. The results are memory-only,
 bounded, expire after 15 minutes and are purged with the other image results.
+An image whose picture CSS alone decides is the exception: its address
+does not say what it paints. That is an image whose computed `content`
+begins with an image other than its own current file (a string, a counter
+or a quote first leaves the file showing), or whose `object-view-box` is
+not the whole file (`styleReplacesImagePicture`). The page script gives the
+picture of such an image a number (`cssPicture` on the image's descriptor),
+which says nothing of the picture: it stays the image's while the computed
+values and the file stay the same, also when the panel's reader starts
+again, and is never given to another picture or image of the document.
+Such an image is not read from its file. Its result, read from the screen
+while the whole image showed, is kept under the document and that number
+with the rendered size and the reading settings, in the same bounded store
+(`imageIdentityKey`), and is dropped when the image comes with another
+number. So a class that swaps the picture makes it read again from the
+screen, and the same picture coming back needs no capture. Nothing reports
+the load of a picture that CSS gives, so one whose capture held no text is
+looked at again 1.5 s and 4 s later before "no text" is kept, and a "no
+text" kept for it is looked at once more the next time the image is read
+(it came back into view). A picture that the system's colour scheme,
+`:hover` or `:focus` swaps changes nothing in the document: the page script
+listens to `prefers-color-scheme`, and to the pointer and the focus moving
+(`pointerover`, `pointerout`, `focusin`, `focusout` on any element); once
+these have rested for 100 ms it looks at the pictures of the images on
+screen again and reports only those that are now another.
+
+The page script reports a change of picture before the tab has painted it,
+and a screenshot shows what is painted. So the rectangle the panel asks for
+before a screenshot is given only after the frame that paints the change
+(the second frame callback after it, or 250 ms where the tab paints no
+frame). And a screenshot of a CSS picture made less than 500 ms after its
+picture changed is not trusted alone: its words are shown and kept as not
+yet confirmed (they go back over the image when it moves, but no read is
+answered from them), the image is looked at once more half a second
+later, and what that look finds is kept for good.
+
+When an image's capture changes and its content does not (its crop moved
+with a scroll), the result kept for the whole image is put back over it at
+once (`#keptWholeImageProjection`); the job that confirms it follows when
+its turn comes, which may be behind another image's capture.
 Any other repeat of a URL is reused only when its processed pixels and
 geometry inputs match, because a responsive, resized, cropped, or animated
 rendering can produce different overlay coordinates.

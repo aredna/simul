@@ -23,6 +23,7 @@ import type { SourceImageUpsert } from './source-image-model';
 import {
   imageTransformIsAxisAligned,
   styleAllowsImageCapture,
+  styleReplacesImagePicture,
 } from './image-capture-style';
 
 export type SourceImageObservationEvent =
@@ -100,6 +101,24 @@ const MAX_LAYOUT_SETTLE_TARGETS = 256;
 const UNREADABLE_SHADOW_ROOT = Symbol('unreadable-shadow-root');
 type ShadowRootRead = ShadowRoot | null |
   typeof UNREADABLE_SHADOW_ROOT;
+/**
+ * The pointer coming onto an element or leaving it, and the focus moving:
+ * what `:hover`, `:focus` and `:focus-within` follow, on an image or on
+ * anything around it.
+ */
+const PICTURE_STATE_EVENT_TYPES = Object.freeze([
+  'pointerover',
+  'pointerout',
+  'focusin',
+  'focusout',
+] as const);
+/**
+ * How long the pointer and the focus must have stayed where they are before
+ * the pictures on screen are looked at again. A state that is left sooner
+ * (the pointer crossing an image) is never reported: its picture would be
+ * gone before it could be read.
+ */
+export const PICTURE_STATE_SETTLE_MS = 100;
 const LAYOUT_SETTLE_EVENT_TYPES = Object.freeze([
   'transitionend',
   'transitioncancel',
@@ -203,6 +222,8 @@ interface ObservedImageState {
   sourceToken: PrivateSourceToken;
   routingToken: PrivateSourceToken;
   layoutToken: PrivateSourceToken;
+  /** The number of the picture CSS gives the image, when CSS decides it. */
+  cssPicture: number | undefined;
   viewportToken: string;
   visibleSettled: boolean;
   nearSettled: boolean;
@@ -214,6 +235,35 @@ interface ObservedImageState {
 const UNREADABLE_PRIVATE_SOURCE_TOKEN: PrivateSourceToken = Object.freeze({
   kind: 'unreadable',
 });
+
+/**
+ * A picture that CSS gives an image, and the number it travels under. The
+ * facts (the computed values and the file they apply to) stay here; the
+ * number says nothing of them. It is the image's for as long as the facts
+ * are these, across readers of the same page, and is never given to another
+ * picture or another image: a result the panel keeps under it is this
+ * picture's.
+ */
+interface CssPicture {
+  readonly facts: PrivateSourceToken;
+  readonly number: number;
+}
+const cssPictures = new WeakMap<HTMLImageElement, CssPicture>();
+let cssPictureCount = 0;
+
+function cssPictureNumber(
+  image: HTMLImageElement,
+  facts: PrivateSourceToken | undefined,
+): number | undefined {
+  if (!facts) return undefined;
+  const known = cssPictures.get(image);
+  if (known && !privateSourceTokenChanged(known.facts, facts)) {
+    return known.number;
+  }
+  cssPictureCount += 1;
+  cssPictures.set(image, Object.freeze({ facts, number: cssPictureCount }));
+  return cssPictureCount;
+}
 
 /**
  * Shared source-frame adapter. Raw URL-like attributes are kept only as a
@@ -249,6 +299,10 @@ export class SourceImageObserver {
   #loadListener: ((event: Event) => void) | undefined;
   #viewportListener: (() => void) | undefined;
   #scrollListener: (() => void) | undefined;
+  #pictureStateListener: (() => void) | undefined;
+  /** Pointer and focus events seen, and the timer that waits for them to stop. */
+  #pictureStateEvents = 0;
+  #pictureStateTimer: unknown;
   #layoutSettleListener: ((event: Event) => void) | undefined;
   #fontSettleListener: (() => void) | undefined;
   #scrollFrame: number | undefined;
@@ -370,6 +424,58 @@ export class SourceImageObserver {
   refreshImage(image: HTMLImageElement): void {
     if (!this.#started) return;
     this.#refresh(image);
+  }
+
+  /**
+   * The images on screen can be captured again after something no observer
+   * here reports (a pinch zoom ended). Their observation advances, which
+   * asks the panel to try the ones it had to leave; an image that was read
+   * keeps its result, and nothing is captured for it.
+   */
+  advanceVisibleObservation(): void {
+    if (!this.#started) return;
+    for (const image of [...this.#visible]) this.#refresh(image, false, true);
+  }
+
+  /**
+   * Something that is no change to the document may have given the images
+   * on screen another picture (the system's colour scheme, the pointer, the
+   * focus). Each is looked at again, and only one whose picture CSS now
+   * decides differently is a change.
+   */
+  refreshVisiblePictures(): void {
+    if (!this.#started) return;
+    for (const image of [...this.#visible]) this.#refreshPicture(image);
+  }
+
+  /**
+   * Looks at the pictures on screen once no pointer or focus event has come
+   * for a whole wait. While they keep coming the timer only starts again.
+   */
+  #awaitPictureStateRest(generation: number): void {
+    const seen = this.#pictureStateEvents;
+    this.#pictureStateTimer = this.#setTimer(() => {
+      this.#pictureStateTimer = undefined;
+      if (!this.#isActiveGeneration(generation)) return;
+      if (this.#pictureStateEvents !== seen) {
+        this.#awaitPictureStateRest(generation);
+        return;
+      }
+      this.refreshVisiblePictures();
+    }, PICTURE_STATE_SETTLE_MS);
+  }
+
+  /** Reads one image's own style, and refreshes it if its picture changed. */
+  #refreshPicture(image: HTMLImageElement): void {
+    const state = this.#states.get(image);
+    if (!state) return;
+    let facts: PrivateSourceToken | undefined;
+    try {
+      facts = readCssPictureFacts(image, readRoutingComputedStyle(image, image));
+    } catch {
+      return;
+    }
+    if (cssPictureNumber(image, facts) !== state.cssPicture) this.#refresh(image);
   }
 
   /** CSSOM has no MutationRecord, so conservatively re-prove every image. */
@@ -498,6 +604,18 @@ export class SourceImageObserver {
         this.#applyCaptureSafetyAssessment(safetyAssessment);
       });
     };
+    // A picture that `:hover` or `:focus` swaps, on the image or on anything
+    // around it, changes with no change to the document. Once the pointer
+    // and the focus have rested, the images on screen are asked for their
+    // picture, and only one whose picture is now another is a change: a
+    // state that restyles an image otherwise is no change here.
+    this.#pictureStateListener = () => {
+      if (!this.#isActiveGeneration(generation)) return;
+      this.#pictureStateEvents += 1;
+      if (this.#pictureStateTimer === undefined) {
+        this.#awaitPictureStateRest(generation);
+      }
+    };
     this.#layoutSettleListener = (event) => {
       if (!this.#isActiveGeneration(generation) || !isElement(event.target)) {
         return;
@@ -558,6 +676,11 @@ export class SourceImageObserver {
       if (this.#scrollListener) {
         root.removeEventListener('scroll', this.#scrollListener, true);
       }
+      if (this.#pictureStateListener) {
+        for (const type of PICTURE_STATE_EVENT_TYPES) {
+          root.removeEventListener(type, this.#pictureStateListener, true);
+        }
+      }
       if (this.#layoutSettleListener) {
         for (const type of LAYOUT_SETTLE_EVENT_TYPES) {
           root.removeEventListener(type, this.#layoutSettleListener, true);
@@ -591,6 +714,10 @@ export class SourceImageObserver {
       this.#clearTimer(this.#shadowDiscoveryTimer);
       this.#shadowDiscoveryTimer = undefined;
     }
+    if (this.#pictureStateTimer !== undefined) {
+      this.#clearTimer(this.#pictureStateTimer);
+      this.#pictureStateTimer = undefined;
+    }
     this.#visibleObserver?.disconnect();
     this.#nearObserver?.disconnect();
     this.#resizeObserver?.disconnect();
@@ -609,6 +736,7 @@ export class SourceImageObserver {
     this.#loadListener = undefined;
     this.#viewportListener = undefined;
     this.#scrollListener = undefined;
+    this.#pictureStateListener = undefined;
     this.#layoutSettleListener = undefined;
     this.#fontSettleListener = undefined;
     this.#states.clear();
@@ -639,6 +767,14 @@ export class SourceImageObserver {
     if (this.#loadListener) root.addEventListener('load', this.#loadListener, true);
     if (this.#scrollListener) {
       root.addEventListener('scroll', this.#scrollListener, true);
+    }
+    if (this.#pictureStateListener) {
+      for (const type of PICTURE_STATE_EVENT_TYPES) {
+        root.addEventListener(type, this.#pictureStateListener, {
+          capture: true,
+          passive: true,
+        });
+      }
     }
     if (this.#layoutSettleListener) {
       for (const type of LAYOUT_SETTLE_EVENT_TYPES) {
@@ -861,6 +997,7 @@ export class SourceImageObserver {
       sourceToken: readPrivateSourceToken(image),
       routingToken: processingTokens.routingToken,
       layoutToken: processingTokens.layoutToken,
+      cssPicture: cssPictureNumber(image, processingTokens.cssPicture),
       viewportToken: facts.viewportToken,
       visibleSettled: false,
       nearSettled: false,
@@ -932,6 +1069,7 @@ export class SourceImageObserver {
     state.sourceToken = token;
     state.routingToken = processingTokens.routingToken;
     state.layoutToken = processingTokens.layoutToken;
+    state.cssPicture = cssPictureNumber(image, processingTokens.cssPicture);
     state.viewportToken = facts.viewportToken;
     state.safetyBounds = facts.safetyBounds;
     this.#emitUpsert(
@@ -967,6 +1105,9 @@ export class SourceImageObserver {
       renderedHeight: facts.renderedHeight,
       intrinsicWidth: facts.intrinsicWidth,
       intrinsicHeight: facts.intrinsicHeight,
+      ...(state.cssPicture === undefined
+        ? {}
+        : { cssPicture: state.cssPicture }),
     });
     const event = Object.freeze({ kind: 'upsert' as const, input });
     if (sameObservation(state.lastEvent?.input, input)) return;
@@ -2581,16 +2722,20 @@ function readPrivateSourceToken(image: HTMLImageElement): PrivateSourceToken {
 function readPrivateProcessingTokens(image: HTMLImageElement): {
   readonly routingToken: PrivateSourceToken;
   readonly layoutToken: PrivateSourceToken;
+  /** The facts of the picture CSS gives the image, when CSS decides it. */
+  readonly cssPicture: PrivateSourceToken | undefined;
 } {
   const path = readSourceFlatTreeElementPath(image);
   if (!path) {
     return Object.freeze({
       routingToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
       layoutToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
+      cssPicture: undefined,
     });
   }
   const routingParts: string[] = [];
   const layoutParts: string[] = [];
+  let cssPicture: PrivateSourceToken | undefined;
   try {
     for (const current of path) {
       routingParts.push(current.localName.toLowerCase());
@@ -2615,6 +2760,10 @@ function readPrivateProcessingTokens(image: HTMLImageElement): {
         style?.mixBlendMode ?? '',
       );
       if (current === image) {
+        // Every fact of the picture is in the paint facts below, or is the
+        // image's address, so a change of one is a capture change and
+        // reaches the panel with the picture's new number.
+        cssPicture = readCssPictureFacts(image, style);
         layoutParts.push(
           style?.objectFit ?? '',
           style?.objectPosition ?? '',
@@ -2632,12 +2781,35 @@ function readPrivateProcessingTokens(image: HTMLImageElement): {
     return Object.freeze({
       routingToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
       layoutToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
+      cssPicture: undefined,
     });
   }
   return Object.freeze({
     routingToken: encodePrivateToken(routingParts),
     layoutToken: encodePrivateToken(layoutParts),
+    cssPicture,
   });
+}
+
+/**
+ * What decides the picture of an image whose picture CSS decides: the
+ * computed `content` and `object-view-box`, how the picture is fitted, and
+ * the file they apply to. `undefined` for an image that shows its own file,
+ * which is nearly always.
+ */
+function readCssPictureFacts(
+  image: HTMLImageElement,
+  style: CSSStyleDeclaration | undefined,
+): PrivateSourceToken | undefined {
+  const file = typeof image.currentSrc === 'string' ? image.currentSrc : '';
+  if (!style || !styleReplacesImagePicture(style, file)) return undefined;
+  return encodePrivateToken([
+    style.content ?? '',
+    style.getPropertyValue?.('object-view-box') ?? '',
+    style.objectFit ?? '',
+    style.objectPosition ?? '',
+    file,
+  ]);
 }
 
 function readRoutingComputedStyle(

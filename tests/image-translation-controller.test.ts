@@ -19,6 +19,7 @@ import {
 import type {
   AcquiredImagePixels,
   PixelAcquisitionCoordinator,
+  PixelAcquisitionResult,
 } from '../lib/ocr/pixel-acquisition';
 import {
   readOffscreenOcrCommand,
@@ -3954,6 +3955,1393 @@ describe('ImageTranslationController', () => {
       descriptor: { ...firstDescriptor, captureRevision: 3, observationRevision: 3 },
     });
     await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    controller.dispose();
+  });
+
+  it('reads an image again when CSS alone swaps its picture, and keeps that picture\'s result under its number', async () => {
+    // A class swaps the picture through `content: url()`: the image's
+    // address, sizes and fit stay, so the first picture's words were reused.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const plain = { ...descriptor, captureRevision: 1 };
+    const hashOf = (current: SourceImageDescriptor) =>
+      (current.cssPicture === undefined ? 'c1' : current.cssPicture === 5 ? 'c2' : 'c3')
+        .repeat(32);
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    // Each screenshot here is made 600 ms after the change it follows, as
+    // behind another image's capture: late enough to show the new picture.
+    // One made at once is the subject of a test further down.
+    let clock = 1_000;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      clock += 600;
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(current, hashOf(current)),
+          nearestElementLanguage: 'en' as const,
+        },
+      };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'c1'.repeat(32)
+          ? 'First picture'
+          : pixels.pixelHash === 'c2'.repeat(32) ? 'Second picture' : 'Third picture',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const translate = vi.fn(async (text: string) => `ja:${text}`);
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: plain }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({ translate, destroy: vi.fn() }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = () => overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    );
+    const reused = () =>
+      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    const settle = async () => {
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    let revision = 1;
+    const change = (cssPicture?: number) => {
+      revision += 1;
+      emitChange?.({
+        kind: 'upsert',
+        descriptor: {
+          ...plain,
+          captureRevision: revision,
+          observationRevision: revision,
+          ...(cssPicture === undefined ? {} : { cssPicture }),
+        },
+      });
+    };
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(shown()).toBe('ja:First picture'));
+    await settle();
+    expect(acquire).toHaveBeenCalledOnce();
+
+    // The class is added: same address in the mirror, another picture,
+    // which the page sends under a number. It is read from the screen.
+    change(5);
+    await vi.waitFor(() => expect(shown()).toBe('ja:Second picture'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(reused()).toBe(0);
+
+    // Its crop moves while the picture is the same (a scroll): the result
+    // kept under the picture's number is the image's, with no capture, and
+    // it is over the image at once.
+    change(5);
+    expect(shown()).toBe('ja:Second picture');
+    await vi.waitFor(() => expect(reused()).toBe(1));
+    await settle();
+    expect(shown()).toBe('ja:Second picture');
+    expect(acquire).toHaveBeenCalledTimes(2);
+
+    // The class is taken off: the first picture's result is the image's own
+    // again, by its address.
+    change();
+    await vi.waitFor(() => expect(reused()).toBe(2));
+    await settle();
+    expect(shown()).toBe('ja:First picture');
+    expect(acquire).toHaveBeenCalledTimes(2);
+
+    // And on again, the same picture under the same number: kept.
+    change(5);
+    await vi.waitFor(() => expect(reused()).toBe(3));
+    await settle();
+    expect(shown()).toBe('ja:Second picture');
+    expect(acquire).toHaveBeenCalledTimes(2);
+
+    // Another picture by CSS comes under another number: read afresh.
+    change(6);
+    await vi.waitFor(() => expect(shown()).toBe('ja:Third picture'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(reused()).toBe(3);
+
+    // What was kept under the replaced number is dropped, and nothing else:
+    // the image's own result is still its own by its address.
+    change();
+    await vi.waitFor(() => expect(reused()).toBe(4));
+    await settle();
+    expect(shown()).toBe('ja:First picture');
+    expect(acquire).toHaveBeenCalledTimes(3);
+    // Were the replaced number to come again, nothing of it would be reused.
+    change(5);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(4));
+    await settle();
+    expect(shown()).toBe('ja:Second picture');
+    expect(reused()).toBe(4);
+    expect(recognize).toHaveBeenCalledTimes(3);
+    expect(translate).toHaveBeenCalledTimes(3);
+
+    // A result is kept for the size it was read at: at another size the
+    // picture is read again.
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: {
+        ...plain,
+        captureRevision: revision,
+        observationRevision: revision,
+        cssPicture: 5,
+        renderedWidth: 300,
+        renderedHeight: 150,
+      },
+    });
+    expect(shown()).toBeUndefined();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(5));
+    await settle();
+    expect(reused()).toBe(4);
+    controller.dispose();
+  });
+
+  it('reads each of two images of one address whose pictures CSS decides', async () => {
+    // One address (a blank file) and two pictures through `content`: the
+    // second image used to get the first one's words.
+    const { document } = parseHTML('<html><body><img><img></body></html>');
+    const images = [...document.querySelectorAll('img')] as unknown as HTMLImageElement[];
+    for (const image of images) {
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: 'https://assets.example.test/blank.png' },
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 600 },
+        naturalHeight: { configurable: true, value: 300 },
+      });
+    }
+    const twins = [12, 13].map((nodeId) => ({
+      ...descriptor,
+      nodeId,
+      captureRevision: 1,
+      cssPicture: nodeId - 10,
+    }));
+    // Each screenshot is made 600 ms after the images were found: late
+    // enough for its result to be kept at once.
+    let clock = 1_000;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      clock += 600;
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(current, (current.nodeId === 12 ? 'a1' : 'a2').repeat(32)),
+          nearestElementLanguage: 'en' as const,
+        },
+      };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'a1'.repeat(32) ? 'Left twin' : 'Right twin',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => {
+          for (const twin of twins) onChange({ kind: 'upsert', descriptor: twin });
+        });
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_identity, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images[nodeId - 12]!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(overlayText(document.querySelector('[data-simul-image-overlay="12"]')))
+      .toBe('ja:Left twin');
+    expect(overlayText(document.querySelector('[data-simul-image-overlay="13"]')))
+      .toBe('ja:Right twin');
+    expect(diagnostics).not.toContain('image-identity-reused');
+    controller.dispose();
+  });
+
+  it('looks at a CSS picture without text twice more, then keeps that it has none', async () => {
+    // Nothing reports the load of a picture that CSS gives: one that is
+    // still on its way paints an empty box.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const swapped = { ...descriptor, captureRevision: 1, cssPicture: 5 };
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(current, 'b2'.repeat(32)),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    const recognize = vi.fn(async () => ({
+      ...autoProbeRecognition('', 0.98),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const timers = lateLookTimers();
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: swapped }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const found = () =>
+      diagnostics.filter((entry) => entry === 'no-text-found').length;
+    const settle = async () => {
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    controller.activateReplica(request, 3, 1);
+    // Two reads of the same pixels confirm it, as for any image.
+    await vi.waitFor(() => expect(found()).toBe(1));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(timers.pending()).toEqual([1_500]);
+
+    // The first later look: one capture, the same empty box.
+    timers.fire();
+    await vi.waitFor(() => expect(found()).toBe(2));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(timers.pending()).toEqual([4_000]);
+
+    // The second, and last.
+    timers.fire();
+    await vi.waitFor(() => expect(found()).toBe(3));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(4);
+    expect(timers.pending()).toEqual([]);
+
+    // From now on the picture is kept as one without text. It may still be
+    // on its way: the next time the image returns to view it is looked at
+    // once more, with one capture and no further look arranged.
+    const reused = () =>
+      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...swapped, captureRevision: 2, observationRevision: 2 },
+    });
+    await vi.waitFor(() => expect(reused()).toBe(1));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(5);
+    expect(found()).toBe(4);
+    expect(timers.pending()).toEqual([]);
+
+    // After that look it stays: another return is not captured.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...swapped, captureRevision: 3, observationRevision: 3 },
+    });
+    await vi.waitFor(() => expect(reused()).toBe(2));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(5);
+    expect(timers.pending()).toEqual([]);
+
+    // Another picture has its own looks.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...swapped, captureRevision: 4, observationRevision: 4, cssPicture: 6 },
+    });
+    await vi.waitFor(() => expect(timers.pending()).toEqual([1_500]));
+    await settle();
+    // An ordinary image without text is looked at no more than before.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...descriptor, captureRevision: 5, observationRevision: 5 },
+    });
+    await settle();
+    expect(timers.pending()).toEqual([]);
+
+    // A look that is still waiting goes with the controller.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...swapped, captureRevision: 6, observationRevision: 6, cssPicture: 7 },
+    });
+    await vi.waitFor(() => expect(timers.pending()).toEqual([1_500]));
+    await settle();
+    controller.dispose();
+    expect(timers.pending()).toEqual([]);
+  });
+
+  it('does not keep a CSS picture\'s read made right after its change until a later look', async () => {
+    // The page reports a change before the tab has painted it: a screenshot
+    // made at once may show the picture before. Here the first one does.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const first = { ...descriptor, captureRevision: 1, cssPicture: 5 };
+    let painted = 'e1';
+    let clock = 10_000;
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      // The pixels are handed over when the capture lane lets go of them,
+      // 550 ms after the screenshot was made.
+      clock += 550;
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(current, painted.repeat(32)),
+          nearestElementLanguage: 'en' as const,
+          screenshotAgeMs: 550,
+        },
+      };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'e1'.repeat(32) ? 'Picture before' : 'Picture after',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const timers = lateLookTimers();
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: first }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = () => overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    );
+    const reused = () =>
+      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    const settle = async () => {
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    let revision = 1;
+    const change = (cssPicture: number) => {
+      revision += 1;
+      emitChange?.({
+        kind: 'upsert',
+        descriptor: {
+          ...first,
+          captureRevision: revision,
+          observationRevision: revision,
+          cssPicture,
+        },
+      });
+    };
+    controller.activateReplica(request, 3, 1);
+    // The first sight is a change too: read, shown, and looked at once more.
+    await vi.waitFor(() => expect(shown()).toBe('ja:Picture before'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(timers.pending()).toEqual([500]);
+    clock += 600;
+    timers.fire();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    await settle();
+    expect(shown()).toBe('ja:Picture before');
+    expect(timers.pending()).toEqual([]);
+
+    // Another picture comes. The screenshot made at once still shows the
+    // picture before: its words go over the image, not yet confirmed.
+    change(6);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(3));
+    await settle();
+    expect(shown()).toBe('ja:Picture before');
+    expect(timers.pending()).toEqual([500]);
+
+    // The image's crop moves before the look that confirms them (a scroll).
+    // The words are back over it at once: they are what is known of it. But
+    // no read is answered from them: the image is captured again.
+    change(6);
+    expect(shown()).toBe('ja:Picture before');
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(4));
+    await settle();
+    expect(reused()).toBe(0);
+    expect(timers.pending()).toEqual([500]);
+
+    // The look that follows shows what the tab paints by then.
+    painted = 'e2';
+    clock += 600;
+    timers.fire();
+    await vi.waitFor(() => expect(shown()).toBe('ja:Picture after'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(5);
+    expect(reused()).toBe(0);
+    expect(timers.pending()).toEqual([]);
+
+    // That one is kept for good: the image's crop moves, and its words are
+    // back at once, with no capture and no further look.
+    change(6);
+    expect(shown()).toBe('ja:Picture after');
+    await vi.waitFor(() => expect(reused()).toBe(1));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(5);
+    expect(timers.pending()).toEqual([]);
+
+    // A screenshot made later than the wait after a change is kept at once.
+    revision += 1;
+    painted = 'e1';
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...first, captureRevision: revision, observationRevision: revision, cssPicture: 7 },
+    });
+    // (the screenshot is made 600 ms after the change: another image's
+    // capture held the lane)
+    clock += 600;
+    await vi.waitFor(() => expect(shown()).toBe('ja:Picture before'));
+    await settle();
+    expect(timers.pending()).toEqual([]);
+
+    // The picture changes again while a look is arranged: that look is
+    // given up, and the new picture gets its own.
+    change(8);
+    await vi.waitFor(() => expect(timers.pending()).toEqual([500]));
+    await settle();
+    const givenUp = timers.cleared();
+    change(9);
+    expect(timers.cleared()).toBe(givenUp + 1);
+    expect(timers.pending()).toEqual([]);
+    await vi.waitFor(() => expect(timers.pending()).toEqual([500]));
+    await settle();
+    // The same picture at another place (its crop moved) is a change too.
+    change(9);
+    expect(timers.cleared()).toBe(givenUp + 2);
+    await vi.waitFor(() => expect(timers.pending()).toEqual([500]));
+    await settle();
+
+    // The image goes: so does the look arranged for it.
+    emitChange?.({
+      kind: 'remove',
+      document: sourceDocument,
+      nodeId: first.nodeId,
+      contentRevision: first.contentRevision + 1,
+      observationRevision: revision + 1,
+    });
+    expect(timers.pending()).toEqual([]);
+
+    // And a look that is still arranged goes with the controller.
+    revision += 2;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: {
+        ...first,
+        contentRevision: first.contentRevision + 2,
+        captureRevision: revision,
+        observationRevision: revision,
+        cssPicture: 10,
+      },
+    });
+    await vi.waitFor(() => expect(timers.pending()).toEqual([500]));
+    await settle();
+    controller.dispose();
+    expect(timers.pending()).toEqual([]);
+  });
+
+  it('keeps at once what is read of a CSS picture long after it changed, when the image is only offered again', async () => {
+    // The picture changed while the image could not be captured (the tab
+    // was pinch-zoomed). The end of the pinch offers the image again: a new
+    // observation, not a change of picture, and nothing to confirm.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const swapped = { ...descriptor, captureRevision: 1, cssPicture: 5 };
+    let capturable = false;
+    let clock = 5_000;
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => capturable
+      ? {
+          status: 'ready' as const,
+          pixels: {
+            ...autoProbePixels(current, 'c9'.repeat(32)),
+            nearestElementLanguage: 'en' as const,
+            screenshotAgeMs: 0,
+          },
+        }
+      : { status: 'deferred' as const, reason: 'hidden' as const });
+    const recognize = vi.fn(async () => ({
+      ...autoProbeRecognition('Offered again', 0.98),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const timers = lateLookTimers();
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: swapped }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = () => overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    );
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(shown()).toBeUndefined();
+
+    // Five seconds later the image is offered again, as it was.
+    clock += 5_000;
+    capturable = true;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...swapped, observationRevision: swapped.observationRevision + 1 },
+    });
+    await vi.waitFor(() => expect(shown()).toBe('ja:Offered again'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(timers.pending()).toEqual([]);
+    controller.dispose();
+  });
+
+  it('finds the words of a CSS picture that arrives after its first reads', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const swapped = { ...descriptor, captureRevision: 1, cssPicture: 5 };
+    let arrived = false;
+    let clock = 5_000;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(current, (arrived ? 'd2' : 'd1').repeat(32)),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'd2'.repeat(32) ? 'Late picture' : '',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const timers = lateLookTimers();
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: swapped }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(diagnostics).toContain('no-text-found'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(timers.pending()).toEqual([1_500]);
+
+    arrived = true;
+    clock += 1_500;
+    timers.fire();
+    await vi.waitFor(() => expect(overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    )).toBe('ja:Late picture'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(acquire).toHaveBeenCalledTimes(3);
+    // Read, a second and a half after the picture changed: no further look.
+    expect(timers.pending()).toEqual([]);
+    controller.dispose();
+  });
+
+  it('looks once more at a CSS picture kept as without text when the image returns, and reads one that has arrived', async () => {
+    // A picture that arrives after the last look was kept as "no text" for
+    // a quarter of an hour, also when the image came back into view.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const swapped = { ...descriptor, captureRevision: 1, cssPicture: 5 };
+    let arrived = false;
+    let capturable = true;
+    // The image shows only in part (cut by the edge of the view).
+    let part = false;
+    // Each screenshot is made this long after the change it follows.
+    let lane = 600;
+    let clock = 5_000;
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      clock += lane;
+      return capturable
+        ? {
+            status: 'ready' as const,
+            pixels: {
+              ...autoProbePixels(current, (arrived ? 'f2' : 'f1').repeat(32)),
+              nearestElementLanguage: 'en' as const,
+              ...(part ? { cropWidthCss: 100 } : {}),
+            },
+          }
+        : { status: 'deferred' as const, reason: 'hidden' as const };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'f2'.repeat(32) ? 'Late picture' : '',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const timers = lateLookTimers();
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: swapped }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = () => overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    );
+    const found = () =>
+      diagnostics.filter((entry) => entry === 'no-text-found').length;
+    const settle = async () => {
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    let revision = 1;
+    const comeBack = () => {
+      revision += 1;
+      emitChange?.({
+        kind: 'upsert',
+        descriptor: { ...swapped, captureRevision: revision, observationRevision: revision },
+      });
+    };
+    controller.activateReplica(request, 3, 1);
+    // Two reads and two later looks find an empty box: "no text" is kept.
+    await vi.waitFor(() => expect(found()).toBe(1));
+    await settle();
+    timers.fire();
+    await vi.waitFor(() => expect(found()).toBe(2));
+    await settle();
+    timers.fire();
+    await vi.waitFor(() => expect(found()).toBe(3));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(4);
+    expect(timers.pending()).toEqual([]);
+
+    // The image comes back while it cannot be captured (under a caption):
+    // the look it is owed is not used up.
+    arrived = true;
+    capturable = false;
+    comeBack();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(5));
+    await settle();
+    expect(shown()).toBeUndefined();
+    expect(diagnostics).not.toContain('image-identity-reused');
+
+    // It comes back again and can be captured: one look, and the picture
+    // that arrived meanwhile is read. The screenshot is made at once, so
+    // soon after the image moved that its words are not kept yet.
+    capturable = true;
+    lane = 0;
+    comeBack();
+    await vi.waitFor(() => expect(shown()).toBe('ja:Late picture'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(6);
+    expect(timers.pending()).toEqual([500]);
+
+    // The look that confirms them must not end at the "no text" that was
+    // kept for the picture: the words stay, and are kept now.
+    clock += 600;
+    timers.fire();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(7));
+    await settle();
+    expect(shown()).toBe('ja:Late picture');
+    expect(diagnostics).not.toContain('image-identity-reused');
+    expect(timers.pending()).toEqual([]);
+
+    // The next return needs no capture.
+    lane = 600;
+    comeBack();
+    await vi.waitFor(() =>
+      expect(diagnostics).toContain('image-identity-reused'));
+    await settle();
+    expect(shown()).toBe('ja:Late picture');
+    expect(acquire).toHaveBeenCalledTimes(7);
+
+    // Another picture, kept as without text after its looks. It returns
+    // cut by the edge of the view, and the look it is owed finds text in
+    // the part that shows: the result of a part is kept for nothing, but
+    // the "no text" kept for the whole picture is gone with it.
+    arrived = false;
+    revision += 1;
+    const other = {
+      ...swapped,
+      captureRevision: revision,
+      observationRevision: revision,
+      cssPicture: 6,
+    };
+    const again = () => {
+      revision += 1;
+      emitChange?.({
+        kind: 'upsert',
+        descriptor: { ...other, captureRevision: revision, observationRevision: revision },
+      });
+    };
+    const before = found();
+    emitChange?.({ kind: 'upsert', descriptor: other });
+    await vi.waitFor(() => expect(found()).toBe(before + 1));
+    await settle();
+    timers.fire();
+    await vi.waitFor(() => expect(found()).toBe(before + 2));
+    await settle();
+    timers.fire();
+    await vi.waitFor(() => expect(found()).toBe(before + 3));
+    await settle();
+    expect(timers.pending()).toEqual([]);
+    const captured = acquire.mock.calls.length;
+    arrived = true;
+    part = true;
+    again();
+    await vi.waitFor(() => expect(shown()).toBe('ja:Late picture'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(captured + 1);
+    // Whole again: read, not answered from a "no text" that is no longer true.
+    part = false;
+    again();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(captured + 2));
+    await settle();
+    expect(shown()).toBe('ja:Late picture');
+    controller.dispose();
+  });
+
+  it('drops what was read for a picture that the image no longer shows', async () => {
+    // A screenshot is under way for one picture when CSS gives the image
+    // another: what comes back is of a picture that is gone.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: 'https://assets.example.test/first.png' },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    const fifth = { ...descriptor, captureRevision: 1, cssPicture: 5 };
+    const sixth = { ...fifth, captureRevision: 2, observationRevision: 2, cssPicture: 6 };
+    let clock = 5_000;
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const handOver: (() => void)[] = [];
+    const acquire = vi.fn((current: SourceImageDescriptor) =>
+      new Promise<PixelAcquisitionResult>((resolve) => {
+        handOver.push(() => {
+          clock += 600;
+          resolve({
+            status: 'ready',
+            pixels: {
+              ...autoProbePixels(current, (current.cssPicture === 5 ? 'a5' : 'a6').repeat(32)),
+              nearestElementLanguage: 'en',
+            } as AcquiredImagePixels,
+          });
+        });
+      }));
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'a5'.repeat(32) ? 'Fifth picture' : 'Sixth picture',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const translate = vi.fn(async (text: string) => `ja:${text}`);
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: fifth }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({ translate, destroy: vi.fn() }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      now: () => clock,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = () => overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    );
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(1));
+    // The picture changes while the screenshot for the fifth is under way.
+    emitChange?.({ kind: 'upsert', descriptor: sixth });
+    handOver[0]!();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    expect(shown()).toBeUndefined();
+    handOver[1]!();
+    await vi.waitFor(() => expect(shown()).toBe('ja:Sixth picture'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    // Nothing of the fifth picture was recognised, translated or shown.
+    expect(translate.mock.calls.map(([text]) => text)).toEqual(['Sixth picture']);
+    // And what is kept is the sixth's, under the sixth's number: the image
+    // comes back with it and needs no capture.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...sixth, captureRevision: 3, observationRevision: 3 },
+    });
+    expect(shown()).toBe('ja:Sixth picture');
+    await vi.waitFor(() =>
+      expect(diagnostics).toContain('image-identity-reused'));
+    expect(acquire).toHaveBeenCalledTimes(2);
+    controller.dispose();
+  });
+
+  it('puts an image\'s kept result back at once when its capture changes, whatever the lane is doing', async () => {
+    // One image job runs at a time and a capture holds it for half a second:
+    // an image that only needs its kept result used to wait behind it,
+    // without words.
+    const { document } = parseHTML('<html><body><img><img></body></html>');
+    const images = [...document.querySelectorAll('img')] as unknown as HTMLImageElement[];
+    images.forEach((image, index) => Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: `https://assets.example.test/lane-${index}.png` },
+      // The mirror holds no copy of the second image, so it has no identity
+      // and is captured whenever its capture changes.
+      complete: { configurable: true, value: index === 0 },
+      naturalWidth: { configurable: true, value: index === 0 ? 600 : 0 },
+      naturalHeight: { configurable: true, value: index === 0 ? 300 : 0 },
+    }));
+    const [kept, captured] = [12, 13].map((nodeId) => ({
+      ...descriptor,
+      nodeId,
+      captureRevision: 1,
+    })) as [SourceImageDescriptor, SourceImageDescriptor];
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    let hold: Promise<void> | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      if (current.nodeId === 13 && hold) await hold;
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(current, (current.nodeId === 12 ? 'e1' : 'e2').repeat(32)),
+          nearestElementLanguage: 'en' as const,
+        },
+      };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'e1'.repeat(32) ? 'Kept words' : 'Captured words',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => {
+          onChange({ kind: 'upsert', descriptor: kept });
+          onChange({ kind: 'upsert', descriptor: captured });
+        });
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_identity, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images[nodeId - 12]!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = (nodeId: number) => overlayText(
+      document.querySelector(`[data-simul-image-overlay="${nodeId}"]`),
+    );
+    const reused = () =>
+      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(shown(13)).toBe('ja:Captured words'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(shown(12)).toBe('ja:Kept words');
+
+    // Both images' captures change (a scroll). The second one's job comes
+    // first and holds the lane with its capture.
+    let release!: () => void;
+    hold = new Promise<void>((resolve) => { release = resolve; });
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...captured, captureRevision: 2, observationRevision: 2 },
+    });
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(3));
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...kept, captureRevision: 2, observationRevision: 2 },
+    });
+    // At once, in the same turn: the kept words are over the first image.
+    expect(shown(12)).toBe('ja:Kept words');
+    // The image that has nothing kept is without words until it is read.
+    expect(shown(13)).toBeUndefined();
+    expect(reused()).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(shown(12)).toBe('ja:Kept words');
+    expect(controller.busy).toBe(true);
+
+    // The capture ends; the first image's own job then confirms its result,
+    // with no capture.
+    release();
+    await vi.waitFor(() => expect(reused()).toBe(1));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(shown(12)).toBe('ja:Kept words');
+    expect(shown(13)).toBe('ja:Captured words');
+    expect(acquire.mock.calls.filter(([current]) => current.nodeId === 12))
+      .toHaveLength(1);
+
+    // At another size nothing is kept for the image: its words go until it
+    // is read at that size.
+    hold = new Promise<void>((resolve) => { release = resolve; });
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...captured, captureRevision: 3, observationRevision: 3 },
+    });
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(4));
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: {
+        ...kept,
+        captureRevision: 3,
+        observationRevision: 3,
+        renderedWidth: 300,
+        renderedHeight: 150,
+      },
+    });
+    expect(shown(12)).toBeUndefined();
+    release();
+    await vi.waitFor(() => expect(shown(12)).toBe('ja:Kept words'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(acquire.mock.calls.filter(([current]) => current.nodeId === 12))
+      .toHaveLength(2);
+    controller.dispose();
+  });
+
+  it('tries an image left as hidden again on a new observation alone, and captures no read image for it', async () => {
+    // What the end of a pinch zoom sends: every image on screen is a new
+    // observation, with the same content, capture and size.
+    const { document } = parseHTML('<html><body><img><img></body></html>');
+    const images = [...document.querySelectorAll('img')] as unknown as HTMLImageElement[];
+    images.forEach((image, index) => Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: `https://assets.example.test/pinch-${index}.png` },
+      // The mirror holds no copy of the first image: it has no identity.
+      complete: { configurable: true, value: index === 1 },
+      naturalWidth: { configurable: true, value: index === 1 ? 600 : 0 },
+      naturalHeight: { configurable: true, value: index === 1 ? 300 : 0 },
+    }));
+    const [waiting, read] = [12, 13].map((nodeId) => ({
+      ...descriptor,
+      nodeId,
+      captureRevision: 1,
+    })) as [SourceImageDescriptor, SourceImageDescriptor];
+    let magnified = true;
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) =>
+      current.nodeId === 12 && magnified
+        ? { status: 'deferred' as const, reason: 'hidden' as const }
+        : {
+            status: 'ready' as const,
+            pixels: {
+              ...autoProbePixels(current, (current.nodeId === 12 ? 'f1' : 'f2').repeat(32)),
+              nearestElementLanguage: 'en' as const,
+            },
+          });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.pixelHash === 'f1'.repeat(32) ? 'Waited' : 'Read while zoomed',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => {
+          onChange({ kind: 'upsert', descriptor: waiting });
+          onChange({ kind: 'upsert', descriptor: read });
+        });
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_identity, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images[nodeId - 12]!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = (nodeId: number) => overlayText(
+      document.querySelector(`[data-simul-image-overlay="${nodeId}"]`),
+    );
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(shown(13)).toBe('ja:Read while zoomed'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(shown(12)).toBeUndefined();
+    const asked = (nodeId: number) =>
+      acquire.mock.calls.filter(([current]) => current.nodeId === nodeId).length;
+    expect(asked(12)).toBe(1);
+    expect(asked(13)).toBe(1);
+
+    // Left as it is, the image waits.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(asked(12)).toBe(1);
+
+    magnified = false;
+    emitChange?.({ kind: 'upsert', descriptor: { ...read, observationRevision: 2 } });
+    emitChange?.({ kind: 'upsert', descriptor: { ...waiting, observationRevision: 2 } });
+    await vi.waitFor(() => expect(shown(12)).toBe('ja:Waited'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(asked(12)).toBe(2);
+    expect(asked(13)).toBe(1);
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(shown(13)).toBe('ja:Read while zoomed');
     controller.dispose();
   });
 
@@ -9139,6 +10527,42 @@ function createDormantController(
     resetEpoch: 0,
   });
   return controller;
+}
+
+/**
+ * Timers of the controller, kept for the test to fire: the later looks at a
+ * CSS picture (1.5 s, 4 s). The one-second quiet timer runs on a microtask,
+ * as in `controlledProbeTimers`.
+ */
+function lateLookTimers() {
+  const waiting = new Map<number, { readonly callback: () => void; readonly milliseconds: number }>();
+  let nextHandle = 0;
+  let cleared = 0;
+  return {
+    setTimer: (
+      callback: () => void,
+      milliseconds?: number,
+    ): ReturnType<typeof setTimeout> => {
+      nextHandle += 1;
+      if (milliseconds === 1_000) queueMicrotask(callback);
+      else waiting.set(nextHandle, { callback, milliseconds: milliseconds ?? 0 });
+      return nextHandle as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimer: (handle: ReturnType<typeof setTimeout>): void => {
+      if (waiting.delete(handle as unknown as number)) cleared += 1;
+    },
+    pending: () => [...waiting.values()].map(({ milliseconds }) => milliseconds),
+    cleared: () => cleared,
+    /** Fires the one waiting timer. */
+    fire: (): void => {
+      const entry = waiting.entries().next().value as
+        | [number, { readonly callback: () => void }]
+        | undefined;
+      if (!entry) throw new Error('Expected a waiting timer.');
+      waiting.delete(entry[0]);
+      entry[1].callback();
+    },
+  };
 }
 
 function testProjectorEnvironment() {

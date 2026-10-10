@@ -294,8 +294,12 @@ translates the page text of the mirrored page, and for images Simul:
    a background tab, or in a tab that is pinch-zoomed (the tab's pixels then
    show the magnified view) is read from its own file instead: the copy the mirror has
    already loaded, then the page's own copy for same-site images, then (Passive
-   fidelity only) a cache-first download of the same URL without cookies. Each
-   crop is reduced to at most 4 megapixels;
+   fidelity only) a cache-first download of the same URL without cookies. An
+   image whose file cannot be read while the tab is pinch-zoomed is read from
+   the tab as soon as the pinch ends. An image whose picture CSS alone decides
+   (`content: url()` of another picture, or an `object-view-box` that shows
+   a part of the file) is read from the screen only: its file is not what it
+   shows. Each crop is reduced to at most 4 megapixels;
 4. tries Chrome TextDetector when the installed platform exposes it, then the
    packaged Tesseract.js 7.0.0 fallback according to the saved method order;
 5. rejects blank, punctuation-only, and insufficient-confidence results, and

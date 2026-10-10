@@ -24,6 +24,8 @@ export interface SourceImageUpsert extends ImageDimensions {
   readonly captureChanged?: boolean;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
+  /** The number of the picture CSS gives the image, when CSS decides it. */
+  readonly cssPicture?: number;
 }
 
 export type SourceImageModelResult =
@@ -103,11 +105,14 @@ export class SourceImageModel {
       !previous ||
       revision?.tombstoned === true ||
       parsed.contentChanged;
+    // A picture that CSS starts or stops deciding, or another one that it
+    // gives, is another picture.
     const pixelGeometryChanged = !previous ||
       previous.renderedWidth !== parsed.renderedWidth ||
       previous.renderedHeight !== parsed.renderedHeight ||
       previous.intrinsicWidth !== parsed.intrinsicWidth ||
-      previous.intrinsicHeight !== parsed.intrinsicHeight;
+      previous.intrinsicHeight !== parsed.intrinsicHeight ||
+      previous.cssPicture !== parsed.cssPicture;
     const observationChanged =
       needsContentRevision ||
       parsed.captureChanged ||
@@ -117,7 +122,8 @@ export class SourceImageModel {
       previous.renderedWidth !== parsed.renderedWidth ||
       previous.renderedHeight !== parsed.renderedHeight ||
       previous.intrinsicWidth !== parsed.intrinsicWidth ||
-      previous.intrinsicHeight !== parsed.intrinsicHeight;
+      previous.intrinsicHeight !== parsed.intrinsicHeight ||
+      previous.cssPicture !== parsed.cssPicture;
     if (!observationChanged && revision && previous) {
       return { status: 'unchanged' };
     }
@@ -257,6 +263,7 @@ function createDescriptor(
           intrinsicHeight: input.intrinsicHeight,
         }
       : {}),
+    ...(input.cssPicture === undefined ? {} : { cssPicture: input.cssPicture }),
   });
 }
 
@@ -271,7 +278,8 @@ function sameDescriptorFacts(
     left.renderedWidth === right.renderedWidth &&
     left.renderedHeight === right.renderedHeight &&
     left.intrinsicWidth === right.intrinsicWidth &&
-    left.intrinsicHeight === right.intrinsicHeight
+    left.intrinsicHeight === right.intrinsicHeight &&
+    left.cssPicture === right.cssPicture
   );
 }
 
@@ -289,7 +297,9 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     'connected',
     'renderedWidth',
     'renderedHeight',
-  ], ['intrinsicWidth', 'intrinsicHeight', 'captureChanged'])) return undefined;
+  ], ['intrinsicWidth', 'intrinsicHeight', 'captureChanged', 'cssPicture'])) {
+    return undefined;
+  }
   const document = readSourceDocumentIdentity(input.document);
   const hasIntrinsicWidth = Object.hasOwn(input, 'intrinsicWidth');
   const hasIntrinsicHeight = Object.hasOwn(input, 'intrinsicHeight');
@@ -311,6 +321,9 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     typeof input.observationChanged !== 'boolean' ||
     (Object.hasOwn(input, 'captureChanged') &&
       typeof input.captureChanged !== 'boolean') ||
+    (Object.hasOwn(input, 'cssPicture') &&
+      !(Number.isSafeInteger(input.cssPicture) &&
+        (input.cssPicture as number) > 0)) ||
     !isVisibility(input.visibility as string) ||
     input.connected !== true ||
     !isValidImageDimensions(dimensions)
@@ -333,6 +346,9 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
           intrinsicWidth: dimensions.intrinsicWidth,
           intrinsicHeight: dimensions.intrinsicHeight,
         }
+      : {}),
+    ...(Object.hasOwn(input, 'cssPicture')
+      ? { cssPicture: input.cssPicture as number }
       : {}),
   });
 }

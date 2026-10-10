@@ -209,6 +209,18 @@ describe('OCR foundation contracts', () => {
       ...descriptor,
       document: { ...descriptor.document, generation: 2 },
     })).toBeUndefined();
+    // The number of a CSS picture is a positive whole number or absent, and
+    // it is copied.
+    expect(readSourceImageDescriptor({ ...descriptor, cssPicture: 12 }))
+      .toEqual({ ...descriptor, cssPicture: 12 });
+    for (const value of [true, false, 0, -3, 2.5, '12', 'url(x)', null]) {
+      expect(readSourceImageDescriptor({ ...descriptor, cssPicture: value }))
+        .toBeUndefined();
+    }
+    expect(readSourceImageChange({
+      kind: 'upsert',
+      descriptor: { ...descriptor, cssPicture: 12 },
+    })).toEqual({ kind: 'upsert', descriptor: { ...descriptor, cssPicture: 12 } });
     expect(readSourceImageChange({ kind: 'upsert', descriptor })).toEqual({
       kind: 'upsert',
       descriptor,

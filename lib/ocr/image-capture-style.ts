@@ -16,6 +16,53 @@ export function styleAllowsImageCapture(style: CSSStyleDeclaration): boolean {
 }
 
 /**
+ * The first part of a computed `content` when it is text and no image.
+ * Chrome replaces an `<img>`'s picture only when the first part is an image
+ * (`url()`, `image-set()`, a gradient); with a string, a counter or a quote
+ * first, the image shows its file, whatever follows. (`attr()` computes to
+ * its string, `contents` to `normal`.)
+ */
+const CONTENT_TEXT_PART =
+  /^(?:normal|none|(?:no-)?(?:open|close)-quote|counters?\(|")/u;
+/**
+ * A computed `object-view-box` that leaves the whole file. Chrome writes
+ * `inset()`, `xywh()` and `rect()` alike as insets, and paints the same
+ * with a `round` part as without.
+ */
+const WHOLE_FILE_VIEW_BOX =
+  /^inset\(\s*0(?:px|%)?(?:\s+0(?:px|%)?){0,3}(?:\s+round\s[^)]*)?\s*\)$/u;
+
+/**
+ * Whether CSS alone decides which picture an `<img>` shows: a computed
+ * `content` whose first part is an image, other than the image's own
+ * current file, replaces the picture of its file, and an `object-view-box`
+ * that is not the whole file shows a part of it. The image's address and
+ * its file then say nothing of what it paints, so its text can only be read
+ * from the screen. `ownFile` is the image's `currentSrc`. A value this does
+ * not know counts as a picture: such an image is read from the screen,
+ * which is right whatever it shows.
+ */
+export function styleReplacesImagePicture(
+  style: CSSStyleDeclaration,
+  ownFile = '',
+): boolean {
+  const content = (style.content ?? '').trim();
+  const viewBox = (style.getPropertyValue?.('object-view-box') ?? '').trim();
+  return (
+    content !== '' &&
+    !CONTENT_TEXT_PART.test(content) &&
+    !contentIsFile(content, ownFile)
+  ) || !(viewBox === '' || viewBox === 'none' || WHOLE_FILE_VIEW_BOX.test(viewBox));
+}
+
+/** `content: url(<the file>)`, with or without a text alternative. */
+function contentIsFile(content: string, file: string): boolean {
+  if (file === '') return false;
+  const match = /^url\("([^"]*)"\)(?:\s*\/.*)?$/su.exec(content);
+  return match?.[1] === file;
+}
+
+/**
  * Accept only positive X/Y scaling plus translation. This includes Slick-like
  * translate3d matrices while rejecting reflection, rotation, skew, Z mixing,
  * and perspective that an axis-aligned screenshot crop cannot map safely.

@@ -115,6 +115,29 @@ const MUTATION_QUIET_MS = 1_000;
 const MAX_TRANSLATED_IMAGE_REGIONS = 512;
 const MAX_TRANSIENT_CAPTURE_RETRIES = 1;
 const MAX_UNCHANGED_EMPTY_RETRIES = 2;
+/**
+ * When an image whose picture CSS decides is looked at again after its
+ * capture held no text, counted from the look before: nothing reports the
+ * load of a CSS picture, so one that is still on its way paints an empty
+ * box. Two looks, then "no text" is kept as for any image.
+ */
+const CSS_PICTURE_LATE_LOOK_DELAYS_MS: readonly number[] = Object.freeze([
+  1_500,
+  4_000,
+]);
+/**
+ * A screenshot made sooner than this after an image's CSS picture changed
+ * may still show the picture before: the tab had not painted the new one.
+ * Its result is shown and not kept; the image is looked at once more after
+ * this long, and that later result is the one kept under the picture.
+ */
+const CSS_PICTURE_SETTLE_MS = 500;
+/**
+ * How often a "no text" kept for a CSS picture is looked at once more when
+ * the image is next read (it came back into view): the picture may have
+ * arrived after the last look.
+ */
+const CSS_PICTURE_EMPTY_RETURN_LOOKS = 1;
 const IMAGE_RESULT_CACHE_TTL_MS = 15 * 60 * 1_000;
 const MAX_RETAINED_IMAGE_EVIDENCE = 512;
 const MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT = 1_000_000;
@@ -527,6 +550,8 @@ interface RetainedFinalImageAnalysis {
   readonly projection: ImageOverlayProjection;
   readonly expiresAt: number;
   readonly weight: number;
+  /** Not yet confirmed: shown when the image moves, never taken for a read. */
+  readonly unconfirmed?: true;
 }
 
 /** A whole-image OCR result kept by the image itself (D86). */
@@ -538,6 +563,10 @@ interface ImageIdentityAnalysis {
   readonly projection: ImageOverlayProjection | undefined;
   readonly expiresAt: number;
   readonly weight: number;
+  /** Looks still owed to a "no text" kept for a CSS picture. */
+  readonly returnLooks?: number;
+  /** Not yet confirmed: shown when the image moves, never taken for a read. */
+  readonly unconfirmed?: true;
 }
 
 interface OriginFinalImageAnalysis {
@@ -608,6 +637,24 @@ export class ImageTranslationController {
    */
   readonly #imageIdentityAnalyses = new Map<string, ImageIdentityAnalysis>();
   #imageIdentityAnalysisWeight = 0;
+  /** The number of the CSS picture each image last came with. */
+  readonly #cssPictures = new Map<number, number>();
+  /** Later looks at a CSS picture whose capture held no text, by image. */
+  readonly #lateLooks = new Map<number, {
+    readonly picture: number;
+    looks: number;
+    timer: ReturnType<typeof setTimeout> | undefined;
+  }>();
+  /** When each image's CSS picture last changed, or was first seen. */
+  readonly #cssPictureChangedAt = new Map<number, number>();
+  /** Images whose last screenshot was made too soon after that, by picture. */
+  readonly #earlyCssPictureReads = new Map<number, number>();
+  /** The look that confirms such a read, by image. */
+  readonly #confirmingLooks = new Map<number, {
+    readonly timer: ReturnType<typeof setTimeout>;
+  }>();
+  /** Images being read once more over a kept "no text", with its key. */
+  readonly #returnLooks = new Map<number, string>();
   readonly #rerankRequestedNodeIds = new Set<number>();
   readonly #semanticRefreshRetainedOcrNodeIds = new Set<number>();
   /** Judge verdicts by pixel hash, language and both texts (null: no call). */
@@ -1126,6 +1173,7 @@ export class ImageTranslationController {
     this.#purgeOriginFinalAnalyses();
     this.#imageIdentityAnalyses.clear();
     this.#imageIdentityAnalysisWeight = 0;
+    this.#clearLateLooks();
     this.#clearRetainedEvidence();
     this.#clearRetainedFinalAnalyses();
     this.#retainedProjections.clear();
@@ -1271,6 +1319,9 @@ export class ImageTranslationController {
     this.#scheduler?.clear();
     this.#scheduler = undefined;
     this.#descriptors.clear();
+    this.#cssPictures.clear();
+    this.#cssPictureChangedAt.clear();
+    this.#clearLateLooks();
     this.#projectedHashes.clear();
     this.#projectedOrdinals.clear();
     this.#retainedProjections.clear();
@@ -1362,6 +1413,10 @@ export class ImageTranslationController {
         ) || invalidatedAutoResolution;
       }
       this.#descriptors.set(change.descriptor.nodeId, change.descriptor);
+      this.#noteCssPicture(
+        change.descriptor,
+        !previous || contentChanged || captureChanged,
+      );
       if (
         previous &&
         previous.observationRevision !== change.descriptor.observationRevision
@@ -1431,14 +1486,21 @@ export class ImageTranslationController {
             change.descriptor.nodeId,
           );
           if (captureChanged) {
+            // The image's crop moved, or something else about its capture.
+            // What is kept for the whole image is still its text: it stays
+            // over the image while the job that confirms it waits its turn,
+            // which may be behind another image's capture.
+            const kept = this.#keptWholeImageProjection(change.descriptor);
             this.#projectedHashes.delete(change.descriptor.nodeId);
             this.#projectedOrdinals.delete(change.descriptor.nodeId);
             this.#retainedProjections.delete(change.descriptor.nodeId);
             this.#deleteRetainedFinalAnalysis(change.descriptor.nodeId);
-            this.#projector.remove(
-              change.descriptor.document,
-              change.descriptor.nodeId,
-            );
+            if (!kept || !this.#showKeptProjection(kept)) {
+              this.#projector.remove(
+                change.descriptor.document,
+                change.descriptor.nodeId,
+              );
+            }
           } else if (!this.#rebaseRetainedObservation(change.descriptor)) {
             // A missing/replaced replay anchor cannot inherit projection
             // currency. Reopen only this exact image while every unrelated
@@ -1467,6 +1529,12 @@ export class ImageTranslationController {
       this.#semanticRefreshRetainedOcrNodeIds.delete(change.nodeId);
       this.#captureRetries.delete(change.nodeId);
       this.#emptyRetries.delete(change.nodeId);
+      this.#cssPictures.delete(change.nodeId);
+      this.#cssPictureChangedAt.delete(change.nodeId);
+      this.#earlyCssPictureReads.delete(change.nodeId);
+      this.#returnLooks.delete(change.nodeId);
+      this.#forgetConfirmingLook(change.nodeId);
+      this.#forgetLateLook(change.nodeId);
       this.#projector.remove(change.document, change.nodeId);
     }
     for (const nodeId of semanticPeers) {
@@ -2005,6 +2073,7 @@ export class ImageTranslationController {
         }
         this.#captureRetries.delete(job.descriptor.nodeId);
         pixels = acquisition.pixels;
+        this.#noteCssPictureCapture(job.descriptor, pixels);
         this.environment.onDiagnostic?.(Object.freeze({
           stage: 'pixel-source' as const,
           ordinal: jobOrdinal,
@@ -2483,11 +2552,17 @@ export class ImageTranslationController {
           pixels,
         );
       } else {
-        this.#emptyRetries.delete(job.descriptor.nodeId);
+        // A picture that CSS gives may still be on its way. Until it has
+        // been looked at again, "no text" is not kept for it, and the read
+        // just made stays known so that the next look is one capture.
+        const lookAgain = this.#lookAgainLater(job.descriptor);
+        if (!lookAgain) this.#emptyRetries.delete(job.descriptor.nodeId);
         if (await commitHeldSemantic()) return;
         scheduler.settle(job);
         this.#clearProjection(job.descriptor);
-        this.#rememberImageIdentityEmpty(anchor, pixels, finalConfigurationKey);
+        if (!lookAgain) {
+          this.#rememberImageIdentityEmpty(anchor, pixels, finalConfigurationKey);
+        }
         this.environment.onDiagnostic?.('no-text-found');
       }
       return;
@@ -3981,7 +4056,17 @@ export class ImageTranslationController {
     projection: ImageOverlayProjection,
     finalConfigurationKey: string,
   ): void {
-    this.#rememberImageIdentityAnalysis(projection, finalConfigurationKey);
+    // A read that may show the picture before is kept as not yet confirmed:
+    // its words go back over the image at once when the image moves, and no
+    // read is answered from it. The look that follows reads the image afresh,
+    // and what that finds is kept for good.
+    const unconfirmed = this.#confirmEarlyCssPictureRead(descriptor);
+    this.#rememberImageIdentityAnalysis(
+      descriptor,
+      projection,
+      finalConfigurationKey,
+      unconfirmed,
+    );
     const weight = finalAnalysisWeight(finalConfigurationKey, projection.regions);
     if (weight > MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT) return;
     this.#deleteRetainedFinalAnalysis(descriptor.nodeId);
@@ -3993,6 +4078,7 @@ export class ImageTranslationController {
       projection: Object.freeze({ ...projection }),
       expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
       weight,
+      ...(unconfirmed ? { unconfirmed: true as const } : {}),
     }));
     this.#retainedFinalAnalysisWeight += weight;
     while (
@@ -4046,6 +4132,8 @@ export class ImageTranslationController {
       }
       return false;
     }
+    // Not yet confirmed: the image is read, not answered from this.
+    if (retained.unconfirmed) return false;
     signal.throwIfAborted();
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Final image analysis became stale.', 'AbortError');
@@ -4084,24 +4172,276 @@ export class ImageTranslationController {
     return true;
   }
 
+  /**
+   * The whole-image result kept for an image whose capture just changed and
+   * whose content did not, as a projection for its new revisions. It is
+   * looked up as the image's next job will look it up, with the reading
+   * settings of the image's last result; that job still runs and decides.
+   */
+  #keptWholeImageProjection(
+    descriptor: SourceImageDescriptor,
+  ): ImageOverlayProjection | undefined {
+    const last = this.#retainedFinalAnalyses.get(descriptor.nodeId);
+    const pairKey = this.#pairKey;
+    if (
+      !last ||
+      !pairKey ||
+      last.expiresAt <= this.#now() ||
+      !sameSourceDocument(last.document, descriptor.document) ||
+      last.contentRevision !== descriptor.contentRevision
+    ) return undefined;
+    const anchor = this.environment.resolveAnchor(
+      descriptor.document,
+      descriptor.nodeId,
+    );
+    const key = imageIdentityKey(
+      anchor,
+      descriptor,
+      descriptor.renderedWidth,
+      descriptor.renderedHeight,
+      last.finalConfigurationKey,
+    );
+    const kept = key ? this.#imageIdentityAnalyses.get(key) : undefined;
+    if (!anchor || !kept?.projection || kept.expiresAt <= this.#now()) {
+      return undefined;
+    }
+    return Object.freeze({
+      ...kept.projection,
+      document: descriptor.document,
+      nodeId: descriptor.nodeId,
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+      replayLease: anchor.replayLease,
+      pairEpoch: this.#pairEpoch,
+      pairKey,
+    });
+  }
+
+  #showKeptProjection(projection: ImageOverlayProjection): boolean {
+    this.#projectedHashes.set(projection.nodeId, projection.pixelHash);
+    this.#projectedOrdinals.set(projection.nodeId, projection.jobOrdinal);
+    this.#retainedProjections.set(projection.nodeId, projection);
+    if (this.#projector.project(projection)) return true;
+    this.#projectedHashes.delete(projection.nodeId);
+    this.#projectedOrdinals.delete(projection.nodeId);
+    this.#retainedProjections.delete(projection.nodeId);
+    return false;
+  }
+
+  /**
+   * An image came with the number of the picture CSS gives it. When that is
+   * another number than before, the page will never send the old one again:
+   * what was kept under it is dropped, and the new picture is looked at
+   * afresh.
+   */
+  #noteCssPicture(
+    descriptor: SourceImageDescriptor,
+    pictureChanged: boolean,
+  ): void {
+    const picture = descriptor.cssPicture;
+    if (pictureChanged || picture === undefined) {
+      // What was to be confirmed is no longer what the image shows.
+      this.#forgetConfirmingLook(descriptor.nodeId);
+      this.#earlyCssPictureReads.delete(descriptor.nodeId);
+    }
+    if (picture === undefined) {
+      // Its own file again: a look that was arranged has nothing to look at.
+      this.#cssPictureChangedAt.delete(descriptor.nodeId);
+      const look = this.#lateLooks.get(descriptor.nodeId);
+      if (look?.timer !== undefined) {
+        this.#clearTimer(look.timer);
+        look.timer = undefined;
+      }
+      return;
+    }
+    if (pictureChanged) {
+      this.#cssPictureChangedAt.set(descriptor.nodeId, this.#now());
+    }
+    const known = this.#cssPictures.get(descriptor.nodeId);
+    if (known === picture) return;
+    this.#cssPictures.set(descriptor.nodeId, picture);
+    this.#forgetLateLook(descriptor.nodeId);
+    if (known === undefined) return;
+    const prefix = cssPictureKeyPrefix(descriptor.document, known);
+    for (const [key, kept] of [...this.#imageIdentityAnalyses]) {
+      if (!key.startsWith(prefix)) continue;
+      this.#imageIdentityAnalyses.delete(key);
+      this.#imageIdentityAnalysisWeight -= kept.weight;
+    }
+  }
+
+  /**
+   * Arranges one more look at an image whose picture CSS decides and whose
+   * capture held no text. False once the picture has had its looks, or for
+   * any other image: "no text" is then kept.
+   */
+  #lookAgainLater(descriptor: SourceImageDescriptor): boolean {
+    const picture = descriptor.cssPicture;
+    if (picture === undefined) return false;
+    const nodeId = descriptor.nodeId;
+    const known = this.#lateLooks.get(nodeId);
+    const looks = known?.picture === picture ? known.looks : 0;
+    if (known?.timer !== undefined) this.#clearTimer(known.timer);
+    const delay = CSS_PICTURE_LATE_LOOK_DELAYS_MS[looks];
+    if (delay === undefined) {
+      this.#lateLooks.set(nodeId, { picture, looks, timer: undefined });
+      return false;
+    }
+    const record: {
+      readonly picture: number;
+      looks: number;
+      timer: ReturnType<typeof setTimeout> | undefined;
+    } = { picture, looks: looks + 1, timer: undefined };
+    record.timer = this.#setTimer(() => {
+      if (this.#lateLooks.get(nodeId) !== record) return;
+      record.timer = undefined;
+      const current = this.#descriptors.get(nodeId);
+      if (
+        this.#disposed ||
+        !current ||
+        current.cssPicture !== picture ||
+        !this.#scheduler?.requeueCurrent(current)
+      ) return;
+      this.#kick();
+    }, delay);
+    this.#lateLooks.set(nodeId, record);
+    return true;
+  }
+
+  #forgetLateLook(nodeId: number): void {
+    const known = this.#lateLooks.get(nodeId);
+    if (known?.timer !== undefined) this.#clearTimer(known.timer);
+    this.#lateLooks.delete(nodeId);
+  }
+
+  #clearLateLooks(): void {
+    for (const known of this.#lateLooks.values()) {
+      if (known.timer !== undefined) this.#clearTimer(known.timer);
+    }
+    this.#lateLooks.clear();
+    for (const look of this.#confirmingLooks.values()) {
+      this.#clearTimer(look.timer);
+    }
+    this.#confirmingLooks.clear();
+    this.#earlyCssPictureReads.clear();
+    this.#returnLooks.clear();
+  }
+
+  /**
+   * A screenshot was just made for this image. When its picture is one that
+   * CSS gives and changed a moment ago, the tab may not have painted it yet
+   * and the screenshot may show the picture before: the read is marked, so
+   * that its result is shown but not kept.
+   */
+  #noteCssPictureCapture(
+    descriptor: SourceImageDescriptor,
+    pixels: AcquiredImagePixels,
+  ): void {
+    if (pixels.pixelSource !== undefined) {
+      // Read from a file: nothing of the screen was looked at.
+      this.#earlyCssPictureReads.delete(descriptor.nodeId);
+      return;
+    }
+    this.#countReturnLook(descriptor.nodeId);
+    const picture = descriptor.cssPicture;
+    const changedAt = this.#cssPictureChangedAt.get(descriptor.nodeId);
+    // The pixels come when the capture lane lets go of them, which is later
+    // than the screenshot was made.
+    const madeAt = this.#now() - (pixels.screenshotAgeMs ?? 0);
+    if (
+      picture !== undefined &&
+      changedAt !== undefined &&
+      madeAt - changedAt < CSS_PICTURE_SETTLE_MS
+    ) {
+      this.#earlyCssPictureReads.set(descriptor.nodeId, picture);
+    } else {
+      this.#earlyCssPictureReads.delete(descriptor.nodeId);
+    }
+  }
+
+  /**
+   * True when this image's result comes from a screenshot made too soon
+   * after its CSS picture changed. One more look is then arranged, late
+   * enough to show what the tab paints; its result is the one that is kept.
+   */
+  #confirmEarlyCssPictureRead(descriptor: SourceImageDescriptor): boolean {
+    const picture = descriptor.cssPicture;
+    const nodeId = descriptor.nodeId;
+    if (
+      picture === undefined ||
+      this.#earlyCssPictureReads.get(nodeId) !== picture
+    ) return false;
+    this.#earlyCssPictureReads.delete(nodeId);
+    this.#forgetConfirmingLook(nodeId);
+    const look = {
+      timer: this.#setTimer(() => {
+        if (this.#confirmingLooks.get(nodeId) !== look) return;
+        this.#confirmingLooks.delete(nodeId);
+        const current = this.#descriptors.get(nodeId);
+        if (
+          this.#disposed ||
+          !current ||
+          current.cssPicture !== picture ||
+          !this.#scheduler?.requeueCurrent(current)
+        ) return;
+        this.#kick();
+      }, CSS_PICTURE_SETTLE_MS),
+    };
+    this.#confirmingLooks.set(nodeId, look);
+    return true;
+  }
+
+  /** The look owed to a kept "no text" has now been made: one fewer is left. */
+  #countReturnLook(nodeId: number): void {
+    const key = this.#returnLooks.get(nodeId);
+    if (key === undefined) return;
+    this.#returnLooks.delete(nodeId);
+    const kept = this.#imageIdentityAnalyses.get(key);
+    if (!kept || kept.projection || kept.returnLooks === undefined) return;
+    const { returnLooks, ...rest } = kept;
+    this.#imageIdentityAnalyses.set(key, Object.freeze({
+      ...rest,
+      ...(returnLooks > 1 ? { returnLooks: returnLooks - 1 } : {}),
+    }));
+  }
+
+  #forgetConfirmingLook(nodeId: number): void {
+    const look = this.#confirmingLooks.get(nodeId);
+    if (!look) return;
+    this.#clearTimer(look.timer);
+    this.#confirmingLooks.delete(nodeId);
+  }
+
   #rememberImageIdentityAnalysis(
+    descriptor: SourceImageDescriptor,
     projection: ImageOverlayProjection,
     finalConfigurationKey: string,
+    unconfirmed = false,
   ): void {
     if (
       projection.evidenceKind !== 'ocr' ||
-      projection.regions.length === 0 ||
-      !isWholeImageCrop(projection)
+      projection.regions.length === 0
     ) return;
-    this.#rememberImageIdentityOutcome(
-      imageIdentityKey(
-        this.environment.resolveAnchor(projection.document, projection.nodeId),
-        projection.renderedWidthCss,
-        projection.renderedHeightCss,
-        finalConfigurationKey,
-      ),
-      projection,
+    const key = imageIdentityKey(
+      this.environment.resolveAnchor(projection.document, projection.nodeId),
+      descriptor,
+      projection.renderedWidthCss,
+      projection.renderedHeightCss,
+      finalConfigurationKey,
     );
+    if (!isWholeImageCrop(projection)) {
+      // Text in a part of a picture that CSS gives: a "no text" kept for the
+      // whole of it (it was being looked at once more) is no longer true.
+      const kept = key && descriptor.cssPicture !== undefined
+        ? this.#imageIdentityAnalyses.get(key)
+        : undefined;
+      if (key && kept && !kept.projection) {
+        this.#imageIdentityAnalyses.delete(key);
+        this.#imageIdentityAnalysisWeight -= kept.weight;
+      }
+      return;
+    }
+    this.#rememberImageIdentityOutcome(key, projection, 0, unconfirmed);
   }
 
   /**
@@ -4120,17 +4460,23 @@ export class ImageTranslationController {
     this.#rememberImageIdentityOutcome(
       imageIdentityKey(
         anchor,
+        pixels.descriptor,
         pixels.renderedWidthCss,
         pixels.renderedHeightCss,
         finalConfigurationKey,
       ),
       undefined,
+      pixels.descriptor.cssPicture === undefined
+        ? 0
+        : CSS_PICTURE_EMPTY_RETURN_LOOKS,
     );
   }
 
   #rememberImageIdentityOutcome(
     key: string | undefined,
     projection: ImageOverlayProjection | undefined,
+    returnLooks = 0,
+    unconfirmed = false,
   ): void {
     if (!key) return;
     const weight = finalAnalysisWeight(key, projection?.regions ?? []);
@@ -4144,6 +4490,8 @@ export class ImageTranslationController {
       projection: projection ? Object.freeze({ ...projection }) : undefined,
       expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
       weight,
+      ...(!projection && returnLooks > 0 ? { returnLooks } : {}),
+      ...(projection && unconfirmed ? { unconfirmed: true as const } : {}),
     }));
     this.#imageIdentityAnalysisWeight += weight;
     while (
@@ -4172,6 +4520,7 @@ export class ImageTranslationController {
   ): boolean {
     const key = imageIdentityKey(
       anchor,
+      job.descriptor,
       job.descriptor.renderedWidth,
       job.descriptor.renderedHeight,
       finalConfigurationKey,
@@ -4187,6 +4536,16 @@ export class ImageTranslationController {
     signal.throwIfAborted();
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image identity analysis became stale.', 'AbortError');
+    }
+    // Not yet confirmed: the image is read, not answered from this.
+    if (retained.unconfirmed) return false;
+    if (!retained.projection && (retained.returnLooks ?? 0) > 0) {
+      // "No text" was kept for a picture that CSS gives, and the picture may
+      // have arrived since. The image is read once more: the look is counted
+      // when its screenshot is made, and a read that again finds nothing
+      // ends at what is kept here.
+      this.#returnLooks.set(job.descriptor.nodeId, key);
+      return false;
     }
     if (!retained.projection) {
       this.#clearProjection(job.descriptor);
@@ -6259,16 +6618,29 @@ function isWholeImageCrop(
 /**
  * The replica image's own identity: what it shows (address and natural
  * size), how it is drawn (rendered size, object-fit and -position) and how
- * it is read (pair and reading configuration). Kept in memory only.
+ * it is read (pair and reading configuration). Kept in memory only. For an
+ * image whose picture CSS alone decides, the address is not what it shows:
+ * its identity is the number the page gives that picture of that image,
+ * with the rendered size and how it is read.
  */
 function imageIdentityKey(
   anchor: ReplicaImageAnchor | undefined,
+  descriptor: Pick<SourceImageDescriptor, 'cssPicture' | 'document'>,
   renderedWidth: number,
   renderedHeight: number,
   finalConfigurationKey: string,
 ): string | undefined {
   const image = anchor?.image;
   if (!image) return undefined;
+  if (descriptor.cssPicture !== undefined) {
+    if (!(renderedWidth > 0) || !(renderedHeight > 0)) return undefined;
+    return cssPictureKeyPrefix(descriptor.document, descriptor.cssPicture) +
+      JSON.stringify([
+        Math.round(renderedWidth),
+        Math.round(renderedHeight),
+        finalConfigurationKey,
+      ]);
+  }
   try {
     const source = image.currentSrc || image.src;
     if (
@@ -6300,6 +6672,23 @@ function imageIdentityKey(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * What every identity of one CSS picture begins with: the document and the
+ * picture's number. No address begins like it.
+ */
+function cssPictureKeyPrefix(
+  document: ReplicaSourceDocumentIdentity,
+  picture: number,
+): string {
+  return `${JSON.stringify([
+    IMAGE_IDENTITY_SCHEMA_VERSION,
+    'css-picture',
+    document.documentId,
+    document.frameId,
+    picture,
+  ])}\u0001`;
 }
 
 function freezeTranslatedRegions(
