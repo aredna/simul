@@ -5,8 +5,8 @@ import {
   MAX_OCR_INPUT_PIXELS,
   PixelAcquisitionCoordinator,
   SourceTabCaptureError,
-  captureVisibleSourceTab,
   captureVisibleSourceTabPromptly,
+  createBrowserPixelAcquisitionEnvironment,
   type PixelAcquisitionEnvironment,
   type SourceTabCaptureEnvironment,
 } from '../lib/ocr/pixel-acquisition';
@@ -114,8 +114,8 @@ describe('PixelAcquisitionCoordinator', () => {
   });
 
   it('says how long before its pixels were handed over a screenshot was asked for', async () => {
-    // The capture lane is held for the rest of Chrome's quota interval, so
-    // the pixels come about half a second after the screenshot was made.
+    // The pixels show the tab as it was when the screenshot was asked for,
+    // however long Chrome took to hand it over.
     let now = 1_000;
     const coordinator = new PixelAcquisitionCoordinator({
       ...fakeEnvironment(
@@ -612,7 +612,7 @@ describe('PixelAcquisitionCoordinator', () => {
       },
     };
 
-    await expect(captureVisibleSourceTab(4, 3, undefined, environment))
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, environment))
       .resolves.toBe('data:image/png;base64,AQID');
     expect(events).toEqual(['lock', 'capture', 'delay:550']);
 
@@ -622,11 +622,11 @@ describe('PixelAcquisitionCoordinator', () => {
         .mockResolvedValueOnce(4)
         .mockResolvedValueOnce(9),
     };
-    await expect(captureVisibleSourceTab(4, 3, undefined, switched))
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, switched))
       .rejects.toMatchObject({ code: 'inactive' });
 
     const inactiveCapture = vi.fn(async () => 'data:image/png;base64,AQID');
-    await expect(captureVisibleSourceTab(4, 3, undefined, {
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, {
       ...environment,
       queryActiveTab: async () => 9,
       captureVisibleTab: inactiveCapture,
@@ -686,6 +686,94 @@ describe('PixelAcquisitionCoordinator', () => {
     await expect(captureVisibleSourceTabPromptly(-1, 3, undefined, environment)).rejects.toThrow();
   });
 
+  it('reads an image from a screenshot handed out at once, and keeps the lane for the quota interval (D147)', async () => {
+    // What the side panel reads images through. The screenshot is in hand as
+    // soon as it is made, so the second rectangle is asked for while the tab
+    // still shows what was captured and the words show half a second sooner;
+    // the next screenshot still waits for the lane.
+    const events: string[] = [];
+    let now = 1_000;
+    let lane: Promise<unknown> = Promise.resolve();
+    const endDelays: Array<() => void> = [];
+    const capture: SourceTabCaptureEnvironment = {
+      queryActiveTab: async () => 4,
+      captureVisibleTab: async (windowId) => {
+        events.push(`screenshot of window ${windowId} at ${now}`);
+        return 'data:image/png;base64,AQID';
+      },
+      withGlobalLock: (callback) => {
+        const run = lane.then(callback, callback);
+        lane = run.catch(() => undefined);
+        return run;
+      },
+      now: () => now,
+      delay: (milliseconds) => new Promise<void>((resolve) => {
+        events.push(`lane held ${milliseconds}`);
+        endDelays.push(() => {
+          now += milliseconds;
+          events.push('lane free');
+          resolve();
+        });
+      }),
+    };
+    const source: ImageSourceLease = {
+      measure: vi.fn(async () => {
+        events.push('rectangle');
+        return metrics;
+      }),
+      dispose: vi.fn(),
+    };
+    const browserEnvironment = createBrowserPixelAcquisitionEnvironment(
+      source,
+      4,
+      3,
+      undefined,
+      capture,
+    );
+    const coordinator = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(source),
+      captureVisibleTab: browserEnvironment.captureVisibleTab,
+      now: () => now,
+    });
+
+    let first: Awaited<ReturnType<typeof coordinator.acquire>> | undefined;
+    void coordinator.acquire(descriptor).then((result) => {
+      first = result;
+    });
+    await vi.waitFor(() => expect(first).toBeDefined(), { timeout: 1_000 });
+    expect(first).toMatchObject({ status: 'ready', pixels: { screenshotAgeMs: 0 } });
+    // The pixels are in hand, with both rectangles, and the lane is not free.
+    expect(events).toEqual([
+      'rectangle',
+      'screenshot of window 3 at 1000',
+      'lane held 550',
+      'rectangle',
+    ]);
+
+    // The next image's screenshot waits until the lane lets go.
+    let second: Awaited<ReturnType<typeof coordinator.acquire>> | undefined;
+    void coordinator.acquire(descriptor).then((result) => {
+      second = result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(second).toBeUndefined();
+    expect(events.filter((event) => event.startsWith('screenshot'))).toHaveLength(1);
+    endDelays.shift()?.();
+    await vi.waitFor(() => expect(second).toBeDefined(), { timeout: 1_000 });
+    expect(events).toEqual([
+      'rectangle',
+      'screenshot of window 3 at 1000',
+      'lane held 550',
+      'rectangle',
+      'rectangle',
+      'lane free',
+      'screenshot of window 3 at 1550',
+      'lane held 550',
+      'rectangle',
+    ]);
+    endDelays.shift()?.();
+  });
+
   it('hands no prompt capture out when another tab showed by the time it was taken (D133)', async () => {
     // The tab was the one in view before the capture and another one after:
     // the picture may be of either, so it is given to no one.
@@ -734,7 +822,7 @@ describe('PixelAcquisitionCoordinator', () => {
       delay: async () => undefined,
     };
 
-    const failure = await captureVisibleSourceTab(4, 3, undefined, environment)
+    const failure = await captureVisibleSourceTabPromptly(4, 3, undefined, environment)
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(SourceTabCaptureError);
     expect(failure).toMatchObject({ code });

@@ -639,6 +639,17 @@ export class ImageTranslationController {
   #imageIdentityAnalysisWeight = 0;
   /** The number of the CSS picture each image last came with. */
   readonly #cssPictures = new Map<number, number>();
+  /**
+   * The file each image shows, as the page said for one content revision of
+   * it: its address, or none where the page names no file (a `data:`
+   * address). The mirror's copy follows the page a moment behind, so its
+   * address alone does not say what the image shows now.
+   */
+  readonly #pageFiles = new Map<number, {
+    readonly document: ReplicaSourceDocumentIdentity;
+    readonly contentRevision: number;
+    readonly address: string | undefined;
+  }>();
   /** Later looks at a CSS picture whose capture held no text, by image. */
   readonly #lateLooks = new Map<number, {
     readonly picture: number;
@@ -1320,6 +1331,7 @@ export class ImageTranslationController {
     this.#scheduler = undefined;
     this.#descriptors.clear();
     this.#cssPictures.clear();
+    this.#pageFiles.clear();
     this.#cssPictureChangedAt.clear();
     this.#clearLateLooks();
     this.#projectedHashes.clear();
@@ -1530,6 +1542,7 @@ export class ImageTranslationController {
       this.#captureRetries.delete(change.nodeId);
       this.#emptyRetries.delete(change.nodeId);
       this.#cssPictures.delete(change.nodeId);
+      this.#pageFiles.delete(change.nodeId);
       this.#cssPictureChangedAt.delete(change.nodeId);
       this.#earlyCssPictureReads.delete(change.nodeId);
       this.#returnLooks.delete(change.nodeId);
@@ -1878,6 +1891,10 @@ export class ImageTranslationController {
       finalConfigurationKey,
       signal,
     )) return;
+    await this.#askPageForFile(job.descriptor, anchor, signal);
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Image job became stale.', 'AbortError');
+    }
     if (this.#commitImageIdentityAnalysis(
       job,
       anchor,
@@ -4200,6 +4217,7 @@ export class ImageTranslationController {
       descriptor.renderedWidth,
       descriptor.renderedHeight,
       last.finalConfigurationKey,
+      this.#pageFileAddress(descriptor),
     );
     const kept = key ? this.#imageIdentityAnalyses.get(key) : undefined;
     if (!anchor || !kept?.projection || kept.expiresAt <= this.#now()) {
@@ -4345,8 +4363,8 @@ export class ImageTranslationController {
     this.#countReturnLook(descriptor.nodeId);
     const picture = descriptor.cssPicture;
     const changedAt = this.#cssPictureChangedAt.get(descriptor.nodeId);
-    // The pixels come when the capture lane lets go of them, which is later
-    // than the screenshot was made.
+    // The pixels come a moment after the screenshot was made (Chrome's own
+    // time, the second rectangle and the crop).
     const madeAt = this.#now() - (pixels.screenshotAgeMs ?? 0);
     if (
       picture !== undefined &&
@@ -4412,6 +4430,77 @@ export class ImageTranslationController {
     this.#confirmingLooks.delete(nodeId);
   }
 
+  /**
+   * Asks the page which file the image shows, once for each content revision
+   * of it. A whole image's result is kept by, and answered from, an address,
+   * and the address of the mirror's copy says what the image showed a moment
+   * ago: after a change of file, or while the mirror has chosen another file
+   * of the image's set, that file's words would be put over the picture and
+   * the picture's words kept under that file (D147). So the address is the
+   * one the page gives. Nothing is asked for a picture that CSS gives, which
+   * is kept by its number, nor for an image that no address can keep (its
+   * copy in the mirror failed to load, or its address is too long).
+   */
+  async #askPageForFile(
+    descriptor: SourceImageDescriptor,
+    anchor: ReplicaImageAnchor,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const source = this.#source;
+    const read = source?.readFile;
+    if (!source || !read || descriptor.cssPicture !== undefined) return;
+    if (!mirrorCopyMayBeKept(anchor.image)) return;
+    const known = this.#pageFiles.get(descriptor.nodeId);
+    if (
+      known &&
+      known.contentRevision === descriptor.contentRevision &&
+      sameSourceDocument(known.document, descriptor.document)
+    ) return;
+    this.#pageFiles.delete(descriptor.nodeId);
+    let file: Awaited<ReturnType<typeof read>>;
+    try {
+      file = await read.call(source, descriptor, false, signal);
+    } catch (error) {
+      if (
+        isAbortError(error) ||
+        signal.aborted ||
+        isImageSourceUnavailableError(error)
+      ) throw error;
+      file = undefined;
+    }
+    signal.throwIfAborted();
+    // No answer (a refusal, a page that is not answering): nothing is known,
+    // and the page is asked again at the image's next read.
+    if (!file || source !== this.#source) return;
+    this.#pageFiles.set(descriptor.nodeId, Object.freeze({
+      document: descriptor.document,
+      contentRevision: descriptor.contentRevision,
+      address: file.url,
+    }));
+  }
+
+  /**
+   * The address the page gave for this revision of the image. `undefined`:
+   * the address of the mirror's copy is taken as it is, as before D147
+   * (the page named no file, which it does for a `data:` address, which is
+   * its own file; or the source cannot be asked). `null`: the page was not
+   * asked or did not answer, and the image has no identity by address.
+   */
+  #pageFileAddress(
+    descriptor: Pick<
+      SourceImageDescriptor,
+      'nodeId' | 'document' | 'contentRevision'
+    >,
+  ): string | null | undefined {
+    if (!this.#source?.readFile) return undefined;
+    const known = this.#pageFiles.get(descriptor.nodeId);
+    return known &&
+        known.contentRevision === descriptor.contentRevision &&
+        sameSourceDocument(known.document, descriptor.document)
+      ? known.address
+      : null;
+  }
+
   #rememberImageIdentityAnalysis(
     descriptor: SourceImageDescriptor,
     projection: ImageOverlayProjection,
@@ -4428,6 +4517,7 @@ export class ImageTranslationController {
       projection.renderedWidthCss,
       projection.renderedHeightCss,
       finalConfigurationKey,
+      this.#pageFileAddress(descriptor),
     );
     if (!isWholeImageCrop(projection)) {
       // Text in a part of a picture that CSS gives: a "no text" kept for the
@@ -4464,6 +4554,7 @@ export class ImageTranslationController {
         pixels.renderedWidthCss,
         pixels.renderedHeightCss,
         finalConfigurationKey,
+        this.#pageFileAddress(pixels.descriptor),
       ),
       undefined,
       pixels.descriptor.cssPicture === undefined
@@ -4524,6 +4615,7 @@ export class ImageTranslationController {
       job.descriptor.renderedWidth,
       job.descriptor.renderedHeight,
       finalConfigurationKey,
+      this.#pageFileAddress(job.descriptor),
     );
     const retained = key ? this.#imageIdentityAnalyses.get(key) : undefined;
     if (!key || !retained) return false;
@@ -6621,7 +6713,10 @@ function isWholeImageCrop(
  * it is read (pair and reading configuration). Kept in memory only. For an
  * image whose picture CSS alone decides, the address is not what it shows:
  * its identity is the number the page gives that picture of that image,
- * with the rendered size and how it is read.
+ * with the rendered size and how it is read. The address is the one the page
+ * gave for the image (`pageFileAddress`), since the mirror's copy may still
+ * be of the file before; `undefined` takes the mirror's own, and `null` (the
+ * page did not say) gives the image no identity (D147).
  */
 function imageIdentityKey(
   anchor: ReplicaImageAnchor | undefined,
@@ -6629,6 +6724,7 @@ function imageIdentityKey(
   renderedWidth: number,
   renderedHeight: number,
   finalConfigurationKey: string,
+  pageFileAddress?: string | null,
 ): string | undefined {
   const image = anchor?.image;
   if (!image) return undefined;
@@ -6642,16 +6738,17 @@ function imageIdentityKey(
       ]);
   }
   try {
-    const source = image.currentSrc || image.src;
     if (
-      !source ||
-      source.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH ||
+      !mirrorCopyMayBeKept(image) ||
       !image.complete ||
       !(image.naturalWidth > 0) ||
       !(image.naturalHeight > 0) ||
       !(renderedWidth > 0) ||
-      !(renderedHeight > 0)
+      !(renderedHeight > 0) ||
+      pageFileAddress === null
     ) return undefined;
+    const address = pageFileAddress ?? (image.currentSrc || image.src);
+    if (address.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH) return undefined;
     let fit = ['', ''];
     try {
       const style = image.ownerDocument?.defaultView?.getComputedStyle(image);
@@ -6661,7 +6758,7 @@ function imageIdentityKey(
     }
     return JSON.stringify([
       IMAGE_IDENTITY_SCHEMA_VERSION,
-      source,
+      address,
       image.naturalWidth,
       image.naturalHeight,
       Math.round(renderedWidth),
@@ -6671,6 +6768,22 @@ function imageIdentityKey(
     ]);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Whether an address can keep this image's result at all: its copy in the
+ * mirror has an address that is not too long to be a key, and has not failed
+ * to load (a copy still on its way may yet).
+ */
+function mirrorCopyMayBeKept(image: HTMLImageElement): boolean {
+  try {
+    const address = image.currentSrc || image.src;
+    return Boolean(address) &&
+      address.length <= MAX_IMAGE_IDENTITY_SOURCE_LENGTH &&
+      !(image.complete && !(image.naturalWidth > 0 && image.naturalHeight > 0));
+  } catch {
+    return false;
   }
 }
 

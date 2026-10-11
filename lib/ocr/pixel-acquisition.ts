@@ -43,8 +43,8 @@ export interface AcquiredImagePixels {
   readonly pixelSource?: ImageFilePixelSource;
   /**
    * For a screenshot: how long before these pixels were handed over it was
-   * asked for. The capture lane is held for the rest of Chrome's quota
-   * interval, so that is about half a second even for a prompt capture.
+   * asked for (the time Chrome took to make it, and the second rectangle
+   * and the crop after it).
    */
   readonly screenshotAgeMs?: number;
 }
@@ -372,6 +372,7 @@ export function createBrowserPixelAcquisitionEnvironment(
   sourceTabId: number,
   sourceWindowId: number,
   filePixels?: Omit<BrowserImageFilePixelOptions, 'maxPixels'>,
+  capture: SourceTabCaptureEnvironment = browserSourceTabCaptureEnvironment(),
 ): PixelAcquisitionEnvironment {
   const fileEnvironment = filePixels
     ? createBrowserImageFilePixelReaderEnvironment(source, {
@@ -387,10 +388,15 @@ export function createBrowserPixelAcquisitionEnvironment(
             readImageFilePixels(descriptor, fileEnvironment, signal),
         }
       : {}),
-    captureVisibleTab: (signal) => captureVisibleSourceTab(
+    // Handed out as soon as it is made: the second rectangle is asked for
+    // while the tab still shows what was captured, and the words show half a
+    // second sooner. The lane is kept for the rest of the quota interval all
+    // the same, so the next screenshot waits its turn there.
+    captureVisibleTab: (signal) => captureVisibleSourceTabPromptly(
       sourceTabId,
       sourceWindowId,
       signal,
+      capture,
     ),
     decode: (blob) => createImageBitmap(blob),
     createSurface: (width, height) => new OffscreenCanvas(width, height),
@@ -402,22 +408,13 @@ export function createBrowserPixelAcquisitionEnvironment(
  * Bind captureVisibleTab's window-scoped API to the exact source tab. The
  * origin-wide Web Lock also keeps separate sidepanel/popout contexts within
  * Chrome's two-captures-per-second extension quota.
- */
-export function captureVisibleSourceTab(
-  sourceTabId: number,
-  sourceWindowId: number,
-  signal?: AbortSignal,
-  environment: SourceTabCaptureEnvironment = browserSourceTabCaptureEnvironment(),
-): Promise<string> {
-  return captureInLane(sourceTabId, sourceWindowId, signal, environment);
-}
-
-/**
- * The same capture, handed out as soon as it is taken and checked. The lane
- * is still kept for the rest of the quota interval, so the next capture
- * (this one's or image text's) waits its turn. For a caller that must act
- * while the tab still shows what was captured (the PDF viewer's page box,
- * D133).
+ *
+ * The capture is handed out as soon as it is taken and checked, and the lane
+ * is kept for the rest of the quota interval all the same, so the next
+ * capture (the PDF viewer's or image text's) waits its turn. Both callers
+ * act while the tab still shows what was captured: the PDF viewer's page
+ * box (D133), and image text's second rectangle (D147; until then image
+ * text got its capture when the lane let go of it, half a second later).
  */
 export function captureVisibleSourceTabPromptly(
   sourceTabId: number,
@@ -436,7 +433,7 @@ async function captureInLane(
   sourceWindowId: number,
   signal: AbortSignal | undefined,
   environment: SourceTabCaptureEnvironment,
-  onCaptured?: (screenshot: string) => void,
+  onCaptured: (screenshot: string) => void,
 ): Promise<string> {
   if (
     !Number.isSafeInteger(sourceTabId) || sourceTabId < 0 ||
@@ -477,7 +474,7 @@ async function captureInLane(
         if (activeAfter !== sourceTabId) {
           throw new SourceTabCaptureError('inactive');
         }
-        onCaptured?.(screenshot);
+        onCaptured(screenshot);
         return screenshot;
       } finally {
         // Hold the cross-context lane for the remainder of the quota interval,

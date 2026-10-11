@@ -904,7 +904,10 @@ const overlayShadowRoots = new WeakMap<Element, ShadowRoot>();
  * parent with its own shadow root) keeps the overlay right after the image.
  * Where the parent's own root gives the image to a slot by script, a sibling
  * of the image is given to no slot and would not be drawn: there the overlay
- * goes right after that slot, inside the root.
+ * goes right after that slot, inside the root. Either way the overlay
+ * carries the slot name of what it stands after: beside an image in a named
+ * slot it would otherwise go to the default slot, and be drawn nowhere in a
+ * root that has none (D147).
  */
 function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
   const parent = image.parentElement;
@@ -925,6 +928,7 @@ function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
       (slot.getRootNode() as Partial<ShadowRoot>).slotAssignment === 'manual'
     ? slot
     : image;
+  giveSlotName(root, before.getAttribute('slot'));
   // Every image of one slot has its overlay after that slot: the others'
   // may stand between (two of them took turns at the first place, moving
   // at every frame that laid them out).
@@ -943,6 +947,13 @@ function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
     return false;
   }
   return placed();
+}
+
+/** The overlay's `slot` attribute: that of what it stands after, or none. */
+function giveSlotName(root: HTMLElement, name: string | null): void {
+  if (root.getAttribute('slot') === name) return;
+  if (name === null) root.removeAttribute('slot');
+  else root.setAttribute('slot', name);
 }
 
 function overlayShadowRootFor(parent: Element): ShadowRoot | undefined {

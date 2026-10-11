@@ -5086,6 +5086,191 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('keeps and answers a whole image by the address the page gives for it, not by the mirror\'s copy (D147)', async () => {
+    // The mirror follows the page a moment behind, and may have chosen
+    // another file of the image's set. Its copy named the file before: that
+    // file's words were put over the new picture with no capture, and what
+    // was read then was kept under the old address.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const mirror = (source: string, natural = [600, 300]) =>
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: source },
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: natural[0] },
+        naturalHeight: { configurable: true, value: natural[1] },
+      });
+    const ONE = 'https://assets.example.test/one.png';
+    const TWO = 'https://assets.example.test/two.png';
+    // What the page answers: a file, no file (a `data:` address), or nothing.
+    let page: { url?: string } | undefined = { url: ONE };
+    let shows = ONE;
+    mirror(ONE);
+    const words = new Map([[ONE, 'First headline'], [TWO, 'Second headline']]);
+    const at = (contentRevision: number, captureRevision: number) => ({
+      ...descriptor,
+      contentRevision,
+      captureRevision,
+      observationRevision: captureRevision,
+    });
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    // The screen shows the page's file, whatever the mirror holds.
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(current, (shows === TWO ? 'b2' : 'a1').repeat(32)),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    const recognize = vi.fn(async (pixels: { pixelHash: string }) => ({
+      ...autoProbeRecognition(
+        words.get(pixels.pixelHash.startsWith('b2') ? TWO : ONE),
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const readFile = vi.fn(async () => page);
+    const diagnostics: unknown[] = [];
+    const reused = () =>
+      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: at(1, 1) }));
+        return {
+          measure: vi.fn(),
+          readFile: readFile as unknown as NonNullable<ImageSourceLease['readFile']>,
+          dispose: vi.fn(),
+        };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `translated:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const overlay = () =>
+      overlayText(document.querySelector('[data-simul-image-method="tesseract"]'));
+    const emit = async (
+      contentRevision: number,
+      captureRevision: number,
+      more: Partial<SourceImageDescriptor> = {},
+    ) => {
+      emitChange?.({
+        kind: 'upsert',
+        descriptor: { ...at(contentRevision, captureRevision), ...more },
+      });
+      await vi.waitFor(() => expect(controller.busy).toBe(true));
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(overlay()).toBe('translated:First headline');
+    expect(readFile).toHaveBeenCalledOnce();
+
+    // Scrolled away and back: kept, and the page is not asked again.
+    await emit(1, 2);
+    expect(reused()).toBe(1);
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(readFile).toHaveBeenCalledOnce();
+
+    // The page's file changes; the mirror's copy still names the first.
+    page = { url: TWO };
+    shows = TWO;
+    await emit(2, 3);
+    expect(readFile).toHaveBeenCalledTimes(2);
+    expect(reused()).toBe(1);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(overlay()).toBe('translated:Second headline');
+    // What was read is kept under the second file, whatever the mirror says
+    // by now.
+    await emit(2, 4);
+    expect(reused()).toBe(2);
+    mirror(TWO);
+    await emit(2, 5);
+    expect(reused()).toBe(3);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(overlay()).toBe('translated:Second headline');
+
+    // The first file again on the page, while the mirror's copy still names
+    // the second: the first file's own words, which the second picture's
+    // were not kept over.
+    page = { url: ONE };
+    shows = ONE;
+    await emit(3, 6);
+    expect(reused()).toBe(4);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(overlay()).toBe('translated:First headline');
+
+    // The page names no file (a `data:` address is its own file): kept by
+    // the address of the mirror's copy, as it always was, and asked once.
+    page = {};
+    mirror('data:image/png;base64,AAAA');
+    await emit(4, 7);
+    expect(acquire).toHaveBeenCalledTimes(3);
+    const asked = readFile.mock.calls.length;
+    await emit(4, 8);
+    expect(reused()).toBe(5);
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(readFile).toHaveBeenCalledTimes(asked);
+
+    // The page does not answer: nothing is known, the image is read from the
+    // screen, and the page is asked again at the next read.
+    page = undefined;
+    mirror(ONE);
+    await emit(5, 9);
+    expect(acquire).toHaveBeenCalledTimes(4);
+    await emit(5, 10);
+    expect(reused()).toBe(5);
+    expect(acquire).toHaveBeenCalledTimes(5);
+    expect(readFile).toHaveBeenCalledTimes(asked + 2);
+
+    // An image whose copy in the mirror failed to load is kept by no address,
+    // as before, and the page is not asked for it. Nor is it asked about a
+    // picture that CSS gives, which is kept by its number.
+    page = { url: ONE };
+    mirror(ONE, [0, 0]);
+    await emit(6, 11);
+    await emit(6, 12);
+    expect(reused()).toBe(5);
+    expect(acquire).toHaveBeenCalledTimes(7);
+    mirror(ONE);
+    await emit(7, 13, { cssPicture: 1 });
+    expect(acquire).toHaveBeenCalledTimes(8);
+    expect(readFile).toHaveBeenCalledTimes(asked + 2);
+    controller.dispose();
+  });
+
   it('puts an image\'s kept result back at once when its capture changes, whatever the lane is doing', async () => {
     // One image job runs at a time and a capture holds it for half a second:
     // an image that only needs its kept result used to wait behind it,

@@ -754,6 +754,92 @@ describe('ImageOverlayProjector', () => {
     expect(slots.get(1)!.nextSibling).toBeNull();
   });
 
+  it('gives the overlay beside an image the slot name of its image (D147)', () => {
+    // A root that gives slots by name draws a child without a name in its
+    // default slot, and nowhere when it has none.
+    const { document } = parseHTML(
+      '<html><body><x-card id="host"><img id="named" slot="pic"><img id="plain"></x-card>' +
+      '<x-tabs id="manual"><img id="assigned" slot="pic"></x-tabs>' +
+      '<x-tabs id="passed"><img id="forwarded"></x-tabs>' +
+      '<div id="block"><img id="own" slot="pic"></div></body></html>',
+    );
+    document.querySelector('#host')!.attachShadow({ mode: 'open' })
+      .innerHTML = '<div><slot name="pic"></slot></div>';
+    const manual = document.querySelector('#manual')!.attachShadow({ mode: 'open' });
+    manual.innerHTML = '<div><slot></slot></div>';
+    Object.defineProperty(manual, 'slotAssignment', { configurable: true, value: 'manual' });
+    // A slot that a script fills and that is itself passed on by name to a
+    // component inside the root.
+    const passed = document.querySelector('#passed')!.attachShadow({ mode: 'open' });
+    passed.innerHTML = '<x-inner><slot slot="inner"></slot></x-inner>';
+    Object.defineProperty(passed, 'slotAssignment', { configurable: true, value: 'manual' });
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, id] of [
+      [1, 'named'], [2, 'plain'], [3, 'assigned'], [4, 'own'], [7, 'forwarded'],
+    ] as const) {
+      const image = document.querySelector(`#${id}`) as unknown as HTMLImageElement;
+      image.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 100, height: 60,
+        right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+      });
+      images.set(nodeId, image);
+    }
+    // linkedom assigns no slots: the test says what Chrome would.
+    Object.defineProperty(images.get(3)!, 'assignedSlot', {
+      configurable: true,
+      value: manual.querySelector('slot'),
+    });
+    Object.defineProperty(images.get(7)!, 'assignedSlot', {
+      configurable: true,
+      value: passed.querySelector('slot'),
+    });
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    for (const nodeId of [1, 2, 3, 4, 7]) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId }))).toBe(true);
+    }
+    const named = images.get(1)!.nextSibling as HTMLElement;
+    expect(named.localName).toBe('simul-image-overlay');
+    expect(named.getAttribute('slot')).toBe('pic');
+    // An image without a name: its overlay has none either.
+    const plain = images.get(2)!.nextSibling as HTMLElement;
+    expect(plain.localName).toBe('simul-image-overlay');
+    expect(plain.hasAttribute('slot')).toBe(false);
+    // After the slot a script assigned the image to, inside the root: the
+    // name of that slot, which has none here, whatever the image's says.
+    const assigned = manual.querySelector('slot')!.nextSibling as HTMLElement;
+    expect(assigned.localName).toBe('simul-image-overlay');
+    expect(assigned.hasAttribute('slot')).toBe(false);
+    // And the name under which that slot is passed on, where it has one.
+    const forwarded = passed.querySelector('slot')!.nextSibling as HTMLElement;
+    expect(forwarded.localName).toBe('simul-image-overlay');
+    expect(forwarded.getAttribute('slot')).toBe('inner');
+    // In Simul's own root on a parent that can take one it stands after no
+    // element of the page.
+    expect(overlayFor(document, 4)!.hasAttribute('slot')).toBe(false);
+    expect(images.get(4)!.nextSibling).toBeNull();
+
+    // The page moves the image to another slot, or to none: the overlay follows.
+    images.get(1)!.setAttribute('slot', 'other');
+    expect(projector.project(projection({ jobOrdinal: 5, nodeId: 1 }))).toBe(true);
+    expect((images.get(1)!.nextSibling as HTMLElement).getAttribute('slot')).toBe('other');
+    images.get(1)!.removeAttribute('slot');
+    expect(projector.project(projection({ jobOrdinal: 6, nodeId: 1 }))).toBe(true);
+    expect((images.get(1)!.nextSibling as HTMLElement).hasAttribute('slot')).toBe(false);
+    projector.dispose();
+  });
+
   it('positions the overlay by measuring its containing block, including a scale (D74)', () => {
     const { document } = parseHTML('<html><body><main><img></main></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

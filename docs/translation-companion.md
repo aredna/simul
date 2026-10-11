@@ -332,9 +332,14 @@ on and are checked again immediately before and after capture. The saved scan
 policy orders visible/near/background work, and very small pixel-OCR images are
 skipped by default. Only stable visible pixels are captured, at no
 more than two viewport captures per second, after matching pre/post document,
-scroll, bounds, and revision. High-DPI crops are proportionally downscaled
-before OCR so the processed bitmap never exceeds 4 MP; the CSS crop geometry
-is retained for overlay placement.
+scroll, bounds, and revision. The screenshot is handed to the image reader
+as soon as Chrome has made it, so the second of the two rectangles is asked
+for while the tab still shows what was captured and the words follow at
+once; the capture lane is kept for the rest of the 550 ms quota interval all
+the same, so the next screenshot waits its turn there
+(`captureVisibleSourceTabPromptly`, D147). High-DPI crops are proportionally
+downscaled before OCR so the processed bitmap never exceeds 4 MP; the CSS
+crop geometry is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
 storage. Chrome TextDetector is tried only when the platform exposes it;
@@ -361,6 +366,18 @@ settles without a capture when it returns (D87); one whose pixels change
 between reads, such as a slide caught mid-transition, is never kept, so it
 cannot hide real text. The results are memory-only,
 bounded, expire after 15 minutes and are purged with the other image results.
+The address is the one the page gives for the image, not that of the
+mirror's copy: the mirror follows the page a moment behind and chooses for
+itself among the files of a `srcset` or `<picture>`, so after a change of
+file its copy still names the file before, whose words would be put over
+the new picture. Before a result is kept or answered by an address the page
+is asked which file the image shows, once for each content revision of the
+image (D147); while the page has not answered, the image has no identity
+and is read from the screen. An image the page names no file for (a `data:`
+address, which is its own file) is kept by the address of the mirror's
+copy. An image whose copy in the mirror failed to load (its host answers
+only the page) is kept by no address and is not asked about: it is read
+from the screen whenever its capture changes.
 An image whose picture CSS alone decides is the exception: its address
 does not say what it paints. That is an image whose computed `content`
 begins with an image other than its own current file (a string, a counter
@@ -431,7 +448,10 @@ see it, and the mirror patches the parent's children as before. It then
 paints after all of the parent's children, so a later positioned sibling (a
 badge over the image) no longer covers the translation. Any other parent (a
 link, a `picture`, a `figure`, a list item) keeps the element right after
-the image, where sibling rules such as `img + figcaption` still see it. When
+the image, where sibling rules such as `img + figcaption` still see it. In
+a parent that is a component of the page (it has a shadow root of its own)
+the element carries the `slot` name of its image, so the component draws it
+in the slot that holds the image (D147). When
 the mirror rewrites the image's parent, the next refresh puts the element
 back. It is placed
 by measuring where it lands, so a transformed or zoomed containing block is
