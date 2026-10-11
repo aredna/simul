@@ -37,6 +37,19 @@ describe('StableSignatureTracker', () => {
     expect(tracker.observe(owner, 'third')).toBe(false);
   });
 
+  it('says whether an owner has a baseline yet', () => {
+    const owner = {};
+    const tracker = new StableSignatureTracker(2);
+
+    expect(tracker.has(owner)).toBe(false);
+    tracker.observe(owner, 'first');
+    expect(tracker.has(owner)).toBe(true);
+    tracker.reset();
+    expect(tracker.has(owner)).toBe(false);
+    tracker.prime(owner, 'primed');
+    expect(tracker.has(owner)).toBe(true);
+  });
+
   it('rejects invalid observation thresholds', () => {
     expect(() => new StableSignatureTracker(0)).toThrow(
       'positive integer',

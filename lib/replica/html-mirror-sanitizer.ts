@@ -1272,7 +1272,10 @@ export function sanitizeSourceElementHints(
     })()
     ? selectedSourceFor(source, baseUrl)
     : undefined;
-  const canvasBackgroundColor = tagName === 'html'
+  // The document's own `<html>`: one inside the page is an element like any
+  // other, and paints no canvas.
+  const canvasBackgroundColor = tagName === 'html' &&
+      source === source.ownerDocument?.documentElement
     ? readSourceCanvasBackgroundColor(source)
     : undefined;
   const resolvedStyleSheetText = fidelityPolicy === 'passive'
@@ -3047,6 +3050,10 @@ function readResolvedElementStyleSheet(
     }
     return undefined;
   }
+  // A `<style>` whose sheet a script switched off applies no rule. The
+  // element has no attribute that says so (a `<link>` has), and the mirror
+  // makes its sheet anew from the text it is given: an empty text (D143).
+  if (tagName === 'style' && sourceStyleSheetDisabled(element)) return '';
   const cacheMiss = !work.cache.has(sheet);
   const classifiedBefore = representability
     ? classifiedStyleOmissionCount(representability)
@@ -3175,20 +3182,47 @@ function readTransportedResolvedStyleSheetText(
 ): string | undefined {
   if (input === undefined) return undefined;
   if (
-    fidelityPolicy !== 'passive' ||
     (tagName !== 'style' && tagName !== 'link') ||
     typeof input !== 'string' ||
-    input.length > MAX_HTML_MIRROR_STRING ||
-    sanitizeCss(
-      input,
-      'about:blank',
-      false,
-      undefined,
-      fidelityPolicy,
-    ) !== input
+    !isTransportableStyleSheetText(input, fidelityPolicy)
   ) return undefined;
   budget.bytes += input.length * 2 + 24;
   return budget.bytes <= MAX_HTML_MIRROR_BYTES ? input : undefined;
+}
+
+/**
+ * Whether the mirror takes `cssText` as a sheet's text: nothing in it that
+ * the page reader would have taken out or rewritten.
+ */
+export function isTransportableStyleSheetText(
+  cssText: string,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): boolean {
+  return fidelityPolicy === 'passive' &&
+    cssText.length <= MAX_HTML_MIRROR_STRING &&
+    sanitizeCss(cssText, 'about:blank', false, undefined, fidelityPolicy) ===
+      cssText;
+}
+
+/**
+ * What was added to the end of a sheet's text since the mirror was last sent
+ * it, when that is all that changed and the mirror takes it on its own: a
+ * page that adds rules by appending text to a `<style>` (D143). Nothing when
+ * the sheet must be sent whole.
+ */
+export function appendedStyleSheetText(
+  previous: string | undefined,
+  current: string,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): string | undefined {
+  if (
+    !previous || current.length <= previous.length ||
+    !current.startsWith(previous)
+  ) return undefined;
+  const appended = current.slice(previous.length);
+  return isTransportableStyleSheetText(appended, fidelityPolicy)
+    ? appended
+    : undefined;
 }
 
 function boundedWorkLimit(value: number | undefined, fallback: number): number {
@@ -5388,6 +5422,30 @@ function elementStartsHiddenOrControlledDisclosureRegion(
   element: Element,
   controlledContent: SourceControlledContentPolicy,
 ): boolean {
+  return readSourceHiddenRegionState(element, controlledContent).starts;
+}
+
+/**
+ * For an element the page declares hidden (`hidden`, `aria-hidden="true"`):
+ * whether what it holds is withheld. The declaration yields to a box that
+ * is really painted, so the answer is read from the element's style and
+ * box, and no change of the element's `display` or `visibility` need go
+ * with a change of it: a style sheet that fades the box out changes it
+ * (D143). Nothing for an element with no such declaration, which `display`
+ * and `visibility` decide alone.
+ */
+export function sourceDeclaredHiddenRegionIsWithheld(
+  element: Element,
+  controlledContent: SourceControlledContentPolicy,
+): boolean | undefined {
+  try {
+    if (
+      !element.hasAttribute('hidden') &&
+      element.getAttribute('aria-hidden')?.trim().toLowerCase() !== 'true'
+    ) return undefined;
+  } catch {
+    return true;
+  }
   return readSourceHiddenRegionState(element, controlledContent).starts;
 }
 

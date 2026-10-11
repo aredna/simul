@@ -18,12 +18,13 @@ import {
   removePaintedSemanticLabelPresentation,
   synchronizePaintedSemanticLabelPresentation,
 } from './painted-semantic-label';
-import type {
-  HtmlMirrorCheckpoint,
-  HtmlMirrorPatchBatch,
-  HtmlMirrorPatchOperation,
-  HtmlMirrorScrollState,
-  HtmlMirrorScrollUpdate,
+import {
+  htmlMirrorFramePatches,
+  type HtmlMirrorCheckpoint,
+  type HtmlMirrorPatchBatch,
+  type HtmlMirrorPatchOperation,
+  type HtmlMirrorScrollState,
+  type HtmlMirrorScrollUpdate,
 } from './html-mirror-protocol';
 import {
   MAX_HTML_MIRROR_BYTES,
@@ -33,6 +34,7 @@ import {
   hasPrivateHtmlMirrorAttribute,
   isAutonomousCustomElementName,
   readHtmlMirrorDocumentContent,
+  isTransportableStyleSheetText,
   readHtmlMirrorNode,
   sanitizeCss,
   type HtmlMirrorControlText,
@@ -901,6 +903,13 @@ export class IsolatedHtmlReplicaEngine
     this.options.onSourceScroll?.(update.scroll);
   }
 
+  /**
+   * One message: a patch, or the patches of one frame of the page. A page
+   * changes in one step, and what it changed in a frame can take up to
+   * three patches; applied in tasks of their own, the browser drew between
+   * them and the reader saw a dialog without its styles, or the old view
+   * beside the new one, for a moment the page never showed (D143).
+   */
   #applyLivePatch(
     batch: HtmlMirrorPatchBatch,
     request: ReplicaCaptureRequest,
@@ -920,9 +929,14 @@ export class IsolatedHtmlReplicaEngine
       );
       return;
     }
-    const replacementMetrics = readPatchMetrics(state, batch.operations);
+    const frame = htmlMirrorFramePatches(batch);
+    const last = frame[frame.length - 1]!;
+    const operations = frame.length === 1
+      ? batch.operations
+      : frame.flatMap((patch) => patch.operations);
+    const replacementMetrics = readPatchMetrics(state, operations);
     const replicaDocument = state.iframe.contentDocument;
-    const disclosureBindingsMayHaveChanged = batch.operations.some(
+    const disclosureBindingsMayHaveChanged = operations.some(
       ({ kind }) => kind !== 'dimensions' && kind !== 'text',
     );
     const retainedOpenDisclosures =
@@ -934,13 +948,13 @@ export class IsolatedHtmlReplicaEngine
     }
     const retainedPaintedLabelIds = [...state.paintedLabelHosts.keys()];
     clearIsolatedPaintedLabels(state);
-    const pageLanguages = patchedPageLanguages(state, batch.operations);
+    const pageLanguages = patchedPageLanguages(state, operations);
     const contentLanguage = disclosureBindingsMayHaveChanged
       ? documentContentLanguage(replicaDocument)
       : undefined;
     let applied: AppliedPatchBatch | undefined;
     try {
-      applied = applyPatchBatch(state, batch.operations);
+      applied = applyPatchFrame(state, frame.map((patch) => patch.operations));
     } finally {
       if (replicaDocument && disclosureBindingsMayHaveChanged) {
         refreshIsolatedReplicaDisclosures(
@@ -951,7 +965,7 @@ export class IsolatedHtmlReplicaEngine
     }
     if (!applied) {
       reconcileIsolatedPaintedLabels(state, this.#projections, retainedPaintedLabelIds);
-      const reconciliationRejected = batch.operations.some(
+      const reconciliationRejected = operations.some(
         ({ kind }) => kind === 'reconcile-children',
       );
       this.#requestRecovery(
@@ -960,7 +974,7 @@ export class IsolatedHtmlReplicaEngine
           ...replacementMetrics,
           reconciliationRejectedCount: reconciliationRejected ? 1 : 0,
         }),
-        batch.representability,
+        last.representability,
       );
       return;
     }
@@ -972,10 +986,11 @@ export class IsolatedHtmlReplicaEngine
       removedNodeCount: applied.removedNodeCount,
     });
     state.sequence = batch.lastSequence;
-    state.replicaRequestsMayOccur ||=
-      batch.representability.replicaRequestCapableResourceCount > 0;
+    state.replicaRequestsMayOccur ||= frame.some(
+      (patch) => patch.representability.replicaRequestCapableResourceCount > 0,
+    );
     stream.acknowledge(state.sequence);
-    if (batch.operations.some(({ kind }) => kind === 'dimensions')) {
+    if (operations.some(({ kind }) => kind === 'dimensions')) {
       this.options.presentationHost.refreshDimensions?.(
         state.iframe,
         state.dimensions,
@@ -983,10 +998,10 @@ export class IsolatedHtmlReplicaEngine
     }
     this.options.presentationHost.markLive(state.iframe);
     const semanticReceiver = this.#semanticReceiver;
-    const semanticBindingsMayHaveChanged = batch.operations.some(
+    const semanticBindingsMayHaveChanged = operations.some(
       ({ kind }) => kind !== 'dimensions',
     );
-    const semanticProofsMayHaveChanged = batch.operations.some(
+    const semanticProofsMayHaveChanged = operations.some(
       ({ kind }) => kind !== 'dimensions' && kind !== 'text',
     );
     let semanticChanges = semanticBindingsMayHaveChanged
@@ -998,7 +1013,7 @@ export class IsolatedHtmlReplicaEngine
     ) refreshIsolatedNativeSelectFacsimiles(replicaDocument);
     // The patch may have brought an element whose label or state came before
     // it (D132).
-    const arrivedChanges = batch.operations.some(
+    const arrivedChanges = operations.some(
       ({ kind }) => kind === 'children' || kind === 'reconcile-children',
     )
       ? semanticReceiver?.placeArrivedNodes()
@@ -1054,17 +1069,17 @@ export class IsolatedHtmlReplicaEngine
       state,
       'batch',
       sourceChanges,
-      changesDocumentLanguage(batch),
+      frame.some(changesDocumentLanguage),
     );
     this.options.onLiveApplied?.();
     this.#refreshExtent(state);
     this.options.onInfo?.(stateInfo(
       'patch',
       state,
-      batch.operations.length,
+      operations.length,
       undefined,
       patchMetrics,
-      batch.representability,
+      last.representability,
     ));
   }
 
@@ -1639,11 +1654,14 @@ function applyDocumentGraph(
   setAttributes(html, root.attributes);
   applyElementHints(html, root);
   nodes.set(root.id, html);
+  // The page's own head and body: the first of each under `<html>`.
   const sourceHead = root.children.find(
-    (node): node is HtmlMirrorElementNode => node.kind === 'element' && node.tagName === 'head',
+    (node): node is HtmlMirrorElementNode =>
+      isDocumentShellChild(node) && node.tagName === 'head',
   );
   const sourceBody = root.children.find(
-    (node): node is HtmlMirrorElementNode => node.kind === 'element' && node.tagName === 'body',
+    (node): node is HtmlMirrorElementNode =>
+      isDocumentShellChild(node) && node.tagName === 'body',
   );
   // Retain the Simul-owned CSP and inert style; source nodes follow them.
   if (sourceHead) {
@@ -1695,14 +1713,15 @@ function applyDocumentGraph(
   // extension, appends beside `<body>`, and the white space between the two
   // (D135). Built in the page's order around the shell's own head and body,
   // so a later patch of `<html>`'s children finds every child it names. A
-  // second `<head>` or `<body>` is left out, as it always was.
+  // second `<head>` or `<body>` is built like any other element (D143): the
+  // page draws it as one.
   const ordered: Node[] = [];
   for (const child of root.children) {
     if (child === sourceHead) {
       ordered.push(head);
     } else if (child === sourceBody) {
       ordered.push(body);
-    } else if (child.kind === 'text' || !isDocumentShellTagName(child.tagName)) {
+    } else {
       const built = buildNode(
         target,
         child,
@@ -1731,8 +1750,37 @@ function applyDocumentGraph(
   assignIsolatedManualSlots(target, nodes);
 }
 
-function isDocumentShellTagName(tagName: string): boolean {
-  return tagName === 'html' || tagName === 'head' || tagName === 'body';
+/**
+ * A `<head>` or `<body>` element. Under `<html>` the first of each is the
+ * page's own, which the mirror holds as its shell's; anywhere else, and any
+ * further one, it is an element like any other (D143).
+ */
+function isDocumentShellChild(node: HtmlMirrorNode): node is HtmlMirrorElementNode {
+  return node.kind === 'element' && node.namespace === 'html' &&
+    (node.tagName === 'head' || node.tagName === 'body');
+}
+
+/** The mirror's own head and body among `children`, the mirror's `<html>`'s. */
+function replicaDocumentShell(children: Iterable<Node>): Node[] {
+  const shell: Node[] = [];
+  for (const tagName of ['head', 'body']) {
+    for (const child of children) {
+      if (
+        child.nodeType === Node.ELEMENT_NODE &&
+        (child as Element).namespaceURI === NAMESPACE_URIS.html &&
+        (child as Element).localName === tagName
+      ) {
+        shell.push(child);
+        break;
+      }
+    }
+  }
+  return shell;
+}
+
+function isReplicaDocumentElement(node: Node): boolean {
+  return node.nodeType === Node.ELEMENT_NODE &&
+    node === node.ownerDocument?.documentElement;
 }
 
 /**
@@ -1800,9 +1848,10 @@ function buildNode(
     textMetadata.set(input.id, input);
     return node;
   }
-  if (isDocumentShellTagName(input.tagName)) {
-    throw new Error('Nested document element rejected.');
-  }
+  // An `<html>`, `<head>` or `<body>` element that is not the document's own
+  // (one a script made inside a block, a parsed document hung in a shadow
+  // root, a second body) is an element like any other, and is built as one
+  // (D143). Refused, it left a page that holds one without a mirror.
   const node = createMirrorElement(target, input.namespace, input.tagName);
   if (input.opaquePlaceholder) {
     if (
@@ -1816,7 +1865,7 @@ function buildNode(
     nodes.set(input.id, node);
     return node;
   }
-  setAttributes(node, input.attributes);
+  setAttributes(node, input.attributes, input.resolvedStyleSheetText);
   applyElementHints(node, input);
   nodes.set(input.id, node);
   if (input.controlText) controlMetadata.set(input.id, input.controlText);
@@ -1947,9 +1996,28 @@ function appendOwnedAdoptedStyles(
 function setAttributes(
   element: Element,
   attributes: readonly (readonly [string, string])[],
+  resolvedStyleSheetText?: string,
 ): void {
-  for (const attribute of [...element.attributes]) {
-    element.removeAttribute(attribute.name);
+  // A `<link>` fetches its sheet again when `rel` or `href` is taken off
+  // and put back, and the mirror is without the sheet meanwhile: what did
+  // not change on a link stays (D143).
+  const link = element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    element.localName.toLowerCase() === 'link';
+  if (link) {
+    attributes = replicaLinkAttributes(attributes, resolvedStyleSheetText);
+    const wanted = new Map(attributes);
+    for (const attribute of [...element.attributes]) {
+      if (wanted.get(attribute.name) !== attribute.value) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+    attributes = attributes.filter(
+      ([name, value]) => element.getAttribute(name) !== value,
+    );
+  } else {
+    for (const attribute of [...element.attributes]) {
+      element.removeAttribute(attribute.name);
+    }
   }
   forgetPageXmlLanguage(element);
   for (const [name, value] of inWriteOrder(attributes)) {
@@ -1961,14 +2029,55 @@ function setAttributes(
     (tagName === 'link' || tagName === 'style')
   ) {
     try {
-      (element as Element & { disabled: boolean }).disabled = attributes.some(
-        ([name]) => name === 'disabled',
-      );
+      const sheetOwner = element as Element & { disabled: boolean };
+      const disabled = element.hasAttribute('disabled');
+      if (sheetOwner.disabled !== disabled) sheetOwner.disabled = disabled;
     } catch {
       // The content attribute remains the browser-owned fallback.
     }
   }
   finishReplicaAttributes(element);
+}
+
+/**
+ * What the mirror's own `<link>` carries when its rules came with it
+ * (D143): it points at those rules, and is never given the page's address.
+ * Written first and replaced, that address was asked for once at every
+ * patch of the link. The page's integrity hash covers the page's response,
+ * not these rules, so it is left out.
+ */
+function replicaLinkAttributes(
+  attributes: readonly (readonly [string, string])[],
+  resolvedStyleSheetText: string | undefined,
+): readonly (readonly [string, string])[] {
+  if (resolvedStyleSheetText === undefined) return attributes;
+  return [
+    ...attributes.filter(([name]) => name !== 'href' && name !== 'integrity'),
+    ['href', `data:text/css;charset=utf-8,${encodeURIComponent(
+      resolvedStyleSheetText,
+    )}`],
+    ['data-simul-resolved-stylesheet', 'v1'],
+  ];
+}
+
+/**
+ * Whether a patch switches a mirror `<link>` off. The mirror asks for a
+ * sheet itself, a little later than the page did, and Chrome applies a
+ * sheet that arrives after its link was switched off, whatever is written
+ * on the link then: a theme that a page loads from another site and
+ * switches off in its `load` handler stayed applied in the mirror for good
+ * (D143). A link that is not in the document applies nothing, so the link
+ * is taken out and a new one, made switched off, stands in its place: it
+ * has asked for nothing, and asks when the page switches it on.
+ */
+function switchesReplicaLinkOff(
+  element: Element,
+  attributes: readonly (readonly [string, string])[],
+): boolean {
+  return element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    element.localName.toLowerCase() === 'link' &&
+    !element.hasAttribute('disabled') &&
+    attributes.some(([name]) => name === 'disabled');
 }
 
 /**
@@ -2176,7 +2285,6 @@ function applyElementHints(
     | 'selectPresentationStyle'
     | 'controlText'
     | 'canvasBackgroundColor'
-    | 'resolvedStyleSheetText'
     | 'customElementDefined'
     | 'assignedNodeIds'
   >,
@@ -2215,22 +2323,6 @@ function applyElementHints(
     element.setAttribute('src', hints.selectedImageSource);
     element.removeAttribute('srcset');
     element.setAttribute('data-simul-selected-image-source', 'v1');
-  }
-  if (
-    hints.resolvedStyleSheetText !== undefined &&
-    element.localName.toLowerCase() === 'link'
-  ) {
-    // The source SRI hash covers the original response, not Simul's bounded,
-    // sanitized CSSOM serialization. Keeping it would make Chrome reject the
-    // local data stylesheet and silently erase otherwise readable styling.
-    element.removeAttribute('integrity');
-    element.setAttribute(
-      'href',
-      `data:text/css;charset=utf-8,${encodeURIComponent(
-        hints.resolvedStyleSheetText,
-      )}`,
-    );
-    element.setAttribute('data-simul-resolved-stylesheet', 'v1');
   }
   const styled = element as Element & { readonly style?: CSSStyleDeclaration };
   if (
@@ -2904,6 +2996,22 @@ function composedElementContains(container: Element, candidate: Element): boolea
   return false;
 }
 
+/**
+ * The sheet text a mirror `<style>` was given, if it holds one: what its
+ * own text nodes hold, which is what Chrome makes its sheet from. An
+ * element inside the style is no part of it.
+ */
+function heldResolvedStyleSheetText(element: Element): string | undefined {
+  if (element.getAttribute('data-simul-resolved-stylesheet') !== 'v1') {
+    return undefined;
+  }
+  let text = '';
+  for (const child of element.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) text += child.nodeValue ?? '';
+  }
+  return text;
+}
+
 function applyResolvedStyleSheetText(
   element: Element,
   cssText: string | undefined,
@@ -3032,9 +3140,16 @@ interface AppliedPatchBatch {
   readonly removedNodeCount: number;
 }
 
-function applyPatchBatch(
+/**
+ * Applies the patches of one frame of the page, each to the mirror as the
+ * one before left it, and all or none of them (D143): a patch the mirror
+ * refuses, or one that fails halfway, leaves the mirror as the frame found
+ * it. What is counted over the whole mirror (its records, its budget) is
+ * counted once, after the last.
+ */
+function applyPatchFrame(
   state: HtmlMirrorDomState,
-  operations: readonly HtmlMirrorPatchOperation[],
+  parts: readonly (readonly HtmlMirrorPatchOperation[])[],
 ): AppliedPatchBatch | undefined {
   type StructuralOperation = Extract<
     HtmlMirrorPatchOperation,
@@ -3086,453 +3201,509 @@ function applyPatchBatch(
     return indexedPresentationNodes;
   };
 
-  const targetOperations: Array<{
-    readonly operation: Exclude<HtmlMirrorPatchOperation, { kind: 'dimensions' }>;
-    readonly target: Node;
-  }> = [];
-  const parsedText = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>();
-  const attributeOperations = new Map<
-    number,
-    Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
-  >();
-  const prospectiveAttributeOperations = new Map<
-    number,
-    Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
-  >();
-  const firstStructuralOperations = new Map<number, {
-    readonly operation: StructuralOperation;
-    readonly index: number;
-  }>();
-  const childReplacementNodeIds = new Set<number>();
-  for (const [index, operation] of operations.entries()) {
-    if (operation.kind === 'attributes') {
-      prospectiveAttributeOperations.set(operation.nodeId, operation);
-    } else if (
-      operation.kind === 'children' ||
-      operation.kind === 'reconcile-children'
-    ) {
-      if (!firstStructuralOperations.has(operation.nodeId)) {
-        firstStructuralOperations.set(operation.nodeId, { operation, index });
-      }
-      if (operation.kind === 'children') {
-        childReplacementNodeIds.add(operation.nodeId);
-      }
-    }
-  }
-
-  // Validate every target and payload before touching visible state.
-  for (const [operationIndex, operation] of operations.entries()) {
-    if (operation.kind === 'dimensions') continue;
-    const target = state.nodes.get(operation.nodeId);
-    if (!target) return undefined;
-    if (
-      target.nodeType === Node.ELEMENT_NODE &&
-      isSourceSecretPlaceholderTagName((target as Element).localName)
-    ) {
-      // The placeholder is immutable for its document lifetime. Any source
-      // mutation at that ID requires a fresh graph so no descendant/resource
-      // patch can repopulate the erased hard-secret region.
-      return undefined;
-    }
-    targetOperations.push({ operation, target });
-    if (
-      (operation.kind === 'children' ||
-        operation.kind === 'reconcile-children') &&
-      target.nodeType === Node.ELEMENT_NODE
-    ) {
-      const targetElement = target as Element;
-      const select = targetElement.localName.toLowerCase() === 'select'
-        ? targetElement
-        : targetElement.closest('select');
-      // Native select structure is transported whole at the select root; a
-      // patch for one of its groups or options is never sent. The new options
-      // come without a selection: the current choice arrives on the semantic
-      // channel, and nothing is drawn from this hidden native select (D132;
-      // the patch was once accepted only with selected positions the page
-      // has stopped sending, so every changed list rebuilt the mirror).
-      if (select && targetElement !== select) return undefined;
-    }
-    if (operation.kind === 'text') {
-      const node = readHtmlMirrorNode(
-        operation.node,
-        undefined,
-        0,
-        undefined,
-        false,
-        false,
-        false,
-        false,
-        false,
-        state.fidelityPolicy,
-      );
-      if (
-        target.nodeType !== Node.TEXT_NODE ||
-        !node || node.kind !== 'text' || node.id !== operation.nodeId ||
-        !validTextForContext(
-          node,
-          domTextContext(target),
-          state.fidelityPolicy,
-        )
-      ) return undefined;
-      parsedText.set(operation.nodeId, node);
-      continue;
-    }
-    if (operation.kind === 'attributes') {
-      if (
-        target.nodeType !== Node.ELEMENT_NODE ||
-        (target as Element).namespaceURI !== NAMESPACE_URIS[operation.namespace] ||
-        (target as Element).localName.toLowerCase() !== operation.tagName
-      ) return undefined;
-      const currentContext = containerContext(target);
-      const prospectiveContext = batchContainerContext(
-        target,
-        prospectiveAttributeOperations,
-        currentNodeIds(),
-      );
-      if (
-        (
-          operation.selectedOptionIndexes !== undefined ||
-          operation.selectPickerOpen !== undefined
-        ) &&
-        (
-          currentContext.privateAttributeRegion ||
-          prospectiveContext.privateAttributeRegion
-        )
-      ) return undefined;
-      if (
-        operation.selectedOptionIndexes !== undefined &&
-        !validPatchSelectedOptionIndexes(
-          state,
-          target as Element,
-          operation,
-          firstStructuralOperations.get(operation.nodeId),
-          operationIndex,
-        )
-      ) return undefined;
-      if (
-        operation.controlText &&
-        (
-          currentContext.privateAttributeRegion ||
-          prospectiveContext.privateAttributeRegion ||
-          currentContext.nonContentRegion ||
-          prospectiveContext.nonContentRegion ||
-          (operation.controlText.kind === 'label' &&
-            !prospectiveContext.nativeSelectRegion)
-        )
-      ) return undefined;
-      if (
-        privacyContextChanges(currentContext, prospectiveContext) &&
-        (
-          (target as Element).shadowRoot ||
-          !childReplacementNodeIds.has(operation.nodeId)
-        )
-      ) return undefined;
-      if (
-        prospectiveContext.privateAttributeRegion &&
-        hasPrivateHtmlMirrorAttribute(operation.tagName, operation.attributes)
-      ) return undefined;
-      try {
-        const sentinelDocument = target.ownerDocument;
-        if (!sentinelDocument) return undefined;
-        const sentinel = createMirrorElement(
-          sentinelDocument,
-          operation.namespace,
-          operation.tagName,
-        );
-        setAttributes(sentinel, operation.attributes);
-      } catch {
-        return undefined;
-      }
-      attributeOperations.set(operation.nodeId, operation);
-      continue;
-    }
-    if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
-      if (
-        target.nodeType !== Node.ELEMENT_NODE &&
-        target.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
-      ) return undefined;
-      if (!isConnectedReplicaNode(state, target)) return undefined;
-      continue;
-    }
-    return undefined;
-  }
-
-  // A parent replacement and a descendant operation cannot be made atomic:
-  // the descendant identity ceases to exist. The source normally minimizes
-  // these, while the extension treats a malicious/confused batch as recovery.
-  // A parent *attribute* update beside a descendant replacement is accepted:
-  // the loop above already refused any that changes the privacy context.
-  if (hasStructuralPatchTargetConflict(targetOperations.map(
-    ({ operation, target }) => ({
-      target,
-      structural: operation.kind === 'children' ||
-        operation.kind === 'reconcile-children',
-    }),
-  ))) return undefined;
-
-  const structuralOperations = operations.filter(
-    (operation): operation is StructuralOperation =>
-      operation.kind === 'children' || operation.kind === 'reconcile-children',
-  );
-  if (
-    structuralOperations.some(({ kind }) => kind === 'children') &&
-    structuralOperations.some(({ kind }) => kind === 'reconcile-children')
-  ) return undefined;
-
-  const removedIds = new Set<number>();
-  const childrenOperations = structuralOperations.filter(
-    (operation): operation is Extract<StructuralOperation, { kind: 'children' }> =>
-      operation.kind === 'children',
-  );
-  const reconcileOperations = structuralOperations.filter(
-    (operation): operation is Extract<
-      StructuralOperation,
-      { kind: 'reconcile-children' }
-    > => operation.kind === 'reconcile-children',
-  );
-  const oldChildren = new Map<number, readonly Node[]>();
-  for (const operation of structuralOperations) {
-    const target = state.nodes.get(operation.nodeId) as Node;
-    const mirrored = [...target.childNodes].filter(
-      (child) => currentPresentationNodes().has(child),
-    );
-    oldChildren.set(operation.nodeId, mirrored);
-    if (operation.kind === 'children') {
-      for (const child of mirrored) {
-        collectDomIds(currentNodeIds(), child, removedIds);
-      }
-    }
-  }
-
-  const incomingIds = new Set<number>();
-  for (const operation of childrenOperations) {
-    for (const child of operation.children) {
-      if (!collectGraphIds(child, incomingIds) || containsDocumentElement(child)) {
-        return undefined;
-      }
-    }
-  }
-  for (const id of incomingIds) {
-    if (state.nodes.has(id) && !removedIds.has(id)) return undefined;
-  }
-
-  const retainedIds = new Set<number>();
-  const reconcileGraphIds = new Set<number>();
-  for (const operation of reconcileOperations) {
-    const target = state.nodes.get(operation.nodeId) as Node;
-    const directChildren = new Set(oldChildren.get(operation.nodeId) ?? []);
-    for (const entry of operation.children) {
-      if (entry.kind === 'retain') {
-        const retainedSource = state.nodes.get(entry.nodeId);
-        const retained = retainedSource
-          ? presentationNodeForMirrorNode(retainedSource)
-          : undefined;
-        if (
-          !retained || retainedIds.has(entry.nodeId) ||
-          reconcileGraphIds.has(entry.nodeId) ||
-          retained.parentNode !== target || !directChildren.has(retained) ||
-          retained.ownerDocument !== target.ownerDocument ||
-          !isConnectedReplicaNode(state, retained)
-        ) return undefined;
-        retainedIds.add(entry.nodeId);
-        continue;
-      }
-      if (
-        !collectGraphIds(entry.node, reconcileGraphIds) ||
-        containsDocumentElement(entry.node)
-      ) {
-        return undefined;
-      }
-    }
-  }
-  for (const id of reconcileGraphIds) {
-    if (state.nodes.has(id) || retainedIds.has(id)) return undefined;
-  }
-
-  const allRemovedIds = new Set(removedIds);
-  for (const operation of reconcileOperations) {
-    for (const child of oldChildren.get(operation.nodeId) ?? []) {
-      const childId = currentNodeIds().get(child);
-      if (childId !== undefined && retainedIds.has(childId)) continue;
-      collectDomIds(currentNodeIds(), child, allRemovedIds);
-    }
-  }
-  const prospectiveNodeCount = state.nodes.size - allRemovedIds.size +
-    incomingIds.size + reconcileGraphIds.size;
-  if (
-    prospectiveNodeCount < 0 ||
-    prospectiveNodeCount > MAX_HTML_MIRROR_NODES
-  ) return undefined;
-
-  const prospectiveText = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>(
-    [...state.textMetadata].filter(([id]) => !allRemovedIds.has(id)),
-  );
-  const prospectiveControls = new Map<number, HtmlMirrorControlText>(
-    [...state.controlMetadata].filter(([id]) => !allRemovedIds.has(id)),
-  );
-  for (const operation of childrenOperations) {
-    for (const child of operation.children) {
-      collectGraphTextState(child, prospectiveText, prospectiveControls);
-    }
-  }
-  for (const operation of reconcileOperations) {
-    for (const child of operation.children) {
-      if (child.kind === 'graph') {
-        collectGraphTextState(child.node, prospectiveText, prospectiveControls);
-      }
-    }
-  }
-  for (const [id, node] of parsedText) prospectiveText.set(id, node);
-  for (const [id, operation] of attributeOperations) {
-    if (operation.controlText) prospectiveControls.set(id, operation.controlText);
-    else prospectiveControls.delete(id);
-  }
-  let prospectiveTextBytes = 0;
-  for (const node of prospectiveText.values()) {
-    prospectiveTextBytes += node.text.length * 2 + 32;
-    if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return undefined;
-  }
-  for (const control of prospectiveControls.values()) {
-    prospectiveTextBytes += control.text.length * 2 + 32;
-    if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return undefined;
-  }
-
-  const childrenPlans = new Map<
-    Extract<StructuralOperation, { kind: 'children' }>,
-    ChildrenPlan
-  >();
-  const reconcilePlans = new Map<
-    Extract<StructuralOperation, { kind: 'reconcile-children' }>,
-    ReconcilePlan
-  >();
-  try {
-    for (const operation of childrenOperations) {
-      const target = state.nodes.get(operation.nodeId) as Node;
-      const context = containerContext(
-        target,
-        attributeOperations.get(operation.nodeId)?.attributes,
-      );
-      if (!operation.children.every(
-        (child) => validGraphForContext(child, context, state.fidelityPolicy),
-      )) {
-        return undefined;
-      }
-      const ownerDocument = target.ownerDocument;
-      if (!ownerDocument) return undefined;
-      const fragment = ownerDocument.createDocumentFragment();
-      const nodes = new Map<number, Node>();
-      const textMetadata = new Map<
-        number,
-        Extract<HtmlMirrorNode, { kind: 'text' }>
-      >();
-      const controlMetadata = new Map<number, HtmlMirrorControlText>();
-      const ownedAdoptedStyles = new Set<HTMLStyleElement>();
-      for (const child of operation.children) {
-        const built = buildNode(
-          ownerDocument,
-          child,
-          nodes,
-          textMetadata,
-          controlMetadata,
-          ownedAdoptedStyles,
-        );
-        if (built) fragment.append(built);
-      }
-      childrenPlans.set(operation, {
-        target,
-        oldChildren: oldChildren.get(operation.nodeId) ?? [],
-        fragment,
-        nodes,
-        textMetadata,
-        controlMetadata,
-        ownedAdoptedStyles,
-      });
-    }
-    for (const operation of reconcileOperations) {
-      const target = state.nodes.get(operation.nodeId) as Node;
-      const context = containerContext(target);
-      const ownerDocument = target.ownerDocument;
-      if (!ownerDocument) return undefined;
-      const nodes = new Map<number, Node>();
-      const textMetadata = new Map<
-        number,
-        Extract<HtmlMirrorNode, { kind: 'text' }>
-      >();
-      const controlMetadata = new Map<number, HtmlMirrorControlText>();
-      const ownedAdoptedStyles = new Set<HTMLStyleElement>();
-      const retainedChildren = new Set<Node>();
-      const desiredChildren: Node[] = [];
-      let insertedNodeCount = 0;
-      for (const entry of operation.children) {
-        if (entry.kind === 'retain') {
-          const retainedSource = state.nodes.get(entry.nodeId);
-          if (!retainedSource) return undefined;
-          const retained = presentationNodeForMirrorNode(retainedSource);
-          retainedChildren.add(retained);
-          desiredChildren.push(retained);
-          continue;
-        }
-        if (!validGraphForContext(
-          entry.node,
-          context,
-          state.fidelityPolicy,
-        )) return undefined;
-        const built = buildNode(
-          ownerDocument,
-          entry.node,
-          nodes,
-          textMetadata,
-          controlMetadata,
-          ownedAdoptedStyles,
-        );
-        if (!built) return undefined;
-        insertedNodeCount += htmlMirrorGraphNodeCount(entry.node);
-        desiredChildren.push(built);
-      }
-      reconcilePlans.set(operation, {
-        target,
-        oldChildren: oldChildren.get(operation.nodeId) ?? [],
-        desiredChildren: Object.freeze(desiredChildren),
-        retainedChildren,
-        stableRetainedChildren: stableRetainedChildSet(
-          oldChildren.get(operation.nodeId) ?? [],
-          desiredChildren,
-          retainedChildren,
-        ),
-        nodes,
-        textMetadata,
-        controlMetadata,
-        ownedAdoptedStyles,
-        insertedNodeCount,
-      });
-    }
-  } catch {
-    return undefined;
-  }
-
-  const previous = new Map(state.records);
+  // What the frame started from, taken when its first patch is about to
+  // change the mirror.
+  let previous: Map<number, ReplicaSourceTextRecord> | undefined;
   const forceUpserts = new Set<number>();
-  const rollback = capturePatchRollback(state, targetOperations);
-  const knownBeforeBatch = new Set(rollback.nodes.values());
+  const rollbacks: PatchRollbackSnapshot[] = [];
   let retainedNodeCount = 0;
   let insertedNodeCount = 0;
   let movedNodeCount = 0;
   let removedNodeCount = 0;
-  for (const plan of childrenPlans.values()) {
-    for (const child of plan.oldChildren) {
-      removedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
+  const undo = (): undefined => {
+    for (let index = rollbacks.length - 1; index >= 0; index -= 1) {
+      restorePatchRollback(state, rollbacks[index]!);
     }
-  }
-  for (const plan of reconcilePlans.values()) {
-    for (const child of plan.oldChildren) {
-      if (plan.retainedChildren.has(child)) {
-        retainedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
-      } else {
-        removedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
+    return undefined;
+  };
+
+  /**
+   * One patch of the frame. False when the mirror refuses it, before it
+   * changed anything; throws when it fails while it is applied.
+   */
+  const applyPart = (
+    operations: readonly HtmlMirrorPatchOperation[],
+  ): boolean => {
+    const targetOperations: Array<{
+      readonly operation: Exclude<HtmlMirrorPatchOperation, { kind: 'dimensions' }>;
+      readonly target: Node;
+    }> = [];
+    const parsedText = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>();
+    const attributeOperations = new Map<
+      number,
+      Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
+    >();
+    const appendedSheetTexts = new Map<number, string>();
+    // The sheet text of each style whose list of children this patch sends.
+    const keptSheetTexts = new Map<number, string>();
+    const prospectiveAttributeOperations = new Map<
+      number,
+      Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
+    >();
+    const firstStructuralOperations = new Map<number, {
+      readonly operation: StructuralOperation;
+      readonly index: number;
+    }>();
+    const childReplacementNodeIds = new Set<number>();
+    for (const [index, operation] of operations.entries()) {
+      if (operation.kind === 'attributes') {
+        prospectiveAttributeOperations.set(operation.nodeId, operation);
+      } else if (
+        operation.kind === 'children' ||
+        operation.kind === 'reconcile-children'
+      ) {
+        if (!firstStructuralOperations.has(operation.nodeId)) {
+          firstStructuralOperations.set(operation.nodeId, { operation, index });
+        }
+        if (operation.kind === 'children') {
+          childReplacementNodeIds.add(operation.nodeId);
+        }
       }
     }
-  }
-  try {
+
+    // Validate every target and payload before touching visible state.
+    for (const [operationIndex, operation] of operations.entries()) {
+      if (operation.kind === 'dimensions') continue;
+      const target = state.nodes.get(operation.nodeId);
+      if (!target) return false;
+      if (
+        target.nodeType === Node.ELEMENT_NODE &&
+        isSourceSecretPlaceholderTagName((target as Element).localName)
+      ) {
+        // The placeholder is immutable for its document lifetime. Any source
+        // mutation at that ID requires a fresh graph so no descendant/resource
+        // patch can repopulate the erased hard-secret region.
+        return false;
+      }
+      targetOperations.push({ operation, target });
+      if (
+        (operation.kind === 'children' ||
+          operation.kind === 'reconcile-children') &&
+        target.nodeType === Node.ELEMENT_NODE
+      ) {
+        const targetElement = target as Element;
+        const select = targetElement.localName.toLowerCase() === 'select'
+          ? targetElement
+          : targetElement.closest('select');
+        // Native select structure is transported whole at the select root; a
+        // patch for one of its groups or options is never sent. The new options
+        // come without a selection: the current choice arrives on the semantic
+        // channel, and nothing is drawn from this hidden native select (D132;
+        // the patch was once accepted only with selected positions the page
+        // has stopped sending, so every changed list rebuilt the mirror).
+        if (select && targetElement !== select) return false;
+      }
+      if (operation.kind === 'text') {
+        const node = readHtmlMirrorNode(
+          operation.node,
+          undefined,
+          0,
+          undefined,
+          false,
+          false,
+          false,
+          false,
+          false,
+          state.fidelityPolicy,
+        );
+        if (
+          target.nodeType !== Node.TEXT_NODE ||
+          !node || node.kind !== 'text' || node.id !== operation.nodeId ||
+          !validTextForContext(
+            node,
+            domTextContext(target),
+            state.fidelityPolicy,
+          )
+        ) return false;
+        parsedText.set(operation.nodeId, node);
+        continue;
+      }
+      if (operation.kind === 'attributes') {
+        if (
+          target.nodeType !== Node.ELEMENT_NODE ||
+          (target as Element).namespaceURI !== NAMESPACE_URIS[operation.namespace] ||
+          (target as Element).localName.toLowerCase() !== operation.tagName
+        ) return false;
+        const currentContext = containerContext(target);
+        const prospectiveContext = batchContainerContext(
+          target,
+          prospectiveAttributeOperations,
+          currentNodeIds(),
+        );
+        if (
+          (
+            operation.selectedOptionIndexes !== undefined ||
+            operation.selectPickerOpen !== undefined
+          ) &&
+          (
+            currentContext.privateAttributeRegion ||
+            prospectiveContext.privateAttributeRegion
+          )
+        ) return false;
+        if (
+          operation.selectedOptionIndexes !== undefined &&
+          !validPatchSelectedOptionIndexes(
+            state,
+            target as Element,
+            operation,
+            firstStructuralOperations.get(operation.nodeId),
+            operationIndex,
+          )
+        ) return false;
+        if (
+          operation.controlText &&
+          (
+            currentContext.privateAttributeRegion ||
+            prospectiveContext.privateAttributeRegion ||
+            currentContext.nonContentRegion ||
+            prospectiveContext.nonContentRegion ||
+            (operation.controlText.kind === 'label' &&
+              !prospectiveContext.nativeSelectRegion)
+          )
+        ) return false;
+        if (
+          privacyContextChanges(currentContext, prospectiveContext) &&
+          (
+            (target as Element).shadowRoot ||
+            !childReplacementNodeIds.has(operation.nodeId)
+          )
+        ) return false;
+        if (
+          prospectiveContext.privateAttributeRegion &&
+          hasPrivateHtmlMirrorAttribute(operation.tagName, operation.attributes)
+        ) return false;
+        try {
+          const sentinelDocument = target.ownerDocument;
+          if (!sentinelDocument) return false;
+          const sentinel = createMirrorElement(
+            sentinelDocument,
+            operation.namespace,
+            operation.tagName,
+          );
+          setAttributes(sentinel, operation.attributes);
+        } catch {
+          return false;
+        }
+        if (operation.resolvedStyleSheetTextFrom !== undefined) {
+          // What follows the text the mirror holds for this style: the two
+          // together are the sheet, and are checked as a sheet sent whole
+          // is. Anything else held here is a mirror out of step.
+          const held = heldResolvedStyleSheetText(target as Element);
+          const whole = `${held ?? ''}${operation.resolvedStyleSheetText ?? ''}`;
+          if (
+            held === undefined ||
+            held.length !== operation.resolvedStyleSheetTextFrom ||
+            !isTransportableStyleSheetText(whole, state.fidelityPolicy)
+          ) return false;
+          appendedSheetTexts.set(operation.nodeId, whole);
+        }
+        attributeOperations.set(operation.nodeId, operation);
+        continue;
+      }
+      if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
+        if (
+          target.nodeType !== Node.ELEMENT_NODE &&
+          target.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
+        ) return false;
+        if (!isConnectedReplicaNode(state, target)) return false;
+        // A style the mirror holds by its sheet's text keeps that text when
+        // its list of children is sent. The text nodes of such a patch hold
+        // the page's own text, which is not always the sheet's (a rule put
+        // in through the sheet is in the sheet's text only), and the page
+        // reader sends the sheet again only when the sheet changed.
+        const held = target.nodeType === Node.ELEMENT_NODE &&
+            (target as Element).localName.toLowerCase() === 'style'
+          ? heldResolvedStyleSheetText(target as Element)
+          : undefined;
+        if (held !== undefined) keptSheetTexts.set(operation.nodeId, held);
+        continue;
+      }
+      return false;
+    }
+
+    // A parent replacement and a descendant operation cannot be made atomic:
+    // the descendant identity ceases to exist. The source normally minimizes
+    // these, while the extension treats a malicious/confused batch as recovery.
+    // A parent *attribute* update beside a descendant replacement is accepted:
+    // the loop above already refused any that changes the privacy context.
+    if (hasStructuralPatchTargetConflict(targetOperations.map(
+      ({ operation, target }) => ({
+        target,
+        structural: operation.kind === 'children' ||
+          operation.kind === 'reconcile-children',
+      }),
+    ))) return false;
+
+    const structuralOperations = operations.filter(
+      (operation): operation is StructuralOperation =>
+        operation.kind === 'children' || operation.kind === 'reconcile-children',
+    );
+    if (
+      structuralOperations.some(({ kind }) => kind === 'children') &&
+      structuralOperations.some(({ kind }) => kind === 'reconcile-children')
+    ) return false;
+
+    const removedIds = new Set<number>();
+    const childrenOperations = structuralOperations.filter(
+      (operation): operation is Extract<StructuralOperation, { kind: 'children' }> =>
+        operation.kind === 'children',
+    );
+    const reconcileOperations = structuralOperations.filter(
+      (operation): operation is Extract<
+        StructuralOperation,
+        { kind: 'reconcile-children' }
+      > => operation.kind === 'reconcile-children',
+    );
+    const oldChildren = new Map<number, readonly Node[]>();
+    for (const operation of structuralOperations) {
+      const target = state.nodes.get(operation.nodeId) as Node;
+      const mirrored = [...target.childNodes].filter(
+        (child) => currentPresentationNodes().has(child),
+      );
+      oldChildren.set(operation.nodeId, mirrored);
+      if (operation.kind === 'children') {
+        for (const child of mirrored) {
+          collectDomIds(currentNodeIds(), child, removedIds);
+        }
+      }
+    }
+
+    const incomingIds = new Set<number>();
+    for (const operation of childrenOperations) {
+      // The whole list of `<html>`'s children would take the mirror's own
+      // head and body with it: that is a whole read.
+      if (isReplicaDocumentElement(state.nodes.get(operation.nodeId) as Node)) {
+        return false;
+      }
+      for (const child of operation.children) {
+        if (!collectGraphIds(child, incomingIds)) return false;
+      }
+    }
+    for (const id of incomingIds) {
+      if (state.nodes.has(id) && !removedIds.has(id)) return false;
+    }
+
+    const retainedIds = new Set<number>();
+    const reconcileGraphIds = new Set<number>();
+    for (const operation of reconcileOperations) {
+      const target = state.nodes.get(operation.nodeId) as Node;
+      const directChildren = new Set(oldChildren.get(operation.nodeId) ?? []);
+      // Under `<html>` the mirror's own head and body stay, and no other head
+      // or body is added: the page changed its own, which is a whole read.
+      const shell = isReplicaDocumentElement(target)
+        ? new Set(replicaDocumentShell(directChildren))
+        : undefined;
+      for (const entry of operation.children) {
+        if (entry.kind === 'retain') {
+          const retainedSource = state.nodes.get(entry.nodeId);
+          const retained = retainedSource
+            ? presentationNodeForMirrorNode(retainedSource)
+            : undefined;
+          if (
+            !retained || retainedIds.has(entry.nodeId) ||
+            reconcileGraphIds.has(entry.nodeId) ||
+            retained.parentNode !== target || !directChildren.has(retained) ||
+            retained.ownerDocument !== target.ownerDocument ||
+            !isConnectedReplicaNode(state, retained)
+          ) return false;
+          retainedIds.add(entry.nodeId);
+          shell?.delete(retained);
+          continue;
+        }
+        if (
+          !collectGraphIds(entry.node, reconcileGraphIds) ||
+          (shell && isDocumentShellChild(entry.node))
+        ) {
+          return false;
+        }
+      }
+      if (shell && shell.size > 0) return false;
+    }
+    for (const id of reconcileGraphIds) {
+      if (state.nodes.has(id) || retainedIds.has(id)) return false;
+    }
+
+    const allRemovedIds = new Set(removedIds);
+    for (const operation of reconcileOperations) {
+      for (const child of oldChildren.get(operation.nodeId) ?? []) {
+        const childId = currentNodeIds().get(child);
+        if (childId !== undefined && retainedIds.has(childId)) continue;
+        collectDomIds(currentNodeIds(), child, allRemovedIds);
+      }
+    }
+    const prospectiveNodeCount = state.nodes.size - allRemovedIds.size +
+      incomingIds.size + reconcileGraphIds.size;
+    if (
+      prospectiveNodeCount < 0 ||
+      prospectiveNodeCount > MAX_HTML_MIRROR_NODES
+    ) return false;
+
+    const prospectiveText = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>(
+      [...state.textMetadata].filter(([id]) => !allRemovedIds.has(id)),
+    );
+    const prospectiveControls = new Map<number, HtmlMirrorControlText>(
+      [...state.controlMetadata].filter(([id]) => !allRemovedIds.has(id)),
+    );
+    for (const operation of childrenOperations) {
+      for (const child of operation.children) {
+        collectGraphTextState(child, prospectiveText, prospectiveControls);
+      }
+    }
+    for (const operation of reconcileOperations) {
+      for (const child of operation.children) {
+        if (child.kind === 'graph') {
+          collectGraphTextState(child.node, prospectiveText, prospectiveControls);
+        }
+      }
+    }
+    for (const [id, node] of parsedText) prospectiveText.set(id, node);
+    for (const [id, operation] of attributeOperations) {
+      if (operation.controlText) prospectiveControls.set(id, operation.controlText);
+      else prospectiveControls.delete(id);
+    }
+    let prospectiveTextBytes = 0;
+    for (const node of prospectiveText.values()) {
+      prospectiveTextBytes += node.text.length * 2 + 32;
+      if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return false;
+    }
+    for (const control of prospectiveControls.values()) {
+      prospectiveTextBytes += control.text.length * 2 + 32;
+      if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return false;
+    }
+
+    const childrenPlans = new Map<
+      Extract<StructuralOperation, { kind: 'children' }>,
+      ChildrenPlan
+    >();
+    const reconcilePlans = new Map<
+      Extract<StructuralOperation, { kind: 'reconcile-children' }>,
+      ReconcilePlan
+    >();
+    try {
+      for (const operation of childrenOperations) {
+        const target = state.nodes.get(operation.nodeId) as Node;
+        const context = containerContext(
+          target,
+          attributeOperations.get(operation.nodeId)?.attributes,
+        );
+        if (!operation.children.every(
+          (child) => validGraphForContext(child, context, state.fidelityPolicy),
+        )) {
+          return false;
+        }
+        const ownerDocument = target.ownerDocument;
+        if (!ownerDocument) return false;
+        const fragment = ownerDocument.createDocumentFragment();
+        const nodes = new Map<number, Node>();
+        const textMetadata = new Map<
+          number,
+          Extract<HtmlMirrorNode, { kind: 'text' }>
+        >();
+        const controlMetadata = new Map<number, HtmlMirrorControlText>();
+        const ownedAdoptedStyles = new Set<HTMLStyleElement>();
+        for (const child of operation.children) {
+          const built = buildNode(
+            ownerDocument,
+            child,
+            nodes,
+            textMetadata,
+            controlMetadata,
+            ownedAdoptedStyles,
+          );
+          if (built) fragment.append(built);
+        }
+        childrenPlans.set(operation, {
+          target,
+          oldChildren: oldChildren.get(operation.nodeId) ?? [],
+          fragment,
+          nodes,
+          textMetadata,
+          controlMetadata,
+          ownedAdoptedStyles,
+        });
+      }
+      for (const operation of reconcileOperations) {
+        const target = state.nodes.get(operation.nodeId) as Node;
+        const context = containerContext(target);
+        const ownerDocument = target.ownerDocument;
+        if (!ownerDocument) return false;
+        const nodes = new Map<number, Node>();
+        const textMetadata = new Map<
+          number,
+          Extract<HtmlMirrorNode, { kind: 'text' }>
+        >();
+        const controlMetadata = new Map<number, HtmlMirrorControlText>();
+        const ownedAdoptedStyles = new Set<HTMLStyleElement>();
+        const retainedChildren = new Set<Node>();
+        const desiredChildren: Node[] = [];
+        let insertedNodeCount = 0;
+        for (const entry of operation.children) {
+          if (entry.kind === 'retain') {
+            const retainedSource = state.nodes.get(entry.nodeId);
+            if (!retainedSource) return false;
+            const retained = presentationNodeForMirrorNode(retainedSource);
+            retainedChildren.add(retained);
+            desiredChildren.push(retained);
+            continue;
+          }
+          if (!validGraphForContext(
+            entry.node,
+            context,
+            state.fidelityPolicy,
+          )) return false;
+          const built = buildNode(
+            ownerDocument,
+            entry.node,
+            nodes,
+            textMetadata,
+            controlMetadata,
+            ownedAdoptedStyles,
+          );
+          if (!built) return false;
+          insertedNodeCount += htmlMirrorGraphNodeCount(entry.node);
+          desiredChildren.push(built);
+        }
+        reconcilePlans.set(operation, {
+          target,
+          oldChildren: oldChildren.get(operation.nodeId) ?? [],
+          desiredChildren: Object.freeze(desiredChildren),
+          retainedChildren,
+          stableRetainedChildren: stableRetainedChildSet(
+            oldChildren.get(operation.nodeId) ?? [],
+            desiredChildren,
+            retainedChildren,
+          ),
+          nodes,
+          textMetadata,
+          controlMetadata,
+          ownedAdoptedStyles,
+          insertedNodeCount,
+        });
+      }
+    } catch {
+      return false;
+    }
+    previous ??= new Map(state.records);
+    const rollback = capturePatchRollback(state, targetOperations, rollbacks[0]);
+    rollbacks.push(rollback);
+    // Counted only for a patch that changes a list.
+    let knownBeforeFrame: Set<Node> | undefined;
+    const knownBefore = (): Set<Node> =>
+      (knownBeforeFrame ??= new Set(rollback.nodes.values()));
+    for (const plan of childrenPlans.values()) {
+      for (const child of plan.oldChildren) {
+        removedNodeCount += domMirrorNodeCount(child, knownBefore());
+      }
+    }
+    for (const plan of reconcilePlans.values()) {
+      for (const child of plan.oldChildren) {
+        if (plan.retainedChildren.has(child)) {
+          retainedNodeCount += domMirrorNodeCount(child, knownBefore());
+        } else {
+          removedNodeCount += domMirrorNodeCount(child, knownBefore());
+        }
+      }
+    }
     for (const operation of operations) {
       if (operation.kind === 'dimensions') {
         state.dimensions = {
@@ -3564,8 +3735,29 @@ function applyPatchBatch(
       }
       if (operation.kind === 'attributes') {
         const previousControl = state.controlMetadata.get(operation.nodeId);
-        setAttributes(target as Element, operation.attributes);
-        applyElementHints(target as Element, operation);
+        let element = target as Element;
+        if (switchesReplicaLinkOff(element, operation.attributes)) {
+          const replacement = createMirrorElement(
+            element.ownerDocument,
+            operation.namespace,
+            operation.tagName,
+          );
+          setAttributes(
+            replacement,
+            operation.attributes,
+            operation.resolvedStyleSheetText,
+          );
+          element.replaceWith(replacement);
+          setCurrentNode(operation.nodeId, replacement);
+          element = replacement;
+        } else {
+          setAttributes(
+            element,
+            operation.attributes,
+            operation.resolvedStyleSheetText,
+          );
+        }
+        applyElementHints(element, operation);
         state.controlMetadata.delete(operation.nodeId);
         if (operation.controlText) {
           state.controlMetadata.set(operation.nodeId, operation.controlText);
@@ -3644,6 +3836,30 @@ function applyPatchBatch(
         if (entry.kind === 'graph') collectTranslatableIds(entry.node, forceUpserts);
       }
     }
+    // A `<style>` sent again holds its sheet's text, as one built from a
+    // whole read does (D143). Written last: whatever the batch did to the
+    // element's text nodes, the sheet ends as the page's.
+    for (const [nodeId, held] of keptSheetTexts) {
+      if (attributeOperations.has(nodeId)) continue;
+      applyResolvedStyleSheetText(state.nodes.get(nodeId) as Element, held);
+    }
+    for (const [nodeId, operation] of attributeOperations) {
+      applyResolvedStyleSheetText(
+        state.nodes.get(nodeId) as Element,
+        appendedSheetTexts.get(nodeId) ?? operation.resolvedStyleSheetText,
+      );
+    }
+    return true;
+  };
+
+  try {
+    for (const operations of parts) {
+      // Which nodes of the mirror are drawn is read afresh for each patch;
+      // the index of ids is kept in step as patches are applied.
+      indexedPresentationNodes = undefined;
+      if (!applyPart(operations)) return undo();
+    }
+    if (!previous) return undefined;
     if (!retainedReplicaStateFitsBudget(state)) {
       throw new Error('Replica retained-state budget exceeded.');
     }
@@ -3682,8 +3898,7 @@ function applyPatchBatch(
       removedNodeCount,
     });
   } catch {
-    restorePatchRollback(state, rollback);
-    return undefined;
+    return undo();
   }
 }
 
@@ -3715,12 +3930,19 @@ interface PatchRollbackSnapshot {
   readonly canvasMarker: string | null;
 }
 
+/**
+ * What a patch is about to change, to put back if it fails. `first`: the
+ * snapshot of the frame's first patch, when this is a later one. What the
+ * mirror keeps by id is put back as the frame found it, so it is copied
+ * once a frame.
+ */
 function capturePatchRollback(
   state: HtmlMirrorDomState,
   targets: readonly {
     readonly operation: Exclude<HtmlMirrorPatchOperation, { kind: 'dimensions' }>;
     readonly target: Node;
   }[],
+  first?: PatchRollbackSnapshot,
 ): PatchRollbackSnapshot {
   const childLists = new Map<Node, readonly Node[]>();
   const attributes = new Map<Element, readonly (readonly [string, string])[]>();
@@ -3751,6 +3973,27 @@ function capturePatchRollback(
           ([name, value]) => Object.freeze([name, value] as const),
         )),
       );
+      // A link that is switched off is replaced by a new element: its
+      // parent's list puts the old one back.
+      const parent = element.parentNode;
+      if (
+        parent && !childLists.has(parent) &&
+        switchesReplicaLinkOff(element, operation.attributes)
+      ) childLists.set(parent, Object.freeze([...parent.childNodes]));
+      if (
+        operation.resolvedStyleSheetText !== undefined &&
+        element.localName.toLowerCase() === 'style'
+      ) {
+        // The sheet's text is written into the element's text nodes.
+        if (!childLists.has(element)) {
+          childLists.set(element, Object.freeze([...element.childNodes]));
+        }
+        for (const child of element.childNodes) {
+          if (child.nodeType === Node.TEXT_NODE) {
+            textValues.set(child, child.nodeValue);
+          }
+        }
+      }
       if (isNativeReplicaTextControl(element)) {
         controlValues.set(element, Object.freeze({
           value: element.value,
@@ -3780,13 +4023,14 @@ function capturePatchRollback(
     }
   }
   return {
-    dimensions: state.dimensions,
-    nodes: new Map(state.nodes),
-    textMetadata: new Map(state.textMetadata),
-    controlMetadata: new Map(state.controlMetadata),
-    records: new Map(state.records),
-    revisions: new Map(state.revisions),
-    ownedAdoptedStyles: new Set(state.ownedAdoptedStyles),
+    dimensions: first?.dimensions ?? state.dimensions,
+    nodes: first?.nodes ?? new Map(state.nodes),
+    textMetadata: first?.textMetadata ?? new Map(state.textMetadata),
+    controlMetadata: first?.controlMetadata ?? new Map(state.controlMetadata),
+    records: first?.records ?? new Map(state.records),
+    revisions: first?.revisions ?? new Map(state.revisions),
+    ownedAdoptedStyles: first?.ownedAdoptedStyles ??
+      new Set(state.ownedAdoptedStyles),
     childLists,
     attributes,
     textValues,
@@ -4411,13 +4655,6 @@ function collectGraphTextState(
   for (const child of node.shadowRoot?.children ?? []) {
     collectGraphTextState(child, text, controls);
   }
-}
-
-function containsDocumentElement(node: HtmlMirrorNode): boolean {
-  return node.kind === 'element' &&
-    (node.tagName === 'html' || node.tagName === 'head' || node.tagName === 'body' ||
-      node.children.some(containsDocumentElement) ||
-      Boolean(node.shadowRoot?.children.some(containsDocumentElement)));
 }
 
 function checkpointChanges(

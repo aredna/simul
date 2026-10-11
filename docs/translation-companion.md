@@ -639,7 +639,10 @@ within rule, byte, and depth limits. If Chrome does not expose an import's
 CSSOM, a normalized passive HTTP(S) `@import` may remain in Passive Fidelity and
 may request again. Ordinary `insertRule`, `deleteRule`, mutable declaration,
 disabled-state, media, or ordering changes are detected by a bounded signature
-pass and trigger last-good checkpoint recovery rather than prototype patching.
+pass rather than prototype patching: the `<style>` or `<link>` element of each
+changed sheet is read again and sent as a patch, and last-good checkpoint
+recovery remains for a sheet with no element the replica holds, for adopted
+sheets, and for a sheet change that masks text the replica holds.
 
 Passive HTML retains normalized HTTP(S) anchor identity for selectors such as
 `a[href]`, while pointer events and navigation remain disabled. It preserves

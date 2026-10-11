@@ -211,12 +211,80 @@ font, so the replica resets body font to inheritance, and any source rule for
 
 A bounded maintenance signature detects ordinary stylesheet `insertRule`,
 `deleteRule`, declaration, disabled-state, media, and order changes that do not
-emit DOM mutations. A detected change requests a fresh staged checkpoint while
-the last good replica remains visible. The signature reads at most 1 MiB of rule
-text (25,000 rules) per half-second tick on the page's main thread. A sheet of
-more than 4,000 rules or 256 KiB of text is watched by its shape instead: its
-rule count and its first and last rules, which is what a script inserting or
-deleting rules changes (D88). Before D88 one such sheet took the whole budget,
+emit DOM mutations. The signature keeps each sheet apart, so a detected change
+names its sheets: the `<style>` or `<link>` element that owns each one is read
+again, as a checkpoint reads it, and sent as a patch when that differs from
+what the replica was last sent (D143). What the page shows is compared afresh
+with it, as after a resize, since a rule can show what was hidden. A fresh
+staged checkpoint is requested only when a changed sheet has no element the
+replica holds, and for adopted sheets; before D143 every detected change
+requested one. A `<style>` element whose own text changes is sent again in the
+same frame with its sheet's text (its text nodes, which a checkpoint sends
+empty, are not sent), so the poll that later sees that sheet differ finds
+nothing new to send; before D143 the text travelled as a patch and then the
+whole page as a checkpoint. A `<link>` whose sheet has loaded is sent again
+at once, with the sheet's rules: they are not there when the element is
+added. So a style element or a linked sheet that a page adds later (a part
+loaded when a menu opens, a framework that preloads a link's page) is a
+patch or two and no checkpoint; a sheet of another origin that Chrome does
+not let the page read stays a link the replica loads itself. A `<style>`
+whose sheet a script disabled is sent with no rules: the element has no
+attribute that says so, and the replica makes its sheet anew from the text
+it is given. Text appended to a `<style>` (rules written one text node at a
+time) is sent as what was added, and the replica adds it to the text it
+holds; any other change sends the sheet's whole text. A patch of a
+`<style>`'s own list of children (an element or a comment put into it)
+leaves the sheet's text the replica holds in place: the text nodes of such
+a patch hold the page's own text, which lacks a rule put in through the
+sheet, and the sheet is sent again only when it changed. On a `<link>` the
+replica writes only the attributes a patch changes: taking `rel` and `href`
+off and putting them back would fetch the sheet again. A link whose rules
+came with it points at those rules and is never given the page's address,
+so the replica asks the network for nothing; a link the replica keeps by
+its address (a sheet of another origin) is asked for once, when it is added
+or switched on. A link that a patch switches off is replaced in the replica
+by a new `<link>` element made switched off: the replica asks for a sheet a
+little later than the page did, and Chrome applies a sheet that arrives
+after its link was switched off, whatever is written on the link then, so a
+theme that a page loads from another site and switches off in its `load`
+handler stayed applied in the replica for good.
+
+What the page reader takes from an element's style is taken again when a
+style sheet changes, as the checkpoint that used to follow took it (D143).
+What is shown and hidden is compared by the index of what is painted, and
+the page's size and canvas colour are read with the dimensions. Three
+answers have no change of `display` or `visibility` to announce them and
+are read for every element the replica holds: text the page masks
+(`-webkit-text-security`), where the replica holds the text and takes the
+shell that stands for it only in a checkpoint, so one is requested, once
+for that element; what an element declared hidden (`hidden`,
+`aria-hidden="true"`) holds, which is read while its box is really painted
+and withheld when a sheet fades the box out, clips it away or leaves it no
+size, so the element is read again with what it holds; and how a dropdown
+is drawn, which comes from the dropdown's own style, so the dropdown is read
+again. On a page of 20,000 elements this walk takes about 15 ms at a sheet
+change, beside the 105 to 140 ms of the comparison of what is painted.
+
+One frame of the page can take up to three patches, which travel in one
+message and are applied one after the other, all or none (D143). A parent's
+changed list of children is sent as "these stay, these are new" only when
+nothing else in the same patch changed inside that parent, so three kinds
+of change go in a patch of their own: what is added to `<html>` or taken
+from it, first; then the lists that changed; then the elements whose sheet
+is sent again and what changed inside a child that stays of a list that
+changed too. So a page that writes a style sheet while it adds elements, or
+adds a view to `<body>` while a sheet hides the old one, has no list sent
+whole. The panel applies the patches of a frame in one step: applied in
+tasks of their own, it drew between them a dialog without its styles, or
+the old view beside the new one, for a moment the page never showed. What
+changes inside an element that was added in that frame is read with the
+element, so adding a `<style>` empty and then filling it, the usual way,
+sends that one element and not the whole `<head>`. A dropdown's list is
+still read afresh when one of its groups changes. The signature reads at most
+1 MiB of rule text (25,000 rules) per half-second tick on the page's main
+thread. A sheet of more than 4,000 rules or 256 KiB of text is watched by its
+shape instead: its rule count and its first and last rules, which is what a
+script inserting or deleting rules changes (D88). Before D88 one such sheet took the whole budget,
 so a page carrying one (Wise's 2.4 M character design system, freee and
 YouTube at about 3 MB) had no polling at all, and rules its scripts added later
 never reached the replica: Wise's signed-in side navigation lost its fixed
@@ -225,7 +293,7 @@ are handled the same way (D95): once a pass that started with the whole
 budget reaches a sheet that no longer fits, that sheet is watched by its shape
 from then on, so the page keeps its polling. An in-place edit inside a sheet
 watched by its shape that keeps its count and ends still waits for the next
-checkpoint. Simul does not patch website prototypes.
+time its element is read. Simul does not patch website prototypes.
 
 ### Inert HTML semantics
 
@@ -879,13 +947,28 @@ the same roots. A part that only indexes the page may still hold an older
 - **Beside `<body>`, and a root on it.** Every child of `<html>` is built,
   in the page's order around the mirror's own `<head>` and `<body>`: a
   dialog or an overlay that a page, a consent manager or another extension
-  appends beside `<body>`, and a style sheet put there (D135). A second
-  `<head>` or `<body>` is left out. A shadow root on `<body>` itself is
-  built like any other; on such a page an open dropdown's list is hung
-  beside the body, since a body with a root draws only what it slots.
-  Before D135 neither was built: a page whose content hangs in a root on
-  `<body>` gave a blank mirror, and every change at or under a child of
-  `<html>` rebuilt the whole mirror and still showed nothing there.
+  appends beside `<body>`, and a style sheet put there (D135). A shadow root
+  on `<body>` itself is built like any other; on such a page an open
+  dropdown's list is hung beside the body, since a body with a root draws
+  only what it slots. Before D135 neither was built: a page whose content
+  hangs in a root on `<body>` gave a blank mirror, and every change at or
+  under a child of `<html>` rebuilt the whole mirror and still showed
+  nothing there. What is added to `<html>` or taken from it is a patch also
+  when something else changes in the same frame (the scroll lock a dialog
+  puts on `<body>`): the change to `<html>`'s own list is the first patch of
+  the frame's message and the rest follows in it (D143). The whole list of
+  `<html>`'s children is the page and is never sent as a patch: an element
+  moved between `<html>` and `<body>`, `<html>` itself hidden or shown, and
+  a page that gives `<html>` another `<head>` or `<body>` (a Turbo-style
+  visit) are read afresh.
+- **An `<html>`, `<head>` or `<body>` element that is not the document's
+  own.** One a script makes inside a block, a parsed document hung in a
+  shadow root (a mail reader's message), a second `<body>` under `<html>`:
+  the page draws each as an ordinary element, and the mirror builds each as
+  one (D143). The mirror's own `<head>` and `<body>` are the page's first of
+  each under `<html>`. Before D143 the mirror refused such an element
+  anywhere: a page that held one had no mirror at all, and one that made one
+  later kept the last mirror and stopped following the page.
 - **Slotted children under a hidden box.** A child of a shadow host is
   drawn in the slot its host's root assigns it to, inside whatever that root
   puts around the slot. The hidden-region rule follows it there (D135): a

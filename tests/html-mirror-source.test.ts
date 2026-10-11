@@ -15,6 +15,7 @@ import {
   type HtmlMirrorScrollState,
   type HtmlMirrorScrollUpdate,
 } from '../lib/replica/html-mirror-protocol';
+import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
 import {
   HtmlMirrorSourceSession,
   WeakNodeIdRegistry,
@@ -1941,7 +1942,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(retainedTraversalCount).toBe(0);
   });
 
-  it('falls back to full children when a structural change covers dirty descendants', () => {
+  it('sends what changed inside a child that stays after the list, in the same message (D143)', () => {
     const fixture = sourceFixture(
       '<main id="target"><span id="label">before</span></main>',
     );
@@ -1957,13 +1958,130 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(labelText));
     fixture.flushFrame();
 
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'children' }),
+    // The list as what stays and what is new, then the text: the whole list
+    // was sent for this, which for `<body>` is the page.
+    expect(fixture.patches()).toHaveLength(1);
+    const message = fixture.patches()[0]!;
+    expect(message.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        nodeId: fixture.registry.peekId(target),
+      }),
+    ]);
+    expect(JSON.stringify(message.operations)).toContain('new sibling');
+    expect(JSON.stringify(message.operations)).not.toContain('after');
+    expect(message.more).toHaveLength(1);
+    expect(message.more![0]!.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        nodeId: fixture.registry.peekId(labelText),
+        node: expect.objectContaining({ text: 'after' }),
+      }),
+    ]);
+    expect(message.representability.coveredDirtyBranchFallbackCount).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The same with an attribute of an element inside a child that stays.
+    const label = fixture.document.querySelector('#label')!;
+    const more = fixture.document.createElement('aside');
+    target.append(more);
+    label.setAttribute('class', 'changed');
+    fixture.mutateAll([childListRecord(target, [more]), attributeRecord(label, 'class')]);
+    fixture.flushFrame();
+    const second = fixture.patches()[1]!;
+    expect(second.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        nodeId: fixture.registry.peekId(target),
+      }),
+    ]);
+    expect(second.more?.[0]?.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        nodeId: fixture.registry.peekId(label),
+        attributes: expect.arrayContaining([['id', 'label'], ['class', 'changed']]),
+      }),
+    ]);
+    expect(second.representability.coveredDirtyBranchFallbackCount).toBe(0);
+  });
+
+  it('still reads a list again whole when its own later patch has a list inside a child that stays', () => {
+    const fixture = sourceFixture(
+      '<main id="outer"><section id="middle"><div id="inner"><span>kept</span></div></section></main>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const [outer, middle, inner] = ['#outer', '#middle', '#inner'].map(
+      (selector) => fixture.document.querySelector(selector)!,
+    );
+    const records = [outer, middle, inner].map((parent, index) => {
+      const added = fixture.document.createElement('p');
+      added.textContent = `added ${index}`;
+      parent!.append(added);
+      return childListRecord(parent!, [added]);
+    });
+    fixture.mutateAll(records);
+    fixture.flushFrame();
+
+    // The outermost list as what stays and what is new; then the next one
+    // whole, with the third inside it: a frame holds three patches.
+    const message = fixture.patches()[0]!;
+    expect(message.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        nodeId: fixture.registry.peekId(outer!),
+      }),
+    ]);
+    expect(message.more).toHaveLength(1);
+    expect(message.more![0]!.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'children',
+        nodeId: fixture.registry.peekId(middle!),
+      }),
+    ]);
+    expect(message.more![0]!.representability.coveredDirtyBranchFallbackCount).toBe(1);
+    const sent = JSON.stringify(message);
+    for (const text of ['added 0', 'added 1', 'added 2']) expect(sent).toContain(text);
+  });
+
+  it('reads a dropdown\'s list afresh when one of its groups changes, beside a list above it that changed (D132)', () => {
+    const fixture = sourceFixture(
+      '<form id="form"><select id="choice"><optgroup id="group" label="g"><option>one</option></optgroup></select></form>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const form = fixture.document.querySelector('#form')!;
+    const select = fixture.document.querySelector('#choice')!;
+    const group = fixture.document.querySelector('#group')!;
+    const option = fixture.document.createElement('option');
+    option.textContent = 'two';
+    group.append(option);
+    const note = fixture.document.createElement('p');
+    note.textContent = 'a note';
+    form.append(note);
+    fixture.mutateAll([childListRecord(group, [option]), childListRecord(form, [note])]);
+    fixture.flushFrame();
+
+    // The form's list first; the dropdown and its group go together after
+    // it, so the dropdown's own list is sent whole and no patch names the
+    // group, which the panel would refuse.
+    const message = fixture.patches()[0]!;
+    const all = [message, ...(message.more ?? [])].flatMap(({ operations }) => operations);
+    expect(all.some((operation) =>
+      'nodeId' in operation && operation.nodeId === fixture.registry.peekId(group))).toBe(false);
+    expect(all).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        nodeId: fixture.registry.peekId(form),
+      }),
+      expect.objectContaining({
+        kind: 'children',
+        nodeId: fixture.registry.peekId(select),
+      }),
     ]));
-    expect(
-      fixture.patches().at(-1)?.representability.coveredDirtyBranchFallbackCount,
-    ).toBe(1);
-    expect(JSON.stringify(fixture.patches().at(-1))).toContain('after');
+    expect(fixture.port.posts.some(
+      (posted) => (posted as { code?: string }).code !== undefined,
+    )).toBe(false);
   });
 
   it('classifies cross-parent churn without retaining the moved identity', () => {
@@ -2046,7 +2164,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(fixture.patches().at(-1))).toContain('updated shadow');
   });
 
-  it('uses full replacement when a light-DOM change covers dirty open-shadow content', () => {
+  it('sends what changed in the root of a host that stays after the list the host is in', () => {
     const fixture = sourceFixture('<main id="page"><x-card id="card"></x-card></main>');
     const page = fixture.document.querySelector('#page')!;
     const card = fixture.document.querySelector('#card')!;
@@ -2065,14 +2183,22 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(shadowText));
     fixture.flushFrame();
 
+    // The host stays in the list, with its root; the text in the root
+    // follows in the same message (D143). The whole list was sent.
     const patch = fixture.patches().at(-1)!;
-    expect(patch.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'children' }),
-    ]));
-    expect(patch.operations.some(({ kind }) => kind === 'reconcile-children')).toBe(
-      false,
-    );
-    expect(JSON.stringify(patch)).toContain('after shadow');
+    expect(patch.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        nodeId: fixture.registry.peekId(page),
+      }),
+    ]);
+    expect(JSON.stringify(patch.operations)).not.toContain('after shadow');
+    expect(patch.more?.[0]?.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        node: expect.objectContaining({ text: 'after shadow' }),
+      }),
+    ]);
   });
 
   it('reads a host\'s root again, beside the host, when the host\'s children and its own root change together (D135)', () => {
@@ -3351,15 +3477,22 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutateAll(records);
     fixture.flushFrame();
 
-    // Nested dirty targets collapse to one full-children patch at the
-    // outermost target, exactly as before the walk was de-duplicated.
+    // The outermost list is sent as what stays and what is new, and the
+    // nested targets inside its child that stays collapse to one
+    // full-children patch at the outermost of them (D143).
     const patch = fixture.patches().at(-1)!;
     expect(patch.operations).toEqual([
       expect.objectContaining({
-        kind: 'children',
+        kind: 'reconcile-children',
         nodeId: fixture.registry.peekId(levels[0]!),
       }),
     ]);
+    expect(patch.more?.map(({ operations }) => operations)).toEqual([[
+      expect.objectContaining({
+        kind: 'children',
+        nodeId: fixture.registry.peekId(levels[1]!),
+      }),
+    ]]);
     const patchJson = JSON.stringify(patch);
     for (let index = 0; index < depth; index += 1) {
       expect(patchJson).toContain(`leaf ${index}`);
@@ -6751,6 +6884,1337 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
         expect(sent(fixture)).toContain('slotted paragraph');
       }
     });
+  });
+});
+
+describe('style sheets that change (D143)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+    });
+  });
+
+  type Fixture = ReturnType<typeof sourceFixture>;
+  /** The sheet of a style or link element, as Chrome has it; linkedom has none. */
+  function ownedSheet(owner: Element, ...rules: string[]) {
+    const list = rules.map((cssText) => ({ cssText }));
+    const sheet = {
+      disabled: false,
+      ownerNode: owner,
+      cssRules: Object.assign(list, {
+        item: (index: number) => list[index] ?? null,
+      }),
+    };
+    Object.defineProperty(owner, 'sheet', { configurable: true, value: sheet });
+    return sheet;
+  }
+  function setSheets(fixture: Fixture, ...sheets: object[]): void {
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(...sheets as CSSStyleSheet[]),
+    });
+  }
+  const gaps = (fixture: Fixture): number => fixture.port.posts.filter(
+    (message) => (message as { code?: string }).code === 'stream_gap',
+  ).length;
+  /** Operations of a patch, without its size report. */
+  const operations = (patch: HtmlMirrorPatchBatch | undefined) =>
+    (patch?.operations ?? []).filter(({ kind }) => kind !== 'dimensions');
+  /** The patches one message holds, in the order the mirror applies them. */
+  const parts = (message: HtmlMirrorPatchBatch | undefined) =>
+    message ? [message, ...(message.more ?? [])] : [];
+  /** Four looks of the style poll, and whatever they asked to be read. */
+  function poll(fixture: Fixture): void {
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    while (fixture.frames.length > 0) fixture.flushFrame();
+  }
+  function styleFixture(markup: string, policy: 'passive' | 'conservative' = 'passive') {
+    const fixture = sourceFixture(markup);
+    const sheets = [...fixture.document.querySelectorAll('style')].map(
+      (style) => ownedSheet(style, ...(style.textContent ? [style.textContent] : [])),
+    );
+    setSheets(fixture, ...sheets);
+    fixture.start(policy);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    return { fixture, sheets };
+  }
+
+  it('sends a style element whose text changed with its sheet\'s text, once', () => {
+    const { fixture, sheets: [sheet] } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style>' +
+      '<main class="page">styled content</main>',
+    );
+    const style = fixture.document.querySelector('#dynamic')!;
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain(
+      '"resolvedStyleSheetText":".page{display:grid}"',
+    );
+
+    // A text node's data changed.
+    const text = style.firstChild as Text;
+    text.nodeValue = '.page{display:flex}';
+    sheet!.cssRules[0]!.cssText = '.page{display:flex}';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        tagName: 'style',
+        resolvedStyleSheetText: '.page{display:flex}',
+      }),
+    ]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The text replaced by another node, and one appended.
+    const next = fixture.document.createTextNode('.page{display:block}');
+    const more = fixture.document.createTextNode('.late{color:red}');
+    style.replaceChildren(next, more);
+    sheet!.cssRules.splice(0, 1, { cssText: '.page{display:block}' }, { cssText: '.late{color:red}' });
+    fixture.mutate(childListRecord(style, [next, more], [text]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(2);
+    expect(operations(fixture.patches()[1])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        tagName: 'style',
+        resolvedStyleSheetText: '.page{display:block}\n.late{color:red}',
+      }),
+    ]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // The style poll then sees the sheet differ from the one it knew: the
+    // element is read again, nothing new is found, nothing is sent, and the
+    // page is not read afresh.
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(2);
+    expect(fixture.checkpoints()).toHaveLength(1);
+  });
+
+  it('sends the text nodes of a style element as before when the mirror holds it by them', () => {
+    // The "conservative" policy sends no sheet text: the element's own text
+    // is all the mirror has.
+    const { fixture } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style><main class="page">x</main>',
+      'conservative',
+    );
+    const text = fixture.document.querySelector('#dynamic')!.firstChild as Text;
+    text.nodeValue = '.page{display:flex}';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        node: expect.objectContaining({ text: '.page{display:flex}' }),
+      }),
+    ]);
+  });
+
+  it('still reads the children of a style element when an element is put into it', () => {
+    const { fixture, sheets: [sheet] } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style><main class="page">x</main>',
+    );
+    const style = fixture.document.querySelector('#dynamic')!;
+    const inner = fixture.document.createElement('b');
+    const more = fixture.document.createTextNode('.late{color:red}');
+    style.append(inner, more);
+    sheet!.cssRules.push({ cssText: '.late{color:red}' });
+    fixture.mutate(childListRecord(style, [inner, more]));
+    fixture.flushFrame();
+    // Its list of children, and then its sheet: two patches in one message.
+    expect(fixture.patches()).toHaveLength(1);
+    const [listPatch, sheetPatch] = parts(fixture.patches()[0]);
+    const list = operations(listPatch);
+    expect(list.map(({ kind }) => kind)).toEqual(['reconcile-children']);
+    expect(JSON.stringify(list)).toContain('"tagName":"b"');
+    // The sheet grew at its end: what was added is sent.
+    expect(operations(sheetPatch)).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '\n.late{color:red}',
+        resolvedStyleSheetTextFrom: '.page{display:grid}'.length,
+      }),
+    ]);
+  });
+
+  it('sends a changed sheet apart from the lists that change in the same frame', () => {
+    // A part of a page loaded late: rows are added, a style element is
+    // added to the head, and the text of one that was there grows. Each
+    // list is sent as what stays and what is new, and the sheet after them.
+    const { fixture, sheets: [sheet] } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style>' +
+      '<main class="page"><p>first row</p></main>',
+    );
+    const head = fixture.document.querySelector('head')!;
+    const main = fixture.document.querySelector('main')!;
+    const style = fixture.document.querySelector('#dynamic')!;
+    head.append(style);
+    fixture.mutateAll([childListRecord(fixture.document.body, [], [style]), childListRecord(head, [style])]);
+    fixture.flushFrame();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    const before = fixture.patches().length;
+
+    const more = fixture.document.createTextNode('.late{color:red}');
+    style.append(more);
+    sheet!.cssRules.push({ cssText: '.late{color:red}' });
+    const added = fixture.document.createElement('style');
+    added.textContent = '.other{color:blue}';
+    ownedSheet(added, '.other{color:blue}');
+    head.append(added);
+    const row = fixture.document.createElement('p');
+    row.textContent = 'second row';
+    main.append(row);
+    fixture.mutateAll([
+      childListRecord(style, [more]),
+      childListRecord(head, [added]),
+      childListRecord(main, [row]),
+    ]);
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    // One message for the frame: the page changed in one step, and the
+    // mirror is to change in one step.
+    expect(fixture.patches().slice(before)).toHaveLength(1);
+    const sent = parts(fixture.patches()[before]);
+    expect(sent).toHaveLength(2);
+    expect(operations(sent[0]).map(({ kind }) => kind)).toEqual([
+      'reconcile-children', 'reconcile-children',
+    ]);
+    expect(JSON.stringify(sent[0]!.operations)).toContain('.other{color:blue}');
+    expect(JSON.stringify(sent[0]!.operations)).toContain('second row');
+    expect(JSON.stringify(sent[0]!.operations)).not.toContain('first row');
+    expect(JSON.stringify(sent)).not.toContain('.page{display:grid}');
+    expect(operations(sent[1])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        tagName: 'style',
+        resolvedStyleSheetText: '\n.late{color:red}',
+        resolvedStyleSheetTextFrom: '.page{display:grid}'.length,
+      }),
+    ]);
+    // Both carry the message's sequence, and the next message the next.
+    expect(sent.map(({ lastSequence }) => lastSequence)).toEqual([2, 2]);
+    expect(sent.map(({ identity: { sequence } }) => sequence)).toEqual([2, 2]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+    main.setAttribute('class', 'page wide');
+    fixture.mutate(attributeRecord(main, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()[before + 1]!.lastSequence).toBe(3);
+    expect(gaps(fixture)).toBe(0);
+  });
+
+  it('sends a changed sheet with what else changed when no list does, and a frame of three patches as one message', () => {
+    const { fixture, sheets: [sheet] } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style>' +
+      '<main class="page"><p>first row</p></main><aside id="side"></aside>',
+    );
+    const style = fixture.document.querySelector('#dynamic')!;
+    const main = fixture.document.querySelector('main')!;
+    const side = fixture.document.querySelector('#side')!;
+    const html = fixture.document.documentElement;
+    const text = style.firstChild as Text;
+    const write = (value: string): MutationRecord => {
+      text.nodeValue = value;
+      sheet!.cssRules[0]!.cssText = value;
+      return characterDataRecord(text);
+    };
+
+    // With an attribute elsewhere: one patch.
+    main.setAttribute('class', 'page wide');
+    fixture.mutateAll([write('.page{display:flex}'), attributeRecord(main, 'class')]);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    expect(operations(fixture.patches()[0]).map(
+      (operation) => `${operation.kind}:${'tagName' in operation ? operation.tagName : ''}`,
+    ).sort()).toEqual(['attributes:main', 'attributes:style']);
+
+    // Two more that the panel has not answered, then a frame that changes
+    // html's list, another list and the sheet: three patches in one
+    // message, the fourth the panel has to take in. None waits a frame.
+    for (const value of ['page', 'page wide']) {
+      main.setAttribute('class', value);
+      fixture.mutate(attributeRecord(main, 'class'));
+      fixture.flushFrame();
+    }
+    const dialog = fixture.document.createElement('div');
+    html.append(dialog);
+    const row = fixture.document.createElement('p');
+    side.append(row);
+    fixture.mutateAll([
+      childListRecord(html, [dialog]),
+      childListRecord(side, [row]),
+      write('.page{display:block}'),
+    ]);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(4);
+    const frame = parts(fixture.patches()[3]);
+    expect(frame.map((patch) => operations(patch).map(({ kind }) => kind))).toEqual([
+      ['reconcile-children'], ['reconcile-children'], ['attributes'],
+    ]);
+    expect(frame.map(({ lastSequence }) => lastSequence)).toEqual([4, 4, 4]);
+    expect(operations(frame[2])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        tagName: 'style',
+        resolvedStyleSheetText: '.page{display:block}',
+      }),
+    ]);
+    expect(fixture.frames).toHaveLength(0);
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
+  });
+
+  it('sends nothing of a frame whose later patch asks for a whole read', () => {
+    const { fixture } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style><main class="page">x</main>',
+    );
+    const html = fixture.document.documentElement;
+    const style = fixture.document.querySelector('#dynamic')!;
+    // A dialog beside body: a patch of html's list. In the same frame the
+    // style's text changes and its sheet can no longer be read, which only
+    // a whole read can tell. The first patch is not sent ahead of it.
+    const dialog = fixture.document.createElement('div');
+    dialog.textContent = 'a dialog beside body';
+    html.append(dialog);
+    Object.defineProperty(style, 'sheet', { configurable: true, value: null });
+    const text = style.firstChild as Text;
+    text.nodeValue = '.page{display:flex}';
+    fixture.mutateAll([childListRecord(html, [dialog]), characterDataRecord(text)]);
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(1);
+    expect(fixture.patches()).toHaveLength(0);
+  });
+
+  it('sends a rule a script adds to a sheet as a patch of the sheet\'s element', () => {
+    const { fixture, sheets: [first, second] } = styleFixture(
+      '<style id="first">.a{color:red}</style><style id="second">.b{color:red}</style>' +
+      '<main class="page">styled content</main>',
+    );
+    let secondReads = 0;
+    const secondRules = second!.cssRules;
+    Object.defineProperty(second, 'cssRules', {
+      get: () => {
+        secondReads += 1;
+        return secondRules;
+      },
+    });
+    const scrollsBefore = fixture.scrolls().length;
+
+    first!.cssRules.push({ cssText: '.a{color:green}' });
+    fixture.runTimer();
+    fixture.runTimer();
+    expect(fixture.frames).toHaveLength(0);
+    fixture.runTimer();
+    // Three looks alike: the element of the sheet that changed is read
+    // again, and what is shown is looked at afresh, as after a resize.
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.scrolls().length).toBe(scrollsBefore + 1);
+    secondReads = 0;
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(secondReads).toBe(0);
+    expect(fixture.patches()).toHaveLength(1);
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        nodeId: fixture.registry.peekId(fixture.document.querySelector('#first')!),
+        resolvedStyleSheetText: '\n.a{color:green}',
+        resolvedStyleSheetTextFrom: '.a{color:red}'.length,
+      }),
+    ]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // And the next one, from where the poll now stands: the first sheet's
+    // element is not read again.
+    let firstReads = 0;
+    const firstRules = first!.cssRules;
+    Object.defineProperty(first, 'cssRules', {
+      get: () => {
+        firstReads += 1;
+        return firstRules;
+      },
+    });
+    second!.cssRules.push({ cssText: '.b{color:green}' });
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    firstReads = 0;
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(firstReads).toBe(0);
+    expect(gaps(fixture)).toBe(0);
+    expect(operations(fixture.patches()[1])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '\n.b{color:green}',
+        resolvedStyleSheetTextFrom: '.b{color:red}'.length,
+      }),
+    ]);
+    expect(fixture.checkpoints()).toHaveLength(1);
+  });
+
+  it('loses no rule a script adds to one sheet in the frame another\'s text changes', () => {
+    const { fixture, sheets: [first, second] } = styleFixture(
+      '<style id="first">.a{color:red}</style><style id="second">.b{color:red}</style>' +
+      '<main class="page">styled content</main>',
+    );
+    const text = fixture.document.querySelector('#first')!.firstChild as Text;
+    text.nodeValue = '.a{color:blue}';
+    first!.cssRules[0]!.cssText = '.a{color:blue}';
+    second!.cssRules.push({ cssText: '.b{color:green}' });
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({ resolvedStyleSheetText: '.a{color:blue}' }),
+    ]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(operations(fixture.patches()[1])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '\n.b{color:green}',
+        resolvedStyleSheetTextFrom: '.b{color:red}'.length,
+      }),
+    ]);
+  });
+
+  /**
+   * A page with one style element, and a computed style that a test
+   * changes as a sheet would: `styled` gives an element the properties a
+   * rule now sets on it.
+   */
+  function derivedFixture(
+    markup: string,
+    before?: (
+      document: Document,
+      styled: Map<Element, Record<string, string>>,
+    ) => void,
+  ) {
+    const fixture = sourceFixture(`<style id="dynamic">.page{color:red}</style>${markup}`);
+    const style = fixture.document.querySelector('#dynamic')!;
+    const sheet = ownedSheet(style, '.page{color:red}');
+    setSheets(fixture, sheet);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+    const painted = fixture.window.getComputedStyle.bind(fixture.window) as unknown as (
+      element: Element,
+    ) => Record<string, unknown> & { getPropertyValue(name: string): string };
+    const styled = new Map<Element, Record<string, string>>();
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const base = painted(element);
+        const own = styled.get(element);
+        return own
+          ? {
+              ...base,
+              ...own,
+              getPropertyValue: (name: string) => own[name] ?? base.getPropertyValue(name),
+            }
+          : base;
+      },
+    });
+    before?.(fixture.document, styled);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const text = style.firstChild as Text;
+    /** The style's text changes, as a script writes it. */
+    const write = (value: string): void => {
+      text.nodeValue = value;
+      sheet.cssRules[0]!.cssText = value;
+      fixture.mutate(characterDataRecord(text));
+      fixture.flushFrame();
+    };
+    return { fixture, style, sheet, styled, write };
+  }
+
+  it('reads the page afresh, once, when a sheet that changed masks text the mirror holds', () => {
+    const { fixture, sheet, styled, write } = derivedFixture(
+      '<main><p id="card">4111 1111 1111 1111</p><p id="other">shown words</p></main>',
+    );
+    const card = fixture.document.querySelector('#card')!;
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('4111 1111 1111 1111');
+
+    // A change that masks nothing is a patch of the sheet.
+    write('.page{color:blue}');
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(1);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // One that masks a box: the mirror holds the box's text, and takes the
+    // shell that stands for it only in a whole read.
+    styled.set(card, { '-webkit-text-security': 'disc' });
+    write('.page{color:blue} #card{-webkit-text-security:disc}');
+    expect(gaps(fixture)).toBe(1);
+    expect(fixture.patches()).toHaveLength(1);
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 1));
+    const whole = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(whole).not.toContain('4111 1111 1111 1111');
+    expect(whole).toContain('shown words');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The box is a shell now: the next change of the sheet is a patch
+    // again, also one a script makes through the sheet's own interface.
+    write('.page{color:green} #card{-webkit-text-security:disc}');
+    expect(gaps(fixture)).toBe(1);
+    expect(fixture.patches()).toHaveLength(2);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+    sheet.cssRules.push({ cssText: '.late{color:red}' });
+    poll(fixture);
+    expect(gaps(fixture)).toBe(1);
+    expect(fixture.patches()).toHaveLength(3);
+  });
+
+  it('reads nothing afresh for masked text while everything is shown for testing', () => {
+    // "Show everything (testing)" sends masked text too: no shell stands
+    // for it, so there is nothing a whole read would change, at this sheet
+    // change or at the next.
+    const { fixture, styled, write } = derivedFixture(
+      '<main><p id="card">4111 1111 1111 1111</p></main>',
+    );
+    // As the panel's start message sets it.
+    applySourcePrivacyFiltersOff(true);
+    onTestFinished(() => applySourcePrivacyFiltersOff(false));
+    styled.set(fixture.document.querySelector('#card')!, { '-webkit-text-security': 'disc' });
+    write('.page{color:blue} #card{-webkit-text-security:disc}');
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(1);
+  });
+
+  it('finds text a rule masks when a script adds the rule, or a linked sheet brings it', () => {
+    const { fixture, sheet, styled } = derivedFixture(
+      '<link id="late" rel="stylesheet" href="/late.css">' +
+      '<main><p id="card">4111 1111 1111 1111</p><p id="pin">9999</p></main>',
+    );
+    // A rule added through the sheet's own interface: the style poll sees
+    // the sheet change, and what is read from style is read again.
+    styled.set(fixture.document.querySelector('#card')!, { '-webkit-text-security': 'circle' });
+    sheet.cssRules.push({ cssText: '#card{-webkit-text-security:circle}' });
+    poll(fixture);
+    expect(gaps(fixture)).toBe(1);
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).not.toContain('4111 1111 1111 1111');
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).toContain('9999');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // A linked sheet that has loaded.
+    styled.set(fixture.document.querySelector('#pin')!, { '-webkit-text-security': 'square' });
+    fixture.document.querySelector('#late')!.dispatchEvent(
+      new fixture.window.Event('load', { bubbles: true }),
+    );
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(gaps(fixture)).toBe(2);
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).not.toContain('9999');
+  });
+
+  it('sends again an element whose look the mirror took from its style, when a sheet changes', () => {
+    const { fixture, styled, write } = derivedFixture(
+      '<main><select id="choice"><option>one</option></select>' +
+      '<span id="note" class="sr-only">for screen readers</span><p id="plain">plain</p></main>',
+    );
+    const select = fixture.document.querySelector('#choice')!;
+    const note = fixture.document.querySelector('#note')!;
+    const id = (node: Node): number => fixture.registry.peekId(node) as number;
+
+    // Nothing the mirror took from style changed: the sheet alone is sent.
+    write('.page{color:blue}');
+    expect(operations(fixture.patches()[0]).map(
+      (operation) => 'tagName' in operation && operation.tagName,
+    )).toEqual(['style']);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The sheet now clips the box of text for screen readers, and draws
+    // the dropdown in another colour.
+    styled.set(note, {
+      position: 'absolute', overflow: 'hidden', overflowX: 'hidden', overflowY: 'hidden',
+      clip: 'rect(0px, 0px, 0px, 0px)', clipPath: 'none', width: '1px', height: '1px',
+    });
+    styled.set(select, { color: 'rgb(0, 0, 200)' });
+    write('.page{color:blue} .sr-only{clip:rect(0,0,0,0)} select{color:rgb(0,0,200)}');
+    expect(gaps(fixture)).toBe(0);
+    const all = (message: HtmlMirrorPatchBatch | undefined) => parts(message).flatMap(operations);
+    const named = (sent: ReturnType<typeof all>): number[] => [...new Set(sent.map(
+      (operation) => ('nodeId' in operation ? operation.nodeId : 0),
+    ))].sort();
+    const sent = all(fixture.patches()[1]);
+    expect(named(sent)).toEqual(
+      [id(note), id(select), id(fixture.document.querySelector('#dynamic')!)].sort(),
+    );
+    expect(sent.find((operation) => operation.kind === 'attributes' && operation.nodeId === id(note)))
+      .toMatchObject({ kind: 'attributes', visuallyHidden: true });
+    expect(JSON.stringify(
+      sent.find((operation) => 'nodeId' in operation && operation.nodeId === id(select)),
+    )).toContain('rgb(0, 0, 200)');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // And no longer clips it: the mirror keeps a box it was told is hidden
+    // to the eye clipped by a style of its own, until it is told otherwise.
+    styled.delete(note);
+    write('.page{color:blue} select{color:rgb(0,0,200)}');
+    const again = all(fixture.patches()[2]);
+    expect(named(again)).toEqual(
+      [id(note), id(fixture.document.querySelector('#dynamic')!)].sort(),
+    );
+    const noteAgain = again.find(
+      (operation) => operation.kind === 'attributes' && operation.nodeId === id(note),
+    );
+    expect(noteAgain).toBeDefined();
+    expect(noteAgain).not.toHaveProperty('visuallyHidden');
+  });
+
+  it('reads again what a declared-hidden element holds when a sheet fades its box out or in', () => {
+    // `aria-hidden="true"` text is read while its box is really painted.
+    // A rule that fades the box out changes neither `display` nor
+    // `visibility`, so the index of what is painted sees no change.
+    const { fixture, styled, write } = derivedFixture(
+      '<main><div id="deco" aria-hidden="true">decorative words</div><p id="plain">plain words</p></main>',
+    );
+    const deco = fixture.document.querySelector('#deco')!;
+    const id = fixture.registry.peekId(deco) as number;
+    const all = (message: HtmlMirrorPatchBatch | undefined) => parts(message).flatMap(operations);
+    const decoList = (index: number) => all(fixture.patches()[index]).find(
+      (operation) => operation.kind === 'children' && operation.nodeId === id,
+    );
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('decorative words');
+
+    // Displayed: the index sees that, and the text is read.
+    styled.set(deco, { display: 'block', opacity: '1' });
+    write('.page{color:blue} #deco{display:block}');
+    expect(JSON.stringify(decoList(0))).toContain('decorative words');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // Faded out: withheld again, as a whole read withholds it.
+    styled.set(deco, { display: 'block', opacity: '0' });
+    write('.page{color:blue} #deco{display:block;opacity:0}');
+    expect(gaps(fixture)).toBe(0);
+    expect(decoList(1)).toBeDefined();
+    expect(JSON.stringify(fixture.patches()[1])).not.toContain('decorative words');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // A change that leaves it faded out reads nothing again.
+    write('.page{color:green} #deco{display:block;opacity:0}');
+    expect(all(fixture.patches()[2]).map(
+      (operation) => 'tagName' in operation && operation.tagName,
+    )).toEqual(['style']);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+
+    // Faded in: read again.
+    styled.set(deco, { display: 'block', opacity: '1' });
+    write('.page{color:green} #deco{display:block}');
+    expect(JSON.stringify(decoList(3))).toContain('decorative words');
+    expect(gaps(fixture)).toBe(0);
+  });
+
+  it('knows from the whole read which declared-hidden elements were read', () => {
+    // Painted when the page was first read: its text is in the mirror.
+    const { fixture, styled, write } = derivedFixture(
+      '<main><div id="deco" aria-hidden="true">decorative words</div></main>',
+      (document, shown) => {
+        shown.set(document.querySelector('#deco')!, { display: 'block', opacity: '1' });
+      },
+    );
+    const deco = fixture.document.querySelector('#deco')!;
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('decorative words');
+    styled.set(deco, { display: 'block', opacity: '0' });
+    write('.page{color:blue} #deco{opacity:0}');
+    expect(gaps(fixture)).toBe(0);
+    expect(parts(fixture.patches()[0]).flatMap(operations).some(
+      (operation) => operation.kind === 'children' &&
+        operation.nodeId === fixture.registry.peekId(deco),
+    )).toBe(true);
+    expect(JSON.stringify(fixture.patches()[0])).not.toContain('decorative words');
+  });
+
+  it('sends what was added to the end of a sheet\'s text, and the whole text when anything else changed', () => {
+    const { fixture, sheets: [sheet] } = styleFixture(
+      '<style id="dynamic">.a{color:red}</style><main class="page">x</main>',
+    );
+    const style = fixture.document.querySelector('#dynamic')!;
+    const add = (css: string): void => {
+      const text = fixture.document.createTextNode(css);
+      style.append(text);
+      sheet!.cssRules.push({ cssText: css });
+      fixture.mutate(childListRecord(style, [text]));
+      fixture.flushFrame();
+    };
+    const sheetOperation = (index: number) => operations(fixture.patches()[index])[0];
+
+    // A page that writes its rules one text node at a time.
+    add('.b{color:red}');
+    expect(sheetOperation(0)).toMatchObject({
+      resolvedStyleSheetText: '\n.b{color:red}',
+      resolvedStyleSheetTextFrom: '.a{color:red}'.length,
+    });
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    // The next is added to the whole text the mirror now holds.
+    add('.c{color:red}');
+    expect(sheetOperation(1)).toMatchObject({
+      resolvedStyleSheetText: '\n.c{color:red}',
+      resolvedStyleSheetTextFrom: '.a{color:red}\n.b{color:red}'.length,
+    });
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // A rule changed too: the whole text.
+    sheet!.cssRules[0]!.cssText = '.a{color:blue}';
+    add('.d{color:red}');
+    expect(sheetOperation(2)).toMatchObject({
+      resolvedStyleSheetText: '.a{color:blue}\n.b{color:red}\n.c{color:red}\n.d{color:red}',
+    });
+    expect(sheetOperation(2)).not.toHaveProperty('resolvedStyleSheetTextFrom');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+
+    // Unchanged: nothing is sent, as before.
+    fixture.mutate(childListRecord(style, []));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(3);
+    expect(gaps(fixture)).toBe(0);
+  });
+
+  it('reads what a changed sheet shows', () => {
+    // A rule a script deletes shows a block: its text was never read.
+    const fixture = sourceFixture(
+      '<style id="dynamic">.late{display:none}</style>' +
+      '<main><p id="late" data-test-computed-hidden="true">shown by a rule</p></main>',
+    );
+    const sheet = ownedSheet(
+      fixture.document.querySelector('#dynamic')!,
+      '.late{display:none}',
+    );
+    setSheets(fixture, sheet);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('shown by a rule');
+
+    sheet.cssRules.splice(0, 1);
+    // No mutation tells of it: the page's attributes are what they were.
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: () => ({
+        backgroundColor: 'rgba(0, 0, 0, 0)', display: 'block',
+        visibility: 'visible', opacity: '1', overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: (name: string) => name === 'content-visibility' ||
+            name.startsWith('overflow')
+          ? 'visible'
+          : name === 'clip' ? 'auto' : name === 'clip-path' ? 'none' : '',
+      }),
+    });
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(JSON.stringify(fixture.patches())).toContain('shown by a rule');
+    expect(JSON.stringify(fixture.patches())).toContain('"resolvedStyleSheetText":""');
+  });
+
+  it('reads the page afresh when a changed sheet has no element the mirror holds', () => {
+    // A style element inside something the mirror leaves out.
+    const fixture = sourceFixture(
+      '<object><style id="unheld">.a{color:red}</style></object>' +
+      '<style id="held">.b{color:red}</style><main>content</main>',
+    );
+    const unheld = ownedSheet(fixture.document.querySelector('#unheld')!, '.a{color:red}');
+    const held = ownedSheet(fixture.document.querySelector('#held')!, '.b{color:red}');
+    setSheets(fixture, unheld, held);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('unheld');
+
+    unheld.cssRules.push({ cssText: '.a{color:green}' });
+    held.cssRules.push({ cssText: '.b{color:green}' });
+    poll(fixture);
+    expect(gaps(fixture)).toBe(1);
+    expect(fixture.patches()).toHaveLength(0);
+  });
+
+  it('reads the page afresh when a style element the mirror holds by its sheet loses the sheet', () => {
+    const { fixture } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style><main class="page">x</main>',
+    );
+    const style = fixture.document.querySelector('#dynamic')!;
+    Object.defineProperty(style, 'sheet', { configurable: true, value: null });
+    style.setAttribute('media', 'print');
+    fixture.mutate(attributeRecord(style, 'media'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+
+    // The whole read sends the element's own text, and what changes in it
+    // travels as text from then on.
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).toContain('.page{display:grid}');
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).not.toContain('resolvedStyleSheetText');
+    const text = style.firstChild as Text;
+    text.nodeValue = '.page{display:flex}';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({ kind: 'text' }),
+    ]);
+  });
+
+  it('knows by what the mirror holds a style element after each time it is sent', () => {
+    // No sheet at first (another type): the mirror holds the element's own
+    // text, and a change of it travels as text.
+    const fixture = sourceFixture(
+      '<div id="wrap"><style id="dynamic" type="text/plain">.page{display:grid}</style></div>' +
+      '<main class="page">x</main>',
+    );
+    const style = fixture.document.querySelector('#dynamic')!;
+    const wrap = fixture.document.querySelector('#wrap')!;
+    Object.defineProperty(style, 'sheet', { configurable: true, value: null });
+    setSheets(fixture);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('resolvedStyleSheetText');
+    const text = style.firstChild as Text;
+    const change = (value: string): void => {
+      text.nodeValue = value;
+      fixture.mutate(characterDataRecord(text));
+      fixture.flushFrame();
+    };
+    change('.page{display:flex}');
+    expect(operations(fixture.patches()[0]).map(({ kind }) => kind)).toEqual(['text']);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The type goes: a patch sends the element with its sheet's text, and
+    // from then on a change of its text sends the element again.
+    const sheet = ownedSheet(style, '.page{display:flex}');
+    setSheets(fixture, sheet);
+    style.removeAttribute('type');
+    fixture.mutate(attributeRecord(style, 'type'));
+    fixture.flushFrame();
+    expect(operations(fixture.patches()[1]).find(({ kind }) => kind === 'attributes'))
+      .toMatchObject({ resolvedStyleSheetText: '.page{display:flex}' });
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+    sheet.cssRules[0]!.cssText = '.page{display:block}';
+    change('.page{display:block}');
+    expect(operations(fixture.patches()[2])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '.page{display:block}',
+      }),
+    ]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+
+    // Sent once more without a sheet, inside a block that is read again
+    // whole (its own attribute changed with its list): its text is the
+    // mirror's again.
+    Object.defineProperty(style, 'sheet', { configurable: true, value: null });
+    setSheets(fixture);
+    style.setAttribute('type', 'text/plain');
+    const added = fixture.document.createElement('p');
+    wrap.append(added);
+    wrap.setAttribute('class', 'wide');
+    fixture.mutateAll([
+      attributeRecord(style, 'type'),
+      childListRecord(wrap, [added]),
+      attributeRecord(wrap, 'class'),
+    ]);
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    expect(operations(fixture.patches()[3]).map(({ kind }) => kind).sort()).toEqual([
+      'attributes', 'children',
+    ]);
+    expect(fixture.patches()[3]!.more).toBeUndefined();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 4));
+    change('.page{display:none}');
+    expect(gaps(fixture)).toBe(0);
+    expect(operations(fixture.patches()[4])).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        node: expect.objectContaining({ text: '.page{display:none}' }),
+      }),
+    ]);
+  });
+
+  it('takes its first look at an owner\'s sheets for what the mirror holds', () => {
+    // Sheets that could not be read when the page was (none here): the
+    // poll's first look is where it starts, and a later change names its
+    // sheet.
+    const fixture = sourceFixture(
+      '<style id="dynamic">.page{display:grid}</style><main class="page">x</main>',
+    );
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const sheet = ownedSheet(fixture.document.querySelector('#dynamic')!, '.page{display:grid}');
+    setSheets(fixture, sheet);
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(0);
+
+    sheet.cssRules.push({ cssText: '.late{color:red}' });
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '.page{display:grid}\n.late{color:red}',
+      }),
+    ]);
+  });
+
+  it('starts afresh on an owner whose sheets a whole read could not read', () => {
+    const { fixture, sheets: [first, second] } = styleFixture(
+      '<style id="first">.a{color:red}</style><style id="second">.b{color:red}</style>' +
+      '<main class="page">styled content</main>',
+    );
+    // The list cannot be read for a while, a sheet changes meanwhile, and
+    // the page is read afresh: the elements carry their sheets as they are.
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: undefined,
+    });
+    first!.cssRules[0]!.cssText = '.a{color:blue}';
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).toContain('.a{color:blue}');
+
+    // Readable again: what the poll knew before that whole read is gone.
+    setSheets(fixture, first!, second!);
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(0);
+    let firstReads = 0;
+    const firstRules = first!.cssRules;
+    Object.defineProperty(first, 'cssRules', {
+      get: () => {
+        firstReads += 1;
+        return firstRules;
+      },
+    });
+    second!.cssRules.push({ cssText: '.b{color:green}' });
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    firstReads = 0;
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(firstReads).toBe(0);
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '\n.b{color:green}',
+        resolvedStyleSheetTextFrom: '.b{color:red}'.length,
+      }),
+    ]);
+  });
+
+  it('sends a linked sheet\'s rules on its element as soon as the sheet has loaded', () => {
+    const fixture = sourceFixture(
+      '<link id="late" rel="stylesheet" href="/late.css">' +
+      '<link id="hint" rel="preload" href="/font.woff2">' +
+      '<main class="page">styled content</main>',
+    );
+    const link = fixture.document.querySelector('#late')!;
+    Object.defineProperty(link, 'sheet', { configurable: true, value: null });
+    setSheets(fixture);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('resolvedStyleSheetText');
+
+    // The sheet arrives: the element is sent again, with its rules, in the
+    // next frame.
+    const sheet = ownedSheet(link, '.page{display:grid}');
+    setSheets(fixture, sheet);
+    link.dispatchEvent(new fixture.window.Event('load', { bubbles: true }));
+    fixture.flushFrame();
+    expect(operations(fixture.patches()[0])).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        tagName: 'link',
+        resolvedStyleSheetText: '.page{display:grid}',
+      }),
+    ]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The poll then finds the new sheet and nothing more to send; a link
+    // that names no style sheet is read again and found as it was.
+    fixture.document.querySelector('#hint')!.dispatchEvent(
+      new fixture.window.Event('load', { bubbles: true }),
+    );
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(1);
+    expect(fixture.checkpoints()).toHaveLength(1);
+  });
+
+  it('sends a style element whose sheet a script switched off with no rule', () => {
+    const fixture = sourceFixture(
+      '<style id="dynamic">.page{display:grid}</style><main class="page">x</main>',
+    );
+    const sheet = ownedSheet(fixture.document.querySelector('#dynamic')!, '.page{display:grid}');
+    sheet.disabled = true;
+    setSheets(fixture, sheet);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const first = JSON.stringify(fixture.checkpoints()[0]);
+    expect(first).toContain('"resolvedStyleSheetText":""');
+    expect(first).toContain('["disabled",""]');
+
+    // Switched on again: no mutation, the poll.
+    sheet.disabled = false;
+    poll(fixture);
+    expect(gaps(fixture)).toBe(0);
+    const sent = operations(fixture.patches()[0]);
+    expect(sent).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        resolvedStyleSheetText: '.page{display:grid}',
+      }),
+    ]);
+    expect(JSON.stringify(sent)).not.toContain('disabled');
+  });
+});
+
+describe('what is added beside body (D143)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+    });
+  });
+
+  type Fixture = ReturnType<typeof sourceFixture>;
+  const gaps = (fixture: Fixture): number => fixture.port.posts.filter(
+    (message) => (message as { code?: string }).code === 'stream_gap',
+  ).length;
+  const kinds = (patch: HtmlMirrorPatchBatch | undefined): string[] =>
+    (patch?.operations ?? []).filter(({ kind }) => kind !== 'dimensions').map(
+      (operation) => `${operation.kind}:${'nodeId' in operation ? operation.nodeId : ''}`,
+    );
+  /** The patches one message holds, in the order the mirror applies them. */
+  const parts = (message: HtmlMirrorPatchBatch | undefined) =>
+    message ? [message, ...(message.more ?? [])] : [];
+  function pageFixture() {
+    const fixture = sourceFixture(
+      '<main id="page"><p id="note">a note</p></main><aside id="side"></aside>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const html = fixture.document.documentElement;
+    const body = fixture.document.querySelector('body')!;
+    const id = (node: Node): number => fixture.registry.peekId(node) as number;
+    const dialog = (text: string): Element => {
+      const element = fixture.document.createElement('div');
+      element.textContent = text;
+      return element;
+    };
+    return { fixture, html, body, id, dialog };
+  }
+
+  it('sends a child added to html in a patch of its own, before what else changed in the frame and with it', () => {
+    const { fixture, html, body, id, dialog } = pageFixture();
+    // A dialog put beside body with a scroll lock on body: the usual pair.
+    const first = dialog('a dialog beside body');
+    html.append(first);
+    body.setAttribute('class', 'locked');
+    fixture.mutateAll([childListRecord(html, [first]), attributeRecord(body, 'class')]);
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    // Two patches in one message: the mirror shows the dialog and the lock
+    // in one step, as the page did.
+    expect(fixture.patches()).toHaveLength(1);
+    const pair = parts(fixture.patches()[0]);
+    expect(pair).toHaveLength(2);
+    expect(kinds(pair[0])).toEqual([`reconcile-children:${id(html)}`]);
+    expect(JSON.stringify(pair[0]!.operations)).toContain('a dialog beside body');
+    expect(kinds(pair[1])).toEqual([`attributes:${id(body)}`]);
+    expect(pair.map(({ lastSequence }) => lastSequence)).toEqual([1, 1]);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // With a style on html itself, a text changed in the page and a child
+    // added elsewhere in it; one removed in the frame another is added.
+    const second = dialog('a second dialog');
+    const text = fixture.document.querySelector('#note')!.firstChild as Text;
+    const side = fixture.document.querySelector('#side')!;
+    const paragraph = fixture.document.createElement('p');
+    paragraph.textContent = 'added to the page';
+    first.remove();
+    html.append(second);
+    html.setAttribute('style', 'overflow:hidden');
+    text.nodeValue = 'the note, changed';
+    side.append(paragraph);
+    fixture.mutateAll([
+      childListRecord(html, [], [first]),
+      childListRecord(html, [second]),
+      attributeRecord(html, 'style'),
+      characterDataRecord(text),
+      childListRecord(side, [paragraph]),
+    ]);
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(2);
+    const second2 = parts(fixture.patches()[1]);
+    expect(second2).toHaveLength(2);
+    expect(kinds(second2[0])).toEqual([`reconcile-children:${id(html)}`]);
+    expect(JSON.stringify(second2[0]!.operations)).toContain('a second dialog');
+    expect(JSON.stringify(second2[0]!.operations)).not.toContain('a dialog beside body');
+    expect(kinds(second2[1]).sort()).toEqual([
+      `attributes:${id(html)}`,
+      `reconcile-children:${id(side)}`,
+      `text:${id(text)}`,
+    ].sort());
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // What changed inside the child that was just sent is not sent twice.
+    const third = dialog('a third dialog');
+    html.append(third);
+    third.setAttribute('class', 'open');
+    fixture.mutateAll([childListRecord(html, [third]), attributeRecord(third, 'class')]);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(3);
+    expect(parts(fixture.patches()[2])).toHaveLength(1);
+    expect(kinds(fixture.patches()[2])).toEqual([`reconcile-children:${id(html)}`]);
+    expect(JSON.stringify(fixture.patches()[2])).toContain('["class","open"]');
+  });
+
+  it('counts a frame of several patches as one message the panel has to take in', () => {
+    const { fixture, html, body, id, dialog } = pageFixture();
+    // Three messages the panel has not answered, then a frame of two
+    // patches: the fourth message, whole. The panel may be four behind.
+    for (const value of ['one', 'two', 'three']) {
+      body.setAttribute('class', value);
+      fixture.mutate(attributeRecord(body, 'class'));
+      fixture.flushFrame();
+    }
+    const added = dialog('a dialog beside body');
+    html.append(added);
+    body.setAttribute('class', 'locked');
+    fixture.mutateAll([childListRecord(html, [added]), attributeRecord(body, 'class')]);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(4);
+    expect(parts(fixture.patches()[3]).map(kinds)).toEqual([
+      [`reconcile-children:${id(html)}`], [`attributes:${id(body)}`],
+    ]);
+    expect(fixture.patches()[3]!.lastSequence).toBe(4);
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
+
+    // A fifth, unanswered, is the stream running over, as before.
+    body.setAttribute('class', 'five');
+    fixture.mutate(attributeRecord(body, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(4);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(true);
+  });
+
+  it('sends a child added to html alone as one patch, as before', () => {
+    const { fixture, html, id, dialog } = pageFixture();
+    const added = dialog('alone');
+    html.append(added);
+    fixture.mutate(childListRecord(html, [added]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    expect(kinds(fixture.patches()[0])).toEqual([`reconcile-children:${id(html)}`]);
+  });
+
+  it('sends a list that changes alone in one patch, with the page\'s new size', () => {
+    const { fixture, html, id, dialog } = pageFixture();
+    const side = fixture.document.querySelector('#side')!;
+    let height = 2_000;
+    Object.defineProperty(html, 'scrollHeight', { configurable: true, get: () => height });
+    const all = (message: HtmlMirrorPatchBatch | undefined): string[] =>
+      (message?.operations ?? []).map(({ kind }) => kind);
+
+    // Beside body.
+    const added = dialog('alone');
+    html.append(added);
+    fixture.mutate(childListRecord(html, [added]));
+    fixture.flushFrame();
+    expect(all(fixture.patches()[0])).toEqual(['reconcile-children', 'dimensions']);
+    expect(fixture.patches()[0]!.more).toBeUndefined();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // Anywhere else.
+    height = 2_400;
+    const row = fixture.document.createElement('p');
+    side.append(row);
+    fixture.mutate(childListRecord(side, [row]));
+    fixture.flushFrame();
+    expect(kinds(fixture.patches()[1])).toEqual([`reconcile-children:${id(side)}`]);
+    expect(all(fixture.patches()[1])).toEqual(['reconcile-children', 'dimensions']);
+    expect(fixture.patches()[1]!.more).toBeUndefined();
+  });
+
+  it('reads what changed inside a child that was just added with that child', () => {
+    // An element added empty and filled in the same task: the usual way to
+    // add a style element, and any block. Its parent's list is sent as what
+    // stays and what is new, not whole.
+    const fixture = sourceFixture(
+      '<main id="page"><p id="note">a note</p></main><aside id="side"><p>kept</p></aside>',
+    );
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const head = fixture.document.querySelector('head')!;
+    const side = fixture.document.querySelector('#side')!;
+    const id = (node: Node): number => fixture.registry.peekId(node) as number;
+
+    const style = fixture.document.createElement('style');
+    head.append(style);
+    const css = fixture.document.createTextNode('.late{color:red}');
+    style.append(css);
+    Object.defineProperty(style, 'sheet', {
+      configurable: true,
+      value: {
+        disabled: false, ownerNode: style,
+        cssRules: Object.assign([{ cssText: '.late{color:red}' }], { item: () => null }),
+      },
+    });
+    const block = fixture.document.createElement('div');
+    side.append(block);
+    const row = fixture.document.createElement('p');
+    row.textContent = 'put into the new block';
+    block.append(row);
+    block.setAttribute('class', 'filled');
+    fixture.mutateAll([
+      childListRecord(head, [style]),
+      childListRecord(style, [css]),
+      childListRecord(side, [block]),
+      childListRecord(block, [row]),
+      attributeRecord(block, 'class'),
+      characterDataRecord(row.firstChild as Text),
+    ]);
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(1);
+    expect(kinds(fixture.patches()[0]).sort()).toEqual([
+      `reconcile-children:${id(head)}`,
+      `reconcile-children:${id(side)}`,
+    ].sort());
+    const sent = JSON.stringify(fixture.patches()[0]);
+    expect(sent).toContain('"resolvedStyleSheetText":".late{color:red}"');
+    expect(sent).toContain('put into the new block');
+    expect(sent).toContain('["class","filled"]');
+    expect(sent).not.toContain('kept');
+    expect(fixture.patches()[0]!.representability.coveredDirtyBranchFallbackCount).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // What changes inside a child that stays, in the frame the list
+    // changes, follows the list in the same message: nothing is lost.
+    const other = fixture.document.createElement('div');
+    side.append(other);
+    row.firstChild!.nodeValue = 'changed in a block that stays';
+    fixture.mutateAll([
+      childListRecord(side, [other]),
+      characterDataRecord(row.firstChild as Text),
+    ]);
+    fixture.flushFrame();
+    expect(parts(fixture.patches()[1]).map(kinds)).toEqual([
+      [`reconcile-children:${id(side)}`],
+      [`text:${id(row.firstChild as Text)}`],
+    ]);
+    expect(JSON.stringify(fixture.patches()[1])).toContain('changed in a block that stays');
+    expect(fixture.patches()[1]!.representability.coveredDirtyBranchFallbackCount).toBe(0);
+  });
+
+  it('never sends the whole list of html\'s children', () => {
+    // An element moved from body to html cannot be kept in place: the list
+    // would be sent whole, which is the page. A whole read is asked for.
+    const { fixture, html, body } = pageFixture();
+    const note = fixture.document.querySelector('#page')!;
+    html.append(note);
+    body.setAttribute('class', 'locked');
+    fixture.mutateAll([
+      childListRecord(body, [], [note]),
+      childListRecord(html, [note]),
+      attributeRecord(body, 'class'),
+    ]);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+    expect(gaps(fixture)).toBe(1);
+    expect(fixture.frames).toHaveLength(0);
+  });
+
+  it('reads the page afresh when html has another head or body than it had', () => {
+    // The page's own body replaced (a Turbo-style visit).
+    let { fixture, html, body, dialog } = pageFixture();
+    const swapped = fixture.document.createElement('body');
+    swapped.textContent = 'the new body';
+    html.replaceChild(swapped, body);
+    fixture.mutate(childListRecord(html, [swapped], [body]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+    expect(gaps(fixture)).toBe(1);
+
+    // One more body, or one more head.
+    for (const tagName of ['body', 'head']) {
+      ({ fixture, html, body, dialog } = pageFixture());
+      const extra = fixture.document.createElement(tagName);
+      html.append(extra);
+      fixture.mutate(childListRecord(html, [extra]));
+      fixture.flushFrame();
+      expect(fixture.patches()).toHaveLength(0);
+      expect(gaps(fixture)).toBe(1);
+
+      // The whole read holds it, and taking it out again, or adding beside
+      // it, is a patch: the page's own stay where they are.
+      fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      const added = dialog('beside two');
+      html.append(added);
+      fixture.mutate(childListRecord(html, [added]));
+      fixture.flushFrame();
+      expect(fixture.patches()).toHaveLength(1);
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+      extra.remove();
+      fixture.mutate(childListRecord(html, [], [extra]));
+      fixture.flushFrame();
+      expect(fixture.patches()).toHaveLength(2);
+      expect(gaps(fixture)).toBe(1);
+    }
+
+    // The page's own body taken out while a second one stays: that one is
+    // the page's own now.
+    ({ fixture, html, body, dialog } = pageFixture());
+    const other = fixture.document.createElement('body');
+    html.append(other);
+    fixture.mutate(childListRecord(html, [other]));
+    fixture.flushFrame();
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    body.remove();
+    fixture.mutate(childListRecord(html, [], [body]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+    expect(gaps(fixture)).toBe(2);
+  });
+
+  it('reads the page afresh when html itself is hidden or shown', () => {
+    const fixture = sourceFixture('<main id="page">page text</main>');
+    installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const html = fixture.document.documentElement;
+    html.setAttribute('data-test-computed-hidden', 'true');
+    fixture.mutate(attributeRecord(html, 'data-test-computed-hidden'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+    expect(gaps(fixture)).toBe(1);
+  });
+
+  it('takes an html element inside the page for no canvas', () => {
+    const fixture = sourceFixture('<div id="holder"></div>');
+    const inner = fixture.document.createElement('html');
+    inner.textContent = 'a document inside the page';
+    fixture.document.querySelector('#holder')!.append(inner);
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: () => ({ backgroundColor: 'rgb(0, 0, 0)', getPropertyValue: () => '' }),
+    });
+    fixture.start();
+    const root = fixture.checkpoints()[0]!.payload.root;
+    expect(root.canvasBackgroundColor).toBe('rgb(0, 0, 0)');
+    const sent = JSON.stringify(root);
+    expect(sent).toContain('a document inside the page');
+    expect(sent.split('canvasBackgroundColor')).toHaveLength(2);
   });
 });
 

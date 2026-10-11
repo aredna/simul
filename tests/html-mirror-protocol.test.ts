@@ -7,11 +7,13 @@ import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
+  createHtmlMirrorPatchFrame,
   createHtmlMirrorPortName,
   createHtmlMirrorScrollUpdate,
   createHtmlMirrorStart,
   decodeHtmlMirrorWireMessage,
   encodeHtmlMirrorWireMessage,
+  htmlMirrorFramePatches,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   groupHtmlMirrorScrollPanes,
@@ -41,6 +43,7 @@ import {
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
   readHtmlMirrorNode,
+  appendedStyleSheetText,
   readSourceDocumentLanguage,
   sanitizeCss,
   sanitizeSourceAdoptedStyleSheets,
@@ -461,6 +464,126 @@ describe('isolated HTML sanitizer and protocol', () => {
         scroll: { ...page, ...forged },
       }, identity), JSON.stringify(forged)).toBeUndefined();
     }
+  });
+
+  it('carries the patches of one frame of the page in one message (D143)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'frame-session', pageEpoch: 2, generation: 2,
+      documentId: 'frame-document', frameId: 0, sequence: 3,
+    });
+    const patch = (
+      sequence: number,
+      className: string,
+    ) => createHtmlMirrorPatch(
+      { ...identity, sequence },
+      sequence,
+      sequence,
+      [{
+        kind: 'attributes', nodeId: 2, namespace: 'html', tagName: 'body',
+        attributes: [['class', className]],
+      }],
+    )!;
+    // A single patch is itself; the patches of a frame share a sequence.
+    expect(createHtmlMirrorPatchFrame([patch(4, 'one')])).toEqual(patch(4, 'one'));
+    expect(createHtmlMirrorPatchFrame([])).toBeUndefined();
+    expect(createHtmlMirrorPatchFrame([patch(4, 'one'), patch(5, 'two')])).toBeUndefined();
+    expect(createHtmlMirrorPatchFrame([
+      patch(4, 'one'), patch(4, 'two'), patch(4, 'three'), patch(4, 'four'),
+    ])).toBeUndefined();
+    const frame = createHtmlMirrorPatchFrame([
+      patch(4, 'one'), patch(4, 'two'), patch(4, 'three'),
+    ])!;
+    expect(htmlMirrorFramePatches(frame).map(
+      ({ operations }) => JSON.stringify(operations).match(/one|two|three/)?.[0],
+    )).toEqual(['one', 'two', 'three']);
+    // A frame is not put inside a frame, and holds one document's patches.
+    expect(createHtmlMirrorPatchFrame([frame, patch(4, 'four')])).toBeUndefined();
+    expect(createHtmlMirrorPatchFrame([patch(4, 'one'), {
+      ...patch(4, 'two'),
+      identity: { ...identity, sequence: 4, documentId: 'another-document' },
+    }])).toBeUndefined();
+
+    // It crosses the port as it is, and the panel checks each patch of it.
+    const wire = decodeHtmlMirrorWireMessage(
+      JSON.parse(JSON.stringify(encodeHtmlMirrorWireMessage(frame))),
+    ) as Record<string, unknown>;
+    expect(readHtmlMirrorSourceMessage(wire, identity)).toEqual(frame);
+    const more = wire.more as Record<string, unknown>[];
+    for (const broken of [
+      { ...wire, more: [] },
+      { ...wire, more: 'two' },
+      { ...wire, more: [more[0], more[1], more[0]] },
+      { ...wire, more: [{ ...more[0], byteLength: 1 }] },
+      { ...wire, more: [{ ...more[0], firstSequence: 5, lastSequence: 5, identity: { ...identity, sequence: 5 } }] },
+      { ...wire, more: [{ ...more[0], more: [more[1]] }] },
+      { ...wire, more: [createHtmlMirrorError({ ...identity, sequence: 4 }, 'stream_gap')] },
+      { ...wire, more: [{ ...more[0], identity: { ...identity, sequence: 4, documentId: 'another-document' } }] },
+    ]) {
+      expect(readHtmlMirrorSourceMessage(broken, identity)).toBeUndefined();
+    }
+  });
+
+  it('carries what was added to a style\'s sheet text, for a style only (D143)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'sheet-session', pageEpoch: 2, generation: 2,
+      documentId: 'sheet-document', frameId: 0, sequence: 0,
+    });
+    const operation = (extra: Record<string, unknown>) => ({
+      kind: 'attributes' as const, nodeId: 3, namespace: 'html' as const,
+      tagName: 'style', attributes: [],
+      resolvedStyleSheetText: '\n.late{color:red}',
+      ...extra,
+    });
+    const patch = createHtmlMirrorPatch(
+      { ...identity, sequence: 1 },
+      1,
+      1,
+      [operation({ resolvedStyleSheetTextFrom: 19 })],
+      undefined,
+      'passive',
+    )!;
+    expect(patch.operations[0]).toMatchObject({
+      resolvedStyleSheetText: '\n.late{color:red}',
+      resolvedStyleSheetTextFrom: 19,
+    });
+    expect(readHtmlMirrorSourceMessage(
+      JSON.parse(JSON.stringify(encodeHtmlMirrorWireMessage(patch))),
+      identity,
+      'passive',
+    )).toEqual(patch);
+    for (const broken of [
+      operation({ resolvedStyleSheetTextFrom: 0 }),
+      operation({ resolvedStyleSheetTextFrom: -1 }),
+      operation({ resolvedStyleSheetTextFrom: 1.5 }),
+      operation({ resolvedStyleSheetTextFrom: '19' }),
+      { ...operation({ resolvedStyleSheetTextFrom: 19 }), resolvedStyleSheetText: undefined },
+      { ...operation({ resolvedStyleSheetTextFrom: 19 }), tagName: 'link', attributes: [['rel', 'stylesheet']] },
+    ]) {
+      expect(createHtmlMirrorPatch(
+        { ...identity, sequence: 1 },
+        1,
+        1,
+        [broken as never],
+        undefined,
+        'passive',
+      )).toBeUndefined();
+    }
+
+    // What the page reader sends: the end of the text, when the text only
+    // grew and the end is taken on its own.
+    expect(appendedStyleSheetText('.a{color:red}', '.a{color:red}\n.b{color:red}', 'passive'))
+      .toBe('\n.b{color:red}');
+    expect(appendedStyleSheetText(undefined, '.a{color:red}', 'passive')).toBeUndefined();
+    expect(appendedStyleSheetText('', '.a{color:red}', 'passive')).toBeUndefined();
+    expect(appendedStyleSheetText('.a{color:red}', '.a{color:red}', 'passive')).toBeUndefined();
+    expect(appendedStyleSheetText('.a{color:red}', '.a{color:blue}\n.b{color:red}', 'passive'))
+      .toBeUndefined();
+    expect(appendedStyleSheetText('.a{color:red}\n.b{color:red}', '.a{color:red}', 'passive'))
+      .toBeUndefined();
+    expect(appendedStyleSheetText('.a{color:red}', '.a{color:red}/* x */', 'passive'))
+      .toBeUndefined();
+    expect(appendedStyleSheetText('.a{color:red}', '.a{color:red}\n.b{color:red}', 'conservative'))
+      .toBeUndefined();
   });
 
   it('names the panes that moved, and panes at one place together, all or none', () => {

@@ -10,6 +10,7 @@ import {
 import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorPatch,
+  createHtmlMirrorPatchFrame,
   createHtmlMirrorScrollUpdate,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchOperation,
@@ -4526,7 +4527,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
                 adoptedStyleSheets: [],
               },
             },
-            // A second body is no part of the mirror's shell: left out.
+            // A second body is no part of the mirror's shell: it is built
+            // like any other element, after the page's own (D143).
             {
               kind: 'element', id: 11, namespace: 'html', tagName: 'body',
               attributes: [], children: [{
@@ -4561,7 +4563,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
         (node) => node.nodeType === 3 ? '#text' : (node as Element).localName,
       );
     };
-    expect(names()).toEqual(['head', '#text', 'div', 'body', 'x-overlay']);
+    expect(names()).toEqual(['head', '#text', 'div', 'body', 'x-overlay', 'body']);
     expect(html.querySelector('#between')?.textContent).toBe('between head and body');
     expect(html.querySelector('#after')?.shadowRoot?.firstChild?.nodeValue)
       .toBe('a dialog beside body');
@@ -4572,9 +4574,11 @@ describe('IsolatedHtmlReplicaEngine', () => {
       ),
     ).not.toBeNull();
     expect(host.resolveNode?.(6)?.textContent).toBe('in body');
-    expect(host.resolveNode?.(11)).toBeUndefined();
+    expect(host.resolveNode?.(11)?.textContent).toBe('a second body');
+    expect(host.resolveNode?.(11)).not.toBe(host.resolveNode?.(6));
     expect(engine.snapshot()?.records.map(({ source }) => source).sort()).toEqual([
       'a dialog beside body',
+      'a second body',
       'between head and body',
       'in body',
     ]);
@@ -4623,6 +4627,1068 @@ describe('IsolatedHtmlReplicaEngine', () => {
       'changed',
       'in body',
     ]);
+  });
+
+  it('builds an html, head or body element that is not the document\'s own like any other (D143)', async () => {
+    // One a script made inside a block, and a parsed document hung in a
+    // shadow root (a mail reader's message). Refused, such a page had no
+    // mirror at all.
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            {
+              kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+              attributes: [], children: [
+                {
+                  kind: 'element', id: 4, namespace: 'html', tagName: 'div',
+                  attributes: [['id', 'holder']], children: [{
+                    kind: 'element', id: 5, namespace: 'html', tagName: 'body',
+                    attributes: [['class', 'inner']], children: [{
+                      kind: 'text', id: 6, text: 'a body inside a block', translatable: true,
+                    }],
+                  }],
+                },
+                {
+                  kind: 'element', id: 7, namespace: 'html', tagName: 'x-mail',
+                  attributes: [], children: [], shadowRoot: {
+                    id: 8, mode: 'open', adoptedStyleSheets: [], children: [{
+                      kind: 'element', id: 9, namespace: 'html', tagName: 'html',
+                      attributes: [], children: [
+                        {
+                          kind: 'element', id: 10, namespace: 'html', tagName: 'head',
+                          attributes: [], children: [{
+                            kind: 'element', id: 11, namespace: 'html', tagName: 'title',
+                            attributes: [], children: [{
+                              kind: 'text', id: 12, text: 'a title', translatable: false,
+                            }],
+                          }],
+                        },
+                        {
+                          kind: 'element', id: 13, namespace: 'html', tagName: 'body',
+                          attributes: [], children: [{
+                            kind: 'text', id: 14, text: 'a message', translatable: true,
+                          }],
+                        },
+                      ],
+                    }],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const inner = host.resolveNode?.(5) as Element;
+    expect(inner.localName).toBe('body');
+    expect(inner.parentNode).toBe(host.resolveNode?.(4));
+    expect(inner.textContent).toBe('a body inside a block');
+    expect(inner).not.toBe(host.resolveNode?.(3));
+    const message = host.resolveNode?.(9) as Element;
+    expect(message.localName).toBe('html');
+    expect(message.parentNode).toBe(host.resolveNode?.(8));
+    expect((host.resolveNode?.(13) as Element).textContent).toBe('a message');
+    expect(engine.snapshot()?.records.map(({ source }) => source).sort()).toEqual([
+      'a body inside a block',
+      'a message',
+    ]);
+
+    // One added later, deep inside a patch, is built too.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 4,
+        children: [
+          { kind: 'retain', nodeId: 5 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 20, namespace: 'html', tagName: 'section',
+              attributes: [], children: [{
+                kind: 'element', id: 21, namespace: 'html', tagName: 'body',
+                attributes: [], children: [{
+                  kind: 'text', id: 22, text: 'another, added later', translatable: true,
+                }],
+              }],
+            },
+          },
+        ],
+      }],
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect((host.resolveNode?.(21) as Element).localName).toBe('body');
+    expect(host.resolveNode?.(21)?.textContent).toBe('another, added later');
+
+    // And taken out like any other: only html keeps a head and a body.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{ kind: 'reconcile-children', nodeId: 4, children: [{ kind: 'retain', nodeId: 20 }] }],
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(host.resolveNode?.(5)).toBeUndefined();
+    expect((host.resolveNode?.(4) as Element).textContent).toBe('another, added later');
+  });
+
+  it('keeps its own head and body under html, whatever a patch says (D143)', async () => {
+    const start = async () => {
+      const checkpoint = createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: {
+            kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+            attributes: [], children: [
+              { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+              {
+                kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+                attributes: [], children: [{
+                  kind: 'text', id: 4, text: 'in body', translatable: true,
+                }],
+              },
+              {
+                kind: 'element', id: 5, namespace: 'html', tagName: 'body',
+                attributes: [], children: [{
+                  kind: 'text', id: 6, text: 'in a second body', translatable: true,
+                }],
+              },
+            ],
+          },
+          adoptedStyleSheets: [],
+          captureMs: 1,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1000,
+        },
+      )!;
+      const stream = new FakeHtmlStream(checkpoint);
+      const host = new FakePresentationHost();
+      const engine = makeEngine(stream, host);
+      await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+      return { stream, host };
+    };
+    const patch = (operations: Parameters<typeof createHtmlMirrorPatch>[3]) =>
+      createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        operations,
+      )!;
+    const overlay = (id: number) => ({
+      kind: 'graph' as const,
+      node: {
+        kind: 'element' as const, id, namespace: 'html' as const, tagName: 'div',
+        attributes: [], children: [],
+      },
+    });
+
+    // A child added beside them, and the second body taken out: a patch.
+    let { stream, host } = await start();
+    stream.observer?.onPatch(patch([{
+      kind: 'reconcile-children',
+      nodeId: 1,
+      children: [
+        { kind: 'retain', nodeId: 2 }, { kind: 'retain', nodeId: 3 }, overlay(10),
+      ],
+    }]));
+    expect(stream.requested).toEqual([]);
+    expect(host.resolveNode?.(10)?.parentNode).toBe(host.resolveNode?.(1));
+    expect(host.resolveNode?.(5)).toBeUndefined();
+    expect(host.resolveNode?.(3)?.textContent).toBe('in body');
+
+    // The page's own body named no more: the mirror's stays, and the page
+    // is read afresh.
+    ({ stream, host } = await start());
+    stream.observer?.onPatch(patch([{
+      kind: 'reconcile-children',
+      nodeId: 1,
+      children: [{ kind: 'retain', nodeId: 2 }, { kind: 'retain', nodeId: 5 }],
+    }]));
+    expect(stream.requested).toEqual([0]);
+    expect(host.resolveNode?.(3)?.parentNode).toBe(host.resolveNode?.(1));
+
+    // Nor its own head.
+    ({ stream, host } = await start());
+    stream.observer?.onPatch(patch([{
+      kind: 'reconcile-children',
+      nodeId: 1,
+      children: [{ kind: 'retain', nodeId: 3 }, { kind: 'retain', nodeId: 5 }],
+    }]));
+    expect(stream.requested).toEqual([0]);
+
+    // Another head or body given to html by a patch: the page changed its
+    // own, which is a whole read.
+    for (const tagName of ['head', 'body']) {
+      ({ stream, host } = await start());
+      stream.observer?.onPatch(patch([{
+        kind: 'reconcile-children',
+        nodeId: 1,
+        children: [
+          { kind: 'retain', nodeId: 2 }, { kind: 'retain', nodeId: 3 },
+          { kind: 'retain', nodeId: 5 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 11, namespace: 'html', tagName,
+              attributes: [], children: [],
+            },
+          },
+        ],
+      }]));
+      expect(stream.requested).toEqual([0]);
+      expect(host.resolveNode?.(11)).toBeUndefined();
+    }
+
+    // The whole list of html's children, with no head or body in it.
+    ({ stream, host } = await start());
+    stream.observer?.onPatch(patch([{
+      kind: 'children',
+      nodeId: 1,
+      children: [overlay(12).node],
+    }]));
+    expect(stream.requested).toEqual([0]);
+    expect(host.resolveNode?.(3)?.textContent).toBe('in body');
+    expect(host.resolveNode?.(12)).toBeUndefined();
+  });
+
+  it('takes an element named head in another namespace for no head of the page (D143)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'svg', tagName: 'head',
+              attributes: [['id', 'drawn']], children: [],
+            },
+            {
+              kind: 'element', id: 3, namespace: 'html', tagName: 'head',
+              attributes: [['id', 'own']], children: [],
+            },
+            { kind: 'element', id: 4, namespace: 'html', tagName: 'body', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const own = host.resolveNode?.(3) as Element;
+    expect(own.querySelector('meta[data-simul-owned-shell="csp"]')).not.toBeNull();
+    expect(own.getAttribute('id')).toBe('own');
+    const drawn = host.resolveNode?.(2) as Element;
+    expect(drawn.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    expect(drawn.querySelector('meta')).toBeNull();
+  });
+
+  it('leaves on a link what a patch does not change, and never gives a link with rules the page\'s address (D143)', async () => {
+    // Taking `rel` and `href` off and putting them back makes the mirror
+    // fetch the sheet again. A link whose rules came with it points at
+    // those rules: the page's address, written first and replaced, was
+    // asked for at every patch of the link.
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [{
+                kind: 'element', id: 3, namespace: 'html', tagName: 'link',
+                attributes: [['rel', 'stylesheet'], ['href', 'https://cdn.example.test/a.css']],
+                children: [],
+              }],
+            },
+            {
+              kind: 'element', id: 4, namespace: 'html', tagName: 'body',
+              attributes: [['class', 'page']], children: [],
+            },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const link = host.resolveNode?.(3) as Element;
+    const body = host.resolveNode?.(4) as Element;
+    const writes: string[] = [];
+    for (const element of [link, body]) {
+      const set = element.setAttribute.bind(element);
+      const remove = element.removeAttribute.bind(element);
+      element.setAttribute = (name: string, value: string) => {
+        writes.push(`${element.localName} set ${name}${name === 'href' ? `=${value.slice(0, 13)}` : ''}`);
+        set(name, value);
+      };
+      element.removeAttribute = (name: string) => {
+        writes.push(`${element.localName} remove ${name}`);
+        remove(name);
+      };
+    }
+    let sequence = 0;
+    const send = (
+      nodeId: number,
+      tagName: string,
+      attributes: [string, string][],
+      resolvedStyleSheetText?: string,
+    ): string[] => {
+      sequence += 1;
+      writes.length = 0;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        [{
+          kind: 'attributes', nodeId, namespace: 'html', tagName, attributes,
+          ...(resolvedStyleSheetText === undefined ? {} : { resolvedStyleSheetText }),
+        }],
+        undefined,
+        'passive',
+      )!);
+      return writes.filter((write) => !write.includes('data-simul'));
+    };
+    const page: [string, string][] = [
+      ['rel', 'stylesheet'], ['href', 'https://cdn.example.test/a.css'],
+    ];
+
+    // Another attribute: `rel` and `href` are not touched.
+    expect(send(3, 'link', [...page, ['media', 'print']])).toEqual(['link set media']);
+    expect(send(3, 'link', page)).toEqual(['link remove media']);
+    // Its rules arrive: it points at them.
+    expect(send(3, 'link', page, '.page{color:red}')).toEqual([
+      'link remove href', 'link set href=data:text/css',
+    ]);
+    // Another attribute of a link with rules: nothing is asked for again,
+    // and the page's address is not written.
+    expect(send(3, 'link', [...page, ['media', 'print']], '.page{color:red}')).toEqual([
+      'link set media',
+    ]);
+    expect(send(3, 'link', page, '.page{color:blue}').sort()).toEqual([
+      'link remove href', 'link remove media', 'link set href=data:text/css',
+    ]);
+    expect(link.getAttribute('href')).toBe(
+      `data:text/css;charset=utf-8,${encodeURIComponent('.page{color:blue}')}`,
+    );
+    expect(host.resolveNode?.(3)).toBe(link);
+    expect(stream.requested).toEqual([]);
+    // Any other element is written whole, as before.
+    expect(send(4, 'body', [['class', 'page'], ['lang', 'en']])).toEqual([
+      'body remove class', 'body set class', 'body set lang',
+    ]);
+  });
+
+  it('puts a new element in the place of a link that is switched off (D143)', async () => {
+    // The mirror asks for a sheet itself, later than the page did, and
+    // Chrome applies a sheet that arrives after its link was switched off:
+    // a theme a page loads from another site and switches off when it has
+    // loaded stayed applied in the mirror. A link that is not in the
+    // document applies nothing.
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [
+                { kind: 'element', id: 5, namespace: 'html', tagName: 'style', attributes: [['id', 'a']], children: [] },
+                {
+                  kind: 'element', id: 3, namespace: 'html', tagName: 'link',
+                  attributes: [['rel', 'stylesheet'], ['href', 'https://cdn.example.test/a.css']],
+                  children: [],
+                },
+                { kind: 'element', id: 6, namespace: 'html', tagName: 'style', attributes: [['id', 'b']], children: [] },
+              ],
+            },
+            { kind: 'element', id: 4, namespace: 'html', tagName: 'body', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const head = host.resolveNode?.(2) as Element;
+    const first = host.resolveNode?.(3) as Element;
+    // The page's three elements in the mirror's head, in the head's order.
+    const order = (): string[] => {
+      const mirrored = [5, 3, 6].map((id) => host.resolveNode?.(id));
+      return [...head.children].filter((child) => mirrored.includes(child)).map(
+        (child) => `${child.localName}:${child.getAttribute('id') ?? child.getAttribute('href') ?? ''}`,
+      );
+    };
+    let sequence = 0;
+    const send = (operations: HtmlMirrorPatchOperation[]): void => {
+      sequence += 1;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        operations,
+        undefined,
+        'passive',
+      )!);
+    };
+    const link = (attributes: [string, string][]): HtmlMirrorPatchOperation => ({
+      kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'link', attributes,
+    });
+    const page: [string, string][] = [
+      ['rel', 'stylesheet'], ['href', 'https://cdn.example.test/a.css'],
+    ];
+
+    send([link([...page, ['disabled', '']])]);
+    const second = host.resolveNode?.(3) as Element;
+    expect(second).not.toBe(first);
+    expect(first.isConnected).toBe(false);
+    expect(second.hasAttribute('disabled')).toBe(true);
+    expect(order()).toEqual(['style:a', 'link:https://cdn.example.test/a.css', 'style:b']);
+    // A patch of a link that is off already changes it in place.
+    send([link([...page, ['disabled', ''], ['media', 'print']])]);
+    expect(host.resolveNode?.(3)).toBe(second);
+    expect(second.getAttribute('media')).toBe('print');
+    // Switched on: the same element asks for its sheet. Off again: a new one.
+    send([link(page)]);
+    expect(host.resolveNode?.(3)).toBe(second);
+    expect(second.hasAttribute('disabled')).toBe(false);
+    send([link([...page, ['disabled', '']])]);
+    const third = host.resolveNode?.(3) as Element;
+    expect(third).not.toBe(second);
+    expect(second.isConnected).toBe(false);
+    expect(stream.acknowledged).toEqual([0, 1, 2, 3, 4]);
+
+    // A frame whose second patch is refused, after the first switched the
+    // link off, leaves the link that was there, in its place.
+    send([link(page)]);
+    const patch = (operations: HtmlMirrorPatchOperation[]) => createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 6 }),
+      6,
+      6,
+      operations,
+      undefined,
+      'passive',
+    )!;
+    stream.observer?.onPatch(createHtmlMirrorPatchFrame([
+      patch([link([...page, ['disabled', '']])]),
+      patch([{ kind: 'reconcile-children', nodeId: 4, children: [{ kind: 'retain', nodeId: 999 }] }]),
+    ])!);
+    expect(stream.requested).toEqual([5]);
+    expect(host.resolveNode?.(3)).toBe(third);
+    expect(third.isConnected).toBe(true);
+    expect(third.hasAttribute('disabled')).toBe(false);
+    expect(order()).toEqual(['style:a', 'link:https://cdn.example.test/a.css', 'style:b']);
+  });
+
+  it('applies the patches of one frame of the page in one step, all or none (D143)', async () => {
+    // What a page changes in a frame can take up to three patches: applied
+    // in tasks of their own, the panel drew between them a state the page
+    // never showed.
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [{
+                kind: 'element', id: 3, namespace: 'html', tagName: 'style',
+                attributes: [],
+                resolvedStyleSheetText: '.page{color:red}',
+                children: [{ kind: 'text', id: 4, text: '', translatable: false }],
+              }],
+            },
+            {
+              kind: 'element', id: 5, namespace: 'html', tagName: 'body',
+              attributes: [], children: [{
+                kind: 'element', id: 6, namespace: 'html', tagName: 'p',
+                attributes: [], children: [
+                  { kind: 'text', id: 7, text: 'first words', translatable: true },
+                ],
+              }],
+            },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const commits: number[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      onSourceCommit: (commit) => { commits.push(commit.changes.length); },
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const html = host.resolveNode?.(1) as Element;
+    const body = host.resolveNode?.(5) as Element;
+    const style = host.resolveNode?.(3) as Element;
+    const patch = (
+      sequence: number,
+      operations: HtmlMirrorPatchOperation[],
+    ) => createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      sequence,
+      sequence,
+      operations,
+      undefined,
+      'passive',
+    )!;
+    const dialog: HtmlMirrorPatchOperation = {
+      kind: 'reconcile-children', nodeId: 1, children: [
+        { kind: 'retain', nodeId: 2 }, { kind: 'retain', nodeId: 5 },
+        {
+          kind: 'graph', node: {
+            kind: 'element', id: 10, namespace: 'html', tagName: 'div',
+            attributes: [], children: [
+              { kind: 'text', id: 11, text: 'a dialog', translatable: true },
+            ],
+          },
+        },
+      ],
+    };
+    const commitsBefore = commits.length;
+
+    // A dialog beside body; the lock on body and a class on the dialog,
+    // which the second patch names though the first has only just brought
+    // it; the sheet, with what was added to it; a text in the page.
+    stream.observer?.onPatch(createHtmlMirrorPatchFrame([
+      patch(1, [dialog]),
+      patch(1, [
+        { kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'body', attributes: [['class', 'lock']] },
+        { kind: 'attributes', nodeId: 10, namespace: 'html', tagName: 'div', attributes: [['class', 'open']] },
+        { kind: 'text', nodeId: 7, node: { kind: 'text', id: 7, text: 'second words', translatable: true } },
+      ]),
+      patch(1, [
+        {
+          kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'style', attributes: [],
+          resolvedStyleSheetText: '\n.open{color:blue}',
+          resolvedStyleSheetTextFrom: '.page{color:red}'.length,
+        },
+        // The list of the dialog itself: what the first patch put there
+        // stays, and is known as the mirror's by now.
+        {
+          kind: 'reconcile-children', nodeId: 10, children: [
+            { kind: 'retain', nodeId: 11 },
+            { kind: 'graph', node: { kind: 'text', id: 12, text: ' with more', translatable: true } },
+          ],
+        },
+      ]),
+    ])!);
+    const added = host.resolveNode?.(10) as Element;
+    expect(added.parentNode).toBe(html);
+    expect(added.textContent).toBe('a dialog with more');
+    expect(added.getAttribute('class')).toBe('open');
+    expect(body.getAttribute('class')).toBe('lock');
+    expect(style.textContent).toBe('.page{color:red}\n.open{color:blue}');
+    expect((host.resolveNode?.(7) as Text).data).toBe('second words');
+    // One answer and one report of what changed, for the frame.
+    expect(stream.acknowledged).toEqual([0, 1]);
+    expect(commits.length).toBe(commitsBefore + 1);
+    expect(stream.requested).toEqual([]);
+
+    // A frame whose last patch the mirror refuses changes nothing: not the
+    // dialog taken out, not the class, not the sheet. The page is read
+    // afresh, once.
+    stream.observer?.onPatch(createHtmlMirrorPatchFrame([
+      patch(2, [{
+        kind: 'reconcile-children', nodeId: 1,
+        children: [{ kind: 'retain', nodeId: 2 }, { kind: 'retain', nodeId: 5 }],
+      }]),
+      patch(2, [
+        { kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'body', attributes: [] },
+        {
+          kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'style', attributes: [],
+          resolvedStyleSheetText: '.page{color:green}',
+        },
+      ]),
+      patch(2, [{
+        kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'style', attributes: [],
+        resolvedStyleSheetText: '\n.late{color:blue}',
+        // Not the length of what the mirror holds for the style.
+        resolvedStyleSheetTextFrom: 3,
+      }]),
+    ])!);
+    expect(stream.requested).toEqual([1]);
+    expect(stream.acknowledged).toEqual([0, 1]);
+    expect(host.resolveNode?.(10)).toBe(added);
+    expect(added.parentNode).toBe(html);
+    expect(body.getAttribute('class')).toBe('lock');
+    expect(style.textContent).toBe('.page{color:red}\n.open{color:blue}');
+    expect(commits.length).toBe(commitsBefore + 1);
+  });
+
+  it('adds to the sheet text a style holds only what fits it (D143)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [
+                {
+                  kind: 'element', id: 3, namespace: 'html', tagName: 'style',
+                  attributes: [],
+                  resolvedStyleSheetText: '.a{color:red}',
+                  children: [{ kind: 'text', id: 4, text: '', translatable: false }],
+                },
+                {
+                  // One the mirror holds by its own text (another type).
+                  kind: 'element', id: 6, namespace: 'html', tagName: 'style',
+                  attributes: [['type', 'text/plain']],
+                  children: [{ kind: 'text', id: 7, text: '.a{color:red}', translatable: false }],
+                },
+              ],
+            },
+            { kind: 'element', id: 5, namespace: 'html', tagName: 'body', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const style = host.resolveNode?.(3) as Element;
+    const append = (
+      sequence: number,
+      nodeId: number,
+      attributes: [string, string][],
+      text: string,
+      from: number,
+    ): void => {
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        [{
+          kind: 'attributes', nodeId, namespace: 'html', tagName: 'style', attributes,
+          resolvedStyleSheetText: text,
+          resolvedStyleSheetTextFrom: from,
+        }],
+        undefined,
+        'passive',
+      )!);
+    };
+
+    append(1, 3, [], '\n.b{color:red}', 13);
+    append(2, 3, [], '\n.c{color:red}/', 27);
+    expect(style.textContent).toBe('.a{color:red}\n.b{color:red}\n.c{color:red}/');
+    expect(style.getAttribute('data-simul-resolved-stylesheet')).toBe('v1');
+    expect(stream.requested).toEqual([]);
+    expect(stream.acknowledged).toEqual([0, 1, 2]);
+    // Each of the two is taken as a sheet's text, and the two together are
+    // not: they make a comment, which the page reader takes out of a sheet
+    // it sends. What is held and what is added are checked as one text.
+    append(3, 3, [], '* .d{color:red} */', 42);
+    expect(stream.requested).toEqual([2]);
+    expect(style.textContent).toBe('.a{color:red}\n.b{color:red}\n.c{color:red}/');
+  });
+
+  it('keeps a style\'s sheet text when its list of children is sent again (D143)', async () => {
+    // A patch of a style's own list (an element put into it) brings the
+    // style's text nodes with the page's own text. That is not always the
+    // sheet's text, which the mirror holds: a rule a script put in through
+    // the sheet is in the sheet only. The sheet is sent again only when it
+    // changed, so the text the mirror holds stays.
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [{
+                kind: 'element', id: 3, namespace: 'html', tagName: 'style',
+                attributes: [],
+                resolvedStyleSheetText: '.a{color:red}\n.put-in{color:blue}',
+                children: [{ kind: 'text', id: 4, text: '', translatable: false }],
+              }],
+            },
+            { kind: 'element', id: 5, namespace: 'html', tagName: 'body', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const style = host.resolveNode?.(3) as Element;
+    const patch = (
+      sequence: number,
+      operations: HtmlMirrorPatchOperation[],
+    ) => createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      sequence,
+      sequence,
+      operations,
+      undefined,
+      'passive',
+    )!;
+    const held = '.a{color:red}\n.put-in{color:blue}';
+
+    // Its whole list, with the page's own text in new text nodes.
+    stream.observer?.onPatch(patch(1, [{
+      kind: 'children', nodeId: 3, children: [
+        { kind: 'text', id: 6, text: '.a{color:red}', translatable: false },
+        { kind: 'text', id: 7, text: '', translatable: false },
+      ],
+    }]));
+    expect(style.textContent).toBe(held);
+    // Its list as what stays and what is new (a text node with a rule),
+    // and in the frame's next patch that rule as what was added to the
+    // sheet: added to the text the mirror holds, not to the text nodes'.
+    // Without the first, the two were not of the length the second names,
+    // the frame was refused and the page read afresh.
+    stream.observer?.onPatch(createHtmlMirrorPatchFrame([
+      patch(2, [{
+        kind: 'reconcile-children', nodeId: 3, children: [
+          { kind: 'retain', nodeId: 7 },
+          // An element inside the style: its text is no part of the sheet.
+          {
+            kind: 'graph', node: {
+              kind: 'element', id: 10, namespace: 'html', tagName: 'b', attributes: [],
+              children: [{ kind: 'text', id: 11, text: 'inside a style', translatable: false }],
+            },
+          },
+          { kind: 'graph', node: { kind: 'text', id: 8, text: '.b{color:red}', translatable: false } },
+        ],
+      }]),
+      patch(2, [{
+        kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'style', attributes: [],
+        resolvedStyleSheetText: '\n.b{color:red}',
+        resolvedStyleSheetTextFrom: held.length,
+      }]),
+    ])!);
+    const ownText = (): string => [...style.childNodes].filter(
+      (child) => child.nodeType === 3,
+    ).map((child) => child.nodeValue).join('');
+    expect(ownText()).toBe(`${held}\n.b{color:red}`);
+    expect(style.querySelector('b')?.textContent).toBe('inside a style');
+    expect(stream.requested).toEqual([]);
+    expect(stream.acknowledged).toEqual([0, 1, 2]);
+
+    // Sent with its list and with no sheet (its type is no style sheet any
+    // more): its own text is all it holds.
+    stream.observer?.onPatch(patch(3, [
+      {
+        kind: 'children', nodeId: 3, children: [
+          { kind: 'text', id: 9, text: 'not a sheet', translatable: false },
+        ],
+      },
+      {
+        kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'style',
+        attributes: [['type', 'text/plain']],
+      },
+    ]));
+    expect(stream.requested).toEqual([]);
+    expect(style.textContent).toBe('not a sheet');
+    expect(style.hasAttribute('data-simul-resolved-stylesheet')).toBe(false);
+  });
+
+  it('refuses text added to a style it does not hold by its sheet\'s text (D143)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [{
+                // The mirror holds this one by its own text (another type).
+                kind: 'element', id: 6, namespace: 'html', tagName: 'style',
+                attributes: [['type', 'text/plain']],
+                children: [{ kind: 'text', id: 7, text: '.a{color:red}', translatable: false }],
+              }],
+            },
+            { kind: 'element', id: 5, namespace: 'html', tagName: 'body', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'style',
+        attributes: [['type', 'text/plain']],
+        resolvedStyleSheetText: '\n.b{color:red}',
+        resolvedStyleSheetTextFrom: 13,
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(stream.requested).toEqual([0]);
+    expect((host.resolveNode?.(6) as Element).textContent).toBe('.a{color:red}');
+  });
+
+  it('writes a style element\'s sheet text when a patch sends the element again (D143)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [
+                {
+                  kind: 'element', id: 3, namespace: 'html', tagName: 'style',
+                  attributes: [['id', 'two']],
+                  resolvedStyleSheetText: '.a{color:red}\n.b{color:red}',
+                  children: [
+                    { kind: 'text', id: 4, text: '', translatable: false },
+                    { kind: 'text', id: 5, text: '', translatable: false },
+                  ],
+                },
+                {
+                  // Rules a script put into an element with no text.
+                  kind: 'element', id: 6, namespace: 'html', tagName: 'style',
+                  attributes: [['id', 'empty']],
+                  resolvedStyleSheetText: '.c{color:red}',
+                  children: [],
+                },
+                {
+                  // One with no sheet yet (another type).
+                  kind: 'element', id: 40, namespace: 'html', tagName: 'style',
+                  attributes: [['id', 'bare'], ['type', 'text/plain']],
+                  children: [],
+                },
+              ],
+            },
+            { kind: 'element', id: 7, namespace: 'html', tagName: 'body', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const two = host.resolveNode?.(3) as Element;
+    const empty = host.resolveNode?.(6) as Element;
+    expect(two.textContent).toBe('.a{color:red}\n.b{color:red}');
+    expect(empty.textContent).toBe('.c{color:red}');
+    let sequence = 0;
+    const send = (operations: Parameters<typeof createHtmlMirrorPatch>[3]) => {
+      sequence += 1;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        operations,
+        undefined,
+        'passive',
+      )!);
+    };
+    const again = (nodeId: number, id: string, resolvedStyleSheetText: string) => ({
+      kind: 'attributes' as const, nodeId, namespace: 'html' as const, tagName: 'style',
+      attributes: [['id', id]] as [string, string][], resolvedStyleSheetText,
+    });
+
+    // The element alone: its sheet's text replaces what its text nodes
+    // held, once, whichever node of the page changed.
+    send([again(3, 'two', '.a{color:red}\n.b{color:green}')]);
+    expect(stream.requested).toEqual([]);
+    expect(two.textContent).toBe('.a{color:red}\n.b{color:green}');
+    expect(two.getAttribute('data-simul-resolved-stylesheet')).toBe('v1');
+    expect(host.resolveNode?.(5)?.nodeValue).toBe('');
+    send([again(6, 'empty', '.c{color:green}')]);
+    expect(empty.textContent).toBe('.c{color:green}');
+    expect(empty.childNodes).toHaveLength(1);
+    send([again(3, 'two', '')]);
+    expect(two.textContent).toBe('');
+
+    // With its text nodes read again in the same batch, in either order:
+    // the sheet's text is written last.
+    const fresh = (id: number) => ({ kind: 'text' as const, id, text: '', translatable: false });
+    send([
+      again(3, 'two', '.a{color:blue}'),
+      { kind: 'children', nodeId: 3, children: [fresh(30)] },
+    ]);
+    expect(stream.requested).toEqual([]);
+    expect(two.textContent).toBe('.a{color:blue}');
+    expect(host.resolveNode?.(30)?.nodeValue).toBe('.a{color:blue}');
+    send([
+      { kind: 'children', nodeId: 3, children: [fresh(31), fresh(32)] },
+      again(3, 'two', '.a{color:black}'),
+    ]);
+    expect(two.textContent).toBe('.a{color:black}');
+    expect(host.resolveNode?.(31)?.nodeValue).toBe('.a{color:black}');
+    expect(host.resolveNode?.(32)?.nodeValue).toBe('');
+
+    // A batch that fails while it is written leaves every sheet as it was:
+    // the text of one, and the text node another had not had.
+    const bare = host.resolveNode?.(40) as Element;
+    expect(bare.childNodes).toHaveLength(0);
+    const held = empty.firstChild!;
+    Object.defineProperty(held, 'nodeValue', {
+      configurable: true,
+      get: () => '.c{color:green}',
+      set: () => {
+        throw new Error('synthetic write failure');
+      },
+    });
+    send([
+      again(3, 'two', '.a{color:white}'),
+      again(40, 'bare', '.d{color:white}'),
+      again(6, 'empty', '.c{color:white}'),
+    ]);
+    expect(stream.requested).toHaveLength(1);
+    expect(two.textContent).toBe('.a{color:black}');
+    expect(host.resolveNode?.(31)?.nodeValue).toBe('.a{color:black}');
+    expect(bare.childNodes).toHaveLength(0);
+    expect(bare.getAttribute('type')).toBe('text/plain');
   });
 
   it('keeps the page\'s order when its body comes before its head (D135)', async () => {

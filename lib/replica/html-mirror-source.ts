@@ -9,12 +9,14 @@ import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
+  createHtmlMirrorPatchFrame,
   createHtmlMirrorScrollUpdate,
   groupHtmlMirrorScrollPanes,
   encodeHtmlMirrorWireMessage,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   type HtmlMirrorPaneScroll,
+  type HtmlMirrorPatchBatch,
   type HtmlMirrorReconcileChild,
   type HtmlMirrorPatchOperation,
 } from './html-mirror-protocol';
@@ -37,6 +39,7 @@ import {
   isSourceSelectVisuallyHidden,
   isSourceStructuralChildOf,
   readSourceSelectPresentationStyle,
+  appendedStyleSheetText,
   sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceAttributes,
   sanitizeSourceChildren,
@@ -44,6 +47,7 @@ import {
   sanitizeSourceElementHints,
   sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
+  sourceDeclaredHiddenRegionIsWithheld,
   beginSourceSlotReadingWalk,
   createSourceSlotReadings,
   sourceSlotReadingChanged,
@@ -507,6 +511,8 @@ const MAX_FULL_SIGNATURE_CHARACTERS_PER_SHEET = 256 * 1024;
  */
 const MAX_SHALLOW_SIGNATURE_RULE_CHARACTERS = 4_096;
 const SHAPE_SIGNATURE_SHEETS = new WeakSet<CSSStyleSheet>();
+/** Elements read again when the resource they name has loaded or failed. */
+const CAPTURED_RESOURCE_ELEMENTS: ReadonlySet<string> = new Set(['img', 'link']);
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
@@ -560,6 +566,17 @@ type ReconciliationDecision =
   | 'attributeContextFallbackCount'
   | 'crossParentFallbackCount';
 
+/** Pending changes set aside for a later patch of the same frame. */
+interface HeldChanges {
+  readonly children: readonly Node[];
+  readonly attributes: readonly Element[];
+  readonly text: readonly Text[];
+  readonly sheets: readonly Element[];
+  /** Slots, filled by a script, whose list of nodes is to be sent. */
+  readonly slotLists: readonly Element[];
+  readonly dimensions: boolean;
+}
+
 type StylePollResult = 'changed' | 'unchanged' | 'capacity';
 type StylePollChannel = 'ordinary' | 'adopted';
 
@@ -582,6 +599,14 @@ export class HtmlMirrorSourceSession {
   #pendingChildren = new Set<Node>();
   #pendingAttributes = new Set<Element>();
   #pendingText = new Set<Text>();
+  /**
+   * Elements whose style sheet is sent again: a `<style>` whose text
+   * changed, a `<link>` whose sheet has loaded, the element of a sheet the
+   * poll found changed (D143). Sent as attributes are, and in a patch of
+   * their own when lists of children change in the same frame: see
+   * `#readAndPostInTurns`.
+   */
+  #pendingSheets = new Set<Element>();
   /**
    * Shadow roots whose slots changed, and children of hosts given another
    * slot name: what may be drawn in other boxes than it was; see
@@ -627,6 +652,26 @@ export class HtmlMirrorSourceSession {
   readonly #ordinaryStyleSignatures = new StableSignatureTracker(
     STYLE_CHANGE_STABILITY_OBSERVATIONS,
   );
+  /**
+   * Each owner's sheets as the poll last settled on them, so that a change
+   * names the sheets it is in. See `#rereadChangedStyleSheets`.
+   */
+  #ordinaryStyleSheets = new WeakMap<object, readonly OrdinaryStyleSheetRead[]>();
+  /**
+   * The `<style>` elements the mirror holds by their sheet's text
+   * (`resolvedStyleSheetText`), as a whole read sends them (D143).
+   */
+  #sheetTextStyles = new WeakSet<Element>();
+  /**
+   * For each element the page declares hidden: whether what it holds was
+   * withheld when it was last sent. See `#readStyleDerivedAgain`.
+   */
+  #declaredHiddenSent = new WeakMap<Element, boolean>();
+  /**
+   * A style sheet changed: what the reader takes from an element's style
+   * is taken again at the next flush. See `#readStyleDerivedAgain`.
+   */
+  #styleDerivedPending = false;
   #shadowDiscoveryTimer: unknown;
   /** When a layout change last asked about every element's root. */
   #lastFreshLayoutWalk = Number.NEGATIVE_INFINITY;
@@ -830,6 +875,10 @@ export class HtmlMirrorSourceSession {
     this.#emittedNodeSignatures = new WeakMap<Node, string>();
     this.#adoptedStyleSignatures.reset();
     this.#ordinaryStyleSignatures.reset();
+    this.#ordinaryStyleSheets = new WeakMap();
+    this.#sheetTextStyles = new WeakSet<Element>();
+    this.#declaredHiddenSent = new WeakMap<Element, boolean>();
+    this.#styleDerivedPending = false;
     this.#controlledContentPolicy = undefined;
     this.#controlledLayoutSettlePending = false;
     this.#visibilityBoundaryIndex?.dispose();
@@ -1292,6 +1341,18 @@ export class HtmlMirrorSourceSession {
       // slots may take other nodes of its host than they did (D135).
       const slotRoot = sourceMutationChangesSlots(record);
       if (slotRoot) this.#slotsChanged(slotRoot);
+      // The text of a `<style>` the mirror holds by its sheet's text: the
+      // element is sent again with that text, as a whole read sends it, and
+      // its text nodes, which the mirror shows nowhere, are not (D143). The
+      // change used to travel as text, and then once more as the whole
+      // page when the style poll saw the sheet change.
+      const sheetStyle = sourceMutationStyleElement(record);
+      if (sheetStyle && this.#sheetTextStyles.has(sheetStyle)) {
+        accepted = true;
+        this.#queuePending(this.#pendingSheets, sheetStyle);
+        this.#styleDerivedPending = true;
+        if (sourceMutationChangesTextOnly(record)) continue;
+      }
       if (record.type === 'childList') {
         accepted = true;
         this.#observeShadowRoots(record.target, walk);
@@ -1484,6 +1545,11 @@ export class HtmlMirrorSourceSession {
       this.#applyVisibilityBoundaryRefresh(visibilityRefresh);
       if (this.#paused || this.#shadowReconciliationPending) return;
     }
+    if (this.#styleDerivedPending) {
+      this.#styleDerivedPending = false;
+      this.#readStyleDerivedAgain();
+      if (this.#paused || this.#shadowReconciliationPending) return;
+    }
     if (this.#imageRefreshRequested) {
       this.#imageRefreshRequested = false;
       this.#refreshChangedImageSources();
@@ -1493,7 +1559,7 @@ export class HtmlMirrorSourceSession {
     // A change of slots first asks what it changes (the walk of the roots
     // is open around the whole flush).
     if (this.#queueChangedSlotReadings()) {
-      this.#readAndPostChanges(fidelityPolicy);
+      this.#readAndPostInTurns(fidelityPolicy);
     }
     // A change to the page may have lengthened a scrolled pane, hidden it,
     // shown it again or put it back at its start, none of which fires a
@@ -1507,7 +1573,177 @@ export class HtmlMirrorSourceSession {
     if (this.#scrolledPanes.size > 0) this.#postScroll(true);
   }
 
-  #readAndPostChanges(fidelityPolicy: SelectableReplicaFidelityPolicy): boolean {
+  /**
+   * One frame's changes, in up to three patches sent as one message
+   * (D143). A parent's changed list of children is sent as "these stay,
+   * these are new" only when nothing else in the batch changed inside that
+   * parent; otherwise every list in the batch is read again and sent whole.
+   * Two kinds of change made that the rule, so each goes in a patch of its
+   * own:
+   *
+   * - What was added to `<html>` itself or taken from it, first. Everything
+   *   is inside `<html>`, and its whole list is the page, which the mirror
+   *   refuses: a dialog put beside `<body>` with a scroll lock on `<body>`,
+   *   the usual pair, had the page read afresh.
+   * - The elements whose style sheet is sent again, last. A page that
+   *   writes a style sheet while it adds elements (a part of a page loaded
+   *   late, which brings its styles) had the `<head>` and every other
+   *   changed list sent whole.
+   * - What changed inside a child that stays of a list that changed too,
+   *   last as well. A page that adds a view to `<body>` while a style
+   *   sheet hides the old one, or adds a row while it writes into another,
+   *   had the whole of `<body>` sent.
+   *
+   * A child that stays keeps what it holds, and what a later patch names
+   * inside something an earlier one has just sent is found unchanged and
+   * not sent twice. The page made these changes in one step, so the mirror
+   * is given them in one message and applies them in one step: sent apart,
+   * the panel drew the dialog before its styles had arrived.
+   */
+  #readAndPostInTurns(fidelityPolicy: SelectableReplicaFidelityPolicy): boolean {
+    const patches: HtmlMirrorPatchBatch[] = [];
+    for (const turn of ['document', 'lists', 'rest'] as const) {
+      const held = turn === 'rest' ? undefined : this.#holdBack(turn);
+      if (!held && turn !== 'rest') continue;
+      const patch = this.#readChanges(fidelityPolicy);
+      // The page is read afresh, or the stream has stopped: what was read
+      // of this frame is not sent, and a whole read follows.
+      if (this.#paused || this.#disposed) return false;
+      if (patch) patches.push(patch);
+      this.#takeBack(held, patch);
+    }
+    const frame = createHtmlMirrorPatchFrame(patches);
+    if (!frame) return false;
+    this.#sequence = frame.lastSequence;
+    this.#post(frame);
+    return true;
+  }
+
+  /**
+   * Takes out of the pending changes what a later turn sends, and returns
+   * it; nothing when this turn has nothing to send apart. `document`: all
+   * but `<html>`'s own list. `lists`: when a list changes, the elements
+   * whose sheet is sent again, and what changed inside a child of that
+   * list that stays.
+   */
+  #holdBack(turn: 'document' | 'lists'): HeldChanges | undefined {
+    const html = this.environment.document.documentElement;
+    const dimensions = this.#pendingDimensions;
+    if (turn === 'lists') {
+      if (this.#pendingChildren.size === 0) return undefined;
+      const held: HeldChanges = {
+        children: [...this.#pendingChildren].filter(
+          (node) => this.#changedInsideKeptChild(node),
+        ),
+        attributes: [...this.#pendingAttributes].filter(
+          (node) => this.#changedInsideKeptChild(node),
+        ),
+        text: [...this.#pendingText].filter(
+          (node) => this.#changedInsideKeptChild(node),
+        ),
+        sheets: [...this.#pendingSheets],
+        // A slot's list is sent on the slot, as an attribute is.
+        slotLists: [...this.#pendingSlotLists].filter(
+          (node) => this.#changedInsideKeptChild(node),
+        ),
+        dimensions,
+      };
+      if (
+        held.children.length + held.attributes.length + held.text.length +
+          held.sheets.length + held.slotLists.length === 0
+      ) return undefined;
+      for (const node of held.children) this.#pendingChildren.delete(node);
+      for (const node of held.attributes) this.#pendingAttributes.delete(node);
+      for (const node of held.text) this.#pendingText.delete(node);
+      for (const node of held.slotLists) this.#pendingSlotLists.delete(node);
+      this.#pendingSheets.clear();
+      this.#pendingDimensions = false;
+      return held;
+    }
+    if (!html || !this.#pendingChildren.has(html)) return undefined;
+    const held: HeldChanges = {
+      children: [...this.#pendingChildren].filter((node) => node !== html),
+      attributes: [...this.#pendingAttributes],
+      text: [...this.#pendingText],
+      sheets: [...this.#pendingSheets],
+      slotLists: [...this.#pendingSlotLists],
+      dimensions,
+    };
+    if (
+      held.children.length + held.attributes.length + held.text.length +
+        held.sheets.length + held.slotLists.length === 0
+    ) return undefined;
+    this.#pendingChildren.clear();
+    this.#pendingAttributes.clear();
+    this.#pendingText.clear();
+    this.#pendingSheets.clear();
+    this.#pendingSlotLists.clear();
+    this.#pendingChildren.add(html);
+    this.#pendingDimensions = false;
+    return held;
+  }
+
+  /**
+   * Whether `node` is, or is inside, a child that stays of a list that
+   * changed too: the outermost such list above it. A dropdown is left out:
+   * its list is read afresh when one of its groups changes, and the group
+   * is queued beside it to say so (D132).
+   */
+  #changedInsideKeptChild(node: Node): boolean {
+    let list: Node | undefined;
+    let child: Node | undefined;
+    for (let current: Node | undefined = node; current;) {
+      const parent: Node | undefined = current.parentNode ??
+        (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current
+          ? (current as ShadowRoot).host
+          : undefined);
+      if (parent && this.#pendingChildren.has(parent)) {
+        list = parent;
+        child = current;
+      }
+      current = parent;
+    }
+    return list !== undefined && child !== undefined &&
+      this.#emittedParent.get(child) === list &&
+      !sourceNativeSelectStructuralOwner(list);
+  }
+
+  /**
+   * Puts back what was held for a later turn. `sent`: the patch read while
+   * it was held. A list that patch sent whole holds every list inside it
+   * as the page has it now, so those are not read a second time; an
+   * element or a text inside it is read again and found unchanged.
+   */
+  #takeBack(held: HeldChanges | undefined, sent?: HtmlMirrorPatchBatch): void {
+    if (!held) return;
+    const sentWhole: Node[] = [];
+    for (const operation of sent?.operations ?? []) {
+      if (operation.kind !== 'children') continue;
+      const target = this.environment.registry.getNode(operation.nodeId);
+      if (target) sentWhole.push(target);
+    }
+    for (const node of held.children) {
+      if (sentWhole.some((target) => containsComposedSource(target, node))) continue;
+      this.#queuePending(this.#pendingChildren, node);
+    }
+    for (const node of held.attributes) this.#queuePending(this.#pendingAttributes, node);
+    for (const node of held.text) this.#queuePending(this.#pendingText, node);
+    for (const node of held.sheets) this.#queuePending(this.#pendingSheets, node);
+    for (const node of held.slotLists) this.#pendingSlotLists.add(node);
+    this.#pendingDimensions ||= held.dimensions;
+  }
+
+  /**
+   * Reads what is pending into one patch, with the sequence the frame's
+   * message will carry, and notes it as sent. Nothing when nothing changed,
+   * or when the stream stopped instead.
+   */
+  #readChanges(
+    fidelityPolicy: SelectableReplicaFidelityPolicy,
+  ): HtmlMirrorPatchBatch | undefined {
+    // An element whose sheet is sent again is sent as attributes are.
+    for (const element of this.#pendingSheets) this.#pendingAttributes.add(element);
+    this.#pendingSheets.clear();
     // A host whose children are read again while something inside its own
     // root changed too: a patch of the host's children does not carry the
     // root, so the root is read again whole, beside its host (D135; it was
@@ -1519,10 +1755,10 @@ export class HtmlMirrorSourceSession {
       if (!shadow || !this.#mirroredNodes.has(shadow)) {
         this.#shadowReconciliationPending = true;
         this.#signalShadowReconciliation();
-        return false;
+        return undefined;
       }
       this.#queuePending(this.#pendingChildren, shadow);
-      if (this.#paused) return false;
+      if (this.#paused) return undefined;
     }
     const childrenTargets = minimizeConnectedComposedTargets(
       this.#pendingChildren,
@@ -1535,7 +1771,9 @@ export class HtmlMirrorSourceSession {
     const representability = createHtmlMirrorRepresentabilityCollector();
     const batchBudget = createHtmlMirrorReadBudget();
     const styleWork = createHtmlMirrorStyleWorkBudget();
-    let posted = false;
+    // The whole sheet text of a style whose patch carries only what was
+    // added to it: what is noted as sent for the element.
+    const wholeSignatures = new Map<number, string>();
     try {
       // Nothing is sent for a node before every element above it, and
       // every element of a subtree read again, has been asked about its
@@ -1552,7 +1790,7 @@ export class HtmlMirrorSourceSession {
           askAboutSourceShadowRootsAbove(target, askedAbove);
         }
       }
-      if (this.#takeLateShadowRoots()) return false;
+      if (this.#takeLateShadowRoots()) return undefined;
       const askedWithin = new Set<Node>();
       const withinBudget = { nodes: MAX_HTML_MIRROR_NODES };
       const askWithin = (sources: readonly Node[]): boolean => {
@@ -1594,9 +1832,21 @@ export class HtmlMirrorSourceSession {
       const useReconciliation = childCaptures.every(
         ({ reconciliation }) => reconciliation === 'reconcile',
       );
+      if (
+        !useReconciliation &&
+        childCaptures.some(({ target }) =>
+          target === this.environment.document.documentElement)
+      ) {
+        // The whole list of `<html>`'s children is the page: the mirror
+        // takes it only as a whole read (an element moved between `<html>`
+        // and `<body>`, for one).
+        this.#shadowReconciliationPending = true;
+        this.#signalShadowReconciliation();
+        return undefined;
+      }
       if (!useReconciliation) {
         if (!askWithin(childCaptures.flatMap(({ sources }) => sources))) {
-          return false;
+          return undefined;
         }
         for (const capture of childCaptures) {
           const children = sanitizeSourceChildren(
@@ -1629,7 +1879,18 @@ export class HtmlMirrorSourceSession {
           const newSources = capture.sources.filter(
             (source) => !previous.has(source),
           );
-          if (!askWithin(newSources)) return false;
+          if (
+            capture.target === this.environment.document.documentElement &&
+            sourceDocumentShellChanged(capture.previous, capture.sources)
+          ) {
+            // The page's own head or body is another element now, or
+            // `<html>` holds one more: the mirror keeps its own two in
+            // place, so this is a whole read.
+            this.#shadowReconciliationPending = true;
+            this.#signalShadowReconciliation();
+            return undefined;
+          }
+          if (!askWithin(newSources)) return undefined;
           const serialized = sanitizeSourceSubtrees(
             newSources,
             this.environment.registry,
@@ -1716,6 +1977,18 @@ export class HtmlMirrorSourceSession {
             hints.selectedImageSource ?? '',
           );
         }
+        if (
+          hints.resolvedStyleSheetText === undefined &&
+          this.#sheetTextStyles.has(target)
+        ) {
+          // The mirror holds this style by its sheet's text and the sheet
+          // can no longer be read (the element's type changed, or the batch
+          // is too large): its own text nodes were never sent, so the page
+          // is read afresh.
+          this.#shadowReconciliationPending = true;
+          this.#signalShadowReconciliation();
+          return undefined;
+        }
         const operation = Object.freeze({
           kind: 'attributes',
           nodeId: this.environment.registry.peekId(target) as number,
@@ -1724,11 +1997,32 @@ export class HtmlMirrorSourceSession {
           attributes,
           ...hints,
         } as const);
-        if (
-          emittedElementSignature(operation) ===
-            this.#emittedNodeSignatures.get(target)
-        ) continue;
-        operations.push(operation);
+        const signature = emittedElementSignature(operation);
+        const sent = this.#emittedNodeSignatures.get(target);
+        if (signature === sent) continue;
+        // A page that adds rules by appending text to a `<style>` (rules
+        // written one by one as parts of the page are drawn) had the whole
+        // sheet sent at every append: what was added is sent, and the
+        // mirror adds it to the text it holds (D143).
+        const appended = operation.tagName === 'style' &&
+            hints.resolvedStyleSheetText !== undefined
+          ? appendedStyleSheetText(
+              emittedStyleSheetText(sent),
+              hints.resolvedStyleSheetText,
+              fidelityPolicy,
+            )
+          : undefined;
+        if (appended === undefined) {
+          operations.push(operation);
+          continue;
+        }
+        wholeSignatures.set(operation.nodeId, signature);
+        operations.push(Object.freeze({
+          ...operation,
+          resolvedStyleSheetText: appended,
+          resolvedStyleSheetTextFrom:
+            (hints.resolvedStyleSheetText as string).length - appended.length,
+        }));
       }
       for (const target of this.#pendingText) {
         if (
@@ -1770,11 +2064,12 @@ export class HtmlMirrorSourceSession {
         }
       }
       // A root found while the patch was read: the replica lacks it.
-      if (this.#takeLateShadowRoots()) return false;
+      if (this.#takeLateShadowRoots()) return undefined;
       if (operations.length === 0) {
         this.#clearPending();
-        return false;
+        return undefined;
       }
+      // Every patch of a frame carries the sequence of the frame's message.
       const sequence = this.#sequence + 1;
       const batch = createHtmlMirrorPatch(
         this.#identityAt(sequence),
@@ -1803,8 +2098,10 @@ export class HtmlMirrorSourceSession {
           if (target) {
             this.#emittedNodeSignatures.set(
               target,
-              emittedElementSignature(operation),
+              wholeSignatures.get(operation.nodeId) ??
+                emittedElementSignature(operation),
             );
+            this.#noteSheetTextStyle(target, operation);
           }
         } else if (operation.kind === 'text') {
           const target = this.environment.registry.getNode(operation.nodeId);
@@ -1817,10 +2114,8 @@ export class HtmlMirrorSourceSession {
         }
       }
       this.#clearPending();
-      this.#sequence = sequence;
       if (emittedDimensions) this.#lastDimensions = emittedDimensions;
-      this.#post(batch);
-      posted = true;
+      return batch;
     } catch (error) {
       if (
         error instanceof HtmlMirrorCapacityError &&
@@ -1841,7 +2136,7 @@ export class HtmlMirrorSourceSession {
         this.#summarizeRepresentability(representability),
       ));
     }
-    return posted;
+    return undefined;
   }
 
   /**
@@ -1891,9 +2186,11 @@ export class HtmlMirrorSourceSession {
     this.#pendingChildren.clear();
     this.#pendingAttributes.clear();
     this.#pendingText.clear();
+    this.#pendingSheets.clear();
     this.#slotChanges.clear();
     this.#pendingSlotLists.clear();
     this.#pendingDimensions = false;
+    this.#styleDerivedPending = false;
     this.#controlledLayoutSettlePending = false;
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
@@ -2398,6 +2695,12 @@ export class HtmlMirrorSourceSession {
 
   /** An element shown or hidden: it and what it holds are read again. */
   #queueVisibilityTarget(target: Element): void {
+    if (target === this.environment.document.documentElement) {
+      // `<html>` shown or hidden is the page shown or hidden: a whole read.
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+      return;
+    }
     this.#queuePending(this.#pendingChildren, target);
     this.#queuePending(this.#pendingAttributes, target);
     // What a host's own root holds is hidden and shown with the host, and
@@ -2460,6 +2763,95 @@ export class HtmlMirrorSourceSession {
     this.#queueCapturedImageAttributeRefresh(event);
   };
 
+  /**
+   * A style sheet changed, and the page is not read afresh for it any more
+   * (D143): what the reader takes from an element's style is taken again,
+   * as that whole read took it. What is shown and what is hidden, to the
+   * eye or at all, is compared by the index of what is painted, and the
+   * page's size and canvas colour are read with the dimensions. Three
+   * things are left, read here for every element the mirror holds:
+   *
+   * - Text the page masks (`-webkit-text-security`). An element whose text
+   *   a sheet has just masked is in the mirror with that text; the mirror
+   *   takes the shell that stands for it only in a whole read, so the page
+   *   is read afresh, once.
+   * - What an element holds that the page declares hidden (`hidden`,
+   *   `aria-hidden="true"`): it is read while the element's box is really
+   *   painted, which a sheet changes with no change of `display` or
+   *   `visibility` (a box faded out, clipped away, or of no size). The
+   *   element is read again with what it holds when the answer differs
+   *   from the one it was sent with.
+   * - What the mirror draws of a dropdown from the dropdown's own style,
+   *   and whether a dropdown inside a menu the reader may open hides
+   *   itself (D138): the dropdown is read again, and sent if that differs
+   *   from what was sent.
+   * - How each child of a shadow host is read, which comes from the boxes
+   *   around its slot (D142): the host's root is noted as one whose slots
+   *   may show other things, and each child is asked again.
+   *
+   * What an ended animation holds (D141) is listed with every flush and
+   * needs nothing here.
+   */
+  #readStyleDerivedAgain(): void {
+    const view = this.environment.window;
+    const root = this.environment.document.documentElement;
+    const pending: Element[] = root ? [root] : [];
+    let inspected = 0;
+    while (pending.length > 0) {
+      const element = pending.pop() as Element;
+      // What an opaque shell stands for is not in the mirror.
+      if (this.#mirroredOpaqueSecrets.has(element)) continue;
+      inspected += 1;
+      const mirrored = this.#mirroredNodes.has(element);
+      if (
+        inspected > MAX_HTML_MIRROR_NODES || (
+          mirrored && sourceStyleMasksText(element, view) &&
+          hasSourceCredentialSecretAncestor(
+            element,
+            this.#secretClassifier(),
+            view,
+          )
+        )
+      ) {
+        this.#shadowReconciliationPending = true;
+        this.#signalShadowReconciliation();
+        return;
+      }
+      if (mirrored && element.localName.toLowerCase() === 'select') {
+        this.#queuePending(this.#pendingAttributes, element);
+      }
+      const withheld = mirrored ? this.#declaredHiddenSent.get(element) : undefined;
+      if (
+        withheld !== undefined && this.#controlledContentPolicy &&
+        sourceDeclaredHiddenRegionIsWithheld(
+          element,
+          this.#controlledContentPolicy,
+        ) !== withheld
+      ) {
+        // As a box the index of what is painted finds shown or hidden.
+        this.#queueVisibilityTarget(element);
+        if (!this.#queueSlottedContent(element)) return;
+      }
+      for (
+        let child = element.lastElementChild;
+        child;
+        child = child.previousElementSibling
+      ) pending.push(child);
+      const shadow = readSourceShadowRoot(element);
+      if (shadow && this.#mirroredNodes.has(shadow)) {
+        // How a child of the host is read comes from the boxes around its
+        // slot in this root, which a sheet restyles: each child is asked
+        // again, and read again if it is read otherwise than it was (D142).
+        this.#slotChanges.add(shadow);
+        for (
+          let child = shadow.lastElementChild;
+          child;
+          child = child.previousElementSibling
+        ) pending.push(child);
+      }
+    }
+  }
+
   #refreshControlledContentPolicy(): boolean {
     const previous = this.#controlledContentPolicy;
     if (!previous) return false;
@@ -2519,7 +2911,9 @@ export class HtmlMirrorSourceSession {
       this.#pendingChildren.size === 0 &&
       this.#pendingAttributes.size === 0 &&
       this.#pendingText.size === 0 &&
+      this.#pendingSheets.size === 0 &&
       !this.#pendingDimensions &&
+      !this.#styleDerivedPending &&
       !this.#controlledLayoutSettlePending &&
       this.#visibilityMutationRecords.length === 0 &&
       !this.#visibilityMutationOverflow &&
@@ -2537,8 +2931,8 @@ export class HtmlMirrorSourceSession {
   #queuePending<T extends Node>(targets: Set<T>, target: T): void {
     if (this.#pendingOverflow) return;
     if (targets.has(target)) return;
-    const size = this.#pendingChildren.size +
-      this.#pendingAttributes.size + this.#pendingText.size;
+    const size = this.#pendingChildren.size + this.#pendingAttributes.size +
+      this.#pendingText.size + this.#pendingSheets.size;
     if (size >= MAX_HTML_MIRROR_PENDING_TARGETS) {
       this.#clearPending();
       this.#pendingOverflow = true;
@@ -2567,6 +2961,10 @@ export class HtmlMirrorSourceSession {
           ? emittedTextSignature(node)
           : emittedElementSignature(node),
       );
+      if (node.kind === 'element') {
+        this.#noteSheetTextStyle(source, node);
+        this.#noteDeclaredHidden(source);
+      }
       if (source instanceof Element) {
         // A credential input is mirrored as an empty field (D76) and, like
         // an opaque shell, is refreshed only by a fresh structural read.
@@ -2610,10 +3008,36 @@ export class HtmlMirrorSourceSession {
     if (source) this.#setEmittedChildren(source, node.children);
   }
 
+  /** Keeps `#sheetTextStyles` in step with what was last sent for `source`. */
+  #noteSheetTextStyle(
+    source: Node,
+    sent: Pick<HtmlMirrorElementNode, 'tagName' | 'resolvedStyleSheetText'>,
+  ): void {
+    if (sent.tagName !== 'style') return;
+    if (sent.resolvedStyleSheetText !== undefined) {
+      this.#sheetTextStyles.add(source as Element);
+    } else {
+      this.#sheetTextStyles.delete(source as Element);
+    }
+  }
+
+  /**
+   * Notes, for an element the page declares hidden, whether what it holds
+   * is withheld, when the element is sent with what it holds.
+   */
+  #noteDeclaredHidden(source: Node): void {
+    const policy = this.#controlledContentPolicy;
+    if (!policy || source.nodeType !== Node.ELEMENT_NODE) return;
+    const withheld = sourceDeclaredHiddenRegionIsWithheld(source as Element, policy);
+    if (withheld === undefined) this.#declaredHiddenSent.delete(source as Element);
+    else this.#declaredHiddenSent.set(source as Element, withheld);
+  }
+
   #recordEmittedChildren(
     target: Node,
     children: readonly import('./html-mirror-sanitizer').HtmlMirrorNode[],
   ): void {
+    this.#noteDeclaredHidden(target);
     for (const child of children) this.#markMirroredGraph(child);
     this.#setEmittedChildren(target, children);
   }
@@ -2667,10 +3091,25 @@ export class HtmlMirrorSourceSession {
     if (this.#pendingAttributes.has(target as Element)) {
       return 'attributeContextFallbackCount';
     }
+    const previousSet = new Set(previous);
+    // Something else that changed inside a child that stays would be lost,
+    // so the list is read again whole. Inside a child that is new it is
+    // read with that child (D143): an element added empty and filled in the
+    // same frame, the usual way to add a `<style>`, had its parent's whole
+    // list sent, the `<head>` with every sheet in it.
+    const added = new Set(children.filter((child) => !previousSet.has(child)));
+    const changesKeptChild = (values: Iterable<Node>): boolean => {
+      for (const value of values) {
+        if (value === target) continue;
+        const holder = composedChildHolding(target, value);
+        if (holder && !added.has(holder)) return true;
+      }
+      return false;
+    };
     if (
-      iterableContainsComposedSource(this.#pendingChildren, target, target) ||
-      iterableContainsComposedSource(this.#pendingAttributes, target, target) ||
-      iterableContainsComposedSource(this.#pendingText, target, target)
+      changesKeptChild(this.#pendingChildren) ||
+      changesKeptChild(this.#pendingAttributes) ||
+      changesKeptChild(this.#pendingText)
     ) return 'coveredDirtyBranchFallbackCount';
     // A slot below whose list is to be sent comes with it, read again.
     for (const slot of this.#pendingSlotLists) {
@@ -2679,7 +3118,6 @@ export class HtmlMirrorSourceSession {
       }
     }
 
-    const previousSet = new Set(previous);
     for (const child of children) {
       if (!previousSet.has(child)) continue;
       if (
@@ -2780,16 +3218,27 @@ export class HtmlMirrorSourceSession {
     }
   }
 
+  /**
+   * An image that has loaded or failed is read again: its picture may be
+   * another. So is a `<link>`: a linked style sheet's rules are not there
+   * when the element is added, and are sent, on the element, as soon as
+   * they are (D143). The style poll would find them 1.5 s later.
+   */
   #queueCapturedImageAttributeRefresh(event: Event): void {
     const target = event.target;
     if (
       !(target instanceof Element) ||
-      target.localName.toLowerCase() !== 'img' ||
+      !CAPTURED_RESOURCE_ELEMENTS.has(target.localName.toLowerCase()) ||
       !belongsToSourceDocument(target, this.environment.document) ||
       !target.isConnected ||
       !this.#mirroredNodes.has(target)
     ) return;
-    this.#queuePending(this.#pendingAttributes, target);
+    if (target.localName.toLowerCase() === 'link') {
+      this.#queuePending(this.#pendingSheets, target);
+      this.#styleDerivedPending = true;
+    } else {
+      this.#queuePending(this.#pendingAttributes, target);
+    }
     this.#pendingDimensions = true;
     this.#scheduleFlush();
   }
@@ -2933,6 +3382,11 @@ export class HtmlMirrorSourceSession {
       : 'unchanged';
   }
 
+  /**
+   * `changed` asks for the whole page. A change in sheets whose `<style>`
+   * or `<link>` elements the mirror holds does not: those elements are read
+   * again (D143).
+   */
   #ordinaryStylesChanged(
     owner: Document | ShadowRoot,
     work: HtmlMirrorStyleWorkBudget,
@@ -2941,9 +3395,49 @@ export class HtmlMirrorSourceSession {
     if (read.kind === 'capacity') return 'capacity';
     const signature = read.signature;
     if (signature === undefined) return 'unchanged';
-    return this.#ordinaryStyleSignatures.observe(owner, signature)
-      ? 'changed'
-      : 'unchanged';
+    // The first look at an owner is what the mirror holds of it.
+    const settled = this.#ordinaryStyleSignatures.has(owner)
+      ? this.#ordinaryStyleSheets.get(owner)
+      : undefined;
+    const changed = this.#ordinaryStyleSignatures.observe(owner, signature);
+    if (changed || !settled) this.#ordinaryStyleSheets.set(owner, read.sheets ?? []);
+    if (!changed) return 'unchanged';
+    return settled && this.#rereadChangedStyleSheets(settled, read.sheets ?? [])
+      ? 'unchanged'
+      : 'changed';
+  }
+
+  /**
+   * A sheet changed with no change to the page's tree: a script added or
+   * took out a rule through the sheet's own interface, a linked sheet
+   * arrived, a sheet was switched off (D88). The element that owns each
+   * changed sheet is read again, as a whole read would read it, and sent
+   * if that differs from what the mirror was last sent: a `<style>` whose
+   * text changed has travelled with that change already. What is shown may
+   * have changed with the sheet, as after a resize. False when a changed
+   * sheet has no element the mirror holds: only a whole read can tell.
+   */
+  #rereadChangedStyleSheets(
+    settled: readonly OrdinaryStyleSheetRead[],
+    current: readonly OrdinaryStyleSheetRead[],
+  ): boolean {
+    const known = new Map(settled.map(({ owner, signature }) => [owner, signature]));
+    const changed: Element[] = [];
+    for (const { owner, signature } of current) {
+      if (known.get(owner) === signature) continue;
+      if (
+        !(owner instanceof Element) || !owner.isConnected ||
+        !this.#mirroredNodes.has(owner) || this.#mirroredOpaqueSecrets.has(owner)
+      ) return false;
+      changed.push(owner);
+    }
+    for (const element of changed) {
+      this.#queuePending(this.#pendingSheets, element);
+    }
+    // Also when a sheet is only gone: its rules no longer apply.
+    this.#styleDerivedPending = true;
+    this.#onLayoutChange();
+    return true;
   }
 
   #primeOrdinaryStyleSignatures(): void {
@@ -2962,6 +3456,7 @@ export class HtmlMirrorSourceSession {
       const read = ordinaryStyleSignature(owner, work, budgetUnused(work));
       if (read.kind === 'signature' && read.signature !== undefined) {
         this.#ordinaryStyleSignatures.prime(owner, read.signature);
+        this.#ordinaryStyleSheets.set(owner, read.sheets ?? []);
       }
       if (read.kind === 'capacity') break;
     }
@@ -3263,9 +3758,14 @@ function adoptedStyleSignature(styles: readonly string[]): string {
 type OrdinaryStyleSignatureRead = Readonly<{
   kind: 'signature';
   signature: string | undefined;
+  /** An owner's read only: each sheet on its own, in the owner's order. */
+  sheets?: readonly OrdinaryStyleSheetRead[];
 }> | Readonly<{
   kind: 'capacity';
 }>;
+
+/** One sheet of an owner: the node that owns it (or the sheet) and its state. */
+type OrdinaryStyleSheetRead = Readonly<{ owner: object; signature: string }>;
 
 function budgetUnused(work: HtmlMirrorStyleWorkBudget): boolean {
   return work.sheets === 0 && work.rules === 0 && work.characters === 0;
@@ -3302,6 +3802,7 @@ function ordinaryStyleSignature(
     return Object.freeze({ kind: 'capacity' });
   }
   const parts: string[] = [];
+  const read: OrdinaryStyleSheetRead[] = [];
   const visited = new Set<object>();
   for (let index = 0; index < sheetCount; index += 1) {
     const sheet = sheets[index];
@@ -3309,20 +3810,26 @@ function ordinaryStyleSignature(
     work.sheets += 1;
     let disabled = false;
     let media = '';
+    let owner: object = sheet;
     try {
       disabled = sheet.disabled === true;
       media = sheet.media?.mediaText ?? '';
+      owner = sheet.ownerNode ?? sheet;
     } catch {
       parts.push(`${index}:unreadable`);
+      read.push(Object.freeze({ owner, signature: 'unreadable' }));
       continue;
     }
     const rules = cssomRuleSignature(sheet, work, visited, 0, shapeOnOverflow);
     if (rules.kind === 'capacity') return rules;
-    parts.push(`${index}:${disabled ? 1 : 0}:${media}:${rules.signature}`);
+    const state = `${disabled ? 1 : 0}:${media}:${rules.signature}`;
+    parts.push(`${index}:${state}`);
+    read.push(Object.freeze({ owner, signature: state }));
   }
   return Object.freeze({
     kind: 'signature',
     signature: adoptedStyleSignature(parts),
+    sheets: Object.freeze(read),
   });
 }
 
@@ -3514,6 +4021,22 @@ function containsComposedSource(ancestor: Node, descendant: Node): boolean {
   return false;
 }
 
+/**
+ * The child of `ancestor`, or its shadow root, that holds `descendant` (or
+ * is it); none when `descendant` is not inside `ancestor`.
+ */
+function composedChildHolding(ancestor: Node, descendant: Node): Node | undefined {
+  for (let current: Node | undefined = descendant; current;) {
+    const parent: Node | undefined = current.parentNode ??
+      (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current
+        ? (current as ShadowRoot).host
+        : undefined);
+    if (parent === ancestor) return current;
+    current = parent;
+  }
+  return undefined;
+}
+
 function reconciliationMatchesEmittedChildren(
   entries: readonly HtmlMirrorReconcileChild[],
   previous: readonly Node[],
@@ -3558,6 +4081,30 @@ function emittedElementSignature(
     element.customElementDefined === true,
     element.assignedNodeIds ?? null,
   ]);
+}
+
+/** The sheet text in what was last sent for an element, if it had one. */
+function emittedStyleSheetText(signature: string | undefined): string | undefined {
+  if (signature === undefined) return undefined;
+  const sheetText = (JSON.parse(signature) as unknown[])[10];
+  return typeof sheetText === 'string' ? sheetText : undefined;
+}
+
+/**
+ * Whether the element's own style masks its text. The reader's rule for
+ * what is secret decides; this is the one input of it that a style sheet
+ * changes, read alone because it is read for every element.
+ */
+function sourceStyleMasksText(element: Element, view: Window): boolean {
+  try {
+    if (typeof view.getComputedStyle !== 'function') return false;
+    const masking = view.getComputedStyle(element)
+      .getPropertyValue('-webkit-text-security').trim().toLowerCase();
+    return masking !== '' && masking !== 'none';
+  } catch {
+    // A style that cannot be read is taken as masking, as the rule takes it.
+    return true;
+  }
 }
 
 function emittedTextSignature(
@@ -3624,6 +4171,52 @@ function sourceMutationChangesSlots(record: MutationRecord): ShadowRoot | undefi
   if (!changes) return undefined;
   const root = target.getRootNode();
   return isSourceShadowRoot(root) ? root : undefined;
+}
+
+/**
+ * The `<style>` element whose own text a mutation changes, if any: a sheet
+ * is made of the text nodes straight inside its element.
+ */
+function sourceMutationStyleElement(record: MutationRecord): Element | undefined {
+  const holder = record.type === 'childList'
+    ? record.target
+    : record.type === 'characterData' ? record.target.parentNode : null;
+  return holder?.nodeType === 1 &&
+      (holder as Element).localName.toLowerCase() === 'style'
+    ? holder as Element
+    : undefined;
+}
+
+/**
+ * Whether `<html>` has another head or body than it had: its own (the first
+ * of each) is another element or gone, or it holds one more. One of several
+ * taken out leaves the page's own in place.
+ */
+function sourceDocumentShellChanged(
+  previous: readonly Node[],
+  current: readonly Node[],
+): boolean {
+  const named = (node: Node, name: string): boolean => node.nodeType === 1 &&
+    (node as Element).namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    (node as Element).localName === name;
+  const known = new Set(previous);
+  for (const name of ['head', 'body']) {
+    if (
+      previous.find((node) => named(node, name)) !==
+        current.find((node) => named(node, name)) ||
+      current.some((node) => named(node, name) && !known.has(node))
+    ) return true;
+  }
+  return false;
+}
+
+/** Whether a mutation adds, removes or changes nothing but text nodes. */
+function sourceMutationChangesTextOnly(record: MutationRecord): boolean {
+  if (record.type === 'characterData') return true;
+  if (record.type !== 'childList') return false;
+  for (const node of record.addedNodes) if (node.nodeType !== 3) return false;
+  for (const node of record.removedNodes) if (node.nodeType !== 3) return false;
+  return true;
 }
 
 /**

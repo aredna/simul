@@ -94,6 +94,13 @@ export type HtmlMirrorPatchOperation =
       readonly controlText?: HtmlMirrorControlText;
       readonly canvasBackgroundColor?: string;
       readonly resolvedStyleSheetText?: string;
+      /**
+       * `resolvedStyleSheetText` is what follows the first so many
+       * characters of the text the mirror holds for this `<style>` (D143):
+       * a page that adds rules by appending text to a style had the whole
+       * sheet sent at every append.
+       */
+      readonly resolvedStyleSheetTextFrom?: number;
       readonly customElementDefined?: true;
       readonly assignedNodeIds?: readonly number[];
     }
@@ -125,6 +132,45 @@ export interface HtmlMirrorPatchBatch {
   readonly operations: readonly HtmlMirrorPatchOperation[];
   readonly representability: HtmlMirrorRepresentabilitySummary;
   readonly byteLength: number;
+  /**
+   * The other patches of the same frame of the page, in order, each with
+   * this one's sequence (D143). The page changed in one step: the mirror
+   * applies the patches of that step one after the other and all or none,
+   * so that it never shows a state the page was not in.
+   */
+  readonly more?: readonly HtmlMirrorPatchBatch[];
+}
+
+/** Patches one frame of the page can take: what `<html>` holds, the lists, the rest. */
+export const MAX_HTML_MIRROR_FRAME_PATCHES = 3;
+
+/**
+ * One message for the patches of one frame of the page, which share a
+ * sequence. A single patch is itself.
+ */
+export function createHtmlMirrorPatchFrame(
+  patches: readonly HtmlMirrorPatchBatch[],
+): HtmlMirrorPatchBatch | undefined {
+  const [first, ...more] = patches;
+  if (
+    !first || patches.length > MAX_HTML_MIRROR_FRAME_PATCHES ||
+    patches.some((patch) =>
+      patch.more !== undefined ||
+      patch.firstSequence !== first.firstSequence ||
+      patch.lastSequence !== first.lastSequence ||
+      patch.identity.sequence !== first.identity.sequence ||
+      !sameDocument(patch.identity, first.identity))
+  ) return undefined;
+  return more.length === 0
+    ? first
+    : Object.freeze({ ...first, more: Object.freeze(more) });
+}
+
+/** The patches of a message in the order they are applied. */
+export function htmlMirrorFramePatches(
+  batch: HtmlMirrorPatchBatch,
+): readonly HtmlMirrorPatchBatch[] {
+  return batch.more ? [batch, ...batch.more] : [batch];
 }
 
 /** Panes the mirror follows at once; the most recently scrolled are kept. */
@@ -756,10 +802,14 @@ export function readHtmlMirrorSourceMessage(
   }
   if (
     input.kind !== 'simul:html-mirror-v2:patch' ||
-    !hasExactKeys(input, [
-      'protocolVersion', 'kind', 'identity', 'firstSequence', 'lastSequence',
-      'operations', 'representability', 'byteLength',
-    ]) ||
+    !hasExactKeysWithOptional(
+      input,
+      [
+        'protocolVersion', 'kind', 'identity', 'firstSequence', 'lastSequence',
+        'operations', 'representability', 'byteLength',
+      ],
+      ['more'],
+    ) ||
     !Array.isArray(input.operations)
   ) return undefined;
   const batch = createHtmlMirrorPatch(
@@ -770,7 +820,22 @@ export function readHtmlMirrorSourceMessage(
     input.representability as HtmlMirrorRepresentabilitySummary,
     fidelityPolicy,
   );
-  return batch && batch.byteLength === input.byteLength ? batch : undefined;
+  if (!batch || batch.byteLength !== input.byteLength) return undefined;
+  if (input.more === undefined) return batch;
+  // The other patches of the frame: each is checked as a patch is, and the
+  // frame as the page reader's own.
+  if (!Array.isArray(input.more) || input.more.length < 1) return undefined;
+  const patches: HtmlMirrorPatchBatch[] = [batch];
+  for (const entry of input.more) {
+    const patch = readHtmlMirrorSourceMessage(
+      entry,
+      expectedIdentity,
+      fidelityPolicy,
+    );
+    if (patch?.kind !== 'simul:html-mirror-v2:patch') return undefined;
+    patches.push(patch);
+  }
+  return createHtmlMirrorPatchFrame(patches);
 }
 
 function readOperations(
@@ -850,7 +915,8 @@ function readOperations(
           'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
           'selectPickerOpen', 'selectPresentationStyle', 'controlText',
           'canvasBackgroundColor', 'resolvedStyleSheetText',
-          'customElementDefined', 'assignedNodeIds',
+          'resolvedStyleSheetTextFrom', 'customElementDefined',
+          'assignedNodeIds',
         ],
       ) &&
       (raw.namespace === 'html' || raw.namespace === 'svg' ||
@@ -866,7 +932,14 @@ function readOperations(
           !Array.isArray(raw.selectedOptionIndexes)) ||
         (raw.selectPresentationStyle !== undefined &&
           typeof raw.selectPresentationStyle !== 'string') ||
-        (raw.selectPickerOpen !== undefined && raw.selectPickerOpen !== true)
+        (raw.selectPickerOpen !== undefined && raw.selectPickerOpen !== true) ||
+        // Only a `<style>` holds its sheet as text that more can be added to.
+        (raw.resolvedStyleSheetTextFrom !== undefined && (
+          !Number.isSafeInteger(raw.resolvedStyleSheetTextFrom) ||
+          (raw.resolvedStyleSheetTextFrom as number) < 1 ||
+          raw.tagName !== 'style' ||
+          typeof raw.resolvedStyleSheetText !== 'string'
+        ))
       ) return undefined;
       const selectedOptionIndexes = readHtmlMirrorSelectedOptionIndexes(
         raw.selectedOptionIndexes,
@@ -946,6 +1019,10 @@ function readOperations(
           : {}),
         ...(sentinel.resolvedStyleSheetText !== undefined
           ? { resolvedStyleSheetText: sentinel.resolvedStyleSheetText }
+          : {}),
+        ...(sentinel.resolvedStyleSheetText !== undefined &&
+            raw.resolvedStyleSheetTextFrom !== undefined
+          ? { resolvedStyleSheetTextFrom: raw.resolvedStyleSheetTextFrom as number }
           : {}),
         ...(sentinel.customElementDefined
           ? { customElementDefined: true as const }
