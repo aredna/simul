@@ -384,6 +384,20 @@ export class CapturePipeline {
     this.environment.updateMirrorLayout();
   }
 
+  /**
+   * Asks Chrome for the followed tab's zoom and takes its answer as a zoom
+   * change (D146). The PDF follower asks when the viewer's reports fit no
+   * page at the zoom the panel holds, so a change Chrome never told this
+   * page of is not waited for. A change told while Chrome answers wins.
+   */
+  async refreshSourceZoom(tabId: number): Promise<void> {
+    if (this.#state.followedOrCapturedIdentity?.tabId !== tabId) return;
+    const zoomChangesBefore = this.#zoomChanges;
+    const zoomFactor = await this.#readZoom(tabId);
+    if (zoomFactor === undefined || this.#zoomChanges !== zoomChangesBefore) return;
+    this.handleSourceZoomChange(tabId, zoomFactor);
+  }
+
   /** The engine committed a checkpoint or a live batch for the replica. */
   handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
     const state = this.#state;

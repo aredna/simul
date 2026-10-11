@@ -38,6 +38,7 @@ function setup(options: {
   connectFails?: boolean;
   locate?: PdfViewerFollowerDependencies['locate'];
   viewerZoom?: () => number | undefined;
+  askViewerZoom?: PdfViewerFollowerDependencies['askViewerZoom'];
 } = {}) {
   let enabled = options.enabled ?? true;
   let deliver: ((message: unknown) => void) | undefined;
@@ -66,6 +67,7 @@ function setup(options: {
     onDiagnostic: (state) => diagnostics.push(state),
     ...(options.locate ? { locate: options.locate } : {}),
     ...(options.viewerZoom ? { viewerZoom: options.viewerZoom } : {}),
+    ...(options.askViewerZoom ? { askViewerZoom: options.askViewerZoom } : {}),
   });
   return {
     follower,
@@ -722,5 +724,91 @@ describe('PdfViewerFollower looks into a doubted place (D133)', () => {
     await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
     expect(locate).toHaveBeenCalledTimes(1);
     expect(view.position?.index).toBe(12);
+  });
+
+  it('asks Chrome for the tab\'s zoom when the viewer rests on a report that fits no page at the zoom held (D146)', async () => {
+    vi.useFakeTimers();
+    let zoom: number | undefined = 1;
+    const locate = vi.fn(async (): Promise<number | undefined> => 12);
+    // Chrome answers 80%, and the panel takes it as a zoom change.
+    const askViewerZoom = vi.fn(() => {
+      void Promise.resolve().then(() => {
+        zoom = 0.8;
+        harness.follower.zoomChanged();
+      });
+    });
+    const harness = setup({ locate, viewerZoom: () => zoom, askViewerZoom });
+    const { follower, view, send } = harness;
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    // The first report comes at 80%, and Chrome never tells of it.
+    send({ ...report(100, 1_000), pageWidth: 816 * 0.8, pageX: (800 - 14 - 816 * 0.8) / 2 });
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS - 1);
+    expect(askViewerZoom).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(askViewerZoom).toHaveBeenCalledTimes(1);
+    expect(askViewerZoom).toHaveBeenCalledWith(TARGET);
+    expect(locate).not.toHaveBeenCalled();
+
+    // Its answer is a zoom change: the guess is looked into at the next rest.
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    expect(locate).toHaveBeenCalledTimes(1);
+    expect(view.position?.index).toBe(12);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(askViewerZoom).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not ask for the zoom while the reports fit the zoom held, while it knows none, or while following is off (D146)', async () => {
+    vi.useFakeTimers();
+    let zoom: number | undefined = 1;
+    const locate = vi.fn(async (): Promise<number | undefined> => undefined);
+    const askViewerZoom = vi.fn();
+    const { follower, send, setEnabled } = setup({ locate, viewerZoom: () => zoom, askViewerZoom });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(100, 1_000));
+    send(report(130, 1_016));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(askViewerZoom).not.toHaveBeenCalled();
+
+    // No zoom known: nothing to compare the report with.
+    zoom = undefined;
+    send({ ...report(160, 8_000), pageWidth: 816 * 0.8, pageX: (800 - 14 - 816 * 0.8) / 2 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(askViewerZoom).not.toHaveBeenCalled();
+
+    // Following off: the view does not move, and nothing is asked.
+    zoom = 1;
+    setEnabled(false);
+    send({ ...report(190, 16_000), pageWidth: 816 * 0.8, pageX: (800 - 14 - 816 * 0.8) / 2 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(askViewerZoom).not.toHaveBeenCalled();
+    // Turned on again: asked at the rest that follows.
+    setEnabled(true);
+    follower.realign();
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    expect(askViewerZoom).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks once a rest while the view is turned, and stays put when Chrome says the same zoom (D146)', async () => {
+    vi.useFakeTimers();
+    const locate = vi.fn(async (): Promise<number | undefined> => undefined);
+    // Chrome answers the zoom the panel holds, or cannot be asked: no zoom
+    // change follows either way.
+    const askViewerZoom = vi.fn((): void => undefined);
+    askViewerZoom.mockImplementationOnce(() => { throw new Error('No tab'); });
+    const { follower, view, send } = setup({ locate, viewerZoom: () => 0.7, askViewerZoom });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    const turned = { ...report(100, 1_000), pageWidth: 1056 * 0.7, pageX: (800 - 14 - 1056 * 0.7) / 2 };
+    send(turned);
+    send({ ...turned, pageY: turned.pageY - 30, time: 1_016 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(askViewerZoom).toHaveBeenCalledTimes(1);
+    send({ ...turned, pageY: turned.pageY - 60, time: 7_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(askViewerZoom).toHaveBeenCalledTimes(2);
+    expect(locate).not.toHaveBeenCalled();
+    expect(view.followPosition).not.toHaveBeenCalled();
   });
 });

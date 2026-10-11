@@ -81,11 +81,16 @@ const LARGE_MOVE = 160;
 // report follows at once); a scroll that stops near a page top is told
 // apart by this margin.
 const PAGE_TOP_EXACT = 0.1;
-// The snapped report of a jump follows its first report within this time;
-// a held key repeats more slowly (about every 30 ms).
+// The snapped report of a jump to the next page (ArrowRight) follows its
+// first report within this time; a held key repeats more slowly (about every
+// 30 ms). So does the second report of a jump to the place the report
+// before it named (from a page's corner to another page's): later than this
+// it is not told from a key pressed again where the viewer cannot move.
 const SNAP_REPORT_MS = 20;
-// A jump's second report is within this (screen px) of its first: the snap
-// to whole pixels moves it by under half a pixel, and scrolling by one or more.
+// A jump's second report is within this of its first, in the screen's own
+// pixels: the snap to whole pixels moves it by about half a pixel at most,
+// and scrolling by one or more. On a screen scaled by 2 a pixel of the
+// screen is half a CSS pixel, and a slow scroll steps by that (D146).
 const REPEATED_REPORT = 0.9;
 // Within a movement, a report this far (screen px) from the one before it
 // is a step, not a frame of scrolling that slows to a stop: the same place
@@ -95,6 +100,11 @@ const JUMP_STEP = 8;
 // frame of a movement that moved whole pages reports the same place too, on
 // another page. Chrome 154's snapped report came 0.1 to 2.5 ms after the
 // first; Chrome 138's, on a busy machine, 2.5 to 10.5 ms, so some are missed.
+// After a lone report that went somewhere else than the report before it,
+// little but its own snapped report repeats its place, so there "at once"
+// is the rest of the burst (`PDF_VIEWER_STREAM_GAP_MS`): a viewer slowed 8
+// times sent it up to 31 ms late (55 ms on Chrome 138), and one showing
+// 11,111 pages up to 40 ms (D146).
 const SNAP_IN_MOVEMENT_MS = 8;
 // A held ArrowRight's report barely differs from the last (the snapping).
 const HELD_PAGE_TOP_MOVE = 0.75;
@@ -213,10 +223,10 @@ export type PdfViewerTrack =
  *
  * A reading that could be whole pages off is a `doubt` (D133): the first
  * report, a report that came twice at once (a jump: the page box, an
- * outline entry, a link; also one made while the viewer still scrolled), a
- * lone report at a page top (ArrowRight, a page key in fit to page), and
- * what the viewer reports as a turned view or the two-page view ends,
- * however that is read. Scrolling is never one, however fast. A doubt stays
+ * outline entry, a link; also one made while the viewer still scrolled,
+ * and one that sets a zoom), a lone report at a page top (ArrowRight, a
+ * page key in fit to page), and what the viewer reports as a turned view
+ * or the two-page view ends, however that is read. Scrolling is never one, however fast. A doubt stays
  * through the scrolling that follows, until the panel says which page it
  * was (`place`) or the viewer goes to the top or bottom of the PDF.
  *
@@ -292,10 +302,18 @@ export class PdfViewerTracker {
    * report is then no jump.
    */
   #zoomed = false;
+  /**
+   * Within how long (ms) the same place again makes the last report a
+   * jump: a place reached in one step and reported again at once.
+   * `undefined` when the last report was no step.
+   */
+  #snapWithin: number | undefined;
   /** How wide the viewer's scrollbars are, in screen px, once the tab has said. */
   #scrollbar: number | undefined;
   /** Whether the tab has said its screen is scaled by a fraction. */
   #scaledByFraction = false;
+  /** The screen's device pixels per CSS pixel, once the tab has said; else 1. */
+  #screenScale = 1;
 
   constructor(pageSizes: readonly PdfPagePoints[]) {
     let top = 0;
@@ -397,12 +415,14 @@ export class PdfViewerTracker {
    * The screen's device pixels per CSS pixel in the tab (D134): 1.25 on a
    * screen scaled by 125%. On a screen scaled by a fraction the bottom of
    * the PDF is taken within 2 px, not 0.75: Chrome's own rounding moves it
-   * that far there. `undefined` (the tab could not tell) is a whole number.
+   * that far there. And two reports are of one place when they are under a
+   * pixel of the screen apart, which is less than a CSS pixel on a scaled
+   * screen (D146). `undefined` (the tab could not tell) is a scale of 1.
    */
   setScreenScale(scale: number | undefined): void {
-    this.#scaledByFraction = scale !== undefined &&
-      Number.isFinite(scale) &&
-      Math.abs(scale - Math.round(scale)) > WHOLE_SCALE;
+    const known = scale !== undefined && Number.isFinite(scale) && scale > 0;
+    this.#screenScale = known ? scale : 1;
+    this.#scaledByFraction = known && Math.abs(scale - Math.round(scale)) > WHOLE_SCALE;
   }
 
   /**
@@ -416,8 +436,8 @@ export class PdfViewerTracker {
    * or a page a little wider or narrower than its neighbours would pass
    * for the only one that fits after a small resize in a fit mode. None
    * fits while Chrome has not told of a zoom yet: then there is no doubt to
-   * look into until it has. Without the tab's zoom they are the pages as
-   * wide as the page guessed.
+   * look into until it has (`zoomUnfitted` says so). Without the tab's zoom
+   * they are the pages as wide as the page guessed.
    */
   get doubt(): PdfViewerDoubt | undefined {
     const fix = this.#fix;
@@ -444,6 +464,21 @@ export class PdfViewerTracker {
       pages: fitting.map((candidate) => candidate.page),
       episode: this.#episode,
     };
+  }
+
+  /**
+   * Whether the latest report fits no page at the zoom the panel was told,
+   * upright and give or take the zoom's lag (D146). The viewer is then at
+   * a zoom the panel has not heard of, or shows its pages turned. While
+   * that lasts a guess has no pages to look into, and a zoom can pass for a
+   * turn; Chrome tells of a zoom apart from the viewer's reports, so the
+   * panel may ask Chrome for the tab's zoom itself. `false` while the panel
+   * knows no zoom.
+   */
+  get zoomUnfitted(): boolean {
+    const report = this.#lastReport;
+    const zoom = this.#viewerZoom;
+    return report !== undefined && zoom !== undefined && !this.#upright(report, zoom);
   }
 
   /**
@@ -493,6 +528,7 @@ export class PdfViewerTracker {
       !(elapsed >= 0 && elapsed <= PDF_VIEWER_STREAM_GAP_MS) &&
       this.#fix?.viewport === this.#lastReport
     ) this.#returned = false;
+    const reportBefore = this.#lastReport;
     this.#lastReport = viewport;
     // A view turned a quarter has other page positions: not followed.
     if (this.#quarterTurned(viewport)) return { kind: 'same' };
@@ -503,6 +539,8 @@ export class PdfViewerTracker {
     this.#previousLone = lone;
     const zoomed = this.#zoomed;
     this.#zoomed = false;
+    const snapWithin = this.#snapWithin;
+    this.#snapWithin = this.#stepAllowance(viewport, reportBefore, lone, zoomed);
     const before = this.#position;
     const keyUndo = this.#keyUndo;
     this.#keyUndo = undefined;
@@ -515,14 +553,15 @@ export class PdfViewerTracker {
         const movedX = Math.abs(viewport.pageX - hold.last.pageX);
         // A jump is a place reached in one step and reported again at
         // once, alone or while the viewer still scrolled (an outline entry
-        // clicked during a fling). The last frames of a movement that slows
-        // to a stop come as close together, each a small step on from the
-        // one before, and are none; nor is a frame that moved whole pages.
+        // clicked during a fling): after a lone report anywhere in its
+        // burst, within a movement in half a frame. The last frames of a
+        // movement that slows to a stop come as close together, each a
+        // small step on from the one before, and are none; nor is a frame
+        // that moved whole pages.
         if (
           hold.stepped &&
-          elapsed <= (hold.frames === 1 ? SNAP_REPORT_MS : SNAP_IN_MOVEMENT_MS) &&
-          movedY < REPEATED_REPORT &&
-          movedX < REPEATED_REPORT
+          (hold.frames === 1 || elapsed <= SNAP_IN_MOVEMENT_MS) &&
+          Math.max(movedY, movedX) < this.#samePlace()
         ) hold.jump = true;
         hold.stepped = movedY > JUMP_STEP || movedX > JUMP_STEP;
         hold.last = viewport;
@@ -542,7 +581,7 @@ export class PdfViewerTracker {
       const key = lone || (this.#lastPageKey && this.#repeatsKey(keyStep, viewport, elapsed));
       this.#accept(key ? keyStep.key : keyStep.scroll, keyStep.viewport, 0);
     }
-    const track = this.#read(viewport, elapsed, lone, previousLone, zoomed);
+    const track = this.#read(viewport, elapsed, lone, previousLone, zoomed, snapWithin);
     // A held movement or key read just now moved the place even when this
     // report did not.
     if (track.kind === 'same' && this.#position !== before && this.#position) {
@@ -557,6 +596,7 @@ export class PdfViewerTracker {
     lone: boolean,
     previousLone: boolean,
     zoomed: boolean,
+    snapWithin: number | undefined,
   ): PdfViewerTrack {
     const fix = this.#fix;
     const jumpInstead = this.#jumpInstead;
@@ -581,15 +621,19 @@ export class PdfViewerTracker {
     // twice at once: its place, then that place snapped to whole pixels.
     // Scrolling never repeats a place. Wherever the first report was read
     // to be, the page could be any (D133). A zoom reports twice too, and
-    // keeps its page.
+    // keeps its page. The first report is a place reached in one step: a
+    // lone report, a step within a movement the tracker follows (a jump
+    // made while the viewer still scrolled), or a place other than the
+    // zoom's straight after a zoom (an outline entry that sets a zoom).
     if (
-      !lone &&
-      previousLone &&
       !zoomed &&
-      elapsed <= SNAP_REPORT_MS &&
+      snapWithin !== undefined &&
+      elapsed <= snapWithin &&
       sameZoom.length > 0 &&
-      Math.abs(viewport.pageY - fix.viewport.pageY) < REPEATED_REPORT &&
-      Math.abs(viewport.pageX - fix.viewport.pageX) < REPEATED_REPORT
+      Math.max(
+        Math.abs(viewport.pageY - fix.viewport.pageY),
+        Math.abs(viewport.pageX - fix.viewport.pageX),
+      ) < this.#samePlace()
     ) this.#guess();
     // Scrolling sideways moves only `pageX`: the same place.
     if (
@@ -689,6 +733,54 @@ export class PdfViewerTracker {
       jump: false,
     };
     return { kind: 'hold', wait: PDF_VIEWER_MOVEMENT_SETTLE_MS };
+  }
+
+  /**
+   * Within how long (ms) the same place again would make `viewport` a jump;
+   * `undefined` when it is no step. A lone report somewhere else than the
+   * report before it is a step whatever follows in its burst; one where
+   * the report before it was is a step for `SNAP_REPORT_MS` only (a key
+   * the viewer cannot follow, a step of whole pages: D146, after the
+   * review). Within a burst a report is a step when it is more than
+   * `JUMP_STEP` from the one before it, or, straight after a report read
+   * as a zoom at the same place, anywhere else than that report: a zoom's
+   * own second report repeats its place, and nothing was scrolling.
+   */
+  #stepAllowance(
+    viewport: PdfViewerViewport,
+    before: PdfViewerViewport | undefined,
+    lone: boolean,
+    zoomed: boolean,
+  ): number | undefined {
+    // The first report is a guess as it is.
+    if (!before) return undefined;
+    const moved = Math.max(
+      Math.abs(viewport.pageY - before.pageY),
+      Math.abs(viewport.pageX - before.pageX),
+    );
+    if (lone) {
+      // Where the report before it was already, the viewer did not move, or
+      // moved by whole pages: Chrome reports every arrow, Page Down and
+      // Space press, also where the viewer cannot go on (the end of the
+      // PDF, the far side of a wide page), and a held key says the same
+      // place again about every 30 ms. There the place again is a jump only
+      // within the 20 ms of D133, sooner than a key repeats.
+      return moved < this.#samePlace() ? SNAP_REPORT_MS : PDF_VIEWER_STREAM_GAP_MS;
+    }
+    return (zoomed ? moved >= this.#samePlace() : moved > JUMP_STEP)
+      ? SNAP_IN_MOVEMENT_MS
+      : undefined;
+  }
+
+  /**
+   * How far apart (CSS px) two reports of one place can be: under a pixel
+   * of the screen. A jump's second report is its first snapped to a whole
+   * pixel of the screen (0.52 of one at most, at scales of 1 to 2), and
+   * scrolling moves by one or more: half a CSS pixel on a screen scaled by
+   * 2, where 0.9 CSS px took the first frames of a slow scroll for a jump.
+   */
+  #samePlace(): number {
+    return REPEATED_REPORT / Math.max(1, this.#screenScale);
   }
 
   /**

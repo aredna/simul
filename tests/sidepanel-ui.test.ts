@@ -621,6 +621,11 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('browser.tabs.onZoomChange.addListener(');
     expect(script).toContain('capturePipeline.handleSourceZoomChange(tabId, newZoomFactor)');
     expect(script).toContain('browser.tabs.getZoom(tabId)');
+    // The PDF follower asks for the zoom itself when the viewer's reports
+    // fit no page at the zoom held (D146).
+    expect(script).toContain(
+      'askViewerZoom: (target) => void capturePipeline.refreshSourceZoom(target.tabId),',
+    );
   });
 
   it('translates PDFs through the page coordinator on their own surface', () => {

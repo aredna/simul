@@ -658,6 +658,62 @@ describe('CapturePipeline tab zoom', () => {
     expect(harness.state.sourceZoomFactor).toBe(0.7);
   });
 
+  it('asks Chrome for the followed tab\'s zoom and takes the answer as a zoom change (D146)', async () => {
+    let zoom = 0.71;
+    const readZoom = vi.fn(async () => zoom);
+    const harness = setup({ readZoom });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.state.sourceZoomFactor).toBe(0.71);
+    harness.events.length = 0;
+    readZoom.mockClear();
+
+    // The viewer went to 50% and this page was never told.
+    zoom = 0.5;
+    await harness.pipeline.refreshSourceZoom(IDENTITY.tabId);
+    expect(readZoom).toHaveBeenCalledWith(IDENTITY.tabId);
+    expect(harness.state.sourceZoomFactor).toBe(0.5);
+    expect(harness.state.sourceZoomKnown).toBe(true);
+    expect(harness.events).toEqual(['layout']);
+
+    // The same zoom again changes nothing; another tab is not asked about.
+    await harness.pipeline.refreshSourceZoom(IDENTITY.tabId);
+    expect(harness.events).toEqual(['layout']);
+    readZoom.mockClear();
+    await harness.pipeline.refreshSourceZoom(IDENTITY.tabId + 1);
+    expect(readZoom).not.toHaveBeenCalled();
+  });
+
+  it('keeps the zoom it holds when Chrome gives none, and a change told while Chrome answers (D146)', async () => {
+    let answer: ((zoom: number) => void) | undefined;
+    let fail = false;
+    const harness = setup({
+      readZoom: () => (fail
+        ? Promise.reject(new Error('No tab'))
+        : answer
+          ? new Promise<number>((resolve) => { answer = resolve; })
+          : Promise.resolve(0.71)),
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    harness.events.length = 0;
+
+    fail = true;
+    await harness.pipeline.refreshSourceZoom(IDENTITY.tabId);
+    expect(harness.state.sourceZoomFactor).toBe(0.71);
+    expect(harness.state.sourceZoomKnown).toBe(true);
+    expect(harness.events).toEqual([]);
+
+    // Chrome answered 0.6 before the viewer went to 0.5 and told of it.
+    fail = false;
+    answer = () => undefined;
+    const asking = harness.pipeline.refreshSourceZoom(IDENTITY.tabId);
+    harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, 0.5);
+    answer(0.6);
+    await asking;
+    expect(harness.state.sourceZoomFactor).toBe(0.5);
+  });
+
   it('follows zoom changes of the followed tab only', async () => {
     const harness = setup();
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });

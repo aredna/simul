@@ -304,6 +304,8 @@ const pdfViewerFollower = new PdfViewerFollower({
   onDiagnostic: (followState) => logPdfDiagnostic({ stage: 'follow', state: followState }),
   // Not the 1 a failed read leaves: a turned view is then not looked for (D123).
   viewerZoom: () => (state.sourceZoomKnown ? state.sourceZoomFactor : undefined),
+  // The viewer reports at a zoom the panel was not told of: Chrome is asked (D146).
+  askViewerZoom: (target) => void capturePipeline.refreshSourceZoom(target.tabId),
   // A place that could be pages off is settled by the page box of the
   // viewer's toolbar, read from one capture of the tab (D133).
   locate: (target, doubt, signal) => pdfController.locatePage(target, doubt, signal),

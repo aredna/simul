@@ -1123,8 +1123,16 @@ shell and the mirror has nothing to copy (D103).
       passes the zoom (`state.sourceZoomFactor`, only when Chrome gave it:
       a failed `tabs.getZoom` leaves it at 1 but unknown) with each report
       and when Chrome tells of a zoom (`zoomChanged`, from
-      `updateMirrorLayout`); the tracker then looks at the latest report
-      again, unless it was a page width exactly at the zoom before (a 4:3
+      `updateMirrorLayout`). A zoom Chrome never told the panel's page of
+      would leave a zoom passing for a turn (a 4:3 slide at 75% is as wide
+      as it is tall at 100%) and a guess with no pages to look into, so the
+      follower does not only wait: when the viewer has rested on a report
+      that fits no page upright at the zoom held (`zoomUnfitted`), it asks
+      Chrome (`askViewerZoom`, `CapturePipeline.refreshSourceZoom`, which
+      takes the answer of `tabs.getZoom` as a zoom change unless one was
+      told meanwhile). While a view really is turned every rest asks and
+      Chrome answers the zoom held. The tracker then looks at the latest
+      report again, unless it was a page width exactly at the zoom before (a 4:3
       slide is as wide at 75% as it is tall at 100%, and Chrome may tell of
       a zoom before the viewer reports it). While turned nothing is read, a
       held movement or key is dropped, and a width that fits no page at the
@@ -1251,10 +1259,29 @@ shell and the mirror has nothing to copy (D103).
       puts a view turned back at the top of its page, which reads as Home
       (or, in fit to height, as End) when the reports come as a movement:
       until a new movement begins, such a reading is a guess all the same.
-      A jump is told within a held movement too (an outline entry clicked
-      while the viewer still scrolls): a report more than 8 px from the one
-      before it, and the same place again within 8 ms, sooner than the next
-      frame of the movement can come. Scrolling is never a doubt, however
+      The first report of the pair is a place reached in one step, and
+      every report says within how long its place again would make it a
+      jump: a lone report that is somewhere else than the report before it
+      for the rest of its burst (100 ms: a viewer slowed 8 times sent the
+      second report up to 31 ms late, 55 ms on Chrome 138, and one showing
+      11,111 pages up to 40 ms); a lone report where the report before it
+      was for 20 ms only, as D133 had it for every lone report (Chrome
+      reports every arrow, Page Down and Space press, also where the
+      viewer cannot go on, so a key held at the end of the PDF says one
+      place again every 30 ms, and a step of whole pages names the same
+      place on another page: the review of this rule found both taken for
+      jumps); within a burst a report more than 8 px from the one before
+      it, for 8 ms, sooner than the next frame of a movement can come (an
+      outline entry clicked while the viewer still scrolls, in the frames
+      the tracker follows and in a movement it holds alike); and straight
+      after a report read as a zoom at the same place, a report anywhere
+      else, for 8 ms (an outline entry or link that sets a zoom percent
+      sends the zoom, then the place gone to several times within a
+      millisecond). Two reports are one place when they are under 0.9 of a
+      pixel of the screen apart, by the scale the tab says its screen has:
+      a snap moves a place by 0.52 of a screen pixel at most, a scroll by
+      one or more, which is half a CSS pixel on a screen scaled by 2.
+      Scrolling is never a doubt, however
       fast: a movement that stopped away from the ends of the PDF (a fling,
       a scrollbar drag, one big step of the wheel) is read as it always
       was, and its last frames, a pixel apart or less, are no jump. That is
@@ -1354,13 +1381,24 @@ shell and the mirror has nothing to copy (D103).
       either way.
     - *Limits.* A number typed into the page box and not entered is what
       the box shows; with the caret blinked off it reads as a page, which
-      is why only jumps are looked into. A jump that also sets the zoom can
-      read as a zoom at the same place and raise no doubt, as can a jump
-      whose second report comes more than 20 ms after its first (a slow
-      viewer; 8 ms for a jump made while the viewer still scrolls). A jump
-      made while the viewer scrolls that lands within a fifth of a page of
-      where the scrolling was heading is followed as a frame of it and is
-      no doubt either. A look may wait its turn behind scanned pages being
+      is why only jumps are looked into. A jump made while the viewer
+      still scrolls whose second report comes more than 8 ms after its
+      first raises no doubt (Chrome 138 with the companion window sent it
+      up to 16 ms late on a busy machine), nor does a jump on a PDF so long
+      that the snap moves its place by a whole pixel (above about 8.4
+      million px of scroll). An outline entry or link that sets a zoom is a
+      doubt only when the place gone to differs, on its page, from the
+      place the viewer was at on its own: from a page's top to another
+      page's top, or corner to corner, every report names one place, and it
+      reads as a zoom at the same place (such a click sent 4 or 6 reports
+      where a plain zoom sends 2, which nothing reads yet). So does, on a
+      viewer too slow for the 20 ms, a jump without a zoom from a page's
+      corner to another page's. And two things that are no jump raise a
+      doubt, one capture each with the page right: a key pressed again
+      within its burst after the press that was cut short by the end of
+      the PDF, or a step of exactly one page within the burst of another
+      step; and inside a held key's burst on a busy viewer, a Page Down
+      whose place came twice 2 ms apart. A look may wait its turn behind scanned pages being
       read, and the Tesseract worker changes model for it when the PDF is
       not read in English. The picture goes through the OCR host's temporary
       storage like any OCR job and is deleted with it. The look runs under

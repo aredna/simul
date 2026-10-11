@@ -230,13 +230,24 @@ on a page once it is drawn.
     all-sites access is off; Simul asks for nothing); and while the page
     box's number is selected or being typed. A toolbar that showed no page
     box three times running is left alone for a minute.
-  - A jump that also changes the zoom (an outline entry or a link that
-    sets its own zoom or fit) can pass for a zoom at the same place; it is
-    then not looked into and the panel stays where it was.
   - A jump made while the viewer is still scrolling (an outline entry
-    clicked during a fling) is looked into as well, unless it lands close
-    to where the scrolling was heading: then it can pass for part of the
-    scrolling, and the panel stays on the page it was following.
+    clicked during a fling) is looked into as well. On a slow or busy
+    computer it can still pass for part of the scrolling, and the panel
+    then stays on the page it was following.
+  - A jump that also changes the zoom (an outline entry or a link that
+    sets its own zoom) is looked into when it lands somewhere else on its
+    page than the viewer was on its own: from the top of a page to a
+    heading further down, say. From the top of one page to the top of
+    another, or from one page's corner to another's, it still passes for a
+    zoom at the same place; it is then not looked into and the panel stays
+    where it was until the next jump.
+  - Pressing a key where the viewer cannot go on (Page Down at the end of
+    the PDF) takes no picture. Two such presses within a tenth of a second
+    right after the press that reached the end can take one.
+  - Simul needs the tab's zoom to tell which pages a place fits. Chrome
+    tells of it as it changes; when what the viewer reports fits no page at
+    the zoom Simul was told, it asks Chrome for the tab's zoom once the
+    viewer is still. That asks nothing of the page and takes no picture.
   - While Simul is reading scanned pages, a look may wait its turn.
   - Setting the viewer's zoom to what it already is, or switching it to fit
     to page, at the top of a page looks the same as ArrowRight; the panel

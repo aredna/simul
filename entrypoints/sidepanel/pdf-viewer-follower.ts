@@ -47,6 +47,12 @@ export interface PdfViewerFollowerDependencies {
   ) => Promise<number | undefined | 'stop'> | undefined;
   /** The tab's zoom, which is the viewer's (D104); `undefined` when unknown. */
   readonly viewerZoom?: () => number | undefined;
+  /**
+   * Asks Chrome for the tab's zoom (D146): the viewer has rested on a
+   * report that fits no page at the zoom `viewerZoom` gives. A zoom that
+   * differs comes back as any zoom change does, through `zoomChanged`.
+   */
+  readonly askViewerZoom?: (target: PdfViewerTarget) => void;
 }
 
 /**
@@ -100,6 +106,11 @@ interface Session {
  * there if it is still where the guess put it. Only while following is on;
  * without `locate`, or when it finds nothing, the guess stays. No page is
  * taken without a reading, however few pages fit the report.
+ *
+ * A guess can be looked into only once the pages its report fits at the
+ * tab's zoom are known. Chrome tells of a zoom apart from the viewer's
+ * reports; when the viewer rests on a report that fits no page at the zoom
+ * the panel holds, the follower does not wait to be told and asks (D146).
  */
 export class PdfViewerFollower {
   readonly #dependencies: PdfViewerFollowerDependencies;
@@ -297,6 +308,15 @@ export class PdfViewerFollower {
       return;
     }
     const { tracker } = session;
+    // The panel holds another zoom than the viewer reports at: Chrome is
+    // asked, and a look follows once `zoomChanged` brings its answer.
+    if (tracker.zoomUnfitted) {
+      try {
+        this.#dependencies.askViewerZoom?.(session.target);
+      } catch {
+        // Following is a convenience; the guess stays.
+      }
+    }
     const doubt = tracker.doubt;
     if (!doubt) return;
     if (doubt.episode !== session.episode) {
