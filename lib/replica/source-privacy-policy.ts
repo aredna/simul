@@ -174,11 +174,15 @@ interface SourceElementPaintInputs {
   readonly contents: boolean;
   /** Its `display` is read and is not `none`. */
   readonly displayed: boolean;
+  /** Its own computed `visibility` hides it (`hidden` or `collapse`). */
+  readonly visibilityHidden: boolean;
   readonly rects: readonly SourcePaintBounds[] | undefined;
   /**
    * The padding box, which is what an overflow clip actually confines
    * descendants to; the border box in `rects` over-approximates it. Absent
-   * when the element has several fragments or no client geometry.
+   * when the element has several fragments or no client geometry, and for
+   * an element that clips nothing, where nobody asks for it (D144: four
+   * layout reads an element, a seventh of a whole comparison).
    */
   readonly clipRects: readonly SourcePaintBounds[] | undefined;
   readonly overflow: { readonly x: boolean; readonly y: boolean } | undefined;
@@ -219,6 +223,11 @@ interface SourcePaintedPathMemo {
   readonly pathVisible: boolean;
   /** Every element of the flat-tree path is displayed (see `displayed`). */
   readonly pathDisplayed: boolean;
+  /**
+   * The element's own computed `visibility` hides it. Read only where the
+   * path is displayed; false elsewhere, where nobody asks.
+   */
+  readonly visibilityHidden: boolean;
   /** Elements in the flat-tree path, the element included. */
   readonly depth: number;
   /** What this element's children are clipped to. */
@@ -875,6 +884,39 @@ export function sourceElementPathIsDisplayed(
   return sourcePaintedPathMemo(element, sourceWindow, paintCache).pathDisplayed;
 }
 
+/** The answers above about one element, from one look at its path. */
+export interface SourceElementPathPaint {
+  /** `sourceElementPathIsPainted`. */
+  readonly painted: boolean;
+  /** `sourceElementPathIsShown`. */
+  readonly pathVisible: boolean;
+  /** `sourceElementPathIsDisplayed`. */
+  readonly pathDisplayed: boolean;
+  /**
+   * Nothing above it is `display: none`, and its own computed `visibility`
+   * hides it. The page reader withholds the text of such an element and
+   * sends that of one that is only faded out, so the two are told apart
+   * (D144): a menu that goes from `visibility: hidden` to visible at the
+   * first frame of a fade from `opacity: 0` is neither shown nor painted
+   * before or after, and its text arrived only when the fade ended.
+   */
+  readonly visibilityHidden: boolean;
+}
+
+/**
+ * `sourceElementPathIsPainted`, `sourceElementPathIsShown` and
+ * `sourceElementPathIsDisplayed` in one, with whether the element's own
+ * `visibility` hides it: the index of what the page paints asks all of it
+ * of every element at every comparison.
+ */
+export function readSourceElementPathPaint(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): SourceElementPathPaint {
+  return sourcePaintedPathMemo(element, sourceWindow, paintCache);
+}
+
 /**
  * The same proof by walking the element's whole path: O(depth) per element,
  * which made a scan O(nodes x depth). Kept for the rare path whose clipping
@@ -940,6 +982,7 @@ function sourcePaintedPathMemo(
     const failed = Object.freeze({
       pathVisible: false,
       pathDisplayed: false,
+      visibilityHidden: false,
       depth: MAX_SOURCE_FLAT_TREE_ANCESTORS + 1,
       childClip: EMPTY_CLIP,
       painted: false,
@@ -972,6 +1015,27 @@ function derivePaintedPathMemo(
     return Object.freeze({
       pathVisible: false,
       pathDisplayed: false,
+      visibilityHidden: false,
+      depth,
+      childClip: EMPTY_CLIP,
+      painted: false,
+    });
+  }
+  if (parent && !parent.pathVisible) {
+    // Inside something that is not shown, an element is neither shown nor
+    // painted, whatever it is itself, and nothing below it asks what it
+    // clips. Only whether it is displayed, and whether its own
+    // `visibility` hides it, is left to read, and not even that inside
+    // something that is not displayed: a closed menu of a thousand
+    // entries, or a page under `aria-hidden` behind a dialog, was read
+    // style by style and box by box at every comparison (D144).
+    const own = parent.pathDisplayed
+      ? readSourceElementDisplay(element, sourceWindow, paintCache)
+      : NOT_DISPLAYED;
+    return Object.freeze({
+      pathVisible: false,
+      pathDisplayed: own.displayed,
+      visibilityHidden: own.displayed && own.visibilityHidden,
       depth,
       childClip: EMPTY_CLIP,
       painted: false,
@@ -993,6 +1057,7 @@ function derivePaintedPathMemo(
   return Object.freeze({
     pathVisible,
     pathDisplayed,
+    visibilityHidden: pathDisplayed && inputs.visibilityHidden,
     depth,
     childClip: childClipOf(element, inputs, ancestorClip),
     painted,
@@ -1379,13 +1444,18 @@ function sourcePaintInputs(
     const clips = (value: string): boolean =>
       value === 'hidden' || value === 'clip' || value === 'scroll' ||
       value === 'auto' || value === 'overlay';
+    const overflow = Object.freeze({ x: clips(overflowX), y: clips(overflowY) });
     result = Object.freeze({
       state,
       contents,
       displayed: display !== 'none' && display !== '',
+      visibilityHidden: visibility === 'hidden' || visibility === 'collapse',
       rects,
-      clipRects: readSourceElementPaddingBoxRects(element, rects),
-      overflow: Object.freeze({ x: clips(overflowX), y: clips(overflowY) }),
+      // Read only where it is asked for: by an element that clips.
+      clipRects: !contents && (overflow.x || overflow.y)
+        ? readSourceElementPaddingBoxRects(element, rects)
+        : undefined,
+      overflow,
       readable: true,
     });
   } catch {
@@ -1393,6 +1463,7 @@ function sourcePaintInputs(
       state: 'unknown',
       contents: false,
       displayed: false,
+      visibilityHidden: false,
       rects: undefined,
       clipRects: undefined,
       overflow: undefined,
@@ -1401,6 +1472,46 @@ function sourcePaintInputs(
   }
   paintCache.inputs.set(element, result);
   return result;
+}
+
+interface SourceElementDisplay {
+  readonly displayed: boolean;
+  readonly visibilityHidden: boolean;
+}
+
+// A plain constant, not frozen: a call here would be kept in the side
+// panel's bundle, which never reads the page's styles.
+const NOT_DISPLAYED: SourceElementDisplay = {
+  displayed: false,
+  visibilityHidden: false,
+};
+
+/**
+ * `sourcePaintInputs(element)`'s `displayed` and `visibilityHidden` by two
+ * style reads, for an element of which nothing else is asked (see
+ * `derivePaintedPathMemo`). Inputs already read answer first.
+ */
+function readSourceElementDisplay(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): SourceElementDisplay {
+  const retained = paintCache.inputs.get(element);
+  if (retained) return retained;
+  try {
+    const getComputedStyle = sourceWindow?.getComputedStyle;
+    if (typeof getComputedStyle !== 'function') return NOT_DISPLAYED;
+    const style = getComputedStyle.call(sourceWindow, element);
+    const display = style.display.trim().toLowerCase();
+    if (display === 'none' || display === '') return NOT_DISPLAYED;
+    const visibility = style.visibility.trim().toLowerCase();
+    return {
+      displayed: true,
+      visibilityHidden: visibility === 'hidden' || visibility === 'collapse',
+    };
+  } catch {
+    return NOT_DISPLAYED;
+  }
 }
 
 function sourceElementPaintBounds(
@@ -1426,17 +1537,16 @@ function readSourceElementPaintRects(
     const painted: SourcePaintBounds[] = [];
     for (let index = 0; index < rects.length; index += 1) {
       const rect = rects.item(index);
+      if (!rect) continue;
+      // Each number is read once: these six reads, for every element of
+      // the page, are a tenth of a whole comparison.
+      const { left, top, right, bottom, width, height } = rect;
       if (
-        rect && [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height]
-          .every(Number.isFinite) && rect.width > 0 && rect.height > 0
-      ) {
-        painted.push(Object.freeze({
-          left: rect.left,
-          top: rect.top,
-          right: rect.right,
-          bottom: rect.bottom,
-        }));
-      }
+        Number.isFinite(left) && Number.isFinite(top) &&
+        Number.isFinite(right) && Number.isFinite(bottom) &&
+        Number.isFinite(width) && Number.isFinite(height) &&
+        width > 0 && height > 0
+      ) painted.push(Object.freeze({ left, top, right, bottom }));
     }
     return Object.freeze(painted);
   } catch {
@@ -1517,12 +1627,33 @@ function isSafeSourceControlledId(value: string): boolean {
     !/[\s\u0000-\u001f\u007f]/u.test(value);
 }
 
-function sourceControlledStringByteLength(value: string): number {
-  try {
-    return new TextEncoder().encode(value).byteLength;
-  } catch {
-    return Number.POSITIVE_INFINITY;
+/**
+ * The length of `value` in UTF-8, as `TextEncoder` gives it (a surrogate
+ * without its other half counts as the three bytes of U+FFFD), counted here:
+ * an encoder and a buffer for every `id` of the page, at every read of the
+ * relationships, was a fifth of that read on a page of 8,000 ids (D144).
+ */
+export function sourceControlledStringByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit < 0x80) {
+      bytes += 1;
+    } else if (unit < 0x800) {
+      bytes += 2;
+    } else if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
   }
+  return bytes;
 }
 
 export function isSourcePrivateTagName(value: string): boolean {
@@ -2460,6 +2591,32 @@ export function createSourceSecretAncestorMemo(): SourceSecretAncestorMemo {
   };
 }
 
+let ambientSecretAncestors: SourceSecretAncestorMemo | undefined;
+let ambientSecretAncestorWalks = 0;
+
+/**
+ * Opens one run of a reader that the page cannot interrupt: until it is
+ * ended, every `hasSourceCredentialSecretAncestor` asked without a memo of
+ * its own shares one. A patch asks about each element it names several
+ * times, and each time every element above it was classified again: a
+ * `title` set on 250 elements nested in one another was 31,000
+ * classifications, three times over (D144). Walks nest; end each in a
+ * `finally`.
+ */
+export function beginSourceSecretAncestorWalk(): { end(): void } {
+  ambientSecretAncestorWalks += 1;
+  ambientSecretAncestors ??= createSourceSecretAncestorMemo();
+  let ended = false;
+  return {
+    end: () => {
+      if (ended) return;
+      ended = true;
+      ambientSecretAncestorWalks -= 1;
+      if (ambientSecretAncestorWalks === 0) ambientSecretAncestors = undefined;
+    },
+  };
+}
+
 /**
  * The part of a node's flat-tree path below its nearest memoized ancestor,
  * so a lookup reads only the parent links it has not seen (D93); reading the
@@ -2509,10 +2666,11 @@ export function hasSourceCredentialSecretAncestor(
     node.ownerDocument ?? node,
   ),
   sourceWindow: Window | null | undefined = node.ownerDocument?.defaultView,
-  memo?: SourceSecretAncestorMemo,
+  ownMemo?: SourceSecretAncestorMemo,
 ): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (classifier.isSecret(node)) return true;
+  const memo = ownMemo ?? ambientSecretAncestors;
   if (
     memo &&
     (memo.classifier !== classifier || memo.revision !== classifier.revision)

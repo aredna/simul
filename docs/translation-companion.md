@@ -604,8 +604,11 @@ present during capture and roots on newly inserted DOM. The web platform
 exposes no event when a connected host attaches a root later, so nothing is
 sent for a node before every element above it, and every element of a
 subtree that is sent, has been asked about its root in that read; a
-checkpoint asks about every element. A layout change looks again (at most
-once every half second), and a bounded rotation (at most 1,000 waiting hosts
+checkpoint asks about every element. A layout change looks again (in the
+animation frame that follows it, once for all the events of that frame
+since D144, or at the event itself in a tab that is not shown, where no
+frame comes; asking Chrome at most once every half second), and a bounded
+rotation (at most 1,000 waiting hosts
 every half second) does too: at the element's own property for an open root,
 and by asking Chrome again for a closed one. Every root that any reader
 meets is also watched by the document-lifetime credential observer, and a

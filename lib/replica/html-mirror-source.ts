@@ -85,6 +85,7 @@ import {
 } from './source-secret-classifier';
 import {
   createSourceControlledContentPolicy,
+  beginSourceSecretAncestorWalk,
   hasSourceCredentialSecretAncestor,
   isSourceSelectWrapper,
   sourceControlledContentBoundaryChanged,
@@ -738,6 +739,19 @@ export class HtmlMirrorSourceSession {
   #visibilityInteractionTargets = new Set<Element>();
   #visibilityFullRefreshPending = false;
   /**
+   * The layout changed and the frame that follows has not yet looked for
+   * new roots and read the relationships of controlled content again: once
+   * a frame, however many events told of it. See `#layoutChanged`.
+   */
+  #layoutChangePending = false;
+  /**
+   * The size of what the resize observer watches when the whole page was
+   * last compared in a frame, and how many whole comparisons the index had
+   * made by then. See `#onObservedResize`.
+   */
+  #comparedAtSize: string | undefined;
+  #wholeComparisonsSeen = 0;
+  /**
    * Elements whose ended script animations hold other values than were last
    * read, as the last listing of the page's animations found. Their style is
    * read again, a bounded number of them in one patch.
@@ -887,6 +901,8 @@ export class HtmlMirrorSourceSession {
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
     this.#visibilityFullRefreshPending = false;
+    this.#layoutChangePending = false;
+    this.#comparedAtSize = undefined;
     this.#clearPending();
     if (disconnect) {
       try {
@@ -1065,7 +1081,7 @@ export class HtmlMirrorSourceSession {
       );
       if (this.environment.createResizeObserver) {
         this.#resizeObserver = this.environment.createResizeObserver(
-          () => this.#onLayoutChange(),
+          () => this.#onObservedResize(),
         );
         this.#resizeObserver.observe(this.environment.document.documentElement);
         if (this.environment.document.body) {
@@ -1188,6 +1204,9 @@ export class HtmlMirrorSourceSession {
         this.environment.window,
         MAX_HTML_MIRROR_NODES,
       );
+      // Read outside a frame: the resize observer's next report is news.
+      this.#comparedAtSize = undefined;
+      this.#wholeComparisonsSeen = 0;
       this.#markMirroredGraph(checkpoint.payload.root);
       this.#lastDimensions = Object.freeze({
         viewportWidth: checkpoint.payload.viewportWidth,
@@ -1237,6 +1256,9 @@ export class HtmlMirrorSourceSession {
 
   #onMutations(records: MutationRecord[]): void {
     if (this.#disposed || !this.#identity) return;
+    // One batch, which the page cannot interrupt: each record asks whether
+    // its element is inside a secret, and the elements above are shared.
+    const secretWalk = beginSourceSecretAncestorWalk();
     try {
       this.#queueMutationRecords(records);
     } catch {
@@ -1246,6 +1268,8 @@ export class HtmlMirrorSourceSession {
       // the stream stays paused until that checkpoint is acknowledged.
       this.#shadowReconciliationPending = true;
       this.#signalShadowReconciliation();
+    } finally {
+      secretWalk.end();
     }
   }
 
@@ -1464,6 +1488,8 @@ export class HtmlMirrorSourceSession {
     // assigns 4,000 nodes by script had its slots' lists gone through once
     // a child).
     const rootWalk = beginSourceShadowRootWalk();
+    // And one answer an element about the secrets above it.
+    const secretWalk = beginSourceSecretAncestorWalk();
     try {
       // One listing of the page's animations serves the whole flush: what
       // is compared and what is read see the same held values.
@@ -1483,6 +1509,7 @@ export class HtmlMirrorSourceSession {
         if (this.#heldChanged.size > 0) this.#scheduleFlush();
       }
     } finally {
+      secretWalk.end();
       rootWalk.end();
     }
   }
@@ -1537,6 +1564,7 @@ export class HtmlMirrorSourceSession {
       this.#visibilityFullRefreshPending = false;
       this.#visibilityInteractionTargets.clear();
       this.#heldAnimationTargets.clear();
+      this.#noteComparedSize();
       // Chrome gives a pane that is shown again its old scroll offset, with
       // no scroll event.
       for (
@@ -2198,16 +2226,124 @@ export class HtmlMirrorSourceSession {
     this.#visibilityFullRefreshPending = false;
   }
 
-  readonly #onLayoutChange = (): void => {
+  readonly #onLayoutChange = (): void => this.#layoutChanged(true);
+
+  /**
+   * The layout changed, or may have. The frame that follows looks for new
+   * roots, reads the relationships of controlled content again, compares
+   * what is painted (`compare`), and reads the images and the page's size:
+   * all of it once, however many events told of the change. The look and
+   * the relationships used to be read at each event, each a walk of the
+   * whole document: 300 `<style>` elements added in one go fire 300 `load`
+   * events, and stopped a page of 20,000 elements for 16 s (D144).
+   */
+  #layoutChanged(compare: boolean): void {
     if (this.#disposed || !this.#identity) return;
-    this.#lookForRootsAfterLayoutChange();
-    this.#refreshControlledContentPolicy();
-    this.#visibilityFullRefreshPending = true;
+    if (this.#documentIsHidden()) {
+      // No animation frame comes in a tab that is not shown (another tab
+      // in front, with the mirror in its own window): the look and the
+      // read are made here, as they were before D144, or a root attached
+      // late would wait for the rotation over waiting hosts.
+      this.#lookForRootsAfterLayoutChange();
+      this.#refreshControlledContentPolicy();
+    } else {
+      this.#layoutChangePending = true;
+    }
+    if (compare) this.#visibilityFullRefreshPending = true;
     this.#imageRefreshRequested = true;
     this.#pendingDimensions = true;
     this.#scheduleFlush();
     this.#postScroll();
+  }
+
+  /** Whether the page is in a tab that is not shown: no frame will come. */
+  #documentIsHidden(): boolean {
+    try {
+      return this.environment.document.visibilityState === 'hidden';
+    } catch {
+      return false;
+    }
+  }
+
+  /** In the frame, before its flush: what `#layoutChanged` left for it. */
+  #takeLayoutChange(): void {
+    if (
+      !this.#layoutChangePending || this.#disposed || !this.#identity ||
+      this.#paused
+    ) return;
+    this.#layoutChangePending = false;
+    this.#lookForRootsAfterLayoutChange();
+    this.#refreshControlledContentPolicy();
+    // Read just now: the end of a transition in this frame asks no second.
+    this.#controlledLayoutSettlePending = false;
+  }
+
+  /**
+   * The resize observer reports that the page or its body has another size
+   * than it last reported. When that is the size the whole page was last
+   * compared at, the comparison was made in this very frame, after the
+   * change that the observer now reports (the observer speaks at the end of
+   * the frame whose start ran the flush): there is nothing new to compare,
+   * and the second walk of every element that used to follow each change
+   * of the page's height is left out (D144). Everything else a change of
+   * layout asks for is done as before.
+   */
+  readonly #onObservedResize = (): void => {
+    const compared = this.#comparedAtSize;
+    this.#layoutChanged(
+      compared === undefined || this.#readObservedSize() !== compared,
+    );
   };
+
+  /** After the comparison of a flush: when it was of the whole page, its size. */
+  #noteComparedSize(): void {
+    const whole = this.#visibilityBoundaryIndex?.wholeComparisons ?? 0;
+    if (whole === this.#wholeComparisonsSeen) return;
+    this.#wholeComparisonsSeen = whole;
+    this.#comparedAtSize = this.#readObservedSize();
+  }
+
+  /**
+   * The content boxes the resize observer watches, as numbers that are the
+   * same exactly when those boxes are: each element's box, what its
+   * scroll bars leave of it, its padding and its borders. Undefined when
+   * they cannot be read, which never equals a size compared at.
+   */
+  #readObservedSize(): string | undefined {
+    try {
+      const view = this.environment.window;
+      const parts: Array<string | number> = [];
+      for (const element of [
+        this.environment.document.documentElement,
+        this.environment.document.body,
+      ]) {
+        if (!element) {
+          parts.push('none');
+          continue;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = view.getComputedStyle(element);
+        const numbers: unknown[] = [
+          rect.width, rect.height, element.clientWidth, element.clientHeight,
+        ];
+        const lengths: unknown[] = [
+          style.paddingTop, style.paddingRight, style.paddingBottom,
+          style.paddingLeft, style.borderTopWidth, style.borderRightWidth,
+          style.borderBottomWidth, style.borderLeftWidth,
+        ];
+        // Numbers and lengths only: anything else (a field of a form that
+        // a page has named `body`, standing in for a property) is no size.
+        if (
+          !numbers.every((value) => typeof value === 'number' && Number.isFinite(value)) ||
+          !lengths.every((value) => typeof value === 'string')
+        ) return undefined;
+        parts.push(...(numbers as number[]), ...(lengths as string[]));
+      }
+      return parts.join(' ');
+    } catch {
+      return undefined;
+    }
+  }
 
   /**
    * This walk is where an open root attached since shows: a root that
@@ -2754,7 +2890,11 @@ export class HtmlMirrorSourceSession {
   readonly #onFontLoadingDone = (): void => this.#onLayoutChange();
 
   readonly #onCapturedResourceLoad = (event: Event): void => {
-    this.#onLayoutChange();
+    // A `<style>` that imports nothing tells of nothing by its `load`: its
+    // rules applied when its text was written, and that was a change of
+    // the page, compared in its own frame. The event used to start a second
+    // comparison of the whole page after every change of a style's text.
+    if (!sourceStyleLoadChangesNothing(event)) this.#onLayoutChange();
     this.#queueCapturedImageAttributeRefresh(event);
   };
 
@@ -2918,12 +3058,14 @@ export class HtmlMirrorSourceSession {
       this.#visibilityMutationRecords.length === 0 &&
       !this.#visibilityMutationOverflow &&
       !this.#visibilityFullRefreshPending &&
+      !this.#layoutChangePending &&
       this.#visibilityInteractionTargets.size === 0 &&
       this.#lateShadowRoots.length === 0 &&
       this.#heldChanged.size === 0
     ) return;
     this.#frame = this.environment.scheduleFrame(() => {
       this.#frame = undefined;
+      this.#takeLayoutChange();
       this.#flush();
     });
   }
@@ -3698,6 +3840,37 @@ export class HtmlMirrorSourceSession {
       this.#identityAt(this.#sequence),
       'stream_gap',
     ));
+  }
+}
+
+/**
+ * Whether a `load` event is that of a `<style>` element whose sheet holds
+ * no `@import`: such a sheet has nothing to wait for, and applied when the
+ * element's text was written or the element put into the page. Imports can
+ * only stand at a sheet's start, after layer statements, so only those
+ * rules are looked at. A sheet that cannot be read answers no.
+ */
+function sourceStyleLoadChangesNothing(event: Event): boolean {
+  try {
+    const target = event.target as Partial<HTMLStyleElement> | null;
+    if (
+      !target || target.nodeType !== 1 ||
+      String(target.localName).toLowerCase() !== 'style'
+    ) return false;
+    const rules = target.sheet?.cssRules;
+    if (!rules) return false;
+    for (let index = 0; index < rules.length; index += 1) {
+      const rule = rules[index] as CSSRule & {
+        readonly styleSheet?: unknown;
+        readonly nameList?: unknown;
+      };
+      if (rule.type === 3 || 'styleSheet' in rule) return false;
+      // A layer statement (`@layer a, b;`) may stand before an import.
+      if (!('nameList' in rule)) break;
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 

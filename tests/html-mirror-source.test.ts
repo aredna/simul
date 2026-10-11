@@ -3101,17 +3101,30 @@ describe('HtmlMirrorSourceSession', () => {
     const resize = () => fixture.window.dispatchEvent(new fixture.window.Event('resize'));
 
     // A root that renders anything changes the layout, as an open one does.
+    // The look is the next frame's (D144): one for all that told of it.
     reader.attach(late, '<p>late text</p>');
     resize();
+    resize();
+    expect(fixture.frames).toHaveLength(1);
+    expect(fixture.port.posts).not.toContainEqual(expect.objectContaining({
+      code: 'stream_gap',
+    }));
+    fixture.flushFrame();
     expect(fixture.port.posts).toContainEqual(expect.objectContaining({
       kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     }));
+    // The page is read afresh and the stream runs again.
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    while (fixture.frames.length > 0) fixture.flushFrame();
     const askedOnce = asked(plain);
     resize();
+    fixture.flushFrame();
     expect(asked(plain)).toBe(askedOnce);
     now += 500;
     resize();
+    fixture.flushFrame();
     expect(asked(plain)).toBe(askedOnce + 1);
   });
 
@@ -3211,15 +3224,18 @@ describe('HtmlMirrorSourceSession', () => {
     const gap = () => fixture.port.posts.some((message) =>
       (message as { code?: string }).code === 'stream_gap');
     resize();
+    fixture.flushFrame();
 
     // A root comes just after that walk; the next layout change trusts it.
     now += 100;
     reader.attach(fixture.document.querySelector('#late')!, '<p>late text</p>');
     const timers = fixture.timers.length;
     resize();
+    fixture.flushFrame();
     expect(gap()).toBe(false);
     expect(fixture.timers).toHaveLength(timers + 1);
     resize();
+    fixture.flushFrame();
     expect(fixture.timers).toHaveLength(timers + 1);
 
     // When the interval ends, the walk owed asks again.

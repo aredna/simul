@@ -68,7 +68,13 @@ stood before, and reads again what differs. An element is painted (a box of
 it is proven painted), shown (nothing hides it, and it has no box to prove:
 a block of no height whose text hangs out of it), displayed (nothing is
 `display: none`, and something else hides it for now: a dialog at the first
-frame of a fade that a script runs, whose end nothing reports), or hidden.
+frame of a fade that a script runs, whose end nothing reports), veiled (the
+same, and its own `visibility` hides it), or hidden. Veiled is apart from
+displayed since D144, because the page script is: it withholds the text of
+an element whose `visibility` hides it and sends that of one that is only
+faded out. A menu that a class takes from `visibility: hidden` to visible
+at `opacity: 0`, the start of its fade, used to count as no change, and
+its text came when the fade ended.
 An element above with no box of its own is no obstacle to the proof (D135):
 a `display: contents` wrapper (some frameworks put the whole page in one), a
 `<slot>`, a block of no height around a positioned menu or dialog. Such an
@@ -81,6 +87,35 @@ an ancestor without a box counted as unknown, nothing inside it was ever
 proven painted, and a menu, a dialog or a tab that was hidden at first and
 shown later inside one stayed blank in the mirror; a site menu there was not
 offered at all.
+
+The comparison walks every element of the page, and on a large page it is
+what a change costs the tab first: about 105 ms of every change on a page
+of 20,000 elements before D144. It now reads only what an answer needs
+(D144). Inside something that is not shown an element is neither shown nor
+painted whatever it is itself, so only its `display` and its `visibility`
+are read, and inside something that is not displayed nothing is: a closed
+menu, a hidden view
+and a page under `aria-hidden` behind a dialog are no longer read style by
+style and box by box. An element's client box is read only where it clips
+its overflow. The steps from an element to its children are made by the
+accessors of the prototypes, never by a property read on the element: a
+form answers `form.<name of one of its fields>` first, and a field named
+`children` used to leave such a page without a mirror. A comparison of
+that page takes 72 to 79 ms, and half of that when half the page is not
+displayed. Two comparisons that told nothing new are gone. The resize
+observer reports a
+new page height at the end of the frame that has just compared the page at
+that height: its report starts a comparison only for a size the page was
+not compared at. And the `load` of a `<style>` that imports nothing tells
+of no change: its rules applied when its text was written, which was
+compared. What a layout event asks for besides (a look for shadow roots
+attached since, and the relationships of `aria-controls`) is done once in
+the frame that follows, however many events told of it (in a tab that is
+not shown no frame comes, and it is done at the event); 300 `<style>`
+elements added in one task used to stop a page of 20,000 elements for 13 to
+17 s, at two walks of the document for each `load`, and stop it for 0.35 s.
+The whole page is still compared at every change: a selector, or a line
+that wraps, can show or hide something far from what changed.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload
@@ -263,7 +298,8 @@ and withheld when a sheet fades the box out, clips it away or leaves it no
 size, so the element is read again with what it holds; and how a dropdown
 is drawn, which comes from the dropdown's own style, so the dropdown is read
 again. On a page of 20,000 elements this walk takes about 15 ms at a sheet
-change, beside the 105 to 140 ms of the comparison of what is painted.
+change, beside the comparison of what is painted (105 to 140 ms then, 72 to
+79 ms since D144).
 
 One frame of the page can take up to three patches, which travel in one
 message and are applied one after the other, all or none (D143). A parent's
