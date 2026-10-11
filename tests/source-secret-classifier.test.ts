@@ -6,6 +6,7 @@ import {
   classifySourceEvidence,
   replicaReadScopeAdmits,
   sourceDocumentSecretClassifier,
+  sourceContentEditableFact,
 } from '../lib/replica/source-secret-classifier';
 import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
@@ -111,6 +112,27 @@ describe('source secret classifier', () => {
     expect(replicaReadScopeAdmits(full, 'ordinary-form')).toBe(true);
     expect(replicaReadScopeAdmits(full, 'personal')).toBe(true);
     expect(replicaReadScopeAdmits(full, 'editable')).toBe(true);
+  });
+
+  it('reads a bare contenteditable attribute as an editor, and no attribute as none (D145)', () => {
+    // `getAttribute` gives '' for `<div contenteditable>`, the commonest
+    // way to write an editor: the fact used to be '' for it, as it is for
+    // an element with no such attribute.
+    expect(sourceContentEditableFact(null)).toBe('');
+    expect(sourceContentEditableFact(undefined)).toBe('');
+    expect(sourceContentEditableFact('')).toBe('true');
+    expect(sourceContentEditableFact('  ')).toBe('true');
+    for (const written of ['true', 'false', 'plaintext-only', 'TRUE', 'other']) {
+      expect(sourceContentEditableFact(written)).toBe(written);
+    }
+    const classified = (attribute: string | null) => classifySourceEvidence({
+      tagName: 'div',
+      contentEditable: sourceContentEditableFact(attribute),
+    });
+    expect(classified('')).toBe('editable');
+    expect(classified('plaintext-only')).toBe('editable');
+    expect(classified('false')).toBe('public-semantic');
+    expect(classified(null)).toBe('public-semantic');
   });
 
   it('admits native range and number values as ordinary form input', () => {

@@ -278,6 +278,18 @@ independent switches, and any other combination is shown as Custom:
   telephone; and
 - visible non-secret contenteditable or ARIA editor text.
 
+"Visible" is meant: the value and the placeholder of a field, and the text
+of an editor, are read only while the tab shows the field or the editor
+(D142, D145). They are read again after a change of the page's DOM, an
+input, and a resize of the window (the side panel itself narrows the tab as
+it opens, and a media query may show another layout's fields): once, three
+quarters of a second after the last resize of a burst, when the mirror's own
+reading of the resize is over and the page has had its turn. One that the
+end of a transition or an animation, or a hover rule, alone shows is not
+read until the page next changes: a scan of the page at every such end cost
+a page that animates too much. The placeholder of a field inside a menu the
+mirror may open is read with the menu's text.
+
 Password fields, CSS text-security fields, hidden inputs, file names and
 paths, password/authentication/one-time-code/WebAuthn autocomplete, and every
 `cc-*` autocomplete token are a floor no read scope lifts; only the Advanced

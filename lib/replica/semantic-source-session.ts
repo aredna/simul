@@ -37,6 +37,7 @@ import {
   StickySourceSecretClassifier,
   isMaskedCredentialInput,
   replicaReadScopeAdmits,
+  sourceContentEditableFact,
   sourceDocumentSecretClassifier,
   type SourceClassificationFacts,
   type SourceEvidenceCategory,
@@ -210,6 +211,19 @@ const SEMANTIC_PRESENTATION_CHANGE_EVENTS = Object.freeze([
   'pointerover', 'pointerout', 'focusin', 'focusout',
   'transitionend', 'transitioncancel', 'animationend', 'animationcancel',
 ] as const);
+// A field or an editor can be shown or hidden with no change of the DOM,
+// most often by a media query when the window is resized (Simul's own side
+// panel narrows the tab as it opens). Hidden wins for both (D142, D145), so
+// each has to be read again then: one scan, this long after the last
+// resize of a burst. The mirror's reader answers a resize with two frames
+// of its own (the resize, then its resize observer), which on a page of
+// 20,000 elements are over 0.3 to 0.45 s after the event. The scan waits
+// until the page has had its turn after them: any sooner and the two make
+// one pause. Nothing but a resize starts or restarts the wait. Not a pointer
+// event, and not the end of a transition or an animation either: a scan at
+// each end doubled the script time of a page that animates, and ends that
+// kept coming put the scan off for good.
+const SEMANTIC_SHOWN_AGAIN_SETTLE_MS = 750;
 const SEMANTIC_CONTROL_ROLES = new Set([
   'button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'option', 'radio', 'switch', 'tab', 'treeitem',
@@ -292,6 +306,13 @@ export class SemanticSourceSession {
   #controlPollCursor = 0;
   #presentationChangeCandidates = new WeakSet<Element>();
   /**
+   * Whether the last scan asked if the tab shows a field or the text of an
+   * editor (the page holds one that the profile reads). Only then can a
+   * change of presentation alone change what is sent.
+   */
+  #scanAskedWhatIsShown = false;
+  #shownAgainTimer: unknown;
+  /**
    * The order in which the page opened the popovers it shows, from their
    * `toggle` events: the later one is drawn over the earlier, and nothing in
    * the DOM says which that is (D132).
@@ -323,6 +344,12 @@ export class SemanticSourceSession {
     this.#observer = undefined;
     this.#cancelControlPoll();
     this.#cancelSelectActivationRefresh();
+    this.#cancelShownAgainScan();
+    safelyRead(() => this.environment.window.removeEventListener?.(
+      'resize',
+      this.#onWindowResize,
+    ));
+    this.#scanAskedWhatIsShown = false;
     this.#controlPollCandidates = [];
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
@@ -423,6 +450,7 @@ export class SemanticSourceSession {
     ) return;
     this.refresh();
   };
+  readonly #onWindowResize = (): void => this.#scanSoonForWhatIsShown();
   readonly #onSelectActivation = (event: Event): void => {
     if (!this.#scope?.formValues) return;
     let path: readonly EventTarget[] = [];
@@ -468,6 +496,10 @@ export class SemanticSourceSession {
         this.refresh();
       });
       this.#observeSemanticRoot(this.environment.document);
+      safelyRead(() => this.environment.window.addEventListener?.(
+        'resize',
+        this.#onWindowResize,
+      ));
       this.#dirty = true;
       this.#flush();
       this.#scheduleControlPoll();
@@ -554,6 +586,32 @@ export class SemanticSourceSession {
       timer as ReturnType<typeof setTimeout>,
     )))(this.#controlPollTimer);
     this.#controlPollTimer = undefined;
+  }
+
+  /**
+   * One scan, a while after the last resize of a burst, and only where the
+   * scan before asked whether the tab shows a field or an editor: on any
+   * other page a change of presentation alone changes nothing that is sent.
+   */
+  #scanSoonForWhatIsShown(): void {
+    if (
+      this.#disposed || !this.#documentIdentity || !this.#scanAskedWhatIsShown
+    ) return;
+    this.#cancelShownAgainScan();
+    const setTimer = this.environment.setTimer ?? ((callback, delayMs) =>
+      setTimeout(callback, delayMs));
+    this.#shownAgainTimer = setTimer(() => {
+      this.#shownAgainTimer = undefined;
+      this.refresh();
+    }, SEMANTIC_SHOWN_AGAIN_SETTLE_MS);
+  }
+
+  #cancelShownAgainScan(): void {
+    if (this.#shownAgainTimer === undefined) return;
+    (this.environment.clearTimer ?? ((timer) => clearTimeout(
+      timer as ReturnType<typeof setTimeout>,
+    )))(this.#shownAgainTimer);
+    this.#shownAgainTimer = undefined;
   }
 
   #scheduleSelectActivationRefresh(): void {
@@ -843,6 +901,7 @@ export class SemanticSourceSession {
   }
 
   #scan(): SemanticSourceScan {
+    this.#scanAskedWhatIsShown = false;
     const scope = this.#scope;
     const root = this.environment.document.documentElement;
     if (!scope || !root) return Object.freeze({
@@ -902,7 +961,9 @@ export class SemanticSourceSession {
     let validatedTabs: readonly ValidatedTab[] = Object.freeze([]);
     // What the page collapses: tabs are proven against it, and editor text
     // is not sent from inside it (below).
-    const controlledContent = scope.controlSemantics || scope.editableContent
+    // Field values ask it too, to know which fields the tab does not show.
+    const controlledContent = scope.controlSemantics ||
+        scope.editableContent || scope.formValues
       ? createSourceControlledContentPolicy(
           this.environment.document,
           this.environment.window,
@@ -1260,7 +1321,8 @@ export class SemanticSourceSession {
     // anywhere around the text as it is drawn, and `visibility: hidden` on
     // the box the text is put into). Text slotted into an editor inside a
     // closed dialog travelled, and was translated; so did the page's own.
-    // An element is asked once a scan, and only for text in an editor.
+    // An element is asked once a scan, and only for text in an editor and
+    // for a field whose value would be sent.
     const hiddenStates = new Map<
       Element,
       ReturnType<typeof readSourceHiddenRegionState>
@@ -1277,10 +1339,11 @@ export class SemanticSourceSession {
       return state;
     };
     const hiddenRegions = new Map<Element, boolean>();
-    const editorTextIsHidden = (text: Node): boolean => {
-      // The boxes around the text were read a moment ago, to know that
-      // none of them is a secret: the way up is readable.
-      const box = readSourceFlatTreeParentElement(text);
+    /** Whether the tab does not show what `box` itself draws. */
+    const boxIsHidden = (box: Element | undefined): boolean => {
+      // The answer can change with no change of the DOM: see
+      // `#scanSoonForWhatIsShown`.
+      this.#scanAskedWhatIsShown = true;
       if (!box || hiddenState(box).visibilityHidden) return true;
       const asked: Element[] = [];
       let hidden: boolean | undefined;
@@ -1298,6 +1361,21 @@ export class SemanticSourceSession {
       }
       for (const element of asked) hiddenRegions.set(element, hidden ?? false);
       return hidden ?? false;
+    };
+    // The boxes around the text were read a moment ago, to know that none
+    // of them is a secret: the way up is readable.
+    const editorTextIsHidden = (text: Node): boolean =>
+      boxIsHidden(readSourceFlatTreeParentElement(text));
+    const isInsidePanelTheMirrorMayOpen = (element: Element): boolean => {
+      if (disclosurePanels.size === 0) return false;
+      for (
+        let around = readSourceFlatTreeParentElement(element);
+        around;
+        around = readSourceFlatTreeParentElement(around)
+      ) {
+        if (disclosurePanels.has(around)) return true;
+      }
+      return false;
     };
     const textStack: Array<{
       node: Node;
@@ -1329,8 +1407,12 @@ export class SemanticSourceSession {
         const parent = current.node.parentElement;
         const classification = parent && classifications.get(parent);
         if (!classification) continue;
-        if (current.editable && scope.editableContent) {
-          if (!editorTextIsHidden(current.node)) {
+        if (current.editable) {
+          // What is inside an editor is editor text or nothing (D145): it
+          // is never a menu's text. Where editor text is not read, a
+          // paragraph inside an editor in a site menu's panel was read as
+          // the menu's own, typed words and all.
+          if (scope.editableContent && !editorTextIsHidden(current.node)) {
             editableText.push({
               node: current.node,
               classification: current.editable,
@@ -1414,16 +1496,30 @@ export class SemanticSourceSession {
         const valueClassification = this.#classifyElement(element, false, true);
         if (valueClassification.category !== classification.category) continue;
         if (tagName === 'input' || tagName === 'textarea') {
-          add(
-            element,
-            valueClassification,
-            classification.category === 'personal'
-              ? 'personalDataValues'
-              : 'formValues',
-            'value',
-            readControlValue(element),
-          );
-          if (classification.category === 'ordinary-form') {
+          // Hidden wins here as it does for editor text (D145): what a
+          // field the tab does not show holds is not sent. It travelled,
+          // was held in the mirror's field and went to the translator. A
+          // field shown later is read by the scan that follows the change
+          // that shows it.
+          const hidden = boxIsHidden(element);
+          if (!hidden) {
+            add(
+              element,
+              valueClassification,
+              classification.category === 'personal'
+                ? 'personalDataValues'
+                : 'formValues',
+              'value',
+              readControlValue(element),
+            );
+          }
+          // Its placeholder is the page's own words, and is hidden text
+          // like any other; inside a menu the mirror may open it is read
+          // with the menu's text, as the search box of that menu shows it.
+          if (
+            classification.category === 'ordinary-form' &&
+            (!hidden || isInsidePanelTheMirrorMayOpen(element))
+          ) {
             add(
               element,
               valueClassification,
@@ -2370,7 +2466,9 @@ function sourceClassificationFacts(
     type: safelyReadAttribute(element, 'type'),
     autocomplete: safelyReadAttribute(element, 'autocomplete'),
     role: safelyReadAttribute(element, 'role'),
-    contentEditable: safelyReadAttribute(element, 'contenteditable'),
+    contentEditable: sourceContentEditableFact(
+      safelyRead(() => element.getAttribute('contenteditable')),
+    ),
     computedTextSecurity,
     secretAncestor,
     valueBearing,

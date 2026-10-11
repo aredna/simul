@@ -52,6 +52,7 @@ import {
   sanitizeSourceDocument,
   sourceDocumentMode,
   sanitizeSourceElementHints,
+  sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
 } from '../lib/replica/html-mirror-sanitizer';
@@ -2962,6 +2963,43 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(contentReads).toBe(0);
   });
 
+  it('reads a subtree with the policy it is given, and refuses with one that is incomplete (D145)', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><p id="one">first words</p><p>second</p></body></html>',
+    );
+    const text = document.querySelector('#one')!.firstChild!;
+    const whole = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    );
+    expect(whole.incomplete).toBe(false);
+    expect(sanitizeSourceSubtree(
+      text, new WeakNodeIdRegistry(), 'https://example.test/',
+      createHtmlMirrorRepresentabilityCollector(), 'conservative', undefined,
+      whole,
+    )).toMatchObject({ kind: 'text', text: 'first words' });
+
+    // A walk that stopped short knows nothing of what it did not reach:
+    // nothing is read with it, and the page is read afresh.
+    const short = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+      2,
+    );
+    expect(short.incomplete).toBe(true);
+    const counted = createHtmlMirrorRepresentabilityCollector();
+    expect(sanitizeSourceSubtree(
+      text, new WeakNodeIdRegistry(), 'https://example.test/', counted,
+      'conservative', undefined, short,
+    )).toBeUndefined();
+    expect(counted.capacityOmissionCount).toBe(1);
+    expect(sanitizeSourceSubtrees(
+      [text], new WeakNodeIdRegistry(), 'https://example.test/',
+      createHtmlMirrorRepresentabilityCollector(), undefined, undefined,
+      'conservative', undefined, short,
+    )).toBeUndefined();
+  });
+
   it('preserves a synthetic dark canvas and same-document SVG logo only', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <header>
@@ -3246,6 +3284,7 @@ describe('isolated HTML sanitizer and protocol', () => {
         <select id="backing"><option>French</option></select>
         <select id="clipped" class="sr-only"><option>Spanish</option></select>
         <select id="zero"><option>Swedish</option></select>
+        <select id="flat"><option>Icelandic</option></select>
         <select id="turned"><option>Norwegian</option></select>
         <select id="veiled" style="visibility:hidden"><option>Danish</option></select>
         <select id="ruled" class="b-vis"><option>Finnish</option></select>
@@ -3326,7 +3365,9 @@ describe('isolated HTML sanitizer and protocol', () => {
           clip: clipped ? 'rect(0px, 0px, 0px, 0px)' : 'auto',
           'clip-path': 'none',
           width: element.id === 'zero' ? '0px' : clipped ? '1px' : 'auto',
-          height: clipped ? '1px' : 'auto',
+          // No height, and an `overflow` that computes to `visible`, as
+          // Chrome 138 computes it for every dropdown.
+          height: element.id === 'flat' ? '0px' : clipped ? '1px' : 'auto',
           left: 'auto',
           top: 'auto',
           // Under `display: none` Chrome computes no transform at all.
@@ -3374,6 +3415,10 @@ describe('isolated HTML sanitizer and protocol', () => {
       // One its own style leaves no size is hidden for good; one that is
       // only turned has no box to tell by under `display: none`.
       expect(hints('zero')[0], how).toBe(true);
+      // Whatever its `overflow` computes to: a dropdown clips what it holds
+      // (D145; Chrome 138 computes `visible` where Chrome 154 computes
+      // `clip`, and such a dropdown was not hidden for good there).
+      expect(hints('flat')[0], how).toBe(true);
       expect(hints('turned'), how).toEqual([false, true]);
       // One the page hides by a `visibility` of its own, in its style
       // attribute or by a rule that names it, or scales to nothing: under a
@@ -3397,14 +3442,75 @@ describe('isolated HTML sanitizer and protocol', () => {
       // where it has one.
       expect(hints('squashed')[0], how).toBe(how === 'visibility');
       expect(hints('shown'), how).toEqual([false, false]);
-      // Its options are marked as ever: only the dropdown's box is kept.
-      expect(sanitizeSourceElementHints(byId('option')).visuallyHidden, how).toBe(true);
+      // Its options are not marked by what hides the dropdown: an option's
+      // mark says whether the dropdown's own list leaves it out (D145).
+      expect(sanitizeSourceElementHints(byId('option')).visuallyHidden, how)
+        .toBeUndefined();
     }
     // The page shows the panel: the dropdown is what it computes to.
     none.clear();
     collapse = 'visibility';
     Object.defineProperty(panel, 'contains', { configurable: true, value: () => false });
     expect(hints('pick')).toEqual([false, false]);
+  });
+
+  it('marks an option or a group by what hides it inside its dropdown, not by what hides the dropdown (D145)', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <div id="menu"><select><option id="m1">one</option>
+        <option id="m2" hidden>two</option></select></div>
+      <div id="faded"><select><option id="f1">one</option></select></div>
+      <select>
+        <option id="s1">one</option>
+        <option id="s2" hidden>two</option>
+        <option id="s3" class="gone">three</option>
+        <option id="s4" class="veiled">four</option>
+        <option id="s5" class="skipped">five</option>
+        <optgroup id="g1" hidden><option id="s6">six</option></optgroup>
+        <optgroup id="g2"><option id="s7">seven</option>
+          <option id="s8" class="gone">eight</option></optgroup>
+        <optgroup id="g3" class="gone"><option id="s9">nine</option></optgroup>
+      </select>
+      <datalist id="list"><option id="d1">loose</option></datalist>
+    </body></html>`);
+    const byId = (id: string): Element => document.querySelector(`#${id}`)!;
+    const inside = (element: Element, id: string): boolean => byId(id).contains(element);
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const values: Record<string, string> = {
+          display: element.classList.contains('gone') || element.id === 'menu' ||
+              element.id === 'list' || element.hasAttribute('hidden')
+            ? 'none'
+            : 'block',
+          // Inherited: all a faded box holds computes to hidden with it.
+          visibility: element.classList.contains('veiled') || inside(element, 'faded')
+            ? 'hidden'
+            : 'visible',
+          opacity: '1',
+          'content-visibility': element.classList.contains('skipped') ? 'hidden' : 'visible',
+        };
+        return { ...values, getPropertyValue: (name: string) => values[name] ?? '' };
+      },
+    });
+    const marked = (id: string): boolean =>
+      sanitizeSourceElementHints(byId(id)).visuallyHidden === true;
+
+    // A dropdown inside a collapsed menu or a faded box: its list is the
+    // list it has wherever it is drawn. (Every option of one was marked,
+    // which the mirror's list could not go by.)
+    expect(marked('m1')).toBe(false);
+    expect(marked('m2')).toBe(true);
+    expect(marked('f1')).toBe(false);
+    // Left out of the list: not displayed, by an attribute or by a rule,
+    // or its contents skipped.
+    expect(['s1', 's2', 's3', 's5'].map(marked)).toEqual([false, true, true, true]);
+    // `visibility` keeps the row and hides its label, as on the page.
+    expect(marked('s4')).toBe(false);
+    // A group that is not displayed, and all it holds.
+    expect(['g1', 's6', 'g3', 's9'].map(marked)).toEqual([true, true, true, true]);
+    expect(['g2', 's7', 's8'].map(marked)).toEqual([false, false, true]);
+    // An option outside a dropdown is read as it was: hidden with its list.
+    expect(marked('d1')).toBe(true);
   });
 
   it('rejects malformed live presentation hints instead of dropping them', () => {

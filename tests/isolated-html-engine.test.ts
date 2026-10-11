@@ -6206,6 +6206,155 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(rows()).toEqual(['Kobe', 'Nara']);
     expect(trigger()).toBe('Kobe');
   });
+
+  it('leaves what the page hides inside a dropdown out of its list, and draws the list again when that changes (D145)', async () => {
+    const entry = (
+      id: number,
+      tagName: 'option' | 'optgroup',
+      leftOut: boolean,
+      children: HtmlMirrorNode[] = [],
+    ): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html', tagName, attributes: [],
+      ...(leftOut ? { visuallyHidden: true as const } : {}),
+      children,
+    });
+    const label = (nodeId: number, text: string): SemanticSourceRecord => ({
+      bridge: 'isolated-html', recordId: nodeId * 8 + 1, nodeId, nodeRevision: 1,
+      category: 'public-semantic', gate: 'controlSemantics', tagName: 'option',
+      type: '', autocomplete: '', role: '', contentEditable: '',
+      text, presentation: 'label', classifierVersion: 1,
+    });
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 40, namespace: 'html', tagName: 'select',
+              attributes: [], children: [
+                entry(41, 'option', false),
+                // Hidden by the page: no row, where it was a blank one.
+                entry(42, 'option', true),
+                // A hidden group: neither it nor what it holds.
+                entry(43, 'optgroup', true, [entry(44, 'option', true)]),
+                // A group that is shown, with one option hidden in it.
+                entry(45, 'optgroup', false, [
+                  entry(46, 'option', false),
+                  entry(47, 'option', true),
+                ]),
+              ],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const sourceDocument = engine.snapshot()!.document;
+    const shadow = host.iframe!.contentDocument!
+      .querySelector('[data-simul-owned-select-host]')!.shadowRoot!;
+    const rows = (): string[] => [...shadow.querySelectorAll(
+      '[data-simul-owned-select-option="v1"]',
+    )].map((row) => row.textContent!.replace(/\u00a0/gu, ''));
+    const groups = (): number => shadow.querySelectorAll(
+      '[data-simul-owned-select-optgroup="v1"]',
+    ).length;
+    const attributes = (
+      sequence: number,
+      nodeId: number,
+      tagName: 'option' | 'optgroup',
+      leftOut: boolean,
+    ): void => {
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        [{
+          kind: 'attributes', nodeId, namespace: 'html', tagName, attributes: [],
+          ...(leftOut ? { visuallyHidden: true as const } : {}),
+        }],
+        undefined,
+        'passive',
+      )!);
+      expect(stream.acknowledged).toContain(sequence);
+    };
+
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 1,
+      [label(41, 'Tokyo'), label(46, 'Kyoto')],
+      [{
+        kind: 'select-presentation', bridge: 'isolated-html', nodeId: 40,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+        classifierVersion: 1,
+      }],
+    ))).toBe(true);
+    expect(rows()).toEqual(['Tokyo', 'Kyoto']);
+    expect(groups()).toBe(1);
+
+    // The page shows the hidden option: its row is there, blank until its
+    // label is read, as any row is.
+    attributes(1, 42, 'option', false);
+    expect(rows()).toEqual(['Tokyo', '', 'Kyoto']);
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 2,
+      [label(41, 'Tokyo'), label(42, 'Osaka'), label(46, 'Kyoto')],
+    ))).toBe(true);
+    expect(rows()).toEqual(['Tokyo', 'Osaka', 'Kyoto']);
+
+    // The page hides one that was shown, then a whole group.
+    attributes(2, 41, 'option', true);
+    expect(rows()).toEqual(['Osaka', 'Kyoto']);
+    attributes(3, 45, 'optgroup', true);
+    expect(rows()).toEqual(['Osaka']);
+    expect(groups()).toBe(0);
+    attributes(4, 45, 'optgroup', false);
+    expect(rows()).toEqual(['Osaka', 'Kyoto']);
+    expect(groups()).toBe(1);
+    expect(stream.requested).toEqual([]);
+
+    // The same where nothing but the page is read (Page only): no label
+    // arrives and nothing else draws the list again after a patch.
+    const plainStream = new FakeHtmlStream(checkpoint);
+    const plainHost = new FakePresentationHost();
+    await makeEngine(plainStream, plainHost).run(request);
+    await Promise.resolve();
+    const plainRows = (): number => plainHost.iframe!.contentDocument!
+      .querySelector('[data-simul-owned-select-host]')!.shadowRoot!
+      .querySelectorAll('[data-simul-owned-select-option="v1"]').length;
+    const plainAttributes = (
+      sequence: number,
+      nodeId: number,
+      tagName: 'option' | 'optgroup',
+      leftOut: boolean,
+    ): void => {
+      plainStream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        [{
+          kind: 'attributes', nodeId, namespace: 'html', tagName, attributes: [],
+          ...(leftOut ? { visuallyHidden: true as const } : {}),
+        }],
+        undefined,
+        'passive',
+      )!);
+    };
+    expect(plainRows()).toBe(2);
+    plainAttributes(1, 42, 'option', false);
+    expect(plainRows()).toBe(3);
+    plainAttributes(2, 45, 'optgroup', true);
+    expect(plainRows()).toBe(2);
+  });
 });
 
 describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {

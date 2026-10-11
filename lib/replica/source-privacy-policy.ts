@@ -603,6 +603,21 @@ export function sourceControlledContentLayoutMayChange(
   );
 }
 
+/**
+ * Whether `node` is drawn inside a panel the policy names, the panel itself
+ * included: what is read there is read or withheld by the panel's state. A
+ * path that cannot be read counts as inside.
+ */
+export function sourceNodeIsInsideControlledTarget(
+  node: Node,
+  policy: SourceControlledContentPolicy,
+): boolean {
+  if (policy.targets.size === 0) return false;
+  const path = readSourceFlatTreeElementPath(node);
+  if (!path) return true;
+  return path.some((current) => policy.targets.has(current));
+}
+
 function finishSourceControlledContentPolicy(
   targets: ReadonlyMap<Element, SourceControlledTargetState>,
   tabs: readonly SourceControlledTabRelationship[],
@@ -2059,6 +2074,40 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   // found above it.
   if (remembered) for (const current of walked) remembered.set(current, hidden);
   return hidden;
+}
+
+/** Elements between an option and its dropdown: a group, a wrapper or two. */
+const MAX_SOURCE_SELECT_ENTRY_DEPTH = 32;
+
+/**
+ * Whether a dropdown's own list has no row for an option or a group: the
+ * entry, or a group or wrapper between it and its dropdown, is not displayed
+ * (`display`, the `hidden` attribute, skipped contents), which is how
+ * Chrome's list leaves one out. What hides the dropdown itself or anything
+ * above it does not count: the list is the same wherever the dropdown is
+ * drawn, and the mirror draws one the page hides when it opens the menu
+ * around it. `visibility` and `opacity` keep the row and hide its label, as
+ * they do on the page. This is the mark the mirror's list goes by (D145; it
+ * was "anything hides it", which the list could not use: every option of a
+ * dropdown in a collapsed menu has it, and an option the page hides was a
+ * blank row). An option outside a dropdown is read as before.
+ */
+export function isSourceSelectEntryLeftOutOfList(entry: Element): boolean {
+  const view = entry.ownerDocument?.defaultView;
+  const between: Element[] = [];
+  let current: Element | null = entry;
+  for (
+    let depth = 0;
+    current && depth <= MAX_SOURCE_SELECT_ENTRY_DEPTH;
+    depth += 1
+  ) {
+    if (current.localName.toLowerCase() === 'select') {
+      return between.some((element) => sourceSelectEntryStaysHidden(element, view));
+    }
+    between.push(current);
+    current = current.parentElement;
+  }
+  return isSourceSelectEntryVisuallyHidden(entry);
 }
 
 /**

@@ -161,6 +161,22 @@ export function isMaskedCredentialInput(
   });
 }
 
+/**
+ * The `contenteditable` attribute as the fact both sides classify by and the
+ * wire carries: `''` for an element that has none, and `true` for a bare or
+ * empty one, which is how HTML reads `<div contenteditable>`. `getAttribute`
+ * gives `''` for it, the same as this fact gives for no attribute at all, so
+ * the commonest way to write an editor was no editor here (D145): its text
+ * was blank in the mirror under every profile, and inside a menu it was
+ * read as the menu's own text. Every other value is kept as written.
+ */
+export function sourceContentEditableFact(
+  attribute: string | null | undefined,
+): string {
+  if (attribute === null || attribute === undefined) return '';
+  return attribute.trim() === '' ? 'true' : attribute;
+}
+
 export function classifySourceEvidence(
   facts: SourceClassificationFacts,
 ): SourceEvidenceCategory {

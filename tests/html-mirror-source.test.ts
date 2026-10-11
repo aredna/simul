@@ -665,6 +665,207 @@ describe('HtmlMirrorSourceSession', () => {
     );
   });
 
+  describe('a panel with a control that closes with no record of it (D145)', () => {
+    // The policy the session keeps holds the state each panel had when the
+    // policy was last made. A changed text, and an element added, inside a
+    // panel are read by the state the panel has when the frame is read:
+    // the policy is made again first. Without that the text of a closed
+    // panel travelled under every profile.
+    /**
+     * A page whose boxes the test places. `shut()` says whether the page
+     * has closed its panel; nothing that changes then is a participant or
+     * above one, so no record makes the policy again.
+     */
+    function closingPanel(
+      markup: string,
+      place: (element: Element, shut: boolean) => {
+        readonly left?: number;
+        readonly height?: number;
+        readonly clipped?: boolean;
+      } | undefined,
+    ) {
+      const fixture = sourceFixture(markup);
+      const flag = fixture.document.querySelector('#flag')!;
+      const shut = (): boolean => flag.classList.contains('shut');
+      for (const element of [...fixture.document.querySelectorAll('*')]) {
+        const rects = (): DOMRectList => {
+          const placed = place(element, shut()) ?? {};
+          const left = placed.left ?? 0;
+          const height = placed.height ?? 40;
+          const rect = {
+            x: left, y: 0, left, top: 0, right: left + 320, bottom: height,
+            width: 320, height, toJSON: () => ({}),
+          } as DOMRect;
+          return Object.assign([rect], {
+            item: (index: number) => index === 0 ? rect : null,
+          }) as unknown as DOMRectList;
+        };
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true, value: rects,
+        });
+        Object.defineProperty(element, 'getBoundingClientRect', {
+          configurable: true, value: () => rects()[0],
+        });
+      }
+      Object.defineProperty(fixture.window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => {
+          const overflow = place(element, shut())?.clipped ? 'hidden' : 'visible';
+          return {
+            backgroundColor: 'rgba(0, 0, 0, 0)',
+            display: 'block', visibility: 'visible', opacity: '1',
+            position: 'static', overflowX: overflow, overflowY: overflow,
+            getPropertyValue: (name: string) => {
+              if (name === '-webkit-text-security') return 'none';
+              if (name === 'content-visibility') return 'visible';
+              if (name === 'clip') return 'auto';
+              if (name === 'clip-path') return 'none';
+              if (name.startsWith('overflow')) return overflow;
+              return '';
+            },
+          } as unknown as CSSStyleDeclaration;
+        },
+      });
+      fixture.start();
+      expect(JSON.stringify(fixture.checkpoints()[0])).toContain('panel words');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      const text = fixture.document.querySelector('#text')!.firstChild as Text;
+      const sent = (): string => JSON.stringify(fixture.port.posts);
+      const flush = (): void => {
+        fixture.flushFrame();
+        const last = fixture.patches().at(-1);
+        if (last) fixture.port.emitMessage(createHtmlMirrorAck(identity, last.lastSequence));
+      };
+      return { fixture, flag, text, sent, flush };
+    }
+
+    const shapes = [
+      [
+        // The popup of a wrapper of no height, put away at `left: -9999px`
+        // by a class on a sibling: what is painted stays "painted".
+        'a popup put off the page',
+        '<i id="flag"></i><button aria-controls="panel" aria-expanded="true">Toggle</button>' +
+          '<div id="panel"><div id="popup"><span id="text">panel words</span></div></div>',
+        (element: Element, shut: boolean) => element.id === 'panel'
+          ? { height: 0 }
+          : shut && element.closest('#popup') ? { left: -9999 } : undefined,
+      ],
+      [
+        // Everything sits in a box that is declared hidden and painted all
+        // the same (a page behind a dialog): what is under it is pinned to
+        // "displayed", and a panel collapsed there changes nothing known.
+        'a panel collapsed under a box that is declared hidden and painted',
+        '<div aria-hidden="true"><i id="flag"></i>' +
+          '<button aria-controls="panel" aria-expanded="true">Toggle</button>' +
+          '<div id="panel"><p id="text">panel words</p></div></div>',
+        (element: Element, shut: boolean) => shut && element.id === 'panel'
+          ? { height: 0, clipped: true }
+          : shut && element.closest('#panel') ? { height: 40 } : undefined,
+      ],
+    ] as const;
+
+    for (const [shape, markup, place] of shapes) {
+      it(`sends no text changed in the task that closes it: ${shape}`, () => {
+        const page = closingPanel(markup, place);
+        page.flag.classList.add('shut');
+        page.text.nodeValue = 'words of the closing task';
+        page.fixture.mutateAll([
+          attributeRecord(page.flag, 'class'),
+          characterDataRecord(page.text),
+        ]);
+        page.flush();
+        expect(page.sent()).not.toContain('words of the closing task');
+        // And what the mirror held of the panel is withdrawn with it.
+        expect(page.fixture.patches().at(-1)!.operations).toContainEqual(
+          expect.objectContaining({
+            kind: 'children',
+            nodeId: page.fixture.registry.peekId(
+              page.fixture.document.querySelector('#panel')!,
+            ),
+          }),
+        );
+      });
+
+      it(`sends no text changed, nor an element added, in a later task: ${shape}`, () => {
+        const page = closingPanel(markup, place);
+        page.flag.classList.add('shut');
+        page.fixture.mutate(attributeRecord(page.flag, 'class'));
+        page.flush();
+        page.text.nodeValue = 'words of a later task';
+        page.fixture.mutate(characterDataRecord(page.text));
+        page.flush();
+        expect(page.sent()).not.toContain('words of a later task');
+        const holder = page.text.parentElement!;
+        const added = page.fixture.document.createElement('b');
+        added.textContent = 'words added later';
+        holder.append(added);
+        page.fixture.mutate(childListRecord(holder, [added]));
+        page.flush();
+        expect(page.sent()).not.toContain('words added later');
+      });
+
+      it(`sends no element added while it was open, when it closes before the frame is read: ${shape}`, () => {
+        // The record of the added element makes the policy again, and the
+        // panel is open then; the frame is read after it has closed.
+        const page = closingPanel(markup, place);
+        const holder = page.text.parentElement!;
+        const added = page.fixture.document.createElement('b');
+        added.textContent = 'words added before it closed';
+        holder.append(added);
+        page.fixture.mutate(childListRecord(holder, [added]));
+        page.flag.classList.add('shut');
+        page.fixture.mutate(attributeRecord(page.flag, 'class'));
+        page.flush();
+        expect(page.sent()).not.toContain('words added before it closed');
+      });
+
+      it(`sends text changed in it while it is open: ${shape}`, () => {
+        const page = closingPanel(markup, place);
+        page.text.nodeValue = 'words while open';
+        page.fixture.mutate(characterDataRecord(page.text));
+        page.flush();
+        expect(page.fixture.patches().at(-1)!.operations).toContainEqual(
+          expect.objectContaining({
+            kind: 'text',
+            node: expect.objectContaining({ text: 'words while open' }),
+          }),
+        );
+      });
+    }
+
+    it('makes no walk of the page for a text changed outside any panel', () => {
+      const page = closingPanel(
+        '<i id="flag"></i><h1 id="head">Heading</h1>' +
+          '<button aria-controls="panel" aria-expanded="true">Toggle</button>' +
+          '<div id="panel"><p id="text">panel words</p></div>',
+        () => undefined,
+      );
+      const head = page.fixture.document.querySelector('#head')!;
+      const button = page.fixture.document.querySelector('button')!;
+      // The walk reads every element's `id` and `aria-controls`.
+      let reads = 0;
+      const readAttribute = button.getAttribute.bind(button);
+      Object.defineProperty(button, 'getAttribute', {
+        configurable: true,
+        value: (name: string) => {
+          if (name === 'aria-controls') reads += 1;
+          return readAttribute(name);
+        },
+      });
+      (head.firstChild as Text).nodeValue = 'Heading, changed';
+      page.fixture.mutate(characterDataRecord(head.firstChild as Text));
+      page.flush();
+      expect(page.sent()).toContain('Heading, changed');
+      expect(reads).toBe(0);
+      // Inside the panel the walk is made, once for the frame.
+      page.text.nodeValue = 'panel words, changed';
+      page.fixture.mutate(characterDataRecord(page.text));
+      page.flush();
+      expect(page.sent()).toContain('panel words, changed');
+      expect(reads).toBeGreaterThan(0);
+    });
+  });
+
   it('rematerializes a generic CSS-hidden subtree only across visibility boundaries', () => {
     const fixture = sourceFixture(`<nav><div id="wrapper" class="closed">
       <a id="trigger">About</a>
@@ -1261,6 +1462,30 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.patches()).toHaveLength(0);
   });
 
+  it('tells the mirror when the page hides an option of a dropdown, and when it shows it again (D145)', () => {
+    const fixture = sourceFixture(
+      '<select><option>first</option><option id="second">second</option></select>',
+    );
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const second = fixture.document.querySelector('#second')!;
+    const sent = () => fixture.patches().at(-1)!.operations.find((operation) =>
+      operation.kind === 'attributes' &&
+      operation.nodeId === fixture.registry.peekId(second));
+
+    second.setAttribute('hidden', '');
+    fixture.mutate(attributeRecord(second, 'hidden'));
+    fixture.flushFrame();
+    expect(sent()).toMatchObject({ tagName: 'option', visuallyHidden: true });
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    second.removeAttribute('hidden');
+    fixture.mutate(attributeRecord(second, 'hidden'));
+    fixture.flushFrame();
+    expect(sent()).toMatchObject({ tagName: 'option' });
+    expect(sent()).not.toHaveProperty('visuallyHidden');
+  });
+
   it('streams inserted option structure while labels and picker state stay semantic-only', () => {
     const fixture = sourceFixture(`
       <select id="picker"><option selected>First choice</option></select>
@@ -1540,6 +1765,82 @@ describe('HtmlMirrorSourceSession', () => {
         descriptor,
       );
     }
+  });
+
+  describe('a page of more nodes than the relationship walk reads by default (D145)', () => {
+    // The walk made for one patch stopped at a quarter of the mirror's own
+    // bound: a changed text and an added element were refused there and the
+    // whole page read afresh, at every such change. They are read with the
+    // policy the session holds, as a list of children and attributes are.
+    const largePage = (): ReturnType<typeof sourceFixture> => {
+      const fixture = sourceFixture(
+        '<h1 id="head">Heading</h1><ul id="list"><li>one</li></ul>' +
+          `<div id="fill">${'<b></b>'.repeat(50_100)}</div>`,
+      );
+      fixture.start();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      return fixture;
+    };
+    const errors = (fixture: ReturnType<typeof sourceFixture>) =>
+      fixture.port.posts.filter((message) =>
+        (message as { kind?: string }).kind === 'simul:html-mirror-v2:error');
+
+    it('sends a changed text as a patch', () => {
+      const fixture = largePage();
+      const text = fixture.document.querySelector('#head')!.firstChild as Text;
+      text.nodeValue = 'Heading, changed';
+      fixture.mutate(characterDataRecord(text));
+      fixture.flushFrame();
+
+      expect(errors(fixture)).toEqual([]);
+      expect(fixture.checkpoints()).toHaveLength(1);
+      expect(fixture.patches().at(-1)!.operations).toContainEqual(
+        expect.objectContaining({
+          kind: 'text',
+          node: expect.objectContaining({ text: 'Heading, changed' }),
+        }),
+      );
+    });
+
+    it('sends an added element as a patch', () => {
+      const fixture = largePage();
+      const list = fixture.document.querySelector('#list')!;
+      const added = fixture.document.createElement('li');
+      added.textContent = 'two, added';
+      list.append(added);
+      fixture.mutate(childListRecord(list, [added]));
+      fixture.flushFrame();
+
+      expect(errors(fixture)).toEqual([]);
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const patch = fixture.patches().at(-1)!;
+      expect(patch.operations.map(({ kind }) => kind))
+        .toContain('reconcile-children');
+      expect(JSON.stringify(patch)).toContain('two, added');
+    });
+  });
+
+  it('withholds a collapsed panel that arrives with its own control, by the policy the session holds (D145)', () => {
+    // The session's policy is the one a new element is read with: it is
+    // made again before the patch when what was added brings a control and
+    // the panel it names.
+    const fixture = sourceFixture('<main id="target"><p>kept</p></main>');
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const added = fixture.document.createElement('section');
+    added.innerHTML = '<button aria-controls="late-panel" aria-expanded="false">More</button>' +
+      '<div id="late-panel">collapsed words</div><p>shown words</p>';
+    target.append(added);
+    fixture.mutate(childListRecord(target, [added]));
+    fixture.flushFrame();
+
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations.map(({ kind }) => kind))
+      .toContain('reconcile-children');
+    expect(JSON.stringify(patch)).toContain('shown words');
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('collapsed words');
   });
 
   it('resanitizes descendants in the same batch when privacy roles enter and leave', () => {

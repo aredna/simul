@@ -166,6 +166,9 @@ describe('painted semantic labels', () => {
   it.each([
     '<section autocomplete="current-password"><a id="logo">Label</a></section>',
     '<section contenteditable="true"><a id="logo">Label</a></section>',
+    // A bare attribute is an editor too (D145).
+    '<section contenteditable><a id="logo">Label</a></section>',
+    '<section contenteditable=""><a id="logo">Label</a></section>',
     '<section role="textbox"><a id="logo">Label</a></section>',
     '<section aria-hidden="true"><a id="logo">Label</a></section>',
     '<section hidden><a id="logo">Label</a></section>',

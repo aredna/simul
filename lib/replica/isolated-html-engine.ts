@@ -2722,6 +2722,9 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   };
 
   for (const child of [...select.children]) {
+    // No row for an option, and nothing for a group, that the page's own
+    // list leaves out (D145; each was a blank row between the others).
+    if (isolatedSelectEntryIsLeftOut(child)) continue;
     if (child.localName.toLowerCase() === 'option') {
       appendOption(child as HTMLOptionElement, panel, false);
       continue;
@@ -2748,7 +2751,10 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       group.append(label);
     }
     for (const option of [...groupElement.children]) {
-      if (option.localName.toLowerCase() === 'option') {
+      if (
+        option.localName.toLowerCase() === 'option' &&
+        !isolatedSelectEntryIsLeftOut(option)
+      ) {
         appendOption(option as HTMLOptionElement, group, groupDisabled);
       }
     }
@@ -2778,6 +2784,16 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   trigger.replaceChildren(shown);
 }
 
+/**
+ * An option or a group the page's own list leaves out: the page reader's
+ * mark for one that is not displayed inside its dropdown. The mark is part
+ * of what the list is drawn from, so the list is drawn again by the pass
+ * that follows every patch when a patch changes it.
+ */
+function isolatedSelectEntryIsLeftOut(entry: Element): boolean {
+  return entry.getAttribute('data-simul-visually-hidden') === 'v1';
+}
+
 function isolatedSelectContentSignature(
   select: HTMLSelectElement,
   exposesSelection: boolean,
@@ -2796,6 +2812,7 @@ function isolatedSelectContentSignature(
       option.getAttribute('data-simul-source-option-selected') === 'v1',
       option.disabled === true || option.hasAttribute('disabled'),
       option.getAttribute('lang'),
+      isolatedSelectEntryIsLeftOut(option),
     ]);
   };
   for (const child of [...select.children]) {
@@ -2814,6 +2831,7 @@ function isolatedSelectContentSignature(
       group.getAttribute('label') ?? '',
       group.disabled === true || group.hasAttribute('disabled'),
       group.getAttribute('lang'),
+      isolatedSelectEntryIsLeftOut(group),
     ]);
     for (const option of [...group.children]) {
       if (option.localName.toLowerCase() === 'option') {

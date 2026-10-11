@@ -7,6 +7,7 @@ import {
   StickySourceSecretClassifier,
   classifySourceEvidence,
   isMaskableInputFacts,
+  sourceContentEditableFact,
   sourceFactsAreSecret,
   type SourceClassificationFacts,
 } from './source-secret-classifier';
@@ -1348,7 +1349,7 @@ function replicaClassificationFacts(
     type: safeAttribute(element, 'type'),
     autocomplete: safeAttribute(element, 'autocomplete'),
     role: safeAttribute(element, 'role'),
-    contentEditable: safeAttribute(element, 'contenteditable'),
+    contentEditable: safeContentEditable(element),
     computedTextSecurity,
     secretAncestor,
     valueBearing: presentation === 'value' || presentation === 'selection' ||
@@ -1609,8 +1610,7 @@ function receiverDisclosureSubtreeIsSafe(
     const element = node as Element;
     const tagName = element.localName.toLowerCase();
     const role = safeAttribute(element, 'role').trim().toLowerCase();
-    const contentEditable = safeAttribute(element, 'contenteditable')
-      .trim().toLowerCase();
+    const contentEditable = safeContentEditable(element).trim().toLowerCase();
     if (!classify(element)) return false;
     if (
       !allowFields && (
@@ -1640,8 +1640,7 @@ function evidenceElement(
   // The editor the text is drawn in: above it in the page's own tree, around
   // the slot that takes it, or the host of the root it sits in.
   for (const element of readSourceFlatTreeElementPath(target) ?? []) {
-    const contentEditable = safeAttribute(element, 'contenteditable')
-      .trim().toLowerCase();
+    const contentEditable = safeContentEditable(element).trim().toLowerCase();
     const role = safeAttribute(element, 'role').trim().toLowerCase();
     if (
       (contentEditable !== '' && contentEditable !== 'false') ||
@@ -1895,6 +1894,13 @@ function writeNodeValue(target: Node, text: string): boolean {
 
 function safeAttribute(element: Element, name: string): string {
   return safeNullableAttribute(element, name) ?? '';
+}
+
+/** The mirror's copy of the attribute, read as the page script reads its own. */
+function safeContentEditable(element: Element): string {
+  return sourceContentEditableFact(
+    safeNullableAttribute(element, 'contenteditable'),
+  );
 }
 
 function safeNullableAttribute(element: Element, name: string): string | null {

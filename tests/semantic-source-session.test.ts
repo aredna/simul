@@ -4000,14 +4000,55 @@ describe('semantic source session', () => {
       const port = new FakeSemanticPort(
         createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
       );
-      const session = createSession(port, document, window);
+      const mutations: SemanticMutationHarness = { observed: [] };
+      // The session's timers, and what it listens for on the window.
+      const timers: Array<() => void> = [];
+      const windowListeners = new Map<string, () => void>();
+      const session = createSession(
+        port,
+        document,
+        {
+          ...(window as object),
+          addEventListener: (type: string, listener: () => void) =>
+            windowListeners.set(type, listener),
+          removeEventListener: (type: string) => windowListeners.delete(type),
+        },
+        'isolated-html', undefined, undefined, timers, mutations,
+      );
       const start = (scope = FULL_VISIBLE_REPLICA_READ_SCOPE): readonly string[] => {
         port.emit(createSemanticSourceStart('isolated-html', identity, scope));
         return port.messages.at(-1)!.records
           .filter((record) => record.gate === 'editableContent')
           .map(({ text }) => text ?? '');
       };
-      return { document, port, session, start, styleReads };
+      /** The scan that follows a change of `target`'s `style` attribute. */
+      const restyle = (target: Element, style: string | null): void => {
+        const last = port.messages.at(-1)!;
+        port.emit(createSemanticSourceAck(identity, last.policyFingerprint, last.sequence));
+        const oldValue = target.getAttribute('style');
+        if (style === null) target.removeAttribute('style');
+        else target.setAttribute('style', style);
+        mutations.callback?.([{
+          type: 'attributes', target, attributeName: 'style', oldValue,
+        } as unknown as MutationRecord], {} as MutationObserver);
+      };
+      /** A change of `target`'s `style` attribute that no record tells of. */
+      const restyleSilently = (target: Element, style: string | null): void => {
+        const last = port.messages.at(-1)!;
+        port.emit(createSemanticSourceAck(identity, last.policyFingerprint, last.sequence));
+        if (style === null) target.removeAttribute('style');
+        else target.setAttribute('style', style);
+      };
+      /** The timers set since `from`, run in turn; how many there were. */
+      const runTimersSince = (from: number): number => {
+        const set = timers.splice(from);
+        for (const timer of set) timer();
+        return set.length;
+      };
+      return {
+        document, port, session, start, restyle, restyleSilently, styleReads,
+        timers, windowListeners, runTimersSince,
+      };
     }
 
     const NOTE = '<x-note id="note"><p>slotted draft</p>direct draft</x-note>';
@@ -4158,6 +4199,171 @@ describe('semantic source session', () => {
       fixture.session.dispose();
     });
 
+    describe('what a change of presentation alone shows or hides (D145)', () => {
+      // A media query when the window is resized (the side panel narrows
+      // the tab as it opens): no record tells of it, and the scan followed
+      // records, input and toggle. A field shown that way stayed blank
+      // until the page next changed, where it had its value before hidden
+      // fields were held back; one hidden that way kept its value in the
+      // mirror. A resize is followed by a scan; the end of a transition or
+      // an animation is not (a scan at each was too dear).
+      const FIELD = '<input id="field" type="text" value="narrow value">' +
+        '<input type="text" placeholder="narrow placeholder">';
+      const values = (fixture: ReturnType<typeof editors>): readonly string[] =>
+        fixture.port.messages.at(-1)!.records
+          .filter(({ presentation }) =>
+            presentation === 'value' || presentation === 'placeholder')
+          .map(({ text }) => text ?? '');
+      const settle = (
+        fixture: ReturnType<typeof editors>,
+        event: 'resize' | 'transitionend' | 'animationend' | 'transitioncancel' | 'animationcancel',
+        times = 1,
+      ): number => {
+        const from = fixture.timers.length;
+        for (let count = 0; count < times; count += 1) {
+          if (event === 'resize') fixture.windowListeners.get('resize')?.();
+          else {
+            const box = fixture.document.querySelector('#box')!;
+            box.dispatchEvent(new (fixture.document.defaultView as unknown as {
+              Event: typeof Event;
+            }).Event(event, { bubbles: true }));
+          }
+        }
+        return fixture.runTimersSince(from);
+      };
+
+      it('reads a field that a resize of the window shows, and takes back one it hides', () => {
+        const fixture = editors(
+          `<div id="box" style="display: none">${FIELD}</div>` +
+            '<div id="wide"><input type="text" value="wide value"></div>',
+        );
+        const box = fixture.document.querySelector('#box')!;
+        const wide = fixture.document.querySelector('#wide')!;
+        fixture.start();
+        expect(values(fixture)).toEqual(['wide value']);
+        // The narrow layout: one box shown, the other hidden, by a rule.
+        fixture.restyleSilently(box, null);
+        wide.setAttribute('style', 'display: none');
+        expect(settle(fixture, 'resize')).toBe(1);
+        expect(fixture.port.messages).toHaveLength(2);
+        expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+        // And back.
+        fixture.restyleSilently(box, 'display: none');
+        wide.removeAttribute('style');
+        expect(settle(fixture, 'resize')).toBe(1);
+        expect(values(fixture)).toEqual(['wide value']);
+        fixture.session.dispose();
+      });
+
+      it('makes one scan of a burst of resize events', () => {
+        const fixture = editors(`<div id="box" style="display: none">${FIELD}</div>`);
+        const field = fixture.document.querySelector('#field')!;
+        fixture.start();
+        fixture.restyleSilently(fixture.document.querySelector('#box')!, null);
+        const before = fixture.styleReads.get(field) ?? 0;
+        expect(settle(fixture, 'resize', 12)).toBe(1);
+        expect((fixture.styleReads.get(field) ?? 0) - before).toBe(1);
+        expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+        fixture.session.dispose();
+      });
+
+      it('waits until the mirror reader is done with the resize and the page has had its turn', () => {
+        // The reader answers a resize with two frames, over as late as
+        // 0.45 s after the event on a page of 20,000 elements: a scan any
+        // sooner joins them into one pause.
+        const fixture = editors(`<div id="box">${FIELD}</div>`);
+        fixture.start();
+        fixture.windowListeners.get('resize')!();
+        expect(timerDelays.get(fixture.timers.at(-1)!)).toBeGreaterThanOrEqual(600);
+        fixture.session.dispose();
+      });
+
+      for (const event of [
+        'transitionend', 'animationend', 'transitioncancel', 'animationcancel',
+      ] as const) {
+        it(`starts no scan at a ${event}, and lets none put off the scan a resize started`, () => {
+          const fixture = editors(`<div id="box" style="display: none">${FIELD}</div>`);
+          fixture.start();
+          expect(values(fixture)).toEqual([]);
+          fixture.restyleSilently(fixture.document.querySelector('#box')!, null);
+          expect(settle(fixture, event, 3)).toBe(0);
+          expect(fixture.port.messages).toHaveLength(1);
+          // The wait a resize started is the same timer after such events.
+          fixture.windowListeners.get('resize')!();
+          const armed = fixture.timers.at(-1)!;
+          expect(settle(fixture, event, 3)).toBe(0);
+          expect(fixture.timers.at(-1)).toBe(armed);
+          expect(fixture.runTimersSince(fixture.timers.length - 1)).toBe(1);
+          expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+          fixture.session.dispose();
+        });
+      }
+
+      it('reads editor text that a resize shows', () => {
+        const fixture = editors(
+          '<div id="box" style="display: none"><div contenteditable="true">narrow draft</div></div>',
+        );
+        expect(fixture.start()).toEqual([]);
+        fixture.restyleSilently(fixture.document.querySelector('#box')!, null);
+        expect(settle(fixture, 'resize')).toBe(1);
+        expect(fixture.port.messages.at(-1)!.records.map(({ text }) => text))
+          .toEqual(['narrow draft']);
+        fixture.session.dispose();
+      });
+
+      it('starts no scan where the scan before asked about no field and no editor', () => {
+        // A page with neither, and a page read without field values.
+        const plain = editors('<div id="box"><p>words</p><button>Go</button></div>');
+        plain.start();
+        expect(settle(plain, 'resize', 3)).toBe(0);
+        plain.session.dispose();
+        const standard = editors(`<div id="box">${FIELD}</div>`);
+        standard.start(STANDARD_REPLICA_READ_SCOPE);
+        expect(settle(standard, 'resize', 3)).toBe(0);
+        standard.session.dispose();
+      });
+
+      it('starts none once the page no longer holds a field', () => {
+        const fixture = editors(`<div id="box">${FIELD}</div><p id="other">words</p>`);
+        fixture.start();
+        expect(settle(fixture, 'resize')).toBe(1);
+        // The fields go: the scan that follows asks about nothing.
+        fixture.document.querySelector('#box')!.replaceChildren();
+        fixture.restyle(fixture.document.querySelector('#other')!, 'color: red');
+        expect(values(fixture)).toEqual([]);
+        expect(settle(fixture, 'resize', 3)).toBe(0);
+        fixture.session.dispose();
+      });
+
+      it('starts none at a pointer or a focus event', () => {
+        const fixture = editors(`<div id="box" style="display: none">${FIELD}</div>`);
+        fixture.start();
+        const box = fixture.document.querySelector('#box')!;
+        const from = fixture.timers.length;
+        for (const type of ['pointerover', 'pointerout', 'focusin', 'focusout']) {
+          box.dispatchEvent(new (fixture.document.defaultView as unknown as {
+            Event: typeof Event;
+          }).Event(type, { bubbles: true }));
+        }
+        expect(fixture.runTimersSince(from)).toBe(0);
+        fixture.session.dispose();
+      });
+
+      it('sets no timer once the session is over', () => {
+        const fixture = editors(`<div id="box">${FIELD}</div>`);
+        fixture.start();
+        const resize = fixture.windowListeners.get('resize')!;
+        resize();
+        const armed = fixture.timers.at(-1)!;
+        fixture.session.dispose();
+        expect(fixture.windowListeners.has('resize')).toBe(false);
+        expect(fixture.timers).not.toContain(armed);
+        const left = fixture.timers.length;
+        resize();
+        expect(fixture.timers.length).toBe(left);
+      });
+    });
+
     it('sends nothing of an editor whose boxes cannot be read (they count as a secret)', () => {
       const fixture = editors(`<section id="broken">${NOTE}</section>`, { '#note': EDITOR });
       const note = fixture.document.querySelector('#note')!;
@@ -4169,6 +4375,290 @@ describe('semantic source session', () => {
       });
       expect(fixture.start()).toEqual([]);
       fixture.session.dispose();
+    });
+
+    describe('and the value of a field that the tab does not show (D145)', () => {
+      // Field values asked nothing of the kind: a text area and a text
+      // field inside a box that is not displayed travelled, were held in
+      // the mirror's fields and went to the translator.
+      const FIELDS = '<textarea id="area">area value</textarea>' +
+        '<input id="field" type="text" value="field value">' +
+        '<input id="empty" type="text" placeholder="placeholder words">' +
+        '<input id="mail" type="email" value="person@example.test">';
+      const SENT = [
+        'area value', 'field value', 'placeholder words', 'person@example.test',
+      ];
+      /** What the last batch carries of field values and placeholders. */
+      const values = (
+        fixture: ReturnType<typeof editors>,
+        scope = FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ): readonly string[] => {
+        fixture.start(scope);
+        return fixture.port.messages.at(-1)!.records
+          .filter(({ presentation }) =>
+            presentation === 'value' || presentation === 'placeholder')
+          .map(({ text }) => text ?? '');
+      };
+
+      it('sends the values of fields that are shown', () => {
+        const fixture = editors(`<form>${FIELDS}</form>`);
+        expect(values(fixture)).toEqual(SENT);
+        fixture.session.dispose();
+      });
+
+      for (const [shape, page, roots] of [
+        ['a box that is not displayed', `<div style="display: none"><p>${FIELDS}</p></div>`, {}],
+        ['a box that is not visible', `<div style="visibility: hidden">${FIELDS}</div>`, {}],
+        ['a box that is declared hidden and has no box', `<div hidden>${FIELDS}</div>`, {}],
+        ['a dialog that is not open', `<dialog>${FIELDS}</dialog>`, {}],
+        [
+          'a box of a root that is not displayed, slotted there',
+          `<x-note id="note">${FIELDS}</x-note>`,
+          { '#note': '<div style="display: none"><slot></slot></div>' },
+        ],
+      ] as const) {
+        it(`sends nothing of fields in ${shape}`, () => {
+          const fixture = editors(page, roots);
+          expect(values(fixture)).toEqual([]);
+          const sent = JSON.stringify(fixture.port.messages);
+          for (const text of SENT) expect(sent).not.toContain(text);
+          fixture.session.dispose();
+        });
+      }
+
+      it('sends nothing of a field that hides itself, and the one beside it', () => {
+        const fixture = editors(
+          '<input type="text" value="undisplayed value" style="display: none">' +
+            '<textarea style="visibility: hidden">invisible value</textarea>' +
+            '<input type="text" value="shown value">',
+        );
+        expect(values(fixture)).toEqual(['shown value']);
+        expect(JSON.stringify(fixture.port.messages)).not.toContain('undisplayed value');
+        expect(JSON.stringify(fixture.port.messages)).not.toContain('invisible value');
+        fixture.session.dispose();
+      });
+
+      it('sends a field made visible again inside a box that is not visible', () => {
+        const fixture = editors(
+          '<div style="visibility: hidden"><input type="text" value="veiled value">' +
+            '<input type="text" value="unveiled value" style="visibility: visible"></div>',
+        );
+        expect(values(fixture)).toEqual(['unveiled value']);
+        fixture.session.dispose();
+      });
+
+      it('sends the value at the scan after the field is shown, and no more once it is hidden again', () => {
+        const fixture = editors(`<div id="box" style="display: none">${FIELDS}</div>`);
+        const box = fixture.document.querySelector('#box')!;
+        const last = (): readonly string[] => fixture.port.messages.at(-1)!.records
+          .filter(({ presentation }) =>
+            presentation === 'value' || presentation === 'placeholder')
+          .map(({ text }) => text ?? '');
+        expect(values(fixture)).toEqual([]);
+        fixture.restyle(box, null);
+        expect(fixture.port.messages).toHaveLength(2);
+        expect(last()).toEqual(SENT);
+        fixture.restyle(box, 'display: none');
+        expect(fixture.port.messages).toHaveLength(3);
+        expect(last()).toEqual([]);
+        fixture.session.dispose();
+      });
+
+      it('asks what is hidden where field values alone are read', () => {
+        const scope = { ...PAGE_ONLY_REPLICA_READ_SCOPE, formValues: true };
+        const shown = editors(`<form>${FIELDS}</form>`);
+        // Without personal data values the e-mail address is not read.
+        expect(values(shown, scope)).toEqual(SENT.slice(0, 3));
+        shown.session.dispose();
+        const hidden = editors(`<div style="display: none">${FIELDS}</div>`);
+        expect(values(hidden, scope)).toEqual([]);
+        hidden.session.dispose();
+      });
+
+      it('still tells whether a radio button the page hides is checked', () => {
+        // Tabs made of radio buttons hide the buttons: the mirror shows
+        // the panel of the one that is checked.
+        const fixture = editors(
+          '<input id="pick" type="radio" name="tab" checked style="display: none">' +
+            '<input type="text" value="hidden beside it" style="display: none">',
+        );
+        Object.defineProperties(fixture.document.querySelector('#pick')!, {
+          checked: { configurable: true, get: () => true },
+          indeterminate: { configurable: true, get: () => false },
+        });
+        expect(values(fixture)).toEqual([]);
+        expect(fixture.port.messages.at(-1)!.proofs).toContainEqual(
+          expect.objectContaining({
+            kind: 'choice-state',
+            nodeId: nodeId(fixture.document.querySelector('#pick')!),
+            checked: true,
+          }),
+        );
+        fixture.session.dispose();
+      });
+
+      it('asks each box around a field once a scan', () => {
+        const fixture = editors(
+          '<main id="around"><form id="form">' +
+            Array.from({ length: 40 }, (_, index) =>
+              `<input type="text" value="value ${index}">`).join('') +
+            '</form></main>',
+        );
+        const before = new Map(fixture.styleReads);
+        expect(values(fixture)).toHaveLength(40);
+        const reads = (selector: string): number => {
+          const element = fixture.document.querySelector(selector)!;
+          return (fixture.styleReads.get(element) ?? 0) - (before.get(element) ?? 0);
+        };
+        expect(reads('#form')).toBe(1);
+        expect(reads('#around')).toBe(1);
+        fixture.session.dispose();
+      });
+
+      it('reads the placeholder of a search box in a menu the mirror may open, and not what was typed there (D145)', () => {
+        // The menu is collapsed: the tab shows nothing of it. The mirror may
+        // open it for the reader, and its search box then says what the
+        // page's says. A field hidden anywhere else sends neither.
+        const { document, window } = parseHTML(`<html><body>
+          <nav><div id="wrapper">
+            <button id="trigger">Resources</button><div id="panel">
+              <input id="search" type="search" placeholder="Search the site" value="typed words">
+              <a href="/school">Startup School</a></div></div></nav>
+          <div id="elsewhere"><input type="text" placeholder="Other words" value="other typed"></div>
+          </body></html>`);
+        installPaintedTabFixture(document, window as unknown as Window);
+        const collapsed = new Set([
+          document.querySelector('#panel')!,
+          document.querySelector('#elsewhere')!,
+        ]);
+        const style = structuralMenuStyle(
+          (element) => collapsed.has(element) ? 'display' : undefined,
+        );
+        Object.defineProperty(window, 'getComputedStyle', {
+          configurable: true,
+          value: style,
+        });
+        const port = new FakeSemanticPort(
+          createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+        );
+        const session = createSession(
+          port, document, window, 'isolated-html', undefined, style,
+        );
+        port.emit(createSemanticSourceStart(
+          'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+        ));
+        const batch = port.messages[0]!;
+        expect(batch.proofs.some((proof) => proof.kind === 'structural-menu'))
+          .toBe(true);
+        expect(batch.records
+          .filter(({ presentation }) =>
+            presentation === 'value' || presentation === 'placeholder')
+          .map(({ presentation, text }) => [presentation, text]))
+          .toEqual([['placeholder', 'Search the site']]);
+        const sent = JSON.stringify(port.messages);
+        expect(sent).not.toContain('typed words');
+        expect(sent).not.toContain('Other words');
+        expect(sent).not.toContain('other typed');
+        session.dispose();
+      });
+    });
+  });
+
+  describe('an editor written as a bare attribute (D145)', () => {
+    // `<div contenteditable>` and `contenteditable=""`: the attribute reads
+    // as '' either way, which was also the reading of no attribute at all.
+    // The editor's text was sent under no profile, and inside a menu or a
+    // panel with a control it was read as that menu's own text.
+    const scan = (markup: string, scope: typeof FULL_VISIBLE_REPLICA_READ_SCOPE) => {
+      const { document, window } = parseHTML(`<html><body>${markup}</body></html>`);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      port.emit(createSemanticSourceStart('isolated-html', identity, scope));
+      const batch = port.messages.at(-1)!;
+      session.dispose();
+      return { batch, sent: JSON.stringify(port.messages) };
+    };
+
+    for (const written of ['contenteditable', 'contenteditable=""', 'contenteditable="  "']) {
+      it(`sends the text of <div ${written}> as editor text under Full visible`, () => {
+        const { batch } = scan(
+          `<div ${written}>typed draft<p>second draft</p></div>`,
+          FULL_VISIBLE_REPLICA_READ_SCOPE,
+        );
+        expect(batch.records.map(({ text, gate, category, contentEditable }) =>
+          [text, gate, category, contentEditable])).toEqual([
+          ['typed draft', 'editableContent', 'editable', 'true'],
+          ['second draft', 'editableContent', 'editable', 'true'],
+        ]);
+      });
+
+      it(`sends nothing typed into <div ${written}> under Standard and Page only`, () => {
+        for (const scope of [
+          STANDARD_REPLICA_READ_SCOPE,
+          PAGE_ONLY_REPLICA_READ_SCOPE,
+        ]) {
+          expect(scan(`<div ${written}>typed draft</div>`, scope).sent)
+            .not.toContain('typed draft');
+        }
+      });
+    }
+
+    it('keeps an element that says it is not an editor, and one that says nothing, as page text', () => {
+      const { batch } = scan(
+        '<div contenteditable="false">plain words</div><div>other words</div>',
+        FULL_VISIBLE_REPLICA_READ_SCOPE,
+      );
+      expect(batch.records.filter(({ gate }) => gate === 'editableContent'))
+        .toEqual([]);
+    });
+
+    it('does not read what is typed into one as the text of an open panel with a control', () => {
+      const markup = (written: string) =>
+        '<button aria-expanded="true" aria-controls="panel">More</button>' +
+        `<div id="panel"><p>panel words</p><div ${written}>typed draft</div></div>`;
+      for (const written of ['contenteditable', 'contenteditable=""', 'contenteditable="true"']) {
+        const { batch, sent } = scan(markup(written), STANDARD_REPLICA_READ_SCOPE);
+        // A panel that holds an editor is no panel the mirror reads as a
+        // whole: nothing of it is menu text, and nothing typed travels.
+        expect(sent, written).not.toContain('typed draft');
+        expect(batch.proofs.some((proof) => proof.kind === 'disclosure-state'), written)
+          .toBe(false);
+      }
+    });
+
+    it('does not read what is typed into one as the text of a site menu', () => {
+      // Nor what is typed into a paragraph of one, as an editor of rich
+      // text holds it: that was read as the menu's text for an editor
+      // written in any way, where editor text is not read.
+      for (const written of ['contenteditable', 'contenteditable=""', 'contenteditable="true"']) {
+        const { document, window } = parseHTML(`<html><body>
+          <nav><div id="wrapper">
+            <button id="trigger">Resources</button><div id="panel">
+              <a href="/school">Startup School</a>
+              <div ${written}>typed draft<p>typed paragraph <b>in bold</b></p></div></div></div></nav>
+          </body></html>`);
+        installPaintedTabFixture(document, window as unknown as Window);
+        const panel = document.querySelector('#panel')!;
+        const port = new FakeSemanticPort(
+          createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+        );
+        const session = createSession(
+          port, document, window, 'isolated-html', undefined,
+          structuralMenuStyle((element) => element === panel ? 'display' : undefined),
+        );
+        port.emit(createSemanticSourceStart(
+          'isolated-html', identity, STANDARD_REPLICA_READ_SCOPE,
+        ));
+        const sent = JSON.stringify(port.messages);
+        expect(sent, written).not.toContain('typed draft');
+        expect(sent, written).not.toContain('typed paragraph');
+        expect(sent, written).not.toContain('in bold');
+        // The menu is still offered, with its own text.
+        expect(sent, written).toContain('Startup School');
+        session.dispose();
+      }
     });
   });
 
@@ -4536,7 +5026,8 @@ function createSession(
       };
     },
     schedule: (callback) => callback(),
-    setTimer: (callback) => {
+    setTimer: (callback, delayMs) => {
+      timerDelays.set(callback, delayMs);
       if (timers) timers.push(callback);
       return callback;
     },
@@ -4547,6 +5038,9 @@ function createSession(
     },
   });
 }
+
+/** How long each timer a session set was to wait. */
+const timerDelays = new WeakMap<() => void, number>();
 
 interface SemanticMutationHarness {
   readonly observed: Node[];

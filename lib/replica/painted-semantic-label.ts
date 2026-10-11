@@ -1,3 +1,5 @@
+import { sourceContentEditableFact } from './source-secret-classifier';
+
 export const PAINTED_SEMANTIC_LABEL_ATTRIBUTE =
   'data-simul-painted-semantic-label';
 export const PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE =
@@ -435,7 +437,10 @@ function elementHasSensitiveStructure(element: Element): boolean {
   if (['input', 'option', 'select', 'textarea'].includes(tagName)) return true;
   const type = safelyReadAttribute(element, 'type').toLowerCase();
   if (SENSITIVE_INPUT_TYPES.has(type)) return true;
-  const contentEditable = safelyReadAttribute(element, 'contenteditable');
+  // A bare attribute is an editor too (D145).
+  const contentEditable = safelyHasAttribute(element, 'contenteditable')
+    ? sourceContentEditableFact(safelyReadAttribute(element, 'contenteditable'))
+    : '';
   if (contentEditable !== '' && contentEditable.toLowerCase() !== 'false') {
     return true;
   }
@@ -446,6 +451,15 @@ function elementHasSensitiveStructure(element: Element): boolean {
     .split(/\s+/u);
   return autocomplete.some((token) =>
     SENSITIVE_AUTOCOMPLETE_TOKENS.has(token) || token.startsWith('cc-'));
+}
+
+function safelyHasAttribute(element: Element, name: string): boolean {
+  try {
+    return element.hasAttribute(name);
+  } catch {
+    // Unreadable structural metadata is not proof that text is public.
+    return true;
+  }
 }
 
 function safelyReadAttribute(element: Element, name: string): string {

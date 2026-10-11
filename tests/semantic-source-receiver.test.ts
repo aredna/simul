@@ -470,6 +470,63 @@ describe('semantic source receiver', () => {
       expect(value).toBe('');
     });
 
+    describe('in an editor written as a bare attribute (D145)', () => {
+      /** The mirror's copy of an editor, with a text node of id 11 in it. */
+      function bareEditor(written: string) {
+        const { document } = parseHTML(
+          `<html><body><div id="editor" ${written}><p id="inside"></p></div></body></html>`,
+        );
+        const editor = document.querySelector('#editor')!;
+        const direct = document.createTextNode('');
+        editor.append(direct);
+        const inside = document.createTextNode('');
+        document.querySelector('#inside')!.append(inside);
+        const nodes = new Map<number, Node>([[11, direct], [12, inside]]);
+        const receiver = new SemanticSourceReceiver({
+          document: identity,
+          replicaDocument: document as unknown as Document,
+          resolveNode: (id) => nodes.get(id),
+        });
+        return { receiver, direct, inside };
+      }
+
+      for (const written of ['contenteditable', 'contenteditable=""']) {
+        it(`places the text of <div ${written}>`, () => {
+          // The page script tells a bare attribute as `true`; the mirror's
+          // copy of the attribute reads '' and was no editor here.
+          const replica = bareEditor(written);
+          expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+            identity, 'read-v1-111111', 1,
+            [editorRecord(11, 'direct draft'), editorRecord(12, 'inside draft')],
+          ))).toHaveLength(2);
+          expect(replica.direct.nodeValue).toBe('direct draft');
+          expect(replica.inside.nodeValue).toBe('inside draft');
+        });
+
+        it(`takes no text for the inside of <div ${written}> that is not sent as editor text`, () => {
+          // What a page script of before this change sent for an editor
+          // inside a menu: the editor's text as the menu's own.
+          const replica = bareEditor(written);
+          expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+            identity, 'read-v1-111000', 1,
+            [editorRecord(11, 'typed draft', {
+              category: 'public-semantic',
+              gate: 'disclosureContent',
+              contentEditable: '',
+            })],
+          ))).toEqual([]);
+          expect(replica.direct.nodeValue).toBe('');
+        });
+      }
+
+      it('takes none for an element that says it is not an editor', () => {
+        const replica = bareEditor('contenteditable="false"');
+        expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+          identity, 'read-v1-111111', 1, [editorRecord(11, 'direct draft')],
+        ))).toEqual([]);
+        expect(replica.direct.nodeValue).toBe('');
+      });
+    });
   });
 
   it('keeps a receiver-side secret transition sticky after attributes revert', () => {
@@ -1494,6 +1551,41 @@ describe('semantic source receiver', () => {
     ))).toBeDefined();
     expect(trigger.hasAttribute('data-simul-source-disclosure-state')).toBe(false);
     expect(text.nodeValue).toBe('Startup School');
+  });
+
+  it('takes no tab state for a panel that holds an editor, however the editor is written (D145)', () => {
+    // A panel that holds an editor is no panel the mirror shows or hides by
+    // a proof. A bare attribute was no editor here.
+    const presented = (editor: string): boolean => {
+      const { document } = parseHTML(`<html><body>
+        <div id="tab" role="tab" aria-selected="false">Tab</div>
+        <section id="panel" role="tabpanel"><p>Panel</p>${editor}</section>
+        </body></html>`);
+      const trigger = document.querySelector<HTMLElement>('#tab')!;
+      const nodes = new Map<number, Node>([
+        [21, trigger], [22, document.querySelector('#panel')!],
+      ]);
+      const presenter = new SemanticProofPresenter({
+        document: document as unknown as Document,
+      });
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => nodes.get(nodeId),
+        applyProofs: (proofs) => presenter.apply(proofs),
+      });
+      receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1, [], [tabStateProof(1, true)],
+      ));
+      return trigger.getAttribute('aria-selected') === 'true';
+    };
+    expect(presented('')).toBe(true);
+    expect(presented('<div contenteditable="false">words</div>')).toBe(true);
+    for (const editor of [
+      '<div contenteditable="true">draft</div>',
+      '<div contenteditable>draft</div>',
+      '<div contenteditable="">draft</div>',
+    ]) expect(presented(editor), editor).toBe(false);
   });
 
   it('preserves a unique panel CSS id across inline tab apply-update-clear', () => {

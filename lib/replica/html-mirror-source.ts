@@ -89,6 +89,7 @@ import {
   hasSourceCredentialSecretAncestor,
   isSourceSelectWrapper,
   sourceControlledContentBoundaryChanged,
+  sourceNodeIsInsideControlledTarget,
   sourceControlledContentChangedTargets,
   sourceControlledContentLayoutMayChange,
   sourceControlledContentMutationsMayChange,
@@ -1540,7 +1541,10 @@ export class HtmlMirrorSourceSession {
   }
 
   #flushChanges(fidelityPolicy: SelectableReplicaFidelityPolicy): void {
-    if (this.#controlledLayoutSettlePending) {
+    if (
+      this.#controlledLayoutSettlePending ||
+      this.#readsInsidePanelWithControl()
+    ) {
       this.#controlledLayoutSettlePending = false;
       this.#refreshControlledContentPolicy();
       if (this.#paused || this.#shadowReconciliationPending) return;
@@ -1928,6 +1932,7 @@ export class HtmlMirrorSourceSession {
             styleWork,
             fidelityPolicy,
             this.#slotReadings,
+            this.#controlledContentPolicy,
           );
           if (!serialized) throw new Error('Unsafe new children patch.');
           const newGraphs = new Map<Node, import(
@@ -2064,6 +2069,7 @@ export class HtmlMirrorSourceSession {
           representability,
           fidelityPolicy,
           this.#slotReadings,
+          this.#controlledContentPolicy,
         );
         if (!node || node.kind !== 'text') throw new Error('Unsafe text patch.');
         const operation = Object.freeze({
@@ -2990,6 +2996,32 @@ export class HtmlMirrorSourceSession {
         ) pending.push(child);
       }
     }
+  }
+
+  /**
+   * Whether this frame reads a changed text or a changed list of children
+   * inside a panel that a control names. Such a panel is read or withheld by
+   * its state, and the policy the session keeps holds the state it had when
+   * the policy was last made: a panel can close with no record that makes
+   * the policy again (a class on a sibling, a checkbox a script unchecks),
+   * and the index of what is painted does not see every closing (a popup
+   * put off the page; anything under a box that is declared hidden and
+   * painted all the same). A changed text there was read by that old state:
+   * the text of a closed panel travelled under every profile (D145; found
+   * by the review, which build `.16`'s walk of the whole document for every
+   * such patch had caught). The policy is made again, once, before the
+   * frame is read, so the panel's state is the one it has now. A change
+   * anywhere else costs no walk.
+   */
+  #readsInsidePanelWithControl(): boolean {
+    const policy = this.#controlledContentPolicy;
+    if (!policy || policy.targets.size === 0) return false;
+    for (const pending of [this.#pendingText, this.#pendingChildren]) {
+      for (const node of pending) {
+        if (sourceNodeIsInsideControlledTarget(node, policy)) return true;
+      }
+    }
+    return false;
   }
 
   #refreshControlledContentPolicy(): boolean {

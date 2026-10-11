@@ -14,6 +14,7 @@ import {
   isSourceNativeTextControlTagName,
   isSourceOptionInsideNativeSelect,
   isSourcePublicMenuRoleValue,
+  isSourceSelectEntryLeftOutOfList,
   isSourceSelectEntryVisuallyHidden,
   isSourceTransparentSelectClickTarget,
   readSourceFlatTreeElementPath,
@@ -1002,6 +1003,7 @@ export function sanitizeSourceSubtree(
   representability = createHtmlMirrorRepresentabilityCollector(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   slotReadings?: SourceSlotReadings,
+  precomputedControlledContent?: SourceControlledContentPolicy,
 ): HtmlMirrorNode | undefined {
   return sanitizeSourceSubtrees(
     [source],
@@ -1012,10 +1014,18 @@ export function sanitizeSourceSubtree(
     undefined,
     fidelityPolicy,
     slotReadings,
+    precomputedControlledContent,
   )?.[0];
 }
 
-/** Serializes only the supplied roots while sharing one global source budget. */
+/**
+ * Serializes only the supplied roots while sharing one global source budget.
+ * A live patch gives the policy its session holds, as it does for a list of
+ * children and for attributes (D145): the policy made here when none is
+ * given walks the whole document for every call and stops at its default
+ * bound, a quarter of the mirror's own, so that a changed text or an added
+ * element on a larger page was refused and the page read afresh.
+ */
 export function sanitizeSourceSubtrees(
   sources: readonly Node[],
   registry: HtmlMirrorIdRegistry,
@@ -1025,11 +1035,11 @@ export function sanitizeSourceSubtrees(
   styleWork = createHtmlMirrorStyleWorkBudget(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   slotReadings?: SourceSlotReadings,
+  precomputedControlledContent?: SourceControlledContentPolicy,
 ): readonly (HtmlMirrorNode | undefined)[] | undefined {
   try {
-    const controlledContent = createSourceControlledContentPolicy(
-      sources[0]?.ownerDocument,
-    );
+    const controlledContent = precomputedControlledContent ??
+      createSourceControlledContentPolicy(sources[0]?.ownerDocument);
     if (controlledContent.incomplete) throw new HtmlMirrorCapacityError();
     const secretAncestors = createSourceSecretAncestorMemo();
     const slotRegions = new Map<Element, SourceSlotRegion>();
@@ -1254,7 +1264,9 @@ export function sanitizeSourceElementHints(
   const hidden = tagName === 'select'
     ? isSourceSelectVisuallyHidden(source)
     : (tagName === 'option' || tagName === 'optgroup')
-      ? isSourceSelectEntryVisuallyHidden(source)
+      // Whether the dropdown's own list leaves it out, wherever the
+      // dropdown is: the mirror's list has no row for it (D145).
+      ? isSourceSelectEntryLeftOutOfList(source)
       : isCanonicalClippedSourceElement(source);
   // A dropdown that only something above it hides keeps its box in the
   // mirror, out of sight, for when the mirror opens what hides it.
@@ -5049,9 +5061,6 @@ function isComputedHiddenSourceSelect(element: Element, opened = false): boolean
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
     const style = view.getComputedStyle(element);
-    const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`
-      .trim()
-      .toLowerCase();
     const width = cssPixelValue(style.width);
     const height = cssPixelValue(style.height);
     const signedPixels = (value: string): number | undefined => {
@@ -5087,8 +5096,12 @@ function isComputedHiddenSourceSelect(element: Element, opened = false): boolean
       style.getPropertyValue('content-visibility').trim().toLowerCase() === 'hidden' ||
       positionedOffscreen ||
       transformCollapses ||
-      (overflow.split(/\s+/u).some((value) => value === 'hidden' || value === 'clip') &&
-        (width === 0 || height === 0));
+      // A dropdown of no width or no height: it clips what it holds
+      // whatever its `overflow` computes to, which is `clip` on Chrome 154
+      // and `visible` on Chrome 138 (D145; the rule asked for a clipping
+      // `overflow`, so on 138 the labels of such a backing dropdown were
+      // read while its menu was collapsed).
+      width === 0 || height === 0;
   } catch {
     return false;
   }

@@ -438,6 +438,16 @@ A wrapper that would make what it holds private, or that acts (a button, an
 editable region, a widget role), is not passed, and the options inside it
 keep their labels to themselves. Before D135 such a dropdown showed
 **Options** and no rows.
+An option or a group that the page's own list leaves out has no row in the
+mirror's list (D145): one that is not displayed (`hidden`, `display: none`)
+itself, or whose group or wrapper is not. It used to be a blank row, since
+its label is not read. The page script marks such an entry by what hides it
+inside its dropdown, not by what hides the dropdown: a dropdown in a
+collapsed menu, which the mirror draws when the reader opens the menu, keeps
+its rows. `visibility: hidden` on an option keeps a blank row, as the option
+keeps its place on the page. On Chrome 138, which computes `overflow:
+visible` for a dropdown where Chrome 154 computes `clip`, a backing dropdown
+of no width or height is hidden for good as on 154 (D145).
 A select that states its own implicit role (`role="combobox"` on a single-row
 select, `role="listbox"`) is approved like one that states none, and the
 stated role is dropped in transit (D98); any other widget or editor role on a
@@ -535,6 +545,24 @@ A panel named by `aria-controls` is held to the older rule: editable
 comboboxes, searchboxes, textboxes, contenteditable regions, native inputs,
 and any branch containing private controls remain masked. This distinction
 admits public navigation labels without transporting user-entered data.
+An editor written as a bare attribute (`<div contenteditable>`,
+`contenteditable=""`) is an editor like one written `contenteditable="true"`
+(D145): the attribute read as `''` for it, which also meant "no attribute",
+so its text was read under no read scope, and inside a menu or a panel with
+a control it was read as that menu's own text. And what is inside an editor
+is editor text or nothing: a paragraph inside an editor in a site menu was
+read as the menu's text where editor text is not read.
+
+What a panel named by `aria-controls` holds is read or withheld by the state
+the panel has when a change inside it is read. The page script keeps the
+states it last worked out, and a panel can close with nothing that makes it
+work them out again (a class on a sibling, a checkbox a script unchecks, a
+popup put off the page): before a frame that reads a changed text or a
+changed list inside such a panel, it works them out afresh (D145). A change
+anywhere else is read with the kept states, at no walk of the page; before
+D145 a changed text or an added element walked the whole page each time, and
+on a page of more than 50,000 nodes that walk stopped short and the page was
+read afresh at every such change.
 
 A dropdown or menu the page opens by its own script is followed, not opened
 by the replica. Three ways of opening left nothing for the replica to copy
