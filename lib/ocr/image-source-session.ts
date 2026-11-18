@@ -76,8 +76,10 @@ export interface ImageSourcePort {
  * no frame at all; the rectangle is then given as it was before this wait.
  */
 export const PICTURE_PAINT_WAIT_LIMIT_MS = 250;
-/** Rectangles that may wait for a frame at once; more are answered at once. */
+/** Rectangles that may wait for a frame at once. */
 const MAX_WAITING_MEASURES = 32;
+/** Further requests held pending for that paint; beyond this they are refused. */
+const MAX_OVERFLOW_MEASURES = 32;
 
 export interface ImageSourceSessionEnvironment {
   readonly port: ImageSourcePort;
@@ -141,6 +143,15 @@ export class ImageSourceSession {
   readonly #unpainted = new Map<number, object>();
   #openPaintWait: Set<number> | undefined;
   #waitingMeasures: {
+    readonly requestId: string;
+    readonly descriptor: SourceImageDescriptor;
+  }[] = [];
+  /**
+   * Measures that arrived while the wait queue was full. They are not
+   * answered with pre-paint geometry; they stay pending and are moved to the
+   * wait queue or answered once a slot frees or their picture paints (C11).
+   */
+  #overflowMeasures: {
     readonly requestId: string;
     readonly descriptor: SourceImageDescriptor;
   }[] = [];
@@ -210,6 +221,7 @@ export class ImageSourceSession {
     this.#unpainted.clear();
     this.#openPaintWait = undefined;
     this.#waitingMeasures = [];
+    this.#overflowMeasures = [];
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
     this.#observer?.dispose();
@@ -337,13 +349,30 @@ export class ImageSourceSession {
           });
       return;
     }
-    if (
-      this.#unpainted.has(descriptor.nodeId) &&
-      this.#waitingMeasures.length < MAX_WAITING_MEASURES
-    ) {
-      // The rectangle is for a screenshot: it is given once the tab has
-      // painted the picture that the descriptor stands for.
-      this.#waitingMeasures.push({ requestId: message.requestId, descriptor });
+    if (this.#unpainted.has(descriptor.nodeId)) {
+      if (this.#waitingMeasures.length < MAX_WAITING_MEASURES) {
+        // The rectangle is for a screenshot: it is given once the tab has
+        // painted the picture that the descriptor stands for.
+        this.#waitingMeasures.push({ requestId: message.requestId, descriptor });
+        return;
+      }
+      if (this.#overflowMeasures.length < MAX_OVERFLOW_MEASURES) {
+        // The wait queue is full. Answering now would attach the old
+        // picture's geometry to the new contentRevision, but answering
+        // `stale` loses the image on a static page: the scheduler makes a
+        // deferred job eligible only on a later observation revision. Keep
+        // the request pending instead; it is answered when a wait slot frees
+        // or this picture paints (C11).
+        this.#overflowMeasures.push({ requestId: message.requestId, descriptor });
+        return;
+      }
+      // Beyond the bounded overflow nothing more may be held; the caller is
+      // told to defer rather than given the pre-paint geometry.
+      this.#post({
+        kind: 'simul:image-source-v2:metrics',
+        requestId: message.requestId,
+        status: 'stale',
+      });
       return;
     }
     this.#answerMeasure(message.requestId, descriptor);
@@ -442,6 +471,28 @@ export class ImageSourceSession {
         this.#waitingMeasures.push(entry);
       } else {
         this.#answerMeasure(entry.requestId, entry.descriptor);
+      }
+    }
+    this.#drainOverflowMeasures();
+  }
+
+  /**
+   * Moves overflowed measures to the wait queue when a slot is free, or
+   * answers them once their picture has painted. An entry whose image is gone
+   * answers stale through #answerMeasure's currency check.
+   */
+  #drainOverflowMeasures(): void {
+    if (this.#disposed || this.#overflowMeasures.length === 0) return;
+    const overflow = this.#overflowMeasures;
+    this.#overflowMeasures = [];
+    for (const entry of overflow) {
+      if (this.#disposed) return;
+      if (!this.#unpainted.has(entry.descriptor.nodeId)) {
+        this.#answerMeasure(entry.requestId, entry.descriptor);
+      } else if (this.#waitingMeasures.length < MAX_WAITING_MEASURES) {
+        this.#waitingMeasures.push(entry);
+      } else {
+        this.#overflowMeasures.push(entry);
       }
     }
   }
@@ -557,6 +608,7 @@ export class ImageSourceSession {
       this.#awaitPaint(change.descriptor.nodeId);
     }
     this.#post({ kind: 'simul:image-source-v2:change', change });
+    if (change.kind === 'remove') this.#drainOverflowMeasures();
   };
 
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
@@ -1056,6 +1108,10 @@ export function hasSourceAriaControlledRegionAncestor(
 export const MAX_CAPTURE_OVERLAP_ELEMENTS = 50_000;
 /** Bounded descent through shadow roots under a covering element. */
 const MAX_TEXT_COVER_SHADOW_DEPTH = 16;
+/** How far below a covering element its own text is still looked for. */
+const MAX_TEXT_COVER_WALK_DEPTH = 3;
+/** How many descendants of a covering element are inspected at most. */
+const MAX_TEXT_COVER_WALK_NODES = 64;
 
 /** Skip invalid lang values and continue outward to the nearest valid hint. */
 export function nearestValidElementLanguage(
@@ -1189,14 +1245,24 @@ function isCoveredByForeignText(
   sourceDocument: Document,
 ): boolean {
   const elementFromPoint = sourceDocument.elementFromPoint;
-  if (typeof elementFromPoint !== 'function') return false;
+  // Without a hit test the cover cannot be ruled out: defer the capture
+  // instead of assuming it is safe (C8).
+  if (typeof elementFromPoint !== 'function') return true;
   const ancestors = new Set<Element>(imagePath);
+  // Nine fixed samples are a bounded heuristic, not a proof: a thin caption
+  // that falls between them is still missed. The set is kept small on purpose.
   const samples: ReadonlyArray<readonly [number, number]> = [
     [0.5, 0.5],
     [0.2, 0.2],
     [0.8, 0.2],
     [0.2, 0.8],
     [0.8, 0.8],
+    // Edge midpoints: a thin caption, bar or toast can sit between the
+    // centre and the corners (C8).
+    [0.5, 0.1],
+    [0.5, 0.9],
+    [0.1, 0.5],
+    [0.9, 0.5],
   ];
   for (const [fx, fy] of samples) {
     const x = imageRect.left + imageRect.width * fx;
@@ -1242,19 +1308,29 @@ function sourceShadowRootAttachedSince(element: Element): boolean {
 }
 
 function elementHasOwnVisibleText(element: Element): boolean {
-  for (const child of element.childNodes) {
-    if (child.nodeType === 3 && (child.nodeValue ?? '').trim().length > 0) {
-      return true;
-    }
-  }
-  // Text nested one level down (a caption span inside an overlay) counts too;
-  // deeper structure is treated as layout rather than a text cover.
-  for (const child of element.children) {
-    for (const grandchild of child.childNodes) {
+  // Bounded depth-first walk below the covering element. It finds a caption
+  // inside a couple of wrappers, but it is not a general text search: text
+  // four or more element levels down escapes, and when the node budget is
+  // exhausted the stack visits later siblings first, so earlier subtrees are
+  // cut. These are accepted bounds, not a claim that deeper text is layout.
+  const pending: Array<{ readonly node: Node; readonly depth: number }> = [
+    { node: element, depth: 0 },
+  ];
+  let visited = 0;
+  while (pending.length > 0 && visited < MAX_TEXT_COVER_WALK_NODES) {
+    const current = pending.pop()!;
+    visited += 1;
+    for (const child of current.node.childNodes) {
+      if (child.nodeType === 3) {
+        if ((child.nodeValue ?? '').trim().length > 0) return true;
+        continue;
+      }
       if (
-        grandchild.nodeType === 3 &&
-        (grandchild.nodeValue ?? '').trim().length > 0
-      ) return true;
+        child.nodeType === 1 &&
+        current.depth < MAX_TEXT_COVER_WALK_DEPTH
+      ) {
+        pending.push({ node: child, depth: current.depth + 1 });
+      }
     }
   }
   return false;

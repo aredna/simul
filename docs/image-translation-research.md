@@ -71,8 +71,11 @@ loaded into memory.
    pinch-zoomed is offered again when the magnification ends: the page
    script then advances the observation of the images on screen.
 6. A short-lived crop is handed to the offscreen extension document through
-   extension-origin storage. The entry is deleted after the job and expires
-   after two minutes if normal cleanup is interrupted.
+   extension-origin storage. The entry is deleted after the job. One left
+   behind by an interrupted cleanup is refused after two minutes and deleted
+   by the next sweep: the OCR host's every thirty seconds while it lives, the
+   service worker at startup, or a new host when it is built. A browser restart
+   that never starts the service worker is not covered.
 7. Enabled pixel methods run in saved order through a capacity-one scheduler.
    Provider-specific unavailability falls through without starting an
    unbounded retry loop.

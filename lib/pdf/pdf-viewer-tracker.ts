@@ -482,6 +482,15 @@ export class PdfViewerTracker {
   }
 
   /**
+   * Whether the panel knows the viewer's zoom. Without it a view turned a
+   * quarter cannot be told from an upright one (D123), so a doubted report
+   * must not be looked into: a turned view is never captured.
+   */
+  get zoomKnown(): boolean {
+    return this.#viewerZoom !== undefined;
+  }
+
+  /**
    * Takes `page` (0-based) as the page the doubted report shows. Returns
    * the new place when that moves it; `undefined` when the place was right
    * already, when the viewer has reported since (the doubt stays; a report

@@ -177,6 +177,28 @@ interface IsolatedSelectFacsimile {
   contentSignature?: string;
 }
 const ISOLATED_SELECT_FACSIMILES = new WeakMap<HTMLElement, IsolatedSelectFacsimile>();
+/**
+ * The select facsimile hosts of each replica document, in the order they
+ * were built. A refresh visits the page's dropdowns, not every node of the
+ * page; a host a patch removed is dropped on the next refresh (R3). Native
+ * picker state has at most one open list, so this order decides no visible
+ * survivor; two open non-page-shown popups cannot legitimately reach it
+ * (S2).
+ */
+const ISOLATED_SELECT_HOSTS_BY_DOCUMENT = new WeakMap<Document, Set<HTMLElement>>();
+
+/**
+ * The elements an ARIA disclosure can be built from: those with an `id` a
+ * trigger might name, and those with `aria-controls`. Rebuilt from the
+ * replica when attributes change behind it; otherwise kept in step with the
+ * nodes a patch adds and removes (R3).
+ */
+interface IsolatedAriaIndex {
+  readonly ids: Map<string, HTMLElement[]>;
+  readonly triggers: Set<HTMLElement>;
+  dirty: boolean;
+}
+const ISOLATED_ARIA_INDEXES = new WeakMap<Document, IsolatedAriaIndex>();
 let isolatedSelectHostSequence = 0;
 export const ISOLATED_HTML_SHELL = `<!doctype html>
 ${ISOLATED_HTML_SHELL_DOCUMENT}`;
@@ -309,6 +331,10 @@ interface HtmlMirrorDomState {
   readonly iframe: HTMLIFrameElement;
   readonly document: ReplicaSourceDocumentIdentity;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
+  /** The replica's `<html>`, the document's own. Read on every commit; kept
+   * here so that reading the document's language is not a walk of every
+   * mirrored node (R3). */
+  readonly root: Element | undefined;
   readonly nodes: Map<number, Node>;
   readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
   readonly controlMetadata: Map<number, HtmlMirrorControlText>;
@@ -528,6 +554,7 @@ export class IsolatedHtmlReplicaEngine
       }
     }
     this.#semanticReceiver?.restoreSources();
+    markIsolatedAriaIndexDirty(state.iframe.contentDocument ?? undefined);
     refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
     this.#refreshExtent(state);
   }
@@ -690,6 +717,12 @@ export class IsolatedHtmlReplicaEngine
     if (!content || !graph || graph.tagName !== 'html') {
       throw new Error('Invalid isolated HTML checkpoint.');
     }
+    if (!validStyleSheetTextInGraph(graph, fidelityPolicy)) {
+      // A `<style>` split over several text nodes whose joined text is not a
+      // fixed point: the mirror would build the sheet the page did not show
+      // (R1).
+      throw new Error('Invalid isolated HTML checkpoint.');
+    }
     const lease = this.options.presentationHost.createCandidate({
       viewportWidth: checkpoint.payload.viewportWidth,
       viewportHeight: checkpoint.payload.viewportHeight,
@@ -789,6 +822,7 @@ export class IsolatedHtmlReplicaEngine
         iframe,
         document,
         fidelityPolicy,
+        root: iframeDocument.documentElement,
         nodes,
         textMetadata,
         controlMetadata,
@@ -939,6 +973,11 @@ export class IsolatedHtmlReplicaEngine
     const disclosureBindingsMayHaveChanged = operations.some(
       ({ kind }) => kind !== 'dimensions' && kind !== 'text',
     );
+    const changedRoots = operations.flatMap((operation) => {
+      if (operation.kind === 'dimensions') return [];
+      const target = state.nodes.get(operation.nodeId);
+      return target ? [target] : [];
+    });
     const retainedOpenDisclosures =
       replicaDocument && disclosureBindingsMayHaveChanged
       ? snapshotOpenReadOnlyReplicaDisclosures(replicaDocument)
@@ -960,6 +999,7 @@ export class IsolatedHtmlReplicaEngine
         refreshIsolatedReplicaDisclosures(
           replicaDocument,
           retainedOpenDisclosures,
+          applied ? changedRoots : undefined,
         );
       }
     }
@@ -1093,6 +1133,19 @@ export class IsolatedHtmlReplicaEngine
       !this.#recoveryRequested ||
       this.#recoveryTask
     ) return;
+    const committed = this.#committed;
+    if (
+      committed &&
+      checkpoint.identity.sequence < committed.sequence
+    ) {
+      // A checkpoint from before the mirror's committed sequence would
+      // rewind it, and the buffered patches would then be replayed over
+      // newer state. The source answers a recovery request with a checkpoint
+      // of the sequence it has acknowledged, which is never older than the
+      // mirror's; anything else is out of contract (R7).
+      this.#failLive('stream_failed');
+      return;
+    }
     const token = this.#recoveryToken;
     const recoverySignal = this.#recoveryAbort?.signal;
     const fidelityPolicy = this.#committed?.fidelityPolicy ??
@@ -1334,6 +1387,7 @@ export class IsolatedHtmlReplicaEngine
         );
       },
       afterApply: () => {
+        markIsolatedAriaIndexDirty(replicaDocument);
         refreshIsolatedNativeSelectFacsimiles(replicaDocument);
         refreshIsolatedReplicaDisclosures(
           replicaDocument,
@@ -1439,6 +1493,7 @@ export class IsolatedHtmlReplicaEngine
     this.#semanticReceiver = undefined;
     const changes = receiver?.clear() ?? Object.freeze([]);
     const state = this.#committed;
+    markIsolatedAriaIndexDirty(state?.iframe.contentDocument ?? undefined);
     for (const change of changes) {
       this.#dropProjection(state, sourceChangeNodeId(change));
     }
@@ -2461,6 +2516,7 @@ function wrapNativeSelectFacsimile(node: Node): Node {
     shadow.addEventListener(type, blockIsolatedDisclosureActivation, true);
   }
   ISOLATED_SELECT_FACSIMILES.set(host, { panel, select, trigger });
+  registerIsolatedSelectHost(host);
   syncNativeSelectFacsimileHost(select);
   queueMicrotask(() => {
     if (isIsolatedOwnedHostConnected(host)) {
@@ -2577,20 +2633,178 @@ function isIsolatedOwnedHostConnected(host: HTMLElement): boolean {
   return false;
 }
 
-function collectIsolatedSelectHosts(root: Node): HTMLElement[] {
-  const hosts: HTMLElement[] = [];
-  const pending: Node[] = [root];
+function registerIsolatedSelectHost(host: HTMLElement): void {
+  const document = host.ownerDocument;
+  let hosts = ISOLATED_SELECT_HOSTS_BY_DOCUMENT.get(document);
+  if (!hosts) {
+    hosts = new Set();
+    ISOLATED_SELECT_HOSTS_BY_DOCUMENT.set(document, hosts);
+  }
+  hosts.add(host);
+}
+
+/** The connected facsimile hosts of a document; removed ones are dropped. */
+function isolatedSelectHosts(document: Document): HTMLElement[] {
+  const hosts = ISOLATED_SELECT_HOSTS_BY_DOCUMENT.get(document);
+  if (!hosts) return [];
+  const live: HTMLElement[] = [];
+  for (const host of [...hosts]) {
+    if (ISOLATED_SELECT_HOSTS.has(host) && isIsolatedOwnedHostConnected(host)) {
+      live.push(host);
+    } else {
+      hosts.delete(host);
+      ISOLATED_SELECT_HOSTS.delete(host);
+      ISOLATED_SELECT_FACSIMILES.delete(host);
+    }
+  }
+  return live;
+}
+
+/**
+ * The select hosts a patch can have changed: a select the patch names, an
+ * ancestor of one it replaces, or a subtree the patch added inside one.
+ */
+function selectHostsInChangedRoots(
+  document: Document,
+  roots: readonly Node[],
+): Set<HTMLElement> {
+  const hosts = new Set<HTMLElement>();
+  const registered = isolatedSelectHosts(document);
+  for (const root of roots) {
+    let element: Element | undefined;
+    if (root.nodeType === Node.ELEMENT_NODE) element = root as Element;
+    else if (root.nodeType === Node.TEXT_NODE) {
+      element = root.parentElement ?? undefined;
+    }
+    if (!element) continue;
+    const containing = containingIsolatedSelectFacsimileHost(element);
+    if (containing) hosts.add(containing);
+    for (const host of registered) {
+      if (
+        host === element ||
+        composedElementContains(element, host) ||
+        composedElementContains(host, element)
+      ) hosts.add(host);
+    }
+  }
+  return hosts;
+}
+
+function releaseIsolatedDocumentHosts(document: Document | undefined): void {
+  if (!document) return;
+  const hosts = ISOLATED_SELECT_HOSTS_BY_DOCUMENT.get(document);
+  if (hosts) {
+    for (const host of hosts) {
+      ISOLATED_SELECT_HOSTS.delete(host);
+      ISOLATED_SELECT_FACSIMILES.delete(host);
+    }
+    ISOLATED_SELECT_HOSTS_BY_DOCUMENT.delete(document);
+  }
+  ISOLATED_ARIA_INDEXES.delete(document);
+}
+
+function registerIsolatedAriaIndexElement(
+  index: IsolatedAriaIndex,
+  element: Element,
+): void {
+  const id = element.getAttribute('id')?.trim();
+  if (id) {
+    const existing = index.ids.get(id);
+    if (!existing) index.ids.set(id, [element as HTMLElement]);
+    else if (!existing.includes(element as HTMLElement)) {
+      existing.push(element as HTMLElement);
+    }
+  }
+  const controls = element.getAttribute('aria-controls')?.trim();
+  if (controls) index.triggers.add(element as HTMLElement);
+}
+
+function unregisterIsolatedAriaIndexElement(
+  index: IsolatedAriaIndex,
+  element: Element,
+): void {
+  const id = element.getAttribute('id')?.trim();
+  if (id) {
+    const existing = index.ids.get(id);
+    if (existing) {
+      const remaining = existing.filter((candidate) => candidate !== element);
+      if (remaining.length > 0) index.ids.set(id, remaining);
+      else index.ids.delete(id);
+    }
+  }
+  index.triggers.delete(element as HTMLElement);
+}
+
+function rebuildIsolatedAriaIndex(
+  document: Document,
+  index: IsolatedAriaIndex,
+): void {
+  index.ids.clear();
+  index.triggers.clear();
+  index.dirty = false;
+  const root = document.documentElement;
+  if (!root) return;
+  for (const element of collectIsolatedElements(root)) {
+    registerIsolatedAriaIndexElement(index, element);
+  }
+}
+
+function isolatedAriaIndex(document: Document): IsolatedAriaIndex {
+  let index = ISOLATED_ARIA_INDEXES.get(document);
+  if (!index) {
+    index = { ids: new Map(), triggers: new Set(), dirty: true };
+    ISOLATED_ARIA_INDEXES.set(document, index);
+  }
+  if (index.dirty) rebuildIsolatedAriaIndex(document, index);
+  return index;
+}
+
+/**
+ * An attribute written outside a patch (the semantic presenter's own
+ * `id`/`aria-controls`) or a rolled-back patch: the index no longer
+ * describes the replica, so it is rebuilt from it on next use.
+ */
+function markIsolatedAriaIndexDirty(document: Document | undefined): void {
+  if (!document) return;
+  const index = ISOLATED_ARIA_INDEXES.get(document);
+  if (index) index.dirty = true;
+}
+
+/** Adds the elements a patch built to the index, when it is still current. */
+function registerIsolatedAriaIndexNodes(
+  document: Document | undefined,
+  nodes: Iterable<Node>,
+): void {
+  if (!document) return;
+  const index = ISOLATED_ARIA_INDEXES.get(document);
+  if (!index || index.dirty) return;
+  for (const node of nodes) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      registerIsolatedAriaIndexElement(index, node as Element);
+    }
+  }
+}
+
+/** The elements of a target's composed subtree with one of the menu roles. */
+function isolatedComposedRoleElements(
+  root: Element,
+  expectedRole: 'listbox' | 'menu',
+): HTMLElement[] {
+  const candidates: HTMLElement[] = [];
+  const pending: Node[] = [...root.childNodes];
   while (pending.length > 0) {
     const node = pending.pop();
     if (!node) continue;
     if (node.nodeType === Node.ELEMENT_NODE) {
-      const element = node as Element;
-      if (ISOLATED_SELECT_HOSTS.has(element)) hosts.push(element as HTMLElement);
+      const element = node as HTMLElement;
+      if (isolatedPublicMenuRole(element) === expectedRole) {
+        candidates.push(element);
+      }
       if (element.shadowRoot) pending.push(element.shadowRoot);
     }
     for (const child of node.childNodes) pending.push(child);
   }
-  return hosts;
+  return candidates;
 }
 
 function collectIsolatedElements(root: Node): HTMLElement[] {
@@ -2875,59 +3089,92 @@ function refreshIsolatedNativeSelectFacsimiles(
   document: Document | null,
 ): void {
   if (!document?.documentElement) return;
-  for (const host of collectIsolatedSelectHosts(document.documentElement)) {
+  for (const host of isolatedSelectHosts(document)) {
     syncIsolatedNativeSelectFacsimile(host);
   }
 }
 
+/** Draws one select facsimile and keeps its dropdown controller in shape. */
+function refreshIsolatedSelectHost(
+  host: HTMLElement,
+  retainedOpenDisclosures: ReadonlySet<HTMLElement>,
+): void {
+  const facsimile = ISOLATED_SELECT_FACSIMILES.get(host);
+  if (!facsimile) return;
+  syncIsolatedNativeSelectFacsimile(host);
+  const presentation = isolatedSelectPresentation(facsimile.select);
+  const rawSize = facsimile.select.getAttribute('size');
+  const size = rawSize && /^[1-9]\d{0,3}$/u.test(rawSize)
+    ? Number(rawSize)
+    : 8;
+  const pickerOpen = presentation === 'popup' &&
+    facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1';
+  const shape = `${presentation}:${size}`;
+  const current = facsimile.controller;
+  // The button and the list are Simul's own, so nothing in a page change
+  // can touch this controller. It stays unless the dropdown itself changed
+  // shape: taking it down and putting it up again on every change moved an
+  // open list out and back and scrolled it to the selected option, so on a
+  // page with a carousel the far end of a long list could not be reached
+  // (D132).
+  if (current && !current.isDisposed() && facsimile.controllerShape === shape) {
+    if (pickerOpen) current.open();
+    current.sync();
+    return;
+  }
+  current?.dispose();
+  facsimile.controllerShape = shape;
+  facsimile.controller = installReadOnlyReplicaDisclosure({
+    anchor: host,
+    panel: facsimile.panel,
+    presentation,
+    ...(presentation === 'popup' ? { trigger: facsimile.trigger } : {}),
+    manageTriggerExpanded: presentation === 'popup',
+    // A native select does not open on hover.
+    openOnHover: false,
+    survivesRefresh: true,
+    initiallyOpen: presentation === 'popup' &&
+      (retainedOpenDisclosures.has(host) || pickerOpen),
+    visibleRows: size,
+  });
+}
+
+/**
+ * Refreshes the replica's dropdowns and ARIA disclosures. Only the select
+ * hosts a patch can have changed are drawn again; the rest keep their
+ * controllers and are repositioned if open. The ARIA pass reads the
+ * maintained index of ids and triggers instead of every element (R3).
+ */
 function refreshIsolatedReplicaDisclosures(
   document: Document,
   retainedOpenDisclosures = snapshotOpenReadOnlyReplicaDisclosures(document),
+  changedRoots?: readonly Node[],
 ): void {
   disposeReadOnlyReplicaDisclosures(document, true);
   if (!document.documentElement) return;
-  const elements = collectIsolatedElements(document.documentElement);
-  for (const host of elements.filter((element) => ISOLATED_SELECT_HOSTS.has(element))) {
-    const facsimile = ISOLATED_SELECT_FACSIMILES.get(host);
-    if (!facsimile) continue;
-    syncIsolatedNativeSelectFacsimile(host);
-    const presentation = isolatedSelectPresentation(facsimile.select);
-    const rawSize = facsimile.select.getAttribute('size');
-    const size = rawSize && /^[1-9]\d{0,3}$/u.test(rawSize)
-      ? Number(rawSize)
-      : 8;
-    const pickerOpen = presentation === 'popup' &&
-      facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1';
-    const shape = `${presentation}:${size}`;
-    const current = facsimile.controller;
-    // The button and the list are Simul's own, so nothing in a page change
-    // can touch this controller. It stays unless the dropdown itself changed
-    // shape: taking it down and putting it up again on every change moved an
-    // open list out and back and scrolled it to the selected option, so on a
-    // page with a carousel the far end of a long list could not be reached
-    // (D132).
-    if (current && !current.isDisposed() && facsimile.controllerShape === shape) {
-      if (pickerOpen) current.open();
-      current.sync();
-      continue;
+  const changedHosts = changedRoots === undefined
+    ? undefined
+    : selectHostsInChangedRoots(document, changedRoots);
+  for (const host of isolatedSelectHosts(document)) {
+    if (changedHosts && !changedHosts.has(host)) {
+      const controller = ISOLATED_SELECT_FACSIMILES.get(host)?.controller;
+      if (controller && !controller.isDisposed()) {
+        // An open list keeps its place when the layout around it moves.
+        controller.sync();
+        continue;
+      }
     }
-    current?.dispose();
-    facsimile.controllerShape = shape;
-    facsimile.controller = installReadOnlyReplicaDisclosure({
-      anchor: host,
-      panel: facsimile.panel,
-      presentation,
-      ...(presentation === 'popup' ? { trigger: facsimile.trigger } : {}),
-      manageTriggerExpanded: presentation === 'popup',
-      // A native select does not open on hover.
-      openOnHover: false,
-      survivesRefresh: true,
-      initiallyOpen: presentation === 'popup' &&
-        (retainedOpenDisclosures.has(host) || pickerOpen),
-      visibleRows: size,
-    });
+    refreshIsolatedSelectHost(host, retainedOpenDisclosures);
   }
-  installValidatedIsolatedAriaDisclosures(document, elements);
+  if (!installValidatedIsolatedAriaDisclosures(document, isolatedAriaIndex(document))) {
+    // Two triggers named one panel: which one owns it depends on the order
+    // of the page walk, so that pass decides.
+    disposeReadOnlyReplicaDisclosures(document, true);
+    installValidatedIsolatedAriaDisclosuresInOrder(
+      document,
+      collectIsolatedElements(document.documentElement),
+    );
+  }
 }
 
 /**
@@ -2937,7 +3184,7 @@ function refreshIsolatedReplicaDisclosures(
  * with the page's styles and images, as a structural menu does (D88; it was
  * an isolated facsimile popup that dropped both).
  */
-function installValidatedIsolatedAriaDisclosures(
+function installValidatedIsolatedAriaDisclosuresInOrder(
   document: Document,
   elements: readonly HTMLElement[],
 ): void {
@@ -2990,6 +3237,61 @@ function installValidatedIsolatedAriaDisclosures(
       shownByPage: trigger.getAttribute('aria-expanded') === 'true',
     });
   }
+}
+
+/**
+ * The same disclosures, resolved through the maintained index. Iteration
+ * order does not matter unless two triggers name one panel; that case
+ * returns false so the caller can run the order-sensitive pass above. The
+ * conflict is defensive: the semantic protocol derives one relation id per
+ * trigger/panel pair, so valid transport cannot make two triggers name one
+ * panel, but a state written outside it can.
+ */
+function installValidatedIsolatedAriaDisclosures(
+  document: Document,
+  index: IsolatedAriaIndex,
+): boolean {
+  const usedPanels = new Set<HTMLElement>();
+  for (const trigger of index.triggers) {
+    if (
+      ISOLATED_SELECT_HOSTS.has(trigger) ||
+      !isIsolatedOwnedHostConnected(trigger)
+    ) continue;
+    const controls = trigger.getAttribute('aria-controls')?.trim() ?? '';
+    if (!controls || /\s/u.test(controls) || controls.length > 256) continue;
+    const targets = index.ids.get(controls);
+    if (targets?.length !== 1) continue;
+    const target = targets[0]!;
+    if (target.ownerDocument !== document || target === trigger) continue;
+    const hasPopup = trigger.getAttribute('aria-haspopup')?.trim().toLowerCase();
+    const expectedRole = hasPopup === 'true' ? 'menu' : hasPopup;
+    if (expectedRole !== 'menu' && expectedRole !== 'listbox') continue;
+    if (
+      !isSourceActivationTagName(trigger.localName) &&
+      !isSourceActivationRoleValue(trigger.getAttribute('role'))
+    ) continue;
+
+    let panel: HTMLElement | undefined =
+      isolatedPublicMenuRole(target) === expectedRole ? target : undefined;
+    if (!panel) {
+      if (!roleHasToken(target, 'region')) continue;
+      const candidates = isolatedComposedRoleElements(target, expectedRole);
+      if (candidates.length !== 1) continue;
+      panel = candidates[0]!;
+    }
+    if (usedPanels.has(panel)) return false;
+    if (composedElementContains(panel, trigger)) continue;
+    usedPanels.add(panel);
+    installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel,
+      presentation: 'inline',
+      manageTriggerExpanded: false,
+      shownByPage: trigger.getAttribute('aria-expanded') === 'true',
+    });
+  }
+  return true;
 }
 
 function roleHasToken(element: Element, token: string): boolean {
@@ -3232,6 +3534,7 @@ function applyPatchFrame(
     for (let index = rollbacks.length - 1; index >= 0; index -= 1) {
       restorePatchRollback(state, rollbacks[index]!);
     }
+    markIsolatedAriaIndexDirty(state.iframe.contentDocument ?? undefined);
     return undefined;
   };
 
@@ -3258,10 +3561,6 @@ function applyPatchFrame(
       number,
       Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
     >();
-    const firstStructuralOperations = new Map<number, {
-      readonly operation: StructuralOperation;
-      readonly index: number;
-    }>();
     const childReplacementNodeIds = new Set<number>();
     for (const [index, operation] of operations.entries()) {
       if (operation.kind === 'attributes') {
@@ -3270,9 +3569,6 @@ function applyPatchFrame(
         operation.kind === 'children' ||
         operation.kind === 'reconcile-children'
       ) {
-        if (!firstStructuralOperations.has(operation.nodeId)) {
-          firstStructuralOperations.set(operation.nodeId, { operation, index });
-        }
         if (operation.kind === 'children') {
           childReplacementNodeIds.add(operation.nodeId);
         }
@@ -3280,7 +3576,7 @@ function applyPatchFrame(
     }
 
     // Validate every target and payload before touching visible state.
-    for (const [operationIndex, operation] of operations.entries()) {
+    for (const operation of operations) {
       if (operation.kind === 'dimensions') continue;
       const target = state.nodes.get(operation.nodeId);
       if (!target) return false;
@@ -3348,37 +3644,6 @@ function applyPatchFrame(
           prospectiveAttributeOperations,
           currentNodeIds(),
         );
-        if (
-          (
-            operation.selectedOptionIndexes !== undefined ||
-            operation.selectPickerOpen !== undefined
-          ) &&
-          (
-            currentContext.privateAttributeRegion ||
-            prospectiveContext.privateAttributeRegion
-          )
-        ) return false;
-        if (
-          operation.selectedOptionIndexes !== undefined &&
-          !validPatchSelectedOptionIndexes(
-            state,
-            target as Element,
-            operation,
-            firstStructuralOperations.get(operation.nodeId),
-            operationIndex,
-          )
-        ) return false;
-        if (
-          operation.controlText &&
-          (
-            currentContext.privateAttributeRegion ||
-            prospectiveContext.privateAttributeRegion ||
-            currentContext.nonContentRegion ||
-            prospectiveContext.nonContentRegion ||
-            (operation.controlText.kind === 'label' &&
-              !prospectiveContext.nativeSelectRegion)
-          )
-        ) return false;
         if (
           privacyContextChanges(currentContext, prospectiveContext) &&
           (
@@ -3575,10 +3840,6 @@ function applyPatchFrame(
       }
     }
     for (const [id, node] of parsedText) prospectiveText.set(id, node);
-    for (const [id, operation] of attributeOperations) {
-      if (operation.controlText) prospectiveControls.set(id, operation.controlText);
-      else prospectiveControls.delete(id);
-    }
     let prospectiveTextBytes = 0;
     for (const node of prospectiveText.values()) {
       prospectiveTextBytes += node.text.length * 2 + 32;
@@ -3609,6 +3870,13 @@ function applyPatchFrame(
         )) {
           return false;
         }
+        if (
+          context.styleRegion &&
+          !validStyleSheetTextForChildren(
+            operation.children,
+            state.fidelityPolicy,
+          )
+        ) return false;
         const ownerDocument = target.ownerDocument;
         if (!ownerDocument) return false;
         const fragment = ownerDocument.createDocumentFragment();
@@ -3643,6 +3911,24 @@ function applyPatchFrame(
       for (const operation of reconcileOperations) {
         const target = state.nodes.get(operation.nodeId) as Node;
         const context = containerContext(target);
+        if (context.styleRegion) {
+          // The sheet a style holds after this reconciliation: retained
+          // children as they are, the arriving ones' text (R1).
+          const parts: string[] = [];
+          for (const entry of operation.children) {
+            if (entry.kind === 'retain') {
+              const retained = state.nodes.get(entry.nodeId);
+              if (!retained) return false;
+              parts.push(retained.textContent ?? '');
+            } else {
+              collectStyleSheetText([entry.node], parts);
+            }
+          }
+          if (!styleSheetTextIsFixedPoint(
+            parts.join(''),
+            state.fidelityPolicy,
+          )) return false;
+        }
         const ownerDocument = target.ownerDocument;
         if (!ownerDocument) return false;
         const nodes = new Map<number, Node>();
@@ -3752,7 +4038,6 @@ function applyPatchFrame(
         continue;
       }
       if (operation.kind === 'attributes') {
-        const previousControl = state.controlMetadata.get(operation.nodeId);
         let element = target as Element;
         if (switchesReplicaLinkOff(element, operation.attributes)) {
           const replacement = createMirrorElement(
@@ -3768,21 +4053,31 @@ function applyPatchFrame(
           element.replaceWith(replacement);
           setCurrentNode(operation.nodeId, replacement);
           element = replacement;
+          markIsolatedAriaIndexDirty(state.iframe.contentDocument ?? undefined);
         } else {
+          // `setAttributes` removes every attribute first, so an operation
+          // that drops an `id` or `aria-controls` changes the index just as
+          // one that adds it does (R3; a stale id resolved a panel that no
+          // longer has one).
+          const indexedBefore = element.hasAttribute('id') ||
+            element.hasAttribute('aria-controls');
           setAttributes(
             element,
             operation.attributes,
             operation.resolvedStyleSheetText,
           );
+          if (
+            indexedBefore || operation.attributes.some(
+              ([name]) => name === 'id' || name === 'aria-controls',
+            )
+          ) {
+            markIsolatedAriaIndexDirty(
+              state.iframe.contentDocument ?? undefined,
+            );
+          }
         }
         applyElementHints(element, operation);
         state.controlMetadata.delete(operation.nodeId);
-        if (operation.controlText) {
-          state.controlMetadata.set(operation.nodeId, operation.controlText);
-        }
-        if (previousControl || operation.controlText) {
-          forceUpserts.add(operation.nodeId);
-        }
         continue;
       }
       if (operation.kind === 'children') {
@@ -3867,9 +4162,17 @@ function applyPatchFrame(
         appendedSheetTexts.get(nodeId) ?? operation.resolvedStyleSheetText,
       );
     }
+    const replicaDocument = state.iframe.contentDocument ?? undefined;
+    for (const plan of childrenPlans.values()) {
+      registerIsolatedAriaIndexNodes(replicaDocument, plan.nodes.values());
+    }
+    for (const plan of reconcilePlans.values()) {
+      registerIsolatedAriaIndexNodes(replicaDocument, plan.nodes.values());
+    }
     return true;
   };
 
+  if (!validFrameStyleSheetText(state, parts)) return undefined;
   try {
     for (const operations of parts) {
       // Which nodes of the mirror are drawn is read afresh for each patch;
@@ -3877,6 +4180,11 @@ function applyPatchFrame(
       indexedPresentationNodes = undefined;
       if (!applyPart(operations)) return undo();
     }
+    // The frame is atomic but its parts are not: a later text part can
+    // complete a construct against text an earlier part inserted. Validate
+    // what the whole frame left, and roll it back if the sheet is not a
+    // fixed point (R1).
+    if (!validFrameStyleSheetTextAfterApply(state, parts)) return undo();
     if (!previous) return undefined;
     if (!retainedReplicaStateFitsBudget(state)) {
       throw new Error('Replica retained-state budget exceeded.');
@@ -4198,6 +4506,14 @@ function removeDomTree(
   node: Node,
   nodeIds: Map<Node, number>,
 ): void {
+  const ariaIndex = ISOLATED_ARIA_INDEXES.get(
+    state.iframe.contentDocument ?? state.iframe.ownerDocument,
+  );
+  if (
+    ariaIndex && !ariaIndex.dirty && node.nodeType === Node.ELEMENT_NODE
+  ) {
+    unregisterIsolatedAriaIndexElement(ariaIndex, node as Element);
+  }
   for (const child of [...node.childNodes]) {
     removeDomTree(state, child, nodeIds);
   }
@@ -4477,77 +4793,219 @@ function nextDomNativeSelectParent(
   return false;
 }
 
-function validPatchSelectedOptionIndexes(
-  state: HtmlMirrorDomState,
-  target: Element,
-  operation: Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>,
-  structural: {
-    readonly operation: Extract<
-      HtmlMirrorPatchOperation,
-      { kind: 'children' | 'reconcile-children' }
-    >;
-    readonly index: number;
-  } | undefined,
-  operationIndex: number,
-): boolean {
-  if (target.localName.toLowerCase() !== 'select') return false;
-  if (structural && structural.index > operationIndex) return false;
-  const structuralOperation = structural?.operation;
-  let optionCount: number;
-  if (structuralOperation?.kind === 'children') {
-    optionCount = nativeSelectGraphOptionCount(structuralOperation.children);
-  } else if (structuralOperation?.kind === 'reconcile-children') {
-    optionCount = structuralOperation.children.reduce((total, child) => {
-      if (child.kind === 'graph') {
-        return total + nativeSelectGraphOptionCount([child.node]);
-      }
-      const retained = state.nodes.get(child.nodeId);
-      return total + (retained ? nativeSelectDomOptionCount(retained) : 0);
-    }, 0);
-  } else {
-    optionCount = nativeSelectDomOptionCount(target);
+/**
+ * The text a `<style>` element's sheet is made of: the text of its light-DOM
+ * children, in order. Validating each text node on its own is not enough: two
+ * nodes that each pass can be read by the browser as one `@import` or one
+ * `expression(`, so the sheet's own text is checked as one text (R1).
+ */
+function collectStyleSheetText(
+  children: readonly HtmlMirrorNode[],
+  parts: string[],
+): void {
+  for (const child of children) {
+    if (child.kind === 'text') parts.push(child.text);
+    else collectStyleSheetText(child.children, parts);
   }
-  const indexes = operation.selectedOptionIndexes ?? [];
-  return indexes.every((index) => index < optionCount) &&
-    (
-      operation.attributes.some(([name]) => name === 'multiple') ||
-      indexes.length <= 1
-    );
 }
 
-function nativeSelectGraphOptionCount(nodes: readonly HtmlMirrorNode[]): number {
-  let count = 0;
-  for (const node of nodes) {
-    if (node.kind !== 'element') continue;
-    if (node.tagName === 'option') {
-      count += 1;
-    } else if (node.tagName === 'optgroup') {
-      count += node.children.filter(
-        (child) => child.kind === 'element' && child.tagName === 'option',
-      ).length;
+function styleSheetTextIsFixedPoint(
+  text: string,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): boolean {
+  return sanitizeCss(text, 'about:blank', false, undefined, fidelityPolicy) ===
+    text;
+}
+
+function validStyleSheetTextForChildren(
+  children: readonly HtmlMirrorNode[],
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): boolean {
+  const parts: string[] = [];
+  collectStyleSheetText(children, parts);
+  return styleSheetTextIsFixedPoint(parts.join(''), fidelityPolicy);
+}
+
+/** Every `<style>` in a graph, its own text re-validated as one sheet. */
+function validStyleSheetTextInGraph(
+  node: HtmlMirrorNode,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): boolean {
+  if (node.kind === 'text') return true;
+  if (
+    node.tagName === 'style' &&
+    !validStyleSheetTextForChildren(node.children, fidelityPolicy)
+  ) return false;
+  return node.children.every(
+    (child) => validStyleSheetTextInGraph(child, fidelityPolicy),
+  ) && (!node.shadowRoot || node.shadowRoot.children.every(
+    (child) => validStyleSheetTextInGraph(child, fidelityPolicy),
+  ));
+}
+
+/**
+ * The nearest `<style>` a text node is part of, through elements a script
+ * may have put inside it. The browser makes the sheet from the style's whole
+ * light-DOM text, however it is nested (R1).
+ */
+function owningStyleElement(node: Node): Element | undefined {
+  for (
+    let current: Node | null = node.parentNode;
+    current;
+    current = current.parentNode
+  ) {
+    if (
+      current.nodeType === Node.ELEMENT_NODE &&
+      (current as Element).localName.toLowerCase() === 'style'
+    ) return current as Element;
+  }
+  return undefined;
+}
+
+/** The style's sheet text as it will be after the frame's text patches. */
+function collectStyleSheetDomText(
+  parent: Node,
+  replacements: ReadonlyMap<Text, string>,
+  parts: string[],
+): void {
+  for (const child of parent.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      parts.push(replacements.get(child as Text) ?? child.nodeValue ?? '');
+    } else {
+      collectStyleSheetDomText(child, replacements, parts);
     }
   }
-  return count;
 }
 
-function nativeSelectDomOptionCount(node: Node): number {
-  if (node.nodeType !== Node.ELEMENT_NODE) return 0;
-  const element = node as Element;
-  const tagName = element.localName.toLowerCase();
-  if (tagName === 'option') return 1;
-  if (tagName === 'optgroup') {
-    return [...element.children].filter(
-      (child) => child.localName.toLowerCase() === 'option',
-    ).length;
+/**
+ * Validates the joined text of every style the frame's text operations
+ * touch, after all of them. Each text node can pass on its own while two
+ * of them assemble an `@import` or an `expression(`, and a frame is atomic:
+ * the check must see the text the batch leaves, not one node against its
+ * pre-batch siblings (R1).
+ */
+function validFrameStyleSheetText(
+  state: HtmlMirrorDomState,
+  parts: readonly (readonly HtmlMirrorPatchOperation[])[],
+): boolean {
+  const replacements = new Map<Text, string>();
+  for (const operations of parts) {
+    for (const operation of operations) {
+      if (operation.kind !== 'text') continue;
+      const target = state.nodes.get(operation.nodeId);
+      if (target?.nodeType === Node.TEXT_NODE) {
+        replacements.set(target as Text, operation.node.text);
+      }
+    }
   }
-  if (tagName !== 'select') return 0;
-  return [...element.children].reduce((total, child) => {
-    const childTag = child.localName.toLowerCase();
-    if (childTag === 'option') return total + 1;
-    return childTag === 'optgroup'
-      ? total + nativeSelectDomOptionCount(child)
-      : total;
-  }, 0);
+  if (replacements.size === 0) return true;
+  const styles = new Set<Element>();
+  for (const target of replacements.keys()) {
+    const style = owningStyleElement(target);
+    if (style) styles.add(style);
+  }
+  for (const style of styles) {
+    const textParts: string[] = [];
+    collectStyleSheetDomText(style, replacements, textParts);
+    if (!styleSheetTextIsFixedPoint(
+      textParts.join(''),
+      state.fidelityPolicy,
+    )) return false;
+  }
+  return true;
+}
+
+/**
+ * Notes the styles a frame could have changed, read after the frame is
+ * applied: a text operation's own style, and every style the graph of a
+ * structural operation brought. A retained node's text did not change, but a
+ * text operation on a node an earlier part created is only visible now.
+ */
+function noteFrameStyleSheetTargets(
+  state: HtmlMirrorDomState,
+  node: HtmlMirrorNode,
+  styles: Set<Element>,
+): void {
+  if (node.kind === 'text') {
+    const text = state.nodes.get(node.id);
+    const style = text ? owningStyleElement(text) : undefined;
+    if (style) styles.add(style);
+    return;
+  }
+  const element = state.nodes.get(node.id);
+  if (
+    element?.nodeType === Node.ELEMENT_NODE &&
+    (element as Element).localName.toLowerCase() === 'style'
+  ) styles.add(element as Element);
+  for (const child of node.children) {
+    noteFrameStyleSheetTargets(state, child, styles);
+  }
+  if (node.shadowRoot) {
+    for (const child of node.shadowRoot.children) {
+      noteFrameStyleSheetTargets(state, child, styles);
+    }
+  }
+}
+
+/**
+ * After the last part, a style the frame touched must still hold a sheet
+ * that is a fixed point. The pre-frame check cannot see text nodes an earlier
+ * part inserted or created; only the applied frame can (R1).
+ */
+function validFrameStyleSheetTextAfterApply(
+  state: HtmlMirrorDomState,
+  parts: readonly (readonly HtmlMirrorPatchOperation[])[],
+): boolean {
+  const styles = new Set<Element>();
+  for (const operations of parts) {
+    for (const operation of operations) {
+      if (operation.kind === 'dimensions') continue;
+      const target = state.nodes.get(operation.nodeId);
+      if (operation.kind === 'text') {
+        const style = target ? owningStyleElement(target) : undefined;
+        if (style) styles.add(style);
+        continue;
+      }
+      if (
+        operation.kind === 'attributes' &&
+        target?.nodeType === Node.ELEMENT_NODE &&
+        (target as Element).localName.toLowerCase() === 'style'
+      ) {
+        styles.add(target as Element);
+        continue;
+      }
+      if (operation.kind === 'children') {
+        if (target?.nodeType === Node.ELEMENT_NODE &&
+            (target as Element).localName.toLowerCase() === 'style') {
+          styles.add(target as Element);
+        }
+        for (const child of operation.children) {
+          noteFrameStyleSheetTargets(state, child, styles);
+        }
+        continue;
+      }
+      if (operation.kind === 'reconcile-children') {
+        if (target?.nodeType === Node.ELEMENT_NODE &&
+            (target as Element).localName.toLowerCase() === 'style') {
+          styles.add(target as Element);
+        }
+        for (const entry of operation.children) {
+          if (entry.kind === 'graph') {
+            noteFrameStyleSheetTargets(state, entry.node, styles);
+          }
+        }
+      }
+    }
+  }
+  for (const style of styles) {
+    const textParts: string[] = [];
+    collectStyleSheetDomText(style, new Map<Text, string>(), textParts);
+    if (!styleSheetTextIsFixedPoint(
+      textParts.join(''),
+      state.fidelityPolicy,
+    )) return false;
+  }
+  return true;
 }
 
 function validGraphForContext(
@@ -4574,6 +5032,8 @@ function validGraphForContext(
     (!node.controlText || node.controlText.kind !== 'label' ||
       validNativeSelectLabelPlacement(node.tagName, inherited.nativeSelectParent)) &&
     (!isNativeSelectSemanticGraphTag(node.tagName) || !node.shadowRoot) &&
+    (node.tagName !== 'style' ||
+      validStyleSheetTextForChildren(node.children, fidelityPolicy)) &&
     node.children.every(
       (child) => validGraphForContext(child, context, fidelityPolicy),
     ) &&
@@ -4811,11 +5271,7 @@ function reconcileIsolatedPaintedLabels(
 }
 
 function readDocumentLanguage(state: HtmlMirrorDomState): string | undefined {
-  const root = [...state.nodes.values()].find(
-    (node) => node.nodeType === Node.ELEMENT_NODE &&
-      (node as Element).localName.toLowerCase() === 'html',
-  ) as Element | undefined;
-  const value = root?.getAttribute('lang')?.trim();
+  const value = state.root?.getAttribute('lang')?.trim();
   return value && value.length <= 128 ? value : undefined;
 }
 
@@ -5312,6 +5768,7 @@ function releaseState(state: HtmlMirrorDomState | undefined): void {
     }
   }
   state.cleanup.clear();
+  releaseIsolatedDocumentHosts(state.iframe.contentDocument ?? undefined);
   state.nodes.clear();
   state.textMetadata.clear();
   state.records.clear();

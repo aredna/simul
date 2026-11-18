@@ -34,6 +34,7 @@ import { sourceDocumentSecretClassifier } from '../lib/replica/source-secret-cla
 import {
   askAboutSourceShadowRootsAbove,
   installSourceShadowRootReader,
+  probeSourceShadowRoot,
 } from '../lib/replica/source-shadow-root';
 import {
   closedRootReader,
@@ -270,6 +271,156 @@ describe('HtmlMirrorSourceSession', () => {
     onConnect.emit(secondPort as unknown as Browser.runtime.Port);
     secondPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
     expect(JSON.stringify(secondPort.posts)).not.toContain(canary);
+  });
+
+  it('lets go of a shadow root whose host left the page (A3)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host"></div><div id="next"></div></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const host = document.querySelector('#host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<span>inside</span>';
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const observers: TrackingBridgeMutationObserver[] = [];
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis & {
+        __simulHtmlMirrorV2Installed?: boolean;
+      },
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: (callback) => {
+        const observer = new TrackingBridgeMutationObserver(callback);
+        observers.push(observer);
+        return observer;
+      },
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+    });
+    // The walk at install meets the root, and the document-lifetime observer
+    // watches it with the document.
+    const observer = observers[0]!;
+    expect(observer.observed).toContain(root);
+
+    host.remove();
+    const next = document.querySelector('#next')!;
+    const nextRoot = next.attachShadow({ mode: 'open' });
+    // Another reader meets a new root: the one that left is let go, and the
+    // document and the root still in the page are watched again.
+    probeSourceShadowRoot(next);
+    expect(observer.disconnects).toBe(1);
+    expect(observer.observed).toContain(document);
+    expect(observer.observed).toContain(nextRoot);
+    expect(observer.observed).not.toContain(root);
+  });
+
+  it('takes a shadow root back when the page holds it again (A3)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host"></div><div id="next"></div></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const host = document.querySelector('#host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<span>inside</span>';
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const observers: TrackingBridgeMutationObserver[] = [];
+    const timers: Array<() => void> = [];
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis & {
+        __simulHtmlMirrorV2Installed?: boolean;
+      },
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: (callback) => {
+        const observer = new TrackingBridgeMutationObserver(callback);
+        observers.push(observer);
+        return observer;
+      },
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: (callback) => {
+        timers.push(callback);
+        return callback;
+      },
+      clearTimer: () => undefined,
+    });
+    const observer = observers[0]!;
+    expect(observer.observed).toContain(root);
+
+    // Detached, then another root is met: the prune lets go of this one.
+    host.remove();
+    const next = document.querySelector('#next')!;
+    next.attachShadow({ mode: 'open' });
+    probeSourceShadowRoot(next);
+    expect(observer.observed).not.toContain(root);
+
+    // Held again, with no new root to tell of it: the maintenance pass
+    // alone takes it back.
+    document.body.append(host);
+    expect(timers.length).toBeGreaterThan(0);
+    timers.shift()!();
+    expect(observer.observed).toContain(root);
+
+    // A credential added inside is remembered with no mirror session open.
+    const field = document.createElement('input');
+    field.setAttribute('type', 'password');
+    root.append(field);
+    observer.trigger([childListRecord(root, [field])]);
+    expect(sourceDocumentSecretClassifier(document).isSecret(field)).toBe(true);
+  });
+
+  it('lets go of a detached shadow root with no new root to tell of it (A3)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host"></div></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const host = document.querySelector('#host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<span>inside</span>';
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const observers: TrackingBridgeMutationObserver[] = [];
+    const timers: Array<() => void> = [];
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis & {
+        __simulHtmlMirrorV2Installed?: boolean;
+      },
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: (callback) => {
+        const observer = new TrackingBridgeMutationObserver(callback);
+        observers.push(observer);
+        return observer;
+      },
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: (callback) => {
+        timers.push(callback);
+        return callback;
+      },
+      clearTimer: () => undefined,
+    });
+    const observer = observers[0]!;
+    expect(observer.observed).toContain(root);
+
+    // The host leaves and no other root is met: the periodic pass is the
+    // only thing that can let go of the detached tree.
+    host.remove();
+    const disconnects = observer.disconnects;
+    expect(timers.length).toBeGreaterThan(0);
+    timers.shift()!();
+    expect(observer.disconnects).toBe(disconnects + 1);
+    expect(observer.observed).not.toContain(root);
   });
 
   it('installs the v2 bundle beside a stale v1 marker without reusing its Ports', () => {
@@ -7726,6 +7877,63 @@ describe('style sheets that change (D143)', () => {
     expect(JSON.stringify(fixture.checkpoints().at(-1))).not.toContain('9999');
   });
 
+  it('walks the children of a form whose fields are named like the links between elements (A7)', () => {
+    const { fixture, styled, write } = derivedFixture(
+      '<form id="form"><input name="lastElementChild">' +
+      '<div id="inside"><p id="card">masked words</p></div>' +
+      '</form>',
+    );
+    const form = fixture.document.querySelector('#form')!;
+    const field = fixture.document.querySelector('input')!;
+    // A form answers `form.<field name>` before its own properties (D144).
+    Object.defineProperty(form, 'lastElementChild', {
+      configurable: true,
+      value: field,
+    });
+    // A change of the sheet reads what the mirror takes from style again.
+    write('.page{color:blue}');
+    expect(gaps(fixture)).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The sheet now masks a box behind the form's field. The walk reaches it
+    // only through the accessors the element's prototype defines.
+    styled.set(fixture.document.querySelector('#card')!, {
+      '-webkit-text-security': 'disc',
+    });
+    write('.page{color:blue} #card{-webkit-text-security:disc}');
+    expect(gaps(fixture)).toBe(1);
+  });
+
+  it('walks a shadow root whose own properties steer the element links (A7)', () => {
+    let card!: Element;
+    let shadow!: ShadowRoot;
+    const { fixture, styled, write } = derivedFixture(
+      '<div id="host"></div>',
+      (document) => {
+        const host = document.querySelector('#host')!;
+        shadow = host.attachShadow({ mode: 'open' });
+        shadow.innerHTML = '<b>decoy</b><p id="card">masked words</p>';
+        card = shadow.querySelector('#card')!;
+        // Page script holding the root defines the names the walk would read.
+        Object.defineProperty(shadow, 'lastElementChild', {
+          configurable: true,
+          value: shadow.querySelector('b'),
+        });
+        Object.defineProperty(card, 'previousElementSibling', {
+          configurable: true,
+          value: null,
+        });
+      },
+    );
+    write('.page{color:blue}');
+    expect(gaps(fixture)).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    styled.set(card, { '-webkit-text-security': 'disc' });
+    write('.page{color:blue} #card{-webkit-text-security:disc}');
+    expect(gaps(fixture)).toBe(1);
+  });
+
   it('sends again an element whose look the mirror took from its style, when a sheet changes', () => {
     const { fixture, styled, write } = derivedFixture(
       '<main><select id="choice"><option>one</option></select>' +
@@ -9002,9 +9210,34 @@ class NoopResizeObserver {
 }
 
 class NoopBridgeMutationObserver {
-  observe(): void {}
+  observe(_target?: Node, _options?: MutationObserverInit): void {}
   disconnect(): void {}
   takeRecords(): MutationRecord[] { return []; }
+}
+
+/** What a document-lifetime observer holds, and whether it let go (A3). */
+class TrackingBridgeMutationObserver extends NoopBridgeMutationObserver {
+  observed: Node[] = [];
+  disconnects = 0;
+
+  constructor(private readonly callback: MutationCallback) {
+    super();
+  }
+
+  override observe(target: Node): void {
+    this.observed.push(target);
+  }
+
+  override disconnect(): void {
+    this.disconnects += 1;
+    this.observed = [];
+  }
+
+  override takeRecords(): MutationRecord[] { return []; }
+
+  trigger(records: MutationRecord[]): void {
+    this.callback(records, this as unknown as MutationObserver);
+  }
 }
 
 class ControlledBridgeMutationObserver extends NoopBridgeMutationObserver {

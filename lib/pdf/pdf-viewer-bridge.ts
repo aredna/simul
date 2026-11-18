@@ -10,6 +10,17 @@ import {
 
 /** Hellos until the viewer answers; it answers once its page has loaded. */
 export const PDF_VIEWER_HELLO_INTERVAL_MS = 1_000;
+/**
+ * How often the frame is looked for once the viewer has answered: Chrome
+ * replaces the viewer's iframe when its page reloads, and the new frame needs
+ * a hello of its own.
+ */
+export const PDF_VIEWER_WATCH_INTERVAL_MS = 5_000;
+/**
+ * An answered viewer this long without a report may have reloaded its document
+ * in place (the same window): say hello again, within the hello budget.
+ */
+export const PDF_VIEWER_REHELLO_AFTER_MS = 60_000;
 export const PDF_VIEWER_MAX_HELLOS = 60;
 
 interface PortLike {
@@ -105,8 +116,10 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
   };
 
   // The viewer answers a hello once per embedding window, so a later panel
-  // (Refresh, the separate window) gets no `documentLoaded` of its own.
-  let viewerAnswered = false;
+  // (Refresh, the separate window) gets no `documentLoaded` of its own. The
+  // window that answered is remembered: a frame Chrome replaced (a viewer
+  // reload) is another window, which has not answered yet.
+  let answeredWindow: unknown;
 
   // Measured once, and again when the window is on a screen of another
   // scale (a scrollbar is a whole number of screen pixels wide).
@@ -139,6 +152,10 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
     if (!isPdfViewerPortName(port.name)) return;
     let viewer: ViewerFrame | undefined;
     let hellos = 0;
+    /** The viewer window this panel has said hello to. */
+    let saidHelloTo: unknown;
+    /** When an accepted message last came from the viewer, by `now`. */
+    let lastHeardAt = now();
     let timer: unknown;
     let open = true;
     const stopHellos = () => {
@@ -152,33 +169,55 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
       sourceWindow.removeEventListener('message', onMessage);
     };
     const hello = () => {
-      hellos += 1;
-      viewer ??= findViewer();
-      try {
-        viewer?.contentWindow?.postMessage({ type: PDF_VIEWER_HELLO_TYPE }, PDF_VIEWER_ORIGIN);
-      } catch {
-        // A frame between documents takes the next hello.
+      // Chrome may replace the viewer's iframe when its page reloads: find it
+      // again every time, and say hello to whichever frame is embedded now.
+      const found = findViewer();
+      if (found) viewer = found;
+      const answered = viewer !== undefined && viewer.contentWindow === answeredWindow;
+      // An answered viewer that has gone quiet may have reloaded its document
+      // in place: the same window, so nothing else tells, and it sends no
+      // reports until it is said hello to again.
+      const quiet = answered &&
+        saidHelloTo === viewer?.contentWindow &&
+        now() - lastHeardAt >= PDF_VIEWER_REHELLO_AFTER_MS;
+      // A later panel says one hello even to a viewer that answered another,
+      // so the viewer reports to it; after that it only looks for the frame.
+      if (!answered || saidHelloTo !== viewer?.contentWindow || quiet) {
+        if (quiet) lastHeardAt = now();
+        hellos += 1;
+        saidHelloTo = viewer?.contentWindow;
+        try {
+          viewer?.contentWindow?.postMessage(
+            { type: PDF_VIEWER_HELLO_TYPE },
+            PDF_VIEWER_ORIGIN,
+          );
+        } catch {
+          // A frame between documents takes the next hello.
+        }
+        if (hellos >= PDF_VIEWER_MAX_HELLOS) return;
       }
-      if (viewerAnswered || hellos >= PDF_VIEWER_MAX_HELLOS) stopHellos();
+      timer = startTimer(hello, answered ? PDF_VIEWER_WATCH_INTERVAL_MS : PDF_VIEWER_HELLO_INTERVAL_MS);
     };
     const onMessage = (event: MessageEventLike) => {
-      if (
-        !open ||
-        event.origin !== PDF_VIEWER_ORIGIN ||
-        !viewer?.contentWindow ||
-        event.source !== viewer.contentWindow
-      ) return;
+      if (!open || event.origin !== PDF_VIEWER_ORIGIN) return;
+      if (event.source !== viewer?.contentWindow) {
+        // The report is not from the frame we knew: Chrome may have replaced
+        // it. Take a report from the frame embedded now, none from any other.
+        const found = findViewer();
+        if (!found || event.source !== found.contentWindow) return;
+        viewer = found;
+      }
       const type = (event.data as { type?: unknown } | null)?.type;
       if (type === 'documentLoaded') {
-        viewerAnswered = true;
-        stopHellos();
+        answeredWindow = event.source;
+        lastHeardAt = now();
         return;
       }
       if (type !== 'viewport') return;
       const viewport = readPdfViewerViewport(event.data);
       if (!viewport) return;
-      viewerAnswered = true;
-      stopHellos();
+      answeredWindow = event.source;
+      lastHeardAt = now();
       const { width, scale } = screen();
       try {
         port.postMessage({
@@ -195,9 +234,6 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
     sourceWindow.addEventListener('message', onMessage);
     port.onDisconnect.addListener(close);
     hello();
-    if (open && !viewerAnswered && hellos < PDF_VIEWER_MAX_HELLOS) {
-      timer = startTimer(hello, PDF_VIEWER_HELLO_INTERVAL_MS);
-    }
   });
 }
 

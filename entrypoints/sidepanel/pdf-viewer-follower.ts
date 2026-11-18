@@ -111,6 +111,9 @@ interface Session {
  * tab's zoom are known. Chrome tells of a zoom apart from the viewer's
  * reports; when the viewer rests on a report that fits no page at the zoom
  * the panel holds, the follower does not wait to be told and asks (D146).
+ * While the tab's zoom is unknown at all, no look is made: a view turned a
+ * quarter cannot be told from an upright one then (D123), and a turned view
+ * is never captured. Chrome is asked for the zoom instead.
  */
 export class PdfViewerFollower {
   readonly #dependencies: PdfViewerFollowerDependencies;
@@ -319,6 +322,16 @@ export class PdfViewerFollower {
     }
     const doubt = tracker.doubt;
     if (!doubt) return;
+    // A turned view is never captured, and without the tab's zoom it cannot
+    // be told from an upright one. Chrome is asked; a look follows the answer.
+    if (!tracker.zoomKnown) {
+      try {
+        this.#dependencies.askViewerZoom?.(session.target);
+      } catch {
+        // Following is a convenience; the guess stays.
+      }
+      return;
+    }
     if (doubt.episode !== session.episode) {
       session.episode = doubt.episode;
       session.tries = 0;

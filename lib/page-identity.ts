@@ -369,20 +369,39 @@ export function withPageTimeout<T>(
   operation: Promise<T>,
   milliseconds: number,
   message = PAGE_TIMEOUT_GUIDANCE,
+  signal?: AbortSignal,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    if (signal?.aborted) {
+      // The operation is still running; its result is ignored from here on.
+      operation.catch(() => undefined);
+      reject(signal.reason);
+      return;
+    }
+    let settled = false;
+    const finish = (): boolean => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
+      return true;
+    };
+    const onAbort = (): void => {
+      if (finish()) reject(signal?.reason);
+    };
     const timeout = setTimeout(
-      () => reject(new PageAccessError(message)),
+      () => {
+        if (finish()) reject(new PageAccessError(message));
+      },
       milliseconds,
     );
+    signal?.addEventListener('abort', onAbort, { once: true });
     operation.then(
       (value) => {
-        clearTimeout(timeout);
-        resolve(value);
+        if (finish()) resolve(value);
       },
       (error: unknown) => {
-        clearTimeout(timeout);
-        reject(error);
+        if (finish()) reject(error);
       },
     );
   });

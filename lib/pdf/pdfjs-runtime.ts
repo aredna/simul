@@ -126,6 +126,14 @@ export interface PdfDocumentHandle {
    * pdf.js frees the page when it ends.
    */
   releasePage(pageNumber: number): Promise<void>;
+  /**
+   * Lets pdf.js drop what it keeps for the document: its worker's caches
+   * (fonts, images, CMaps) and every cached page's parsed resources. Pages
+   * are fetched again when they are next needed. A page being drawn stops the
+   * sweep, so `cleanup` is best effort: it resolves either way, and the next
+   * call frees what a drawing page kept.
+   */
+  cleanup(): Promise<void>;
   /** Ends the document and its worker. Safe to call more than once. */
   destroy(): Promise<void>;
 }
@@ -262,7 +270,7 @@ function createDocumentHandle(
   paints('mask-repeat', 'paintImageMaskXObjectRepeat');
   paints('image-group', 'paintImageMaskXObjectGroup');
   paints('inline-group', 'paintInlineImageXObjectGroup');
-  const rendering = new WeakMap<object, Pdfjs.RenderTask>();
+  const rendering = new WeakMap<object, CanvasRender>();
   return {
     pageCount: document.numPages,
     async getPageSize(pageNumber) {
@@ -274,15 +282,22 @@ function createDocumentHandle(
       };
     },
     async getTextContent(pageNumber) {
-      const content = await (await document.getPage(pageNumber)).getTextContent();
-      type ContentItem = (typeof content.items)[number];
-      return {
-        items: content.items.filter(
-          (item): item is Extract<ContentItem, { str: string }> => 'str' in item,
-        ),
-        styles: content.styles,
-        lang: content.lang,
-      };
+      const page = await document.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        type ContentItem = (typeof content.items)[number];
+        return {
+          items: content.items.filter(
+            (item): item is Extract<ContentItem, { str: string }> => 'str' in item,
+          ),
+          styles: content.styles,
+          lang: content.lang,
+        };
+      } finally {
+        // The text is out: the page's parsed text and drawing state are not
+        // needed unless it is drawn later, when pdf.js fetches them again.
+        releaseQuietly(page);
+      }
     },
     async hasImages(pageNumber) {
       const operators = await (await document.getPage(pageNumber)).getOperatorList();
@@ -297,44 +312,68 @@ function createDocumentHandle(
         throw new RangeError(`Render scale must be a positive number, not ${scale}.`);
       }
       signal?.throwIfAborted();
-      const page = await document.getPage(pageNumber);
-      signal?.throwIfAborted();
-      const unit = page.getViewport({ scale: 1 });
-      const drawnScale = Math.min(
-        scale,
-        MAX_RENDER_SIDE / unit.width,
-        MAX_RENDER_SIDE / unit.height,
-        Math.sqrt(MAX_RENDER_PIXELS / (unit.width * unit.height)),
-      );
-      const viewport = page.getViewport({ scale: drawnScale });
-      // pdf.js refuses a canvas it is still drawing on, and resizing clears
-      // it, so the earlier render ends before this one touches the canvas.
-      const previous = rendering.get(canvas);
-      if (previous) {
+      // One render at a time per canvas: pdf.js refuses a canvas it is still
+      // drawing on, and two renders that start together would both resize it.
+      // A new render replaces the one in progress, and waits for the canvas.
+      let previous = rendering.get(canvas);
+      while (previous) {
         previous.cancel();
-        await previous.promise.catch(() => {});
+        await previous.settled;
         signal?.throwIfAborted();
+        // Several renders can wait on the same one: whoever woke first may
+        // hold the canvas now. Replace that holder, not the render that has
+        // already let go, or two draws would touch the canvas together.
+        previous = rendering.get(canvas);
       }
-      canvas.width = Math.max(1, Math.floor(viewport.width));
-      canvas.height = Math.max(1, Math.floor(viewport.height));
-      const renderTask = page.render({
-        // pdf.js only calls getContext('2d'), which an OffscreenCanvas also
-        // has; its type names only the element.
-        canvas: canvas as HTMLCanvasElement,
-        viewport,
-      });
-      rendering.set(canvas, renderTask);
-      const cancel = () => renderTask.cancel();
-      signal?.addEventListener('abort', cancel, { once: true });
+      let replaced = false;
+      let settle!: () => void;
+      const slot: CanvasRender = {
+        task: undefined,
+        cancel() {
+          replaced = true;
+          slot.task?.cancel();
+        },
+        settled: new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+      };
+      rendering.set(canvas, slot);
       try {
-        await renderTask.promise;
-        return drawnScale;
-      } catch (error) {
+        const page = await document.getPage(pageNumber);
         signal?.throwIfAborted();
-        throw error;
+        const unit = page.getViewport({ scale: 1 });
+        const drawnScale = Math.min(
+          scale,
+          MAX_RENDER_SIDE / unit.width,
+          MAX_RENDER_SIDE / unit.height,
+          Math.sqrt(MAX_RENDER_PIXELS / (unit.width * unit.height)),
+        );
+        const viewport = page.getViewport({ scale: drawnScale });
+        canvas.width = Math.max(1, Math.floor(viewport.width));
+        canvas.height = Math.max(1, Math.floor(viewport.height));
+        const renderTask = page.render({
+          // pdf.js only calls getContext('2d'), which an OffscreenCanvas also
+          // has; its type names only the element.
+          canvas: canvas as HTMLCanvasElement,
+          viewport,
+        });
+        slot.task = renderTask;
+        // Replaced while the page was on its way: stop before it draws.
+        if (replaced) renderTask.cancel();
+        const cancel = () => renderTask.cancel();
+        signal?.addEventListener('abort', cancel, { once: true });
+        try {
+          await renderTask.promise;
+          return drawnScale;
+        } catch (error) {
+          signal?.throwIfAborted();
+          throw error;
+        } finally {
+          signal?.removeEventListener('abort', cancel);
+        }
       } finally {
-        signal?.removeEventListener('abort', cancel);
-        if (rendering.get(canvas) === renderTask) rendering.delete(canvas);
+        if (rendering.get(canvas) === slot) rendering.delete(canvas);
+        settle();
       }
     },
     async fontFaces(pageNumber, fontIds) {
@@ -357,8 +396,45 @@ function createDocumentHandle(
       // The boolean only says whether it freed at once or after a render.
       (await document.getPage(pageNumber)).cleanup();
     },
+    async cleanup() {
+      try {
+        await document.cleanup();
+      } catch {
+        // A page is being drawn: pdf.js keeps the rest until the next sweep.
+      }
+    },
     destroy,
   };
+}
+
+/** A render on one canvas, which a later render replaces and waits for. */
+interface CanvasRender {
+  /** The pdf.js task, once the page has arrived. */
+  task: Pdfjs.RenderTask | undefined;
+  /** Asks the render to stop; `settled` resolves when the canvas is free. */
+  cancel(): void;
+  readonly settled: Promise<void>;
+}
+
+/**
+ * Lets a page go without letting either failure mode escape. pdf.js's
+ * `PDFPageProxy.cleanup` returns a boolean today and does not throw, but a
+ * page that is not in the expected state, or a later pdf.js, may throw or
+ * return a promise; a failed cleanup must neither fail the text read nor
+ * become an unhandled rejection.
+ */
+function releaseQuietly(page: { cleanup(): unknown }): void {
+  try {
+    const cleaning: unknown = page.cleanup();
+    if (
+      typeof cleaning === 'object' && cleaning !== null &&
+      typeof (cleaning as PromiseLike<unknown>).then === 'function'
+    ) {
+      void (cleaning as PromiseLike<unknown>).then(undefined, () => undefined);
+    }
+  } catch {
+    // The page keeps its state until the document's own sweep.
+  }
 }
 
 function runtimeError(cause: unknown): PdfjsOpenError {

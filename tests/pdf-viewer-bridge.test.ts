@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   PDF_VIEWER_MAX_HELLOS,
+  PDF_VIEWER_REHELLO_AFTER_MS,
   installPdfViewerBridge,
   type PdfViewerBridgeEnvironment,
 } from '../lib/pdf/pdf-viewer-bridge';
@@ -28,7 +29,8 @@ function setup(options: {
   devicePixelRatio?: () => number;
 } = {}) {
   const viewerWindow = { postMessage: vi.fn() };
-  const frame = { contentWindow: viewerWindow };
+  let frame = { contentWindow: viewerWindow };
+  let clock = 4_321;
   const listeners = new Set<Listener>();
   let connect: ((port: never) => void) | undefined;
   const intervals: Array<{ callback: () => void; cleared: boolean }> = [];
@@ -44,7 +46,7 @@ function setup(options: {
       querySelector: (selector: string) =>
         options.frame === false || selector !== 'iframe[type="application/pdf"]' ? null : frame,
     }) as unknown as ShadowRoot,
-    now: () => 4_321,
+    now: () => clock,
     measureScrollbar: options.measureScrollbar ?? (() => undefined),
     devicePixelRatio: options.devicePixelRatio ?? (() => Number.NaN),
     setInterval: (callback) => {
@@ -70,7 +72,14 @@ function setup(options: {
   const deliver = (data: unknown, origin = PDF_VIEWER_ORIGIN, source: unknown = viewerWindow) => {
     for (const listener of [...listeners]) listener({ origin, source, data });
   };
-  return { environment, viewerWindow, listeners, intervals, open, deliver };
+  /** Chrome's viewer reloads its frame: the next look finds this one. */
+  const replaceFrame = () => {
+    const next = { postMessage: vi.fn() };
+    frame = { contentWindow: next };
+    return next;
+  };
+  return { environment, viewerWindow, replaceFrame, listeners, intervals, open, deliver,
+    advanceClock: (ms: number) => { clock += ms; } };
 }
 
 describe('installPdfViewerBridge', () => {
@@ -120,27 +129,96 @@ describe('installPdfViewerBridge', () => {
     timer!.callback();
     expect(first.viewerWindow.postMessage).toHaveBeenCalledTimes(2);
     first.deliver({ type: 'documentLoaded', load_state: 'success' });
-    expect(timer!.cleared).toBe(true);
+    // Answered: the frame is only looked at now and then, with no hellos.
+    const watch = first.intervals.at(-1)!;
+    watch.callback();
+    expect(watch.cleared).toBe(false);
+    expect(first.viewerWindow.postMessage).toHaveBeenCalledTimes(2);
 
     const slow = setup({ frame: false });
     slow.open();
-    const [slowTimer] = slow.intervals;
-    for (let hello = 1; hello < PDF_VIEWER_MAX_HELLOS; hello += 1) slowTimer!.callback();
-    expect(slowTimer!.cleared).toBe(true);
+    for (let hello = 1; hello < PDF_VIEWER_MAX_HELLOS; hello += 1) {
+      slow.intervals.at(-1)!.callback();
+    }
+    expect(slow.intervals).toHaveLength(PDF_VIEWER_MAX_HELLOS - 1);
+    // Sixty hellos said: no further look is scheduled.
+    slow.intervals.at(-1)!.callback();
+    expect(slow.intervals).toHaveLength(PDF_VIEWER_MAX_HELLOS - 1);
   });
 
   it('sends a later panel one hello once the viewer has answered', () => {
     const { viewerWindow, intervals, open, deliver } = setup();
     const first = open();
     deliver(REPORT);
-    expect(intervals[0]!.cleared).toBe(true);
+    expect(first.sent).toHaveLength(1);
     // Refresh, or the separate window: the viewer sends no second answer.
     const second = open(createPdfViewerPortName('session-2'));
     expect(viewerWindow.postMessage).toHaveBeenCalledTimes(2);
-    expect(intervals).toHaveLength(1);
+    // Each panel keeps a slow watch for a replaced viewer frame.
+    expect(intervals).toHaveLength(2);
     deliver(REPORT);
     expect(first.sent).toHaveLength(2);
     expect(second.sent).toHaveLength(1);
+  });
+
+  it('finds a replaced viewer frame and says hello to it again (P3)', () => {
+    const { open, deliver, replaceFrame, intervals } = setup();
+    const port = open();
+    deliver(REPORT);
+    expect(port.sent).toHaveLength(1);
+    const reloaded = replaceFrame();
+    // Chrome reloaded the viewer into a new frame: the next look finds it.
+    intervals.at(-1)!.callback();
+    expect(reloaded.postMessage).toHaveBeenCalledWith(
+      { type: PDF_VIEWER_HELLO_TYPE },
+      PDF_VIEWER_ORIGIN,
+    );
+    deliver(REPORT, PDF_VIEWER_ORIGIN, reloaded);
+    expect(port.sent).toHaveLength(2);
+  });
+
+  it('takes a report from the frame embedded now, and none from the one replaced (P3)', () => {
+    const { open, deliver, replaceFrame, viewerWindow } = setup();
+    const port = open();
+    deliver(REPORT);
+    const reloaded = replaceFrame();
+    // No hello has reached the new frame yet; a report it sends is still its.
+    deliver({ ...REPORT, pageY: -300 }, PDF_VIEWER_ORIGIN, reloaded);
+    expect(port.sent).toHaveLength(2);
+    expect(port.sent[1]).toMatchObject({ kind: 'viewport', pageY: -300 });
+    // The window that is no longer embedded is not taken.
+    deliver(REPORT, PDF_VIEWER_ORIGIN, viewerWindow);
+    expect(port.sent).toHaveLength(2);
+  });
+
+  it('says hello again when an answered viewer has gone quiet in place (P3 repair)', () => {
+    const { viewerWindow, open, deliver, intervals, advanceClock } = setup();
+    const port = open();
+    deliver(REPORT);
+    expect(port.sent).toHaveLength(1);
+    expect(viewerWindow.postMessage).toHaveBeenCalledTimes(1);
+
+    // Chrome reloaded the viewer's document without replacing the frame: the
+    // window is the one that answered, and it sends no reports now.
+    advanceClock(PDF_VIEWER_REHELLO_AFTER_MS);
+    intervals.at(-1)!.callback();
+    expect(viewerWindow.postMessage).toHaveBeenCalledTimes(2);
+
+    // The new document answers, and its reports are taken again.
+    deliver(REPORT);
+    expect(port.sent).toHaveLength(2);
+
+    // Not again before another quiet window.
+    intervals.at(-1)!.callback();
+    expect(viewerWindow.postMessage).toHaveBeenCalledTimes(2);
+
+    // Bounded by the hello budget: sixty hellos in all, then no more looks.
+    for (let hello = 2; hello < PDF_VIEWER_MAX_HELLOS; hello += 1) {
+      advanceClock(PDF_VIEWER_REHELLO_AFTER_MS);
+      intervals.at(-1)!.callback();
+    }
+    expect(viewerWindow.postMessage).toHaveBeenCalledTimes(PDF_VIEWER_MAX_HELLOS);
+    expect(intervals).toHaveLength(PDF_VIEWER_MAX_HELLOS);
   });
 
   it('sends how wide the tab draws a scrollbar with each report (D134)', () => {

@@ -161,6 +161,11 @@ const REMEMBERED_POSITIONS = 16;
 export const PDF_PRIORITY_DELAY_MS = 250;
 /** One page's text read that takes longer than this counts as no text. */
 export const PDF_PAGE_TEXT_TIMEOUT_MS = 10_000;
+/**
+ * Text pages read between document-wide pdf.js cleanups: long PDFs would
+ * otherwise keep each page's parsed state until they close.
+ */
+export const PDF_TEXT_CLEANUP_PAGES = 32;
 // For the language probe, the pictures of at most this many pages with a
 // little text are looked at, nearest the reader first, and no more once this
 // many of them are scans (the probe draws three pages at most).
@@ -386,6 +391,12 @@ export class PdfController {
         surface.addPage(page);
       } catch {
         // A page the surface or view could not take does not stop the rest.
+      }
+      // pdf.js keeps what it parsed for every page until the document closes:
+      // let it drop the pages read so far as the reading goes on. A page being
+      // drawn stops the sweep, and the next one frees what is left.
+      if (counts.pages % PDF_TEXT_CLEANUP_PAGES === 0) {
+        await document.cleanup().catch(() => undefined);
       }
     }
     this.#reading = undefined;

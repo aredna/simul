@@ -520,7 +520,11 @@ const ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES = new Set([
   'manifest',
   'ping',
   'poster',
+  'privatetoken',
   'profile',
+  // A per-element referrer policy overrides the mirror frame's
+  // `no-referrer` and can announce the extension URL to a resource host.
+  'referrerpolicy',
   'sharedstoragewritable',
   'srcdoc',
   'target',
@@ -1860,6 +1864,56 @@ export function htmlMirrorJsonBytes(value: unknown): number {
   }
 }
 
+/**
+ * The text a `<style>`'s sheet is made of, as the serialized graph holds it.
+ * A style can hold several text nodes; the browser reads them as one sheet
+ * (R1/R9).
+ */
+function serializedStyleSheetText(
+  children: readonly HtmlMirrorNode[],
+): string {
+  let text = '';
+  for (const child of children) {
+    text += child.kind === 'text'
+      ? child.text
+      : serializedStyleSheetText(child.children);
+  }
+  return text;
+}
+
+/**
+ * Replaces the graph's style text with one sheet text, keeping the node
+ * identities: the first text holds the text and the rest are empty. A page
+ * that split a sheet over text nodes then keeps a mirror that the receiver
+ * accepts, instead of losing it at checkpoint (R9).
+ */
+function rewriteSerializedStyleSheetText(
+  children: readonly HtmlMirrorNode[],
+  text: string,
+): readonly HtmlMirrorNode[] {
+  let delivered = false;
+  const rewrite = (
+    nodes: readonly HtmlMirrorNode[],
+  ): readonly HtmlMirrorNode[] => {
+    let changed = false;
+    const next = nodes.map((node) => {
+      if (node.kind === 'text') {
+        const value = delivered ? '' : text;
+        delivered = true;
+        if (value === node.text) return node;
+        changed = true;
+        return Object.freeze({ ...node, text: value });
+      }
+      const rewritten = rewrite(node.children);
+      if (rewritten === node.children) return node;
+      changed = true;
+      return Object.freeze({ ...node, children: rewritten });
+    });
+    return changed ? Object.freeze(next) : nodes;
+  };
+  return rewrite(children);
+}
+
 function serializeNode(
   live: Node,
   context: SerializeContext,
@@ -2125,7 +2179,7 @@ function serializeNode(
       (hints.resolvedStyleSheetText?.length ?? 0) * 2,
     context.representability,
   );
-  const children: HtmlMirrorNode[] = [];
+  let children: HtmlMirrorNode[] = [];
   // Open or closed (D125). Read before the element's own children: they are
   // drawn where this root slots them, not where they sit in the page (D135).
   const sourceShadow = readSourceShadowRoot(liveElement);
@@ -2176,6 +2230,46 @@ function serializeNode(
         depth: context.depth + 1,
       });
       if (child) children.push(child);
+    }
+    if (tagName === 'style' && !styleResolved && children.length > 0) {
+      // The receiver checks a style's whole text as one sheet and refuses a
+      // graph that is not a fixed point. Sanitize the joined text here so a
+      // legitimate split sheet still crosses, and the receiver's refusal is
+      // reserved for a graph no serializer made (R9).
+      const joined = serializedStyleSheetText(children);
+      if (
+        joined &&
+        sanitizeCss(
+          joined,
+          'about:blank',
+          false,
+          undefined,
+          childFidelityPolicy,
+        ) !== joined
+      ) {
+        const normalized = sanitizeCss(
+          joined,
+          context.baseUrl,
+          false,
+          context.representability,
+          childFidelityPolicy,
+        ) ?? '';
+        const receiverSafe = sanitizeCss(
+          normalized,
+          'about:blank',
+          false,
+          undefined,
+          childFidelityPolicy,
+        ) ?? '';
+        const transported = sanitizeCss(
+          receiverSafe,
+          'about:blank',
+          false,
+          undefined,
+          childFidelityPolicy,
+        ) === receiverSafe ? receiverSafe : '';
+        children = [...rewriteSerializedStyleSheetText(children, transported)];
+      }
     }
   }
   let shadowRoot: HtmlMirrorShadowRoot | undefined;
@@ -2923,7 +3017,7 @@ function serializeReadableStyleSheetRules(
         return { status: 'unreadable' };
       }
       let cssText: string | undefined;
-      const importLike = /^@\s*import\b/iu.test(rule.cssText);
+      const importLike = /^@import\b/iu.test(rule.cssText);
       const importedSheet = importLike
         ? (rule as CSSRule & { readonly styleSheet?: CSSStyleSheet | null })
             .styleSheet
@@ -4109,10 +4203,53 @@ function stripCssCommentsOutsideStrings(
       quote = character;
       continue;
     }
+    // An unquoted url body takes `/` and `*` as URL code points, not as a
+    // comment: stripping one there would request a URL the page never
+    // wrote (R4). Copy such a body verbatim. A quoted body keeps the string
+    // path above, which already holds its comments as text.
+    if (
+      (character === 'u' || character === 'U') &&
+      (css[index + 1] === 'r' || css[index + 1] === 'R') &&
+      (css[index + 2] === 'l' || css[index + 2] === 'L') &&
+      css[index + 3] === '('
+    ) {
+      const bodyStart = index + 4;
+      let scan = bodyStart;
+      while (scan < css.length && isAsciiWhitespace(css[scan]!)) scan += 1;
+      if (css[scan] !== '"' && css[scan] !== "'") {
+        const close = findCssFunctionClose(css, index + 3);
+        if (close !== undefined) {
+          let quoted = false;
+          for (let position = bodyStart; position < close; position += 1) {
+            const bodyCharacter = css[position]!;
+            if (bodyCharacter === '\\') {
+              position += 1;
+              continue;
+            }
+            if (bodyCharacter === '"' || bodyCharacter === "'") {
+              quoted = true;
+              break;
+            }
+          }
+          if (!quoted) {
+            parts.push(css.slice(segmentStart, close + 1));
+            index = close;
+            segmentStart = close + 1;
+            continue;
+          }
+        }
+      }
+    }
     if (character === '/' && css[index + 1] === '*') {
       const close = css.indexOf('*/', index + 2);
       if (close < 0) return undefined;
       parts.push(css.slice(segmentStart, index));
+      // A comment parts tokens: removing it must not join the material
+      // around it into a function, at-keyword, or name the page never
+      // wrote (a split `url(`, a split `@import`, a split class name) (R4).
+      if (commentJoinsTokens(css, index, close)) {
+        parts.push(commentSeparator(css, index));
+      }
       index = close + 1;
       segmentStart = close + 2;
     }
@@ -4120,6 +4257,49 @@ function stripCssCommentsOutsideStrings(
   if (quote) return undefined;
   parts.push(css.slice(segmentStart));
   return parts.join('');
+}
+
+/** Whether a character can be part of a CSS identifier (an ident code point). */
+function isCssIdentChar(character: string): boolean {
+  return /[a-zA-Z0-9_\-\u0080-\uFFFF]/u.test(character);
+}
+
+/**
+ * Whether removing a comment would join the material around it into one
+ * token the browser never saw. A comment parts tokens, so the text must
+ * keep them parted: identifier halves (a split `url` name, `.a` and `b`,
+ * `1` and `px`), a name and its parenthesis (a split `url(`), an at-sign
+ * or hash and a name (a split `@import`, a split `#id`), a sign or digit
+ * and a number. A hex escape reaches over its terminating white space,
+ * and an escape opens on either side of the comment.
+ */
+function commentJoinsTokens(
+  css: string,
+  commentStart: number,
+  commentEnd: number,
+): boolean {
+  const before = css[commentStart - 1];
+  const after = css[commentEnd + 2];
+  if (before === undefined || after === undefined) return false;
+  const afterIdent = isCssIdentChar(after) || after === '\\';
+  const beforeWindow = css.slice(Math.max(0, commentStart - 8), commentStart);
+  const beforeIdent = isCssIdentChar(before) || before === '\\' ||
+    /\\[0-9a-fA-F]{1,6}[ \t\n\r\f]?$/u.test(beforeWindow);
+  if (beforeIdent && (afterIdent || after === '(')) return true;
+  if ((before === '@' || before === '#') && afterIdent) return true;
+  if (/[0-9]/u.test(before) && (after === '.' || after === '%')) return true;
+  if (before === '+' && (/[0-9]/u.test(after) || after === '.')) return true;
+  return false;
+}
+
+/**
+ * The space a parting comment leaves. An unterminated hex escape takes the
+ * first space as its own terminator, so a second one is what actually
+ * parts the names: without it the halves still join once decoded.
+ */
+function commentSeparator(css: string, commentStart: number): string {
+  const beforeWindow = css.slice(Math.max(0, commentStart - 8), commentStart);
+  return /\\[0-9a-fA-F]{1,6}$/u.test(beforeWindow) ? '  ' : ' ';
 }
 
 /** Replaces each string, quotes included, with spaces of the same length. */
@@ -4179,7 +4359,10 @@ function rewriteCssUrlsOutsideStrings(
     if (character.toLowerCase() !== 'u') continue;
     const previous = css[index - 1];
     if (previous && /[a-z0-9_-]/iu.test(previous)) continue;
-    const match = /^url\s*\(/iu.exec(css.slice(index));
+    // A CSS `url(` token has no space between the name and the parenthesis;
+    // `url (x)` and `url\u00A0(x)` are not functions the browser fetches for
+    // (R4).
+    const match = /^url\(/iu.exec(css.slice(index));
     if (!match) continue;
     const openParenthesis = index + match[0].lastIndexOf('(');
     const closeParenthesis = findCssFunctionClose(css, openParenthesis);
@@ -4206,24 +4389,70 @@ function isPassiveDataFontUrl(value: string): boolean {
     DATA_FONT_URL_PATTERN.test(value);
 }
 
+/** CSS white space is ASCII only; a no-break space is a character of a value. */
+function trimCssWhitespace(value: string): string {
+  return value.replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/gu, '');
+}
+
+/**
+ * Whether an unquoted `url()` body holds CSS white space that parts the token.
+ * The space that ends a hexadecimal escape is part of the escape, not of the
+ * value (`url(\23 brand)` is `url(#brand)`), and so is an escaped one.
+ */
+function hasUnescapedCssWhitespace(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (character === '\\') {
+      let end = index + 1;
+      if (end < value.length && /[0-9a-f]/iu.test(value[end]!)) {
+        let digits = 0;
+        while (
+          end < value.length && digits < 6 &&
+          /[0-9a-f]/iu.test(value[end]!)
+        ) {
+          end += 1;
+          digits += 1;
+        }
+        // One white space after a hexadecimal escape terminates it.
+        if (end < value.length && isAsciiWhitespace(value[end]!)) end += 1;
+      } else {
+        end += 1;
+      }
+      index = end - 1;
+      continue;
+    }
+    if (isAsciiWhitespace(character)) return true;
+  }
+  return false;
+}
+
 function normalizeCssUrlFunction(
   body: string,
   baseUrl: string,
   representability: HtmlMirrorRepresentabilityCollector | undefined,
 ): string | undefined {
-  const content = body.trim();
+  // CSS parts a url token only by its own white space; a no-break space is a
+  // character of the value, as it is to the browser's tokenizer (R4).
+  const content = body.replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/gu, '');
   let raw = content;
   const quote = content[0];
   if (quote === '"' || quote === "'") {
     const end = findCssStringEnd(content, quote);
-    if (end === undefined || content.slice(end + 1).trim() !== '') {
+    if (
+      end === undefined ||
+      content.slice(end + 1).replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/gu, '') !== ''
+    ) {
       return undefined;
     }
     raw = content.slice(1, end);
-  } else if (/["'()]/u.test(content)) {
+  } else if (
+    /["'()]/u.test(content) || hasUnescapedCssWhitespace(content)
+  ) {
+    // An unquoted url token ends at white space: `url(foo bar)` is a
+    // `bad-url` token in the page, and must not become a live request here.
     return undefined;
   }
-  const decodedUrl = decodeCssEscapes(raw.trim());
+  const decodedUrl = decodeCssEscapes(trimCssWhitespace(raw));
   // A fragment-only CSS URL resolves inside the reconstructed document.
   if (LOCAL_SVG_FRAGMENT_PATTERN.test(decodedUrl)) {
     return `url("${decodedUrl}")`;
@@ -4493,7 +4722,7 @@ function stripCssImports(css: string, onStrip?: () => void): string {
     }
     if (character === '@') {
       const decodedPrefix = decodeCssEscapes(css.slice(index, index + 128));
-      if (/^@\s*import\b/iu.test(decodedPrefix)) {
+      if (/^@import\b/iu.test(decodedPrefix)) {
         onStrip?.();
         parts.push(css.slice(segmentStart, index));
         let depth = 0;
@@ -4563,7 +4792,7 @@ function rewritePassiveCssImports(
     }
     if (
       character !== '@' ||
-      !/^@\s*import\b/iu.test(decodeCssEscapes(css.slice(index, index + 128)))
+      !/^@import\b/iu.test(decodeCssEscapes(css.slice(index, index + 128)))
     ) {
       index += 1;
       continue;
@@ -4643,24 +4872,77 @@ function rewritePassiveCssImports(
   return parts.join('');
 }
 
+/**
+ * Reads the URL an `@import` statement begins with, and where it ends. The
+ * CSS string scanner is used rather than a regular expression that stops at
+ * the first quote: an escaped quote stands before the one that closes the
+ * string, and the expression cut the URL there and left the rest behind as
+ * a malformed statement (R5).
+ */
+function readCssImportUrl(statement: string): {
+  readonly rawUrl: string;
+  readonly end: number;
+} | undefined {
+  const prefix = /^@import\b/iu.exec(statement);
+  if (!prefix) return undefined;
+  let index = prefix[0].length;
+  const skipWhitespace = (): void => {
+    while (index < statement.length && isAsciiWhitespace(statement[index]!)) {
+      index += 1;
+    }
+  };
+  skipWhitespace();
+  const functionMatch = /^url\(/iu.exec(statement.slice(index));
+  if (functionMatch) {
+    index += functionMatch[0].length;
+    skipWhitespace();
+    const quote = statement[index];
+    if (quote === '"' || quote === "'") {
+      const end = findCssStringEnd(statement.slice(index), quote);
+      if (end === undefined) return undefined;
+      const rawUrl = statement.slice(index + 1, index + end);
+      index += end + 1;
+      skipWhitespace();
+      if (statement[index] !== ')') return undefined;
+      return { rawUrl, end: index + 1 };
+    }
+    const close = statement.indexOf(')', index);
+    if (close < 0) return undefined;
+    // The white space around an unquoted body is the tokenizer's own; what
+    // stands inside it parts the token. `url(x y)` is a bad-url token the
+    // browser never fetches, and must not become a live import here (R4).
+    const rawUrl = statement.slice(index, close)
+      .replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/gu, '');
+    if (/["'(]/u.test(rawUrl) || hasUnescapedCssWhitespace(rawUrl)) {
+      return undefined;
+    }
+    return { rawUrl, end: close + 1 };
+  }
+  const quote = statement[index];
+  if (quote !== '"' && quote !== "'") return undefined;
+  const end = findCssStringEnd(statement.slice(index), quote);
+  if (end === undefined) return undefined;
+  return {
+    rawUrl: statement.slice(index + 1, index + end),
+    end: index + end + 1,
+  };
+}
+
 function extractCssImportUrl(statement: string): string | undefined {
-  const match = /^@\s*import\s+(?:url\(\s*(["']?)([\s\S]*?)\1\s*\)|(["'])([\s\S]*?)\3)/iu.exec(
-    statement,
-  );
-  const value = match?.[2] ?? match?.[4];
-  return value ? decodeCssEscapes(value.trim()) : undefined;
+  const read = readCssImportUrl(statement);
+  if (!read) return undefined;
+  const value = decodeCssEscapes(trimCssWhitespace(read.rawUrl));
+  return value || undefined;
 }
 
 function normalizePassiveCssImport(
   statement: string,
   baseUrl: string,
 ): string | undefined {
-  const match = /^@\s*import\s+(?:url\(\s*(["']?)([\s\S]*?)\1\s*\)|(["'])([\s\S]*?)\3)\s*([\s\S]*);$/iu.exec(
-    statement,
-  );
-  if (!match) return undefined;
-  const rawUrl = decodeCssEscapes((match[2] ?? match[4] ?? '').trim());
-  const conditions = (match[5] ?? '').trim();
+  const read = readCssImportUrl(statement);
+  if (!read || !statement.endsWith(';')) return undefined;
+  const rawUrl = decodeCssEscapes(trimCssWhitespace(read.rawUrl));
+  const conditions = statement.slice(read.end, -1).trim();
   if (
     conditions.length > 2_048 ||
     /[{};@\\]/u.test(conditions) ||
@@ -5079,7 +5361,7 @@ function isComputedHiddenSourceSelect(element: Element, opened = false): boolean
       );
     const transform = style.transform.trim().toLowerCase();
     const transformCollapses = opened && element.getClientRects().length === 0
-      ? sourceElementScalesItselfToNothing(element)
+      ? sourceElementScalesItselfToNothing(element, true)
       : transform !== '' && transform !== 'none' && (() => {
         try {
           const rect = element.getBoundingClientRect();
@@ -5090,7 +5372,7 @@ function isComputedHiddenSourceSelect(element: Element, opened = false): boolean
       })();
     return style.display.trim().toLowerCase() === 'none' ||
       (['hidden', 'collapse'].includes(style.visibility.trim().toLowerCase()) &&
-        (!opened || sourceElementHidesItselfByVisibility(element))) ||
+        (!opened || sourceElementHidesItselfByVisibility(element, true))) ||
       (Number(style.opacity) === 0 &&
         !isSourceTransparentSelectClickTarget(element, view, style)) ||
       style.getPropertyValue('content-visibility').trim().toLowerCase() === 'hidden' ||
@@ -5206,6 +5488,16 @@ function isUnsafeTransportedAttribute(
       name === 'imagesrcset' || name === 'imagesizes'
     )
   ) return true;
+  // The source answers `(scripting: …)` in a media query before it travels;
+  // the receiver checks the answer is a fixed point, so a transported query
+  // cannot make a scriptless replica apply no-script styles the tab did not.
+  if (
+    (name === 'media' &&
+      (tagName === 'link' || tagName === 'style' || tagName === 'source')) ||
+    (name === 'sizes' && (tagName === 'img' || tagName === 'source'))
+  ) {
+    return answerScriptingMediaFeatures(value) !== value;
+  }
   const localSvgReference = namespace === 'svg' &&
     LOCAL_SVG_REFERENCE_ELEMENTS.has(tagName) &&
     (name === 'href' || name === 'xlink:href') &&

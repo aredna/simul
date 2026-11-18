@@ -246,6 +246,24 @@ describe('parseCompanionPreferences', () => {
     );
   });
 
+  it('treats its own snapshots as canonical instead of validating them again (O7)', () => {
+    const canonical = parseCompanionPreferences({
+      autoTranslateOrigins: ['https://example.com'],
+    });
+
+    // Parsing a snapshot this module produced is the identity, so the hot
+    // helpers below skip re-validation and allocation.
+    expect(parseCompanionPreferences(canonical)).toBe(canonical);
+    expect(autoTranslationModeForPage(canonical, 'https://example.com/page'))
+      .toBe('site');
+    expect(permissionOriginsForPreferences(canonical))
+      .toEqual(['https://example.com/*']);
+    expect(withViewSettings(canonical, { displayMode: 'fit' })).toMatchObject({
+      displayMode: 'fit',
+      autoTranslateOrigins: ['https://example.com'],
+    });
+  });
+
   it('migrates and bounds saved multilingual view settings', () => {
     expect(
       parseCompanionPreferences({

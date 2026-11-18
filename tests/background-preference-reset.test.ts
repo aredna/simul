@@ -77,4 +77,32 @@ describe('background preference reset wiring', () => {
       "type: 'simul:preferences:reconcile'",
     );
   });
+
+  it('keeps the ready promise settled when preference hydration fails (O1)', () => {
+    const hydration = background.slice(
+      background.indexOf('const launchPreferencesReady'),
+      background.indexOf('function queueToolbarBehaviorSync'),
+    );
+    expect(hydration).toContain('try {');
+    expect(hydration).toContain('} catch {');
+    expect(hydration).toContain('} finally {');
+    expect(hydration).toContain('launchPreferencesHydrated = true;');
+    // The failure path still runs the toolbar behavior sync, and the
+    // promise has no rejection path left.
+    expect(hydration.slice(hydration.indexOf('} catch {')))
+      .toContain('queueToolbarBehaviorSync();');
+  });
+
+  it('queues a permission-revocation reconcile behind the preference lock (O2)', () => {
+    const listener = background.slice(
+      background.indexOf('browser.permissions.onRemoved.addListener('),
+      background.indexOf('browser.storage.onChanged.addListener('),
+    );
+    expect(listener).toContain('navigator.locks.request(');
+    expect(listener).not.toContain('ifAvailable');
+    expect(listener).toContain(
+      "await coordinator.run({ type: 'simul:preferences:reconcile' });",
+    );
+    expect(listener).toContain('.catch(() => undefined)');
+  });
 });

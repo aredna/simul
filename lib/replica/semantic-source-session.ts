@@ -68,6 +68,8 @@ import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 import {
   askAboutSourceShadowRootsAbove,
   beginSourceShadowRootWalk,
+  isSourceShadowRoot,
+  listenForSourceShadowRoots,
   readSourceAssignedSlot,
   readSourceShadowRoot,
 } from './source-shadow-root';
@@ -118,7 +120,13 @@ export interface SemanticSourceSessionEnvironment {
   }>;
   readonly createMutationObserver?: (
     callback: MutationCallback,
-  ) => Pick<MutationObserver, 'observe' | 'disconnect'>;
+  ) => Pick<MutationObserver, 'observe' | 'disconnect'> & {
+    /**
+     * The records queued but not delivered yet. A scan can run before the
+     * observer's own microtask (A2); a stand-in may leave this out.
+     */
+    readonly takeRecords?: () => MutationRecord[];
+  };
   readonly schedule?: (callback: () => void) => void;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (timer: unknown) => void;
@@ -211,6 +219,14 @@ const SEMANTIC_PRESENTATION_CHANGE_EVENTS = Object.freeze([
   'pointerover', 'pointerout', 'focusin', 'focusout',
   'transitionend', 'transitioncancel', 'animationend', 'animationcancel',
 ] as const);
+const SEMANTIC_ROOT_MUTATION_OPTIONS = Object.freeze({
+  subtree: true,
+  childList: true,
+  characterData: true,
+  characterDataOldValue: true,
+  attributes: true,
+  attributeOldValue: true,
+});
 // A field or an editor can be shown or hidden with no change of the DOM,
 // most often by a media query when the window is resized (Simul's own side
 // panel narrows the tab as it opens). Hidden wins for both (D142, D145), so
@@ -291,9 +307,12 @@ export class SemanticSourceSession {
   #documentIdentity: ReplicaSourceDocumentIdentity | undefined;
   #scope: ReplicaReadScope | undefined;
   #policyFingerprint: string | undefined;
-  #observer: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined;
-  readonly #observedSemanticRoots = new WeakSet<Document | ShadowRoot>();
+  #observer: (Pick<MutationObserver, 'observe' | 'disconnect'> & {
+    readonly takeRecords?: () => MutationRecord[];
+  }) | undefined;
+  #observedSemanticRoots = new WeakSet<Document | ShadowRoot>();
   readonly #semanticEventRoots = new Set<Document | ShadowRoot>();
+  readonly #stopListeningForShadowRoots: () => void;
   #sequence = 0;
   #inFlightSequence: number | undefined;
   #dirty = false;
@@ -331,6 +350,16 @@ export class SemanticSourceSession {
     this.#classifier = environment.secretClassifier ??
       sourceDocumentSecretClassifier(environment.document);
     this.#structuralMenus = environment.structuralMenus ?? new WeakMap();
+    this.#stopListeningForShadowRoots = listenForSourceShadowRoots(
+      environment.document,
+      (_root, late) => {
+        // A root attached to a host that was read before fires nothing. When
+        // another reader of the page finds it (the base channel's rotation,
+        // a person's input), what was sent as public under that host may now
+        // be masked: read the page again and send what it says (A1).
+        if (late) this.refresh();
+      },
+    );
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
   }
@@ -340,6 +369,7 @@ export class SemanticSourceSession {
     this.#disposed = true;
     this.environment.port.onMessage.removeListener(this.#onMessage);
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
+    this.#stopListeningForShadowRoots();
     this.#observer?.disconnect();
     this.#observer = undefined;
     this.#cancelControlPoll();
@@ -356,16 +386,7 @@ export class SemanticSourceSession {
     this.#presentationChangeCandidates = new WeakSet<Element>();
     this.#popoverOpenOrder = new WeakMap<Element, number>();
     for (const root of this.#semanticEventRoots) {
-      for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
-        root.removeEventListener(type, this.#onDomChange, true);
-      }
-      for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
-        root.removeEventListener(type, this.#onSelectActivation, true);
-      }
-      for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
-        root.removeEventListener(type, this.#onPresentationChange, true);
-      }
-      root.removeEventListener('slotchange', this.#onDomChange, true);
+      this.#stopListeningToRoot(root);
     }
     this.#semanticEventRoots.clear();
     this.#documentIdentity = undefined;
@@ -539,14 +560,7 @@ export class SemanticSourceSession {
 
   #observeSemanticRoot(root: Document | ShadowRoot): void {
     if (!this.#observer || this.#observedSemanticRoots.has(root)) return;
-    this.#observer.observe(root, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      characterDataOldValue: true,
-      attributes: true,
-      attributeOldValue: true,
-    });
+    this.#observer.observe(root, SEMANTIC_ROOT_MUTATION_OPTIONS);
     this.#observedSemanticRoots.add(root);
     this.#semanticEventRoots.add(root);
     for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
@@ -563,6 +577,84 @@ export class SemanticSourceSession {
     if ((root as Partial<ShadowRoot>).slotAssignment === 'manual') {
       root.addEventListener('slotchange', this.#onDomChange, true);
     }
+  }
+
+  #stopListeningToRoot(root: Document | ShadowRoot): void {
+    for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
+      root.removeEventListener(type, this.#onDomChange, true);
+    }
+    for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
+      root.removeEventListener(type, this.#onSelectActivation, true);
+    }
+    for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
+      root.removeEventListener(type, this.#onPresentationChange, true);
+    }
+    root.removeEventListener('slotchange', this.#onDomChange, true);
+  }
+
+  /**
+   * Forgets the roots whose host left the page: `#semanticEventRoots` is a
+   * strong set, and one entry per root ever met kept every detached tree,
+   * and the listeners on it, for the session's lifetime (A3). A host put
+   * back is met by the next scan and watched again.
+   */
+  #pruneSemanticRoots(): void {
+    let detached = false;
+    for (const root of this.#semanticEventRoots) {
+      if (isSourceShadowRoot(root) && !root.host.isConnected) {
+        detached = true;
+        break;
+      }
+    }
+    if (!detached) return;
+    const kept: Array<Document | ShadowRoot> = [];
+    for (const root of this.#semanticEventRoots) {
+      if (!isSourceShadowRoot(root) || root.host.isConnected) {
+        kept.push(root);
+        continue;
+      }
+      this.#stopListeningToRoot(root);
+      this.#semanticEventRoots.delete(root);
+    }
+    // The observer has no way to stop watching one root: it lets go of all
+    // of them and takes the ones still in the page again.
+    if (!this.#observer) return;
+    this.#observer.disconnect();
+    this.#observedSemanticRoots = new WeakSet();
+    for (const root of kept) {
+      this.#observer.observe(root, SEMANTIC_ROOT_MUTATION_OPTIONS);
+      this.#observedSemanticRoots.add(root);
+    }
+  }
+
+  /**
+   * A credential change the observer has queued but not delivered is
+   * remembered before the page is read: a scan scheduled during an event
+   * handler can run before the observer's own microtask, which is where a
+   * same-task password-to-text (or dots-to-none) change is made sticky
+   * (A2). The added subtrees are walked fresh: this read comes first.
+   *
+   * What this can and cannot see: an inline style written through the page's
+   * own CSSOM (`element.style.setProperty(...)`) changes the `style`
+   * attribute, and where that is reported as a mutation record its old value
+   * is what carries a removed `-webkit-text-security`; the record is drained
+   * here like any other. A rule of a stylesheet rewritten through the CSSOM
+   * reports nothing at all, so this drain cannot see that transition. The
+   * style-derived re-read of the page walks the new state and marks what is
+   * masked now, not what was masked; the field stays known only if an earlier
+   * read saw it masked (the sticky ledger).
+   */
+  #rememberPendingMutationSecrets(): void {
+    const records = safelyRead(
+      () => this.#observer?.takeRecords?.() ?? [],
+    ) ?? [];
+    if (records.length === 0) return;
+    rememberSourceMutationSecrets(
+      records,
+      this.environment.window,
+      this.#classifier,
+      { freshRoots: true },
+    );
   }
 
   #scheduleControlPoll(): void {
@@ -838,6 +930,11 @@ export class SemanticSourceSession {
       !documentIdentity || !policyFingerprint
     ) return;
     this.#dirty = false;
+    // What the observer has queued comes before the page is read, and the
+    // roots that left the page go before the roots still in it are watched
+    // again (A2, A3).
+    this.#rememberPendingMutationSecrets();
+    this.#pruneSemanticRoots();
     let scan: SemanticSourceScan;
     const rootWalk = beginSourceShadowRootWalk();
     const readPage = (): SemanticSourceScan => {
@@ -2850,7 +2947,12 @@ function disclosureElementCanCarryUserState(element: Element): boolean {
     false,
     true,
   );
-  return facts.contentEditable?.trim().toLowerCase() !== '' ||
+  // `contenteditable="false"` says the element is not an editor, not that
+  // a person can put state into it. Counting it as such withheld the whole
+  // panel a rich-text toolbar sits in; the receiver excludes it the same
+  // way (`isTransportedEditableState`).
+  const contentEditable = facts.contentEditable?.trim().toLowerCase() ?? '';
+  return (contentEditable !== '' && contentEditable !== 'false') ||
     facts.role?.trim().toLowerCase().split(/\s+/u).some(
       (role) => role === 'textbox' || role === 'searchbox' ||
         role === 'combobox' || role === 'listbox',

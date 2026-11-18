@@ -7,6 +7,7 @@ import {
   type PdfViewerConnection,
   type PdfViewerFollowerDependencies,
 } from '../entrypoints/sidepanel/pdf-viewer-follower';
+import { PdfPageBoxReader } from '../entrypoints/sidepanel/pdf-page-box-reader';
 import {
   PDF_VIEWER_MOVEMENT_SETTLE_MS,
   PDF_VIEWER_SETTLE_MS,
@@ -66,7 +67,9 @@ function setup(options: {
     enabled: () => enabled,
     onDiagnostic: (state) => diagnostics.push(state),
     ...(options.locate ? { locate: options.locate } : {}),
-    ...(options.viewerZoom ? { viewerZoom: options.viewerZoom } : {}),
+    // The panel knows the tab's zoom unless a test says it does not: without
+    // it no look is made at all (a turned view cannot be ruled out).
+    viewerZoom: options.viewerZoom ?? (() => 1),
     ...(options.askViewerZoom ? { askViewerZoom: options.askViewerZoom } : {}),
   });
   return {
@@ -682,6 +685,60 @@ describe('PdfViewerFollower looks into a doubted place (D133)', () => {
     expect(view.followPosition).toHaveBeenCalledTimes(moves);
   });
 
+  it('never captures a report that may be a turned view while the zoom is unknown (P8)', async () => {
+    vi.useFakeTimers();
+    const capture = vi.fn(async () => undefined);
+    const read = vi.fn(async () => undefined);
+    const reader = new PdfPageBoxReader({ capture });
+    const locate = vi.fn((
+      target: { readonly tabId: number },
+      doubt: PdfViewerDoubt,
+      signal: AbortSignal,
+    ) => reader.locate({
+      tabId: target.tabId,
+      doubt,
+      pageCount: PAGES.length,
+      read,
+      signal,
+    }));
+    // Ctrl+]: a page 1,056 px wide at 100%, which is a page turned a quarter.
+    // Without the tab's zoom the tracker cannot tell a turn from a zoom, so
+    // the report must not be looked into: a turned view is never captured.
+    const askViewerZoom = vi.fn();
+    const { follower, send } = setup({ locate, viewerZoom: () => undefined, askViewerZoom });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send({ ...report(0, 1_000), pageWidth: 1056 });
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    expect(locate).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    // Fail closed: Chrome is asked for the zoom, so a look can follow it.
+    expect(askViewerZoom).toHaveBeenCalledWith(TARGET);
+
+    // The same report at a zoom that reconciles it is looked into: the report
+    // alone would have been enough, and the missing zoom is what stops it.
+    const knownCapture = vi.fn(async () => undefined);
+    const knownReader = new PdfPageBoxReader({ capture: knownCapture });
+    const knownLocate = vi.fn((
+      target: { readonly tabId: number },
+      doubt: PdfViewerDoubt,
+      signal: AbortSignal,
+    ) => knownReader.locate({
+      tabId: target.tabId,
+      doubt,
+      pageCount: PAGES.length,
+      read,
+      signal,
+    }));
+    const known = setup({ locate: knownLocate, viewerZoom: () => 1056 / 816 });
+    known.follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    known.send({ ...report(0, 1_000), pageWidth: 1056 });
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    expect(knownCapture).toHaveBeenCalledTimes(1);
+  });
+
   it('hears of the tab\'s zoom when it changes, without waiting for a report', async () => {
     vi.useFakeTimers();
     let zoom: number | undefined = 1;
@@ -771,13 +828,15 @@ describe('PdfViewerFollower looks into a doubted place (D133)', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(askViewerZoom).not.toHaveBeenCalled();
 
-    // No zoom known: nothing to compare the report with.
+    // No zoom known: a report that may be turned is not looked into, so
+    // Chrome is asked for the zoom, which a later rest can use.
     zoom = undefined;
     send({ ...report(160, 8_000), pageWidth: 816 * 0.8, pageX: (800 - 14 - 816 * 0.8) / 2 });
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(askViewerZoom).not.toHaveBeenCalled();
+    expect(askViewerZoom).toHaveBeenCalledTimes(1);
 
     // Following off: the view does not move, and nothing is asked.
+    askViewerZoom.mockClear();
     zoom = 1;
     setEnabled(false);
     send({ ...report(190, 16_000), pageWidth: 816 * 0.8, pageX: (800 - 14 - 816 * 0.8) / 2 });

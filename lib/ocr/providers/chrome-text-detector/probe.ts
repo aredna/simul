@@ -7,6 +7,14 @@ import {
 import type { ImageTextProviderCapability } from '../../contracts';
 
 export const CHROME_TEXT_DETECTOR_PROBE_TIMEOUT_MS = 2_000;
+/**
+ * The representative model the capability probe asks about. Availability is
+ * queried for exactly these languages and create() is given the same list, so
+ * the probe never downloads a model. The platform cannot enumerate installed
+ * languages, so a build with only other languages installed probes unavailable;
+ * the runner re-checks each job's own language before create().
+ */
+const PROBE_LANGUAGES: readonly string[] = Object.freeze(['en']);
 
 export interface ChromeTextDetectorProbeEnvironment {
   readonly getApi?: () => TextDetectorConstructor | undefined;
@@ -27,8 +35,25 @@ export async function probeChromeTextDetector(
   const operation = new AbortController();
   try {
     await withTimeout((async () => {
+      // Only an installed model may reach create(): `downloadable` and
+      // `downloading` would start a platform model download on create(),
+      // which the project rules out (C4). A constructor without create() has
+      // no download step and is admitted by `new api()` below.
+      if (api.create) {
+        if (!api.availability) throw new TextDetectorModelUnavailableError();
+        const availability = await api.availability({
+          languages: PROBE_LANGUAGES,
+        });
+        operation.signal.throwIfAborted();
+        if (availability !== 'available') {
+          throw new TextDetectorModelUnavailableError();
+        }
+      }
       const detector = api.create
-        ? await api.create({ signal: operation.signal })
+        ? await api.create({
+            languages: PROBE_LANGUAGES,
+            signal: operation.signal,
+          })
         : new api();
       operation.signal.throwIfAborted();
       const source = (environment.createProbeSource ?? defaultProbeSource)();
@@ -91,8 +116,15 @@ function withTimeout(
 }
 
 function readableProbeFailure(error: unknown): string {
+  if (error instanceof TextDetectorModelUnavailableError) {
+    return 'TextDetector model is not installed.';
+  }
   if (error instanceof Error && error.name) {
     return `TextDetector probe failed (${error.name}).`;
   }
   return 'TextDetector probe failed.';
+}
+
+class TextDetectorModelUnavailableError extends Error {
+  override readonly name = 'TextDetectorModelUnavailableError';
 }

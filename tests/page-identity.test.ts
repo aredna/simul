@@ -368,4 +368,36 @@ describe('withPageTimeout', () => {
       vi.useRealTimers();
     }
   });
+
+  it('stops waiting when its signal aborts and clears the timer (O10)', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const pending = withPageTimeout(
+        new Promise<never>(() => undefined),
+        1_000,
+        undefined,
+        controller.signal,
+      );
+      const settled = pending.catch((error: unknown) => error);
+      controller.abort();
+      const error = await settled;
+      expect(error).toBeInstanceOf(DOMException);
+      expect((error as DOMException).name).toBe('AbortError');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects at once when its signal is already aborted (O10)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(withPageTimeout(
+      Promise.resolve(1),
+      1_000,
+      undefined,
+      controller.signal,
+    )).rejects.toMatchObject({ name: 'AbortError' });
+  });
 });

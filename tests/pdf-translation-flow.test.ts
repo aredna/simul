@@ -88,6 +88,7 @@ function fakeDocument(
     },
     fontFaces: async () => ({}),
     releasePage: async () => undefined,
+    cleanup: async () => undefined,
     destroy: async () => undefined,
   };
 }

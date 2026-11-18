@@ -16,7 +16,11 @@ import {
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
 import { hasOcrRuntimeProvider } from '../lib/ocr/runtime-provider-readiness';
 import { createBrowserOcrOffscreenManager } from '../lib/ocr/offscreen-document-manager';
-import { IndexedDbTransientImageStore } from '../lib/ocr/transient-image-store';
+import { isTrustedOffscreenMessageSender } from '../lib/ocr/offscreen-message-sender';
+import {
+  IndexedDbTransientImageStore,
+  sweepExpiredTransientImageInputs,
+} from '../lib/ocr/transient-image-store';
 import { readEnsureOcrHostCommand } from '../lib/ocr/offscreen-protocol';
 import {
   DEFAULT_COMPANION_PREFERENCES,
@@ -55,6 +59,9 @@ export default defineBackground(() => {
 
   const offscreenManager = createBrowserOcrOffscreenManager();
   const transientImageStore = new IndexedDbTransientImageStore();
+  // Enforce the transient-crop TTL even when no OCR host is alive to sweep
+  // (C3). Best-effort: storage being unavailable resolves without throwing.
+  void sweepExpiredTransientImageInputs(transientImageStore);
   const coordinator = new PreferenceCoordinator(
     createBrowserPreferenceAdapter(),
     {
@@ -122,32 +129,40 @@ export default defineBackground(() => {
   const loadRevision = launchPreferenceRevision;
   const launchPreferencesReady = browser.storage.local.get(STORAGE_KEY).then(
     async (stored) => {
-      const loaded = parseCompanionPreferences(stored[STORAGE_KEY]);
-      await offscreenManager.advanceResetEpoch(loaded.resetRevision);
-      if (launchPreferenceRevision === loadRevision) {
-        launchPreferences = selectLatestCompanionPreferences(
-          launchPreferences,
-          loaded,
-        );
-        await preferenceSafety.observeCommittedReadScope(
-          effectiveReplicaReadScope(
-            loaded.replicaReadScope,
-            loaded.readScopeSetupVersion,
-          ),
-        );
-      }
-      if (loaded.resetCleanupPendingRevision > 0) {
-        const reconciled = await runPreferenceCommand(coordinator, {
-          type: 'simul:preferences:reconcile',
-        }, preferenceSafety).catch(() => undefined);
-        if (reconciled && launchPreferenceRevision === loadRevision) {
+      // A failed hydration step (storage, reset epoch, safety journal) must
+      // not poison every later toolbar click: clicks fall back to the
+      // defaults this worker already holds until storage changes (O1).
+      try {
+        const loaded = parseCompanionPreferences(stored[STORAGE_KEY]);
+        await offscreenManager.advanceResetEpoch(loaded.resetRevision);
+        if (launchPreferenceRevision === loadRevision) {
           launchPreferences = selectLatestCompanionPreferences(
             launchPreferences,
-            reconciled.preferences,
+            loaded,
+          );
+          await preferenceSafety.observeCommittedReadScope(
+            effectiveReplicaReadScope(
+              loaded.replicaReadScope,
+              loaded.readScopeSetupVersion,
+            ),
           );
         }
+        if (loaded.resetCleanupPendingRevision > 0) {
+          const reconciled = await runPreferenceCommand(coordinator, {
+            type: 'simul:preferences:reconcile',
+          }, preferenceSafety).catch(() => undefined);
+          if (reconciled && launchPreferenceRevision === loadRevision) {
+            launchPreferences = selectLatestCompanionPreferences(
+              launchPreferences,
+              reconciled.preferences,
+            );
+          }
+        }
+      } catch {
+        // Keep the defaults: a later storage change still updates them.
+      } finally {
+        queueToolbarBehaviorSync();
       }
-      queueToolbarBehaviorSync();
     },
     () => {
       queueToolbarBehaviorSync();
@@ -241,6 +256,18 @@ export default defineBackground(() => {
       }
       const ensureHost = readEnsureOcrHostCommand(message);
       if (ensureHost) {
+        // Only an extension page (side panel, popout) may start the OCR
+        // host; a content script also carries the extension id but reports
+        // its page URL, and the popout is an extension page even though it
+        // is tab-hosted (C9).
+        if (!isTrustedOffscreenMessageSender(sender, browser.runtime.id)) {
+          sendResponse({
+            kind: 'simul:ocr-v1:host-ready',
+            version: 1,
+            ready: false,
+          });
+          return;
+        }
         if (!hasOcrRuntimeProvider(compiledImageTextProviderIds)) {
           sendResponse({
             kind: 'simul:ocr-v1:host-ready',
@@ -281,15 +308,15 @@ export default defineBackground(() => {
   );
 
   browser.permissions.onRemoved.addListener(() => {
+    // Queue behind a preference command that holds the lock instead of
+    // skipping this revocation's reconcile (O2). A reconcile that still
+    // fails is retried by the next panel load or command.
     void navigator.locks.request(
       PREFERENCE_LOCK_NAME,
-      { ifAvailable: true },
-      async (lock) => {
-        if (lock) {
-          await coordinator.run({ type: 'simul:preferences:reconcile' });
-        }
+      async () => {
+        await coordinator.run({ type: 'simul:preferences:reconcile' });
       },
-    );
+    ).catch(() => undefined);
   });
 
   browser.storage.onChanged.addListener((changes, areaName) => {

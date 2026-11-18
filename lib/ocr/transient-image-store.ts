@@ -19,6 +19,27 @@ export interface TransientImageInputStore {
   clearAll?(): Promise<void>;
 }
 
+/**
+ * Enforces the transient-input TTL without an OCR host. A side panel that dies
+ * mid-job never runs its own cleanup, and the offscreen host's 30 s sweep only
+ * exists while that document does. Expiry is enforced by that periodic host
+ * sweep while a host lives, by the service worker's startup call
+ * (entrypoints/background.ts), and by the next host construction. The side
+ * panel deliberately does not sweep: opening storage during panel boot would
+ * run ahead of the preference-safety connection for no extra coverage. A
+ * browser restart that never starts the service worker is not covered.
+ */
+export async function sweepExpiredTransientImageInputs(
+  store: TransientImageInputStore = new IndexedDbTransientImageStore(),
+): Promise<void> {
+  try {
+    await store.clearExpired();
+  } catch {
+    // Storage being unavailable leaves nothing this context can sweep; the
+    // next host construction retries the same sweep.
+  }
+}
+
 export class IndexedDbTransientImageStore implements TransientImageInputStore {
   readonly #now: () => number;
   #databasePromise: Promise<IDBDatabase> | undefined;
@@ -27,7 +48,7 @@ export class IndexedDbTransientImageStore implements TransientImageInputStore {
     this.#now = now;
   }
 
-  async put(blob: Blob, id = crypto.randomUUID()): Promise<string> {
+  async put(blob: Blob, id: string = crypto.randomUUID()): Promise<string> {
     if (!isInputKey(id) || blob.size < 1 || blob.size > MAX_TRANSIENT_IMAGE_BYTES) {
       throw new Error('Invalid transient image input.');
     }

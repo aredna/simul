@@ -26,6 +26,12 @@ export const PDF_PAGE_GAP = 8;
 export const PDF_RERENDER_DELAY_MS = 150;
 // Drawn pages are redrawn only when their scale moved by more than this share.
 const SCALE_TOLERANCE = 0.01;
+/**
+ * Fitting runs again this many frames in a row while a block still has no
+ * layout (it may be laid out on the next one). Bounded: a block that never
+ * lays out is not measured on every frame forever.
+ */
+export const PDF_FIT_RETRY_FRAMES = 2;
 
 /** The part of an open pdf.js document the view draws with. */
 export interface PdfViewDocument {
@@ -94,8 +100,10 @@ export interface PdfViewEnvironment {
 interface ViewPage {
   readonly element: HTMLElement;
   canvas: HTMLCanvasElement | undefined;
-  /** The pdf.js scale the canvas was drawn at. */
+  /** The scale pdf.js actually drew at, after any size cap: what the canvas holds. */
   drawnScale: number | undefined;
+  /** The scale the draw was asked for; a redraw compares against this. */
+  requestedScale: number | undefined;
   failed: boolean;
   /** The page's text blocks, once read. */
   blocks: readonly PdfSurfaceBlock[] | undefined;
@@ -154,6 +162,8 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   #frame: unknown;
   #rerenderTimer: ReturnType<typeof setTimeout> | undefined;
   #holdRedraw = false;
+  /** Fitting retries run since a block could last not be measured. */
+  #fitRetries = 0;
   #resizeObserver: ResizeObserverLike | undefined;
   /** The page each text block is on. */
   readonly #blockPages = new Map<number, number>();
@@ -226,6 +236,14 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     return this.#pages.flatMap((page, index) => (page.canvas ? [index + 1] : []));
   }
 
+  /**
+   * The scale page `index` (0-based) was drawn at, when it is drawn: the
+   * scale request the canvas's size reflects, which pdf.js may have capped.
+   */
+  drawnScaleOf(index: number): number | undefined {
+    return this.#pages[index]?.drawnScale;
+  }
+
   mount(
     document: PdfViewDocument,
     pageSizes: readonly PdfPagePoints[],
@@ -248,6 +266,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
         element,
         canvas: undefined,
         drawnScale: undefined,
+        requestedScale: undefined,
         failed: false,
         blocks: undefined,
         layer: undefined,
@@ -520,6 +539,19 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
       fitting = fitting.filter((layer) => layer.applyFit());
     }
     for (const layer of fitting) layer.finishFit();
+    // A block with no layout was not fitted: measure it again on the next
+    // frames, so a view that goes quiet does not leave it overflowing.
+    let waiting = false;
+    for (const page of this.#pages) {
+      if (page.canvas && page.layer?.needsFit) waiting = true;
+    }
+    if (!waiting) {
+      this.#fitRetries = 0;
+      return;
+    }
+    if (this.#fitRetries >= PDF_FIT_RETRY_FRAMES) return;
+    this.#fitRetries += 1;
+    this.#schedule();
   }
 
   #reportReadingPage(): void {
@@ -672,8 +704,8 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
       drawn.add(index);
       if (
         !this.#holdRedraw &&
-        page.drawnScale !== undefined &&
-        Math.abs(page.drawnScale / this.#targetScale(index) - 1) > SCALE_TOLERANCE
+        page.requestedScale !== undefined &&
+        Math.abs(page.requestedScale / this.#targetScale(index) - 1) > SCALE_TOLERANCE
       ) {
         stale.add(index);
       }
@@ -751,7 +783,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     let placed = false;
     void document.render(index + 1, canvas, scale, controller.signal)
       .then(
-        () => {
+        (drawn) => {
           if (
             this.#rendering !== rendering ||
             this.#document !== document ||
@@ -762,7 +794,10 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
           if (page.canvas) discardCanvas(page.canvas);
           page.element.prepend(canvas);
           page.canvas = canvas;
-          page.drawnScale = scale;
+          // What the canvas holds, which a size cap may have made smaller
+          // than the scale asked for (the request is kept for redraws).
+          page.drawnScale = drawn;
+          page.requestedScale = scale;
           placed = true;
           // A new drawing is a new chance to read colours that failed.
           if (page.layer) page.layer.colourReadFailed = false;
@@ -788,6 +823,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     if (page.canvas) discardCanvas(page.canvas);
     page.canvas = undefined;
     page.drawnScale = undefined;
+    page.requestedScale = undefined;
     syncOverlays(page);
     void this.#document?.releasePage(index + 1).catch(() => {});
   }

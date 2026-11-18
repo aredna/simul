@@ -26,6 +26,8 @@ function setup(options: {
   onReadingPageChange?: (index: number) => void;
   readPixels?: (canvas: HTMLCanvasElement) => RgbaPixels | undefined;
   measureBlock?: PdfBlockMeasure;
+  /** The scale pdf.js says it drew, when it is smaller than the request. */
+  maxRenderScale?: number;
 } = {}) {
   const { document, window } = parseHTML(
     '<main><section id="pdf-view" hidden></section></main>',
@@ -78,7 +80,11 @@ function setup(options: {
           settled: false,
           finish: () => {
             render.settled = true;
-            resolve(scale);
+            // pdf.js caps a request the canvas could not hold and reports
+            // the scale it actually drew.
+            resolve(options.maxRenderScale === undefined
+              ? scale
+              : Math.min(scale, options.maxRenderScale));
           },
         };
         pending.push(render);
@@ -188,6 +194,19 @@ describe('PdfView', () => {
     await vi.advanceTimersByTimeAsync(150);
     expect(harness.pdf.render.mock.calls.length).toBe(renders + 1);
     expect(harness.pending.at(-1)?.scale).toBeCloseTo(1.25 * (4 / 3));
+  });
+
+  it('records the scale drawn when pdf.js capped the request (P4)', async () => {
+    const harness = setup({ pages: 1, maxRenderScale: 0.25 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    await harness.finishNext();
+    // The canvas may not hold the scale asked for: the page records what it
+    // holds, and the request is kept for the redraw comparison.
+    expect(harness.view.drawnScaleOf(0)).toBe(0.25);
+
+    harness.view.updateLayout({ displayMode: 'fit', zoomPercent: 100, sourceZoomFactor: 1 });
+    harness.runFrames();
+    expect(harness.pdf.render).toHaveBeenCalledTimes(1);
   });
 
   it('lays out again when the panel width changes', () => {
@@ -520,6 +539,31 @@ describe('PdfView text', () => {
 
     laidOut = true;
     harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+    expect(fontPixels(block)).toBeLessThan(7.5);
+  });
+
+  it('tries to fit a block with no layout on the next frames, with no scroll (P6)', async () => {
+    let laidOut = false;
+    const measureBlock: PdfBlockMeasure = (block) => laidOut
+      ? {
+          needed: { width: 100, height: 40 * (fontPixels(block) / 10) ** 2 },
+          available: { width: 100, height: 20 },
+        }
+      : undefined;
+    const harness = setup({ pages: 1, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un')]);
+    await harness.finishNext();
+    const block = harness.element.querySelector<HTMLElement>('.pdf-block')!;
+
+    harness.view.showTranslation(1, 'Longer text', 'en');
+    harness.runFrames();
+    expect(fontPixels(block)).toBe(10);
+
+    // Nothing was scrolled or resized: the pass the fitting run queued itself
+    // measures the block now that it is laid out.
+    laidOut = true;
     harness.runFrames();
     expect(fontPixels(block)).toBeLessThan(7.5);
   });

@@ -242,7 +242,9 @@ describe('packaged Tesseract provider', () => {
     expect(createWorker.mock.calls[0]?.[2]).not.toEqual(
       expect.objectContaining({ workerPath: expect.stringMatching(/^https?:/u) }),
     );
-    expect(firstWorker.worker.setParameters).not.toHaveBeenCalled();
+    // Every recognition carries its own segmentation mode (C1).
+    expect(firstWorker.worker.setParameters).toHaveBeenCalledTimes(2);
+    expect(secondWorker.worker.setParameters).toHaveBeenCalledOnce();
     expect(workers).toHaveLength(0);
     await runner.dispose();
   });
@@ -269,7 +271,9 @@ describe('packaged Tesseract provider', () => {
       new AbortController().signal,
     );
 
-    expect(add).toHaveBeenCalledTimes(3);
+    // Worker acquisition, the job's segmentation and the recognition: three
+    // loss races for the first job, two for the second.
+    expect(add).toHaveBeenCalledTimes(5);
     expect(remove).toHaveBeenCalledTimes(add.mock.calls.length);
     await runner.dispose();
   });
@@ -325,25 +329,21 @@ describe('packaged Tesseract provider', () => {
       new AbortController().signal,
     );
 
+    // The mode is job-scoped: the banner jobs set SINGLE_LINE before their
+    // own recognition and the multi-line job sets SINGLE_BLOCK before its.
     expect(worker.worker.setParameters).toHaveBeenNthCalledWith(1, {
       tessedit_pageseg_mode: '7',
     }, bannerJob.jobId);
     expect(worker.worker.setParameters).toHaveBeenNthCalledWith(2, {
-      tessedit_pageseg_mode: '6',
-    }, bannerJob.jobId);
+      tessedit_pageseg_mode: '7',
+    }, highDpiBannerJob.jobId);
     expect(worker.worker.setParameters).toHaveBeenNthCalledWith(3, {
       tessedit_pageseg_mode: '7',
-    }, highDpiBannerJob.jobId);
+    }, downscaledBannerJob.jobId);
     expect(worker.worker.setParameters).toHaveBeenNthCalledWith(4, {
       tessedit_pageseg_mode: '6',
-    }, highDpiBannerJob.jobId);
-    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(5, {
-      tessedit_pageseg_mode: '7',
-    }, downscaledBannerJob.jobId);
-    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(6, {
-      tessedit_pageseg_mode: '6',
-    }, downscaledBannerJob.jobId);
-    expect(worker.worker.setParameters).toHaveBeenCalledTimes(6);
+    }, nativeMultiLineJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenCalledTimes(4);
     await runner.dispose();
   });
 
@@ -539,6 +539,136 @@ describe('packaged Tesseract provider', () => {
     expect(stalledTerminate).not.toHaveBeenCalled();
     await runner.dispose();
     expect(stalledTerminate).toHaveBeenCalledOnce();
+  });
+
+  it('sets its own segmentation mode before every recognition (C1)', async () => {
+    const calls: string[] = [];
+    let completeBanner!: (value: unknown) => void;
+    const bannerRecognition = new Promise((resolve) => {
+      completeBanner = resolve;
+    });
+    const worker = fakeWorker('next');
+    const bannerJob: OffscreenOcrJob = {
+      ...job('eng'),
+      preprocessingVersion: OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+    };
+    const nextJob = job('eng');
+    worker.worker.setParameters = vi.fn(async (
+      parameters: { readonly tessedit_pageseg_mode: string },
+      jobId: string,
+    ) => {
+      calls.push(`mode:${parameters.tessedit_pageseg_mode}:${jobId}`);
+      return { data: undefined };
+    }) as never;
+    worker.worker.recognize = vi.fn((
+      _encoded: Blob,
+      _options: unknown,
+      _output: unknown,
+      jobId: string,
+    ) => {
+      calls.push(`recognize:${jobId}`);
+      return jobId === bannerJob.jobId
+        ? bannerRecognition
+        : Promise.resolve({
+            data: {
+              text: 'next',
+              confidence: 90,
+              blocks: [{
+                paragraphs: [{
+                  lines: [{
+                    text: 'next',
+                    confidence: 90,
+                    bbox: { x0: 1, y0: 1, x1: 20, y1: 12 },
+                  }],
+                }],
+              }],
+            },
+          });
+    }) as never;
+    const runner = new TesseractOffscreenRunner({
+      createWorker: vi.fn(async () => worker.worker) as never,
+      getUrl: (path) => `chrome-extension://id${path}`,
+    });
+    const abortController = new AbortController();
+    const banner = runner.recognize(
+      bannerJob,
+      new Blob([new Uint8Array([1])]),
+      abortController.signal,
+    );
+    await vi.waitFor(() => expect(calls).toContain(
+      `recognize:${bannerJob.jobId}`,
+    ));
+    abortController.abort();
+    await expect(banner).rejects.toMatchObject({ name: 'AbortError' });
+
+    // The abandoned banner job has not drained from the worker yet. The next
+    // job must still set its own multi-line mode instead of inheriting the
+    // banner's SINGLE_LINE.
+    await expect(runner.recognize(
+      nextJob,
+      new Blob([new Uint8Array([2])]),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ transcript: 'next' });
+    expect(calls).toEqual([
+      `mode:7:${bannerJob.jobId}`,
+      `recognize:${bannerJob.jobId}`,
+      `mode:6:${nextJob.jobId}`,
+      `recognize:${nextJob.jobId}`,
+    ]);
+
+    completeBanner({
+      data: {
+        text: 'banner',
+        confidence: 90,
+        blocks: [{
+          paragraphs: [{
+            lines: [{
+              text: 'banner',
+              confidence: 90,
+              bbox: { x0: 1, y0: 1, x1: 20, y1: 12 },
+            }],
+          }],
+        }],
+      },
+    });
+    await runner.dispose();
+  });
+
+  it('disposes a worker that arrives after its bootstrap was cancelled (C2)', async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = fakeWorker('late');
+      let resolveCreation!: (value: typeof worker.worker) => void;
+      const creation = new Promise<typeof worker.worker>((resolve) => {
+        resolveCreation = resolve;
+      });
+      const runner = new TesseractOffscreenRunner({
+        createWorker: vi.fn(() => creation) as never,
+        getUrl: (path) => `chrome-extension://id${path}`,
+        idleTimeoutMs: 50,
+      });
+      const abortController = new AbortController();
+      const recognition = runner.recognize(
+        job('eng'),
+        new Blob([new Uint8Array([1])]),
+        abortController.signal,
+      );
+      void recognition.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      abortController.abort();
+      await expect(recognition).rejects.toMatchObject({ name: 'AbortError' });
+
+      resolveCreation(worker.worker);
+      await vi.advanceTimersByTimeAsync(1);
+      // The bootstrap finished with no recognize left to own it: the runner
+      // must put it on the idle clock instead of leaking the worker and WASM.
+      expect(worker.terminate).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      await runner.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('terminates and reports worker loss for recognition infrastructure rejection', async () => {

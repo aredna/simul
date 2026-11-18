@@ -4,6 +4,9 @@ import { PDF_SIGNATURE_WINDOW, classifyPdfResponse } from './pdf-detection';
 export const MAX_PDF_BYTES = 128 * 1024 * 1024;
 /** How long the download may wait for the server or go without a byte. */
 export const PDF_FETCH_TIMEOUT_MS = 60_000;
+// The smallest buffer a download of unknown length is gathered into, so a
+// small file does not grow its buffer piece by piece.
+const GATHER_MIN_BYTES = 64 * 1024;
 
 /**
  * `too-large`: over the size cap. `failed`: no file came back (network error,
@@ -131,7 +134,9 @@ export async function fetchPdfBytes(
 /**
  * Reads the body with a running total and stops as soon as it passes the cap.
  * With a declared length it fills one buffer of that size, so the file is not
- * held twice; pieces are gathered only when the length is unknown or wrong.
+ * held twice. A length that is unknown or wrong is gathered into one buffer
+ * that grows as pieces arrive: each piece is copied in and let go, so the
+ * pieces and the finished file are never both alive.
  */
 async function readBody(
   response: Response,
@@ -150,8 +155,31 @@ async function readBody(
   let buffer = declaredBytes !== undefined && declaredBytes <= maxBytes
     ? new Uint8Array(declaredBytes)
     : undefined;
-  const chunks: Uint8Array[] = [];
+  // The one buffer a download of unknown length is gathered into.
+  let gathered: Uint8Array | undefined;
   let total = 0;
+  const capacityFor = (needed: number, current: number): number =>
+    Math.min(maxBytes, Math.max(needed, GATHER_MIN_BYTES, current * 2));
+  const append = (value: Uint8Array) => {
+    if (buffer && total + value.byteLength <= buffer.byteLength) {
+      buffer.set(value, total);
+      return;
+    }
+    if (!gathered) {
+      // More than was declared (or nothing was): gather, and let the
+      // declared buffer go once what it held is copied out.
+      gathered = new Uint8Array(capacityFor(total + value.byteLength, buffer?.byteLength ?? 0));
+      if (buffer) gathered.set(buffer.subarray(0, total));
+      buffer = undefined;
+    } else if (total + value.byteLength > gathered.byteLength) {
+      const grown = new Uint8Array(
+        capacityFor(total + value.byteLength, gathered.byteLength),
+      );
+      grown.set(gathered.subarray(0, total));
+      gathered = grown;
+    }
+    gathered.set(value, total);
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -162,30 +190,40 @@ async function readBody(
         void reader.cancel().catch(() => {});
         throw tooLargeError();
       }
-      if (buffer && total + value.byteLength <= buffer.byteLength) {
-        buffer.set(value, total);
-      } else {
-        // More than declared (or no declared length): gather pieces instead.
-        if (buffer) {
-          chunks.push(buffer.subarray(0, total));
-          buffer = undefined;
-        }
-        chunks.push(value);
-      }
+      append(value);
       total += value.byteLength;
     }
   } finally {
     signal.removeEventListener('abort', stop);
   }
-  if (buffer) return total === buffer.byteLength ? buffer : buffer.slice(0, total);
-  if (chunks.length === 1) return chunks[0]!;
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+  if (buffer) return total === buffer.byteLength ? buffer : exactBytes(buffer.subarray(0, total), total);
+  if (!gathered) return new Uint8Array(0);
+  return exactBytes(gathered, total);
+}
+
+/**
+ * `bytes` (the first `length` of them) in a buffer of exactly that length. A
+ * gathered buffer is larger by its last growth; kept as a view, that slack
+ * stays alive for as long as the document holds the bytes (about twice the
+ * file near the size cap). `ArrayBuffer.transfer` moves the buffer to the
+ * exact length without a second copy where the platform has it (Chrome and
+ * Node do); otherwise a copy is the only way, as before.
+ */
+function exactBytes(bytes: Uint8Array, length: number): Uint8Array {
+  if (bytes.byteOffset === 0 && bytes.buffer.byteLength === length) return bytes;
+  if (bytes.byteOffset === 0) {
+    const buffer = bytes.buffer as ArrayBuffer & {
+      transfer?: (newLength: number) => ArrayBuffer;
+    };
+    if (typeof buffer.transfer === 'function') {
+      try {
+        return new Uint8Array(buffer.transfer(length));
+      } catch {
+        // Not transferable here: fall back to a copy.
+      }
+    }
   }
-  return bytes;
+  return bytes.slice(0, length);
 }
 
 function tooLargeError(): PdfFetchError {
