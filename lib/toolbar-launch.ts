@@ -195,7 +195,11 @@ export class ToolbarLauncher {
     clickSequence: number,
     preopenedSidePanel?: Promise<void>,
   ): Promise<void> {
-    await this.#environment.preferencesReady;
+    // A hydration failure leaves the worker's defaults in place; a click
+    // must still launch instead of staying dead until the next restart (O1).
+    await this.#environment.preferencesReady.catch(() => {
+      this.#environment.report?.('preference-load-failed', 'preferences_not_hydrated');
+    });
     if (clickSequence !== this.#clickSequence) {
       // The saved choice is not looked at here: only a panel this click
       // opened itself, ahead of it, is closed.
@@ -418,7 +422,14 @@ export class ToolbarLauncher {
               };
     if (message) await this.#send(message);
     if (clickSequence !== this.#clickSequence) return;
-    await this.#environment.rememberSurface('side-panel');
+    try {
+      await this.#environment.rememberSurface('side-panel');
+    } catch {
+      // The panel is already open and authorized. Preference persistence is
+      // secondary, and a rejected click would report a failed launch that
+      // happened (O3), mirroring the popout path.
+      this.#environment.report?.('preference-save-failed', 'surface_not_remembered');
+    }
   }
 
   /**

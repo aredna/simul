@@ -326,12 +326,21 @@ Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
 is rejected. Positive-area accessibility labels are not blocked by the OCR
 small-image setting.
 
-Pixel capture remains blocked for credential overlap. Images inside native or
-ARIA controls are admitted only when the independent control-images switch is
-on and are checked again immediately before and after capture. The saved scan
-policy orders visible/near/background work, and very small pixel-OCR images are
-skipped by default. Only stable visible pixels are captured, at no
-more than two viewport captures per second, after matching pre/post document,
+Pixel capture remains blocked for credential overlap. Text from another
+element over the image is looked for at nine fixed points, each with a walk
+of at most three element levels and 64 nodes, so a thin caption between the
+points, or text four or more levels down, can still reach OCR; a credential
+control anywhere over the image still blocks the capture. Images inside
+native or ARIA controls are admitted only when the independent control-images
+switch is on and are checked immediately before capture, again after it, and
+once more when the crop is made. The third check closes only the window
+between the second check and the crop, and costs one more full safety
+measure per accepted crop, about half again the measure work; a credential
+field that appears and leaves again strictly between the first two checks
+is not observable. The saved scan
+policy orders visible/near/background work, and very small pixel-OCR images
+are skipped by default. Only stable visible pixels are captured, at no more
+than two viewport captures per second, after matching pre/post document,
 scroll, bounds, and revision. The screenshot is handed to the image reader
 as soon as Chrome has made it, so the second of the two rectangles is asked
 for while the tab still shows what was captured and the words follow at
@@ -342,8 +351,12 @@ downscaled before OCR so the processed bitmap never exceeds 4 MP; the CSS
 crop geometry is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
-storage. Chrome TextDetector is tried only when the platform exposes it;
-packaged Tesseract.js 7.0.0 provides the deterministic local fallback. The
+storage. Chrome TextDetector is used only when its model is installed: only
+an `available` answer reaches `create()`, and a model Chrome could download
+counts as unavailable. The capability probe asks about English, so a platform
+with only other models installed probes unavailable even though a job in one
+of those languages can still work; the runner checks each job's own language.
+Packaged Tesseract.js 7.0.0 provides the deterministic local fallback. The
 routed language is chosen from nearest valid element `lang`, explicit From,
 then detected page or bounded image-probe evidence. Tesseract loads
 `jpn+jpn_vert` for Japanese. Recognition uses a
@@ -421,8 +434,11 @@ Any other repeat of a URL is reused only when its processed pixels and
 geometry inputs match, because a responsive, resized, cropped, or animated
 rendering can produce different overlay coordinates.
 
-The transient crop is deleted after the job and expires after two minutes if
-cleanup is interrupted. An unchanged empty result must be observed twice
+The transient crop is deleted after the job. One left behind by an interrupted
+cleanup is refused after two minutes and deleted by the next sweep: the OCR
+host sweeps every 30 seconds while it lives, the service worker at startup,
+and a new host when it is built. A browser restart that never starts the
+service worker is not covered. An unchanged empty result must be observed twice
 before it enters the recognition cache, and transient capture failures receive
 only one immediate retry. Provider-neutral quality filtering drops blank,
 punctuation-only, and regions scored below 25%. A saved 25–95% minimum,
@@ -898,7 +914,10 @@ shell and the mirror has nothing to copy (D103).
   and is fitted again. Measured in Chrome for Testing 154: reading the text
   of 3,000 pages went from 23 s to 1.3 s, and of 10,000 pages from not done
   after 170 s to 5.4 s; a 300-page PDF is unchanged. Showing 10,000 pages
-  still takes 2.5 s, which is pdf.js answering each page's size.
+  still takes 2.5 s, which is pdf.js answering each page's size. A document
+  sweep clears pdf.js's shared objects, so a page's text layer rebuilt after
+  a sweep can lose bold or italic; its text stays. This follows pdf.js's
+  source; it was not checked in a browser.
 - **Scanned pages (D106).** A page pdf.js read and found no text item on at
   all (not a failed or timed-out read, not a page of only rotated or
   vertical text) is a scanned page of the surface, unread until a
@@ -1313,10 +1332,10 @@ shell and the mirror has nothing to copy (D103).
       pages as wide as the report says at the tab's zoom give or take its
       lag (`MIN_ZOOM_DELTA`, as for a turned view), no tighter: after a
       small resize in a fit mode a page a little wider or narrower than its
-      neighbours would else pass for the only one that fits. While no page
-      fits (Chrome has not told of a zoom yet) there is no doubt to look
-      into; the follower looks once the zoom is told. No page is taken
-      without a reading, however few are listed. In a second simulation (60
+      neighbours would else pass for the only one that fits. While Chrome has
+      not told of the zoom, a doubt is not looked into: the follower asks
+      for the zoom and looks once it is told. No page is taken without a
+      reading, however few are listed. In a second simulation (60
       sessions, 4,800 actions, jumps to any page added) every jump and
       every ArrowRight is doubted, and of the rest only what lands on a page
       top (0.07% of wheel turns, 0.3% of arrow steps, 0.7% of page keys);

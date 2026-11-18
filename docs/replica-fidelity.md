@@ -182,7 +182,11 @@ feature spelled with a backslash is left as it is and long conditions are
 not answered. `<noscript>` and what it
 holds are left out of the mirror, as a tab that runs scripts leaves them
 undrawn; in a tab whose scripts are switched off the page draws them and the
-mirror still leaves them out.
+mirror still leaves them out. A sheet of another origin that Chrome does not
+let the page read is the exception: the replica loads it itself, and the
+sheet answers its own `@media (scripting: …)` in the replica's scriptless
+frame, so it can apply a no-script layout the tab does not. No check on what
+travels can see inside such a sheet.
 
 For a browser a string that was not closed ends at a line break, and what
 follows is the sheet again. The passes that drop imports and read addresses
@@ -784,7 +788,10 @@ Both selectable policies continue to block:
 - navigation, form actions, automatic submission, and source-page mutation;
 - frames, objects, embeds, portals, webviews, and media playback;
 - request modifiers that add attribution, Topics, or Shared Storage side
-  effects, plus base-URL overrides that could externalize local SVG fragments;
+  effects; an element's own `referrerpolicy` (which controls the request's
+  referrer, so a mirrored element cannot name the extension's URL) and
+  `privatetoken`; and base-URL overrides that could externalize local SVG
+  fragments;
 - passwords, password/authentication autocomplete, one-time codes, WebAuthn,
   every `cc-*` autocomplete class, hidden inputs, file names and paths, and
   CSS text-security content regardless of the selected readable-content
@@ -889,6 +896,9 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
 - **Cross-origin CSSOM.** A stylesheet link may render while Chrome's same-origin
   rules prevent Simul from reading its rules. Passive Fidelity can retain the
   normalized link/import, but cannot flatten or inspect inaccessible CSSOM.
+  A dropdown that such a sheet may hide, or one that a sheet with more rules
+  than Simul reads may hide, is withheld when its panel opens, because the
+  mirror cannot prove the page would show it.
 - **Shorthands CSSOM cannot write back.** A rule in an adopted (constructed)
   or linked sheet whose `var()` shorthand Chrome reads back as empty longhands
   loses that shorthand in the replica; only a `<style>` element has its own
@@ -958,11 +968,13 @@ the same roots. A part that only indexes the page may still hold an older
   a closed root's slot list is read once a walk.
 - **Cost, and the rule for sending.** The call takes one to two
   microseconds, about a hundred times the property read, and the page is
-  walked many times. A root found is kept for good (a root is never detached
-  or replaced). "No root" is kept too, but nothing fires when a root is
-  attached, so nothing is sent for a node before every element between it
-  and the document has been asked about its root in the same read, or holds
-  a known one. A checkpoint asks about every element once. A patch asks
+  walked many times. A root found is kept for good (the same host never gets
+  another), and a root whose host leaves the page is let go and watched
+  again when the host comes back; one that never comes back is dropped. "No
+  root" is kept too, but nothing fires when a root is attached, so nothing
+  is sent for a node before every element between it and the document has
+  been asked about its root in the same read, or holds a known one. A
+  checkpoint asks about every element once. A patch asks
   about every element above each change and within each subtree it sends;
   the semantic channel asks above each node whose record is new or changed,
   and the image channel above an image before its alt text, measurements or

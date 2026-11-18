@@ -113,6 +113,94 @@ describe('PixelAcquisitionCoordinator', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('discards a crop when the image safety changed again at crop time (C6)', async () => {
+    const drawImage = vi.fn();
+    const measure = vi.fn()
+      .mockResolvedValueOnce(metrics)
+      .mockResolvedValueOnce(metrics)
+      .mockResolvedValueOnce(undefined);
+    const environment: PixelAcquisitionEnvironment = {
+      ...fakeEnvironment({ measure, dispose: vi.fn() }),
+      decode: async () => ({ width: 2_000, height: 1_000, close: vi.fn() }),
+      createSurface: (width, height) => ({
+        width,
+        height,
+        getContext: () => ({ drawImage }),
+        convertToBlob: async () => new Blob([new Uint8Array([1])], {
+          type: 'image/png',
+        }),
+      }),
+    };
+
+    await expect(new PixelAcquisitionCoordinator(environment).acquire(descriptor))
+      .resolves.toEqual({ status: 'deferred', reason: 'unstable' });
+    // The crop was made, then discarded: the page no longer admitted the
+    // image when the pixels were about to be handed over.
+    expect(drawImage).toHaveBeenCalledOnce();
+    expect(measure).toHaveBeenCalledTimes(3);
+  });
+
+  it('clamps the device-pixel crop inward instead of into a touching neighbour (C7)', async () => {
+    const fractional = {
+      ...metrics,
+      left: 10.25,
+      top: 20.25,
+    };
+    const drawImage = vi.fn();
+    const environment: PixelAcquisitionEnvironment = {
+      ...fakeEnvironment(fakeSource([fractional, fractional])),
+      decode: async () => ({ width: 2_000, height: 1_000, close: vi.fn() }),
+      createSurface: (width, height) => ({
+        width,
+        height,
+        getContext: () => ({ drawImage }),
+        convertToBlob: async () => new Blob([new Uint8Array([1])], {
+          type: 'image/png',
+        }),
+      }),
+    };
+
+    await expect(new PixelAcquisitionCoordinator(environment).acquire(descriptor))
+      .resolves.toMatchObject({ status: 'ready' });
+    // At 2x the visible rect is 20.5..420.5 x 40.5..240.5. Floor/ceil would
+    // pull in the half device pixel on each side, which can belong to a
+    // credential field the image exactly touches.
+    expect(drawImage).toHaveBeenCalledWith(
+      expect.anything(),
+      21,
+      41,
+      399,
+      199,
+      0,
+      0,
+      399,
+      199,
+    );
+  });
+
+  it('routes a sub-device-pixel visible rectangle to the retryable too-small path (C7)', async () => {
+    const narrow = {
+      ...metrics,
+      left: 0.2,
+      top: 10,
+      width: 0.2,
+      height: 100,
+    };
+    const createSurface = vi.fn();
+    const environment: PixelAcquisitionEnvironment = {
+      ...fakeEnvironment(fakeSource([narrow, narrow])),
+      decode: async () => ({ width: 1_000, height: 500, close: vi.fn() }),
+      createSurface,
+    };
+
+    // Inward rounding of 0.2..0.4 leaves no whole device pixel. That is a
+    // "too small right now" deferral, which a later observation can retry;
+    // settling it as oversized would lose the image for good.
+    await expect(new PixelAcquisitionCoordinator(environment).acquire(descriptor))
+      .resolves.toEqual({ status: 'deferred', reason: 'too-small-visible' });
+    expect(createSurface).not.toHaveBeenCalled();
+  });
+
   it('says how long before its pixels were handed over a screenshot was asked for', async () => {
     // The pixels show the tab as it was when the screenshot was asked for,
     // however long Chrome took to hand it over.
@@ -742,11 +830,13 @@ describe('PixelAcquisitionCoordinator', () => {
     });
     await vi.waitFor(() => expect(first).toBeDefined(), { timeout: 1_000 });
     expect(first).toMatchObject({ status: 'ready', pixels: { screenshotAgeMs: 0 } });
-    // The pixels are in hand, with both rectangles, and the lane is not free.
+    // The pixels are in hand, with the capture's two rectangles and the
+    // crop-time safety confirmation, and the lane is not free.
     expect(events).toEqual([
       'rectangle',
       'screenshot of window 3 at 1000',
       'lane held 550',
+      'rectangle',
       'rectangle',
     ]);
 
@@ -766,9 +856,11 @@ describe('PixelAcquisitionCoordinator', () => {
       'lane held 550',
       'rectangle',
       'rectangle',
+      'rectangle',
       'lane free',
       'screenshot of window 3 at 1550',
       'lane held 550',
+      'rectangle',
       'rectangle',
     ]);
     endDelays.shift()?.();
@@ -834,7 +926,9 @@ function fakeSource(
   values: Array<SourceImageCaptureMetrics | undefined>,
 ): ImageSourceLease {
   return {
-    measure: vi.fn(async () => values.shift()),
+    // The last value answers any further measure: the acquisition re-checks
+    // the same geometry at crop time (C6).
+    measure: vi.fn(async () => values.length > 1 ? values.shift() : values[0]),
     dispose: vi.fn(),
   };
 }

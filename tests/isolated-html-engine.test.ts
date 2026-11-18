@@ -32,6 +32,7 @@ import {
   pageAttribute,
   setReplicaAttributeOverride,
 } from '../lib/replica/replica-attribute-override';
+import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import {
   PAGE_LANGUAGE_ATTRIBUTE,
@@ -64,6 +65,7 @@ import {
 import {
   MAX_HTML_MIRROR_NODES,
   createHtmlMirrorRepresentabilityCollector,
+  sanitizeSourceDocument,
   type HtmlMirrorNode,
 } from '../lib/replica/html-mirror-sanitizer';
 import { applyHtmlMirrorLimitSettings } from '../lib/replica/html-mirror-limits';
@@ -1598,7 +1600,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       [{
         kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
         attributes: [], selectedOptionIndexes: [0],
-      }, {
+      } as unknown as HtmlMirrorPatchOperation, {
         kind: 'children', nodeId: 4, children: [{
           kind: 'element', id: 110, namespace: 'html', tagName: 'option',
           attributes: [], children: [],
@@ -2001,7 +2003,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
         kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'optgroup',
         attributes: [['label', 'Forged']],
         controlText: { kind: 'label', text: 'Forged', translatable: true },
-      }],
+      } as unknown as HtmlMirrorPatchOperation],
       undefined,
       'passive',
     );
@@ -2050,7 +2052,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
         kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'input',
         attributes: [['type', 'text']],
         controlText: { kind: 'value', text: 'must not apply', translatable: true },
-      }, {
+      } as unknown as HtmlMirrorPatchOperation, {
         kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'section',
         attributes: [['role', 'textbox']],
       }],
@@ -6354,6 +6356,987 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(plainRows()).toBe(3);
     plainAttributes(2, 45, 'optgroup', true);
     expect(plainRows()).toBe(2);
+  });
+});
+
+describe('isolated replica receiver invariants (R1, R3, R7)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  describe('receiver validation of a sheet held as text nodes (R1)', () => {
+    const styleText = (
+      id: number,
+      text: string,
+    ): HtmlMirrorNode => ({ kind: 'text', id, text, translatable: false });
+
+    function styleCheckpoint(
+      children: readonly HtmlMirrorNode[],
+      shadow = false,
+    ): HtmlMirrorCheckpoint {
+      const checkpoint = createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: {
+            kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+            attributes: [['lang', 'en']], children: [
+              {
+                kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+                attributes: [],
+                children: shadow ? [] : [{
+                  kind: 'element', id: 3, namespace: 'html', tagName: 'style',
+                  attributes: [], children,
+                }],
+              },
+              {
+                kind: 'element', id: 5, namespace: 'html', tagName: 'body',
+                attributes: [], children: shadow ? [{
+                  kind: 'element', id: 4, namespace: 'html', tagName: 'div',
+                  attributes: [], children: [],
+                  shadowRoot: {
+                    id: 8, mode: 'open', adoptedStyleSheets: [],
+                    children: [{
+                      kind: 'element', id: 9, namespace: 'html',
+                      tagName: 'style', attributes: [], children,
+                    }],
+                  },
+                }] : [],
+              },
+            ],
+          },
+          adoptedStyleSheets: [],
+          captureMs: 1,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1000,
+        },
+      );
+      if (!checkpoint) throw new Error('Style fixture checkpoint rejected.');
+      return checkpoint;
+    }
+
+    const split = (): HtmlMirrorNode[] => [
+      styleText(30, '@'),
+      styleText(31, 'import url("https://evil.example/t.css");'),
+    ];
+
+    it('refuses a checkpoint whose style text joins into an import', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint(split()));
+      const host = new FakePresentationHost();
+      await expect(makeEngine(stream, host).run(request)).resolves.toMatchObject({
+        status: 'failed',
+        diagnostics: { code: 'replay_failed' },
+      });
+      expect(host.iframe).toBeUndefined();
+      expect(host.releases).toHaveLength(0);
+    });
+
+    it('refuses the same split inside a shadow root', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint(split(), true));
+      const host = new FakePresentationHost();
+      await expect(makeEngine(stream, host).run(request)).resolves.toMatchObject({
+        status: 'failed',
+        diagnostics: { code: 'replay_failed' },
+      });
+      expect(host.iframe).toBeUndefined();
+    });
+
+    it('keeps a mirror for a split style captured by the conservative source (R9)', async () => {
+      const { document, window } = parseHTML(
+        '<!doctype html><html><head></head><body></body></html>',
+      );
+      const style = document.createElement('style');
+      style.append(
+        document.createTextNode('@'),
+        document.createTextNode(
+          'import url("https://evil.example/t.css");',
+        ),
+      );
+      document.head.append(style);
+      const graph = sanitizeSourceDocument(
+        document,
+        window as unknown as Window,
+        new WeakNodeIdRegistry(),
+        createHtmlMirrorRepresentabilityCollector(),
+        'conservative',
+      );
+      expect(graph).toBeDefined();
+      expect(JSON.stringify(graph!.root)).not.toContain('evil.example');
+      const checkpoint = createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: graph!.root,
+          adoptedStyleSheets: graph!.adoptedStyleSheets,
+          captureMs: 1,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1000,
+        },
+      );
+      expect(checkpoint).toBeDefined();
+      const stream = new FakeHtmlStream(checkpoint!);
+      const host = new FakePresentationHost();
+      await expect(
+        makeEngine(stream, host).run(request),
+      ).resolves.toMatchObject({ status: 'complete' });
+      const styleTexts = [...(host.iframe?.contentDocument?.querySelectorAll(
+        'style',
+      ) ?? [])].map((element) => element.textContent);
+      expect(styleTexts).toContain('');
+      expect(styleTexts.some((text) => text?.includes('evil.example'))).toBe(
+        false,
+      );
+    });
+
+    it('keeps a legitimate split sheet captured by the source (R9)', async () => {
+      const { document, window } = parseHTML(
+        '<!doctype html><html><head></head><body></body></html>',
+      );
+      const style = document.createElement('style');
+      style.append(
+        document.createTextNode('.a{color:red}'),
+        document.createTextNode('.b{color:blue}'),
+      );
+      document.head.append(style);
+      const graph = sanitizeSourceDocument(
+        document,
+        window as unknown as Window,
+        new WeakNodeIdRegistry(),
+        createHtmlMirrorRepresentabilityCollector(),
+        'conservative',
+      );
+      const checkpoint = createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: graph!.root,
+          adoptedStyleSheets: graph!.adoptedStyleSheets,
+          captureMs: 1,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1000,
+        },
+      );
+      const stream = new FakeHtmlStream(checkpoint!);
+      const host = new FakePresentationHost();
+      await expect(
+        makeEngine(stream, host).run(request),
+      ).resolves.toMatchObject({ status: 'complete' });
+      const styleTexts = [...(host.iframe?.contentDocument?.querySelectorAll(
+        'style',
+      ) ?? [])].map((element) => element.textContent);
+      expect(styleTexts).toContain('.a{color:red}.b{color:blue}');
+    });
+
+    it('still takes a style split into text nodes that joins to a valid sheet', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+        styleText(31, '.b{color:blue}'),
+      ]));
+      const host = new FakePresentationHost();
+      await expect(makeEngine(stream, host).run(request)).resolves.toMatchObject({
+        status: 'complete',
+      });
+      expect(host.iframe?.contentDocument?.head.textContent)
+        .toContain('.a{color:red}.b{color:blue}');
+    });
+
+    it('refuses a children patch that joins into an import', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{ kind: 'children', nodeId: 3, children: split() }],
+      )!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('.a{color:red}');
+    });
+
+    it('refuses a text patch that completes an import beside its sibling', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '@'),
+        styleText(31, ''),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text',
+          nodeId: 31,
+          node: {
+            kind: 'text', id: 31,
+            text: 'import url("https://evil.example/t.css");',
+            translatable: false,
+          },
+        }],
+      )!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('@');
+    });
+
+    it('refuses a batch whose two text ops join into an import (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+        styleText(31, '.b{color:blue}'),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [
+          {
+            kind: 'text',
+            nodeId: 30,
+            node: { kind: 'text', id: 30, text: '@', translatable: false },
+          },
+          {
+            kind: 'text',
+            nodeId: 31,
+            node: {
+              kind: 'text', id: 31,
+              text: 'import url("https://evil.example/t.css");',
+              translatable: false,
+            },
+          },
+        ],
+      )!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('.a{color:red}.b{color:blue}');
+    });
+
+    it('refuses a batch whose two text ops join into an expression (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+        styleText(31, '.b{color:blue}'),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [
+          {
+            kind: 'text',
+            nodeId: 30,
+            node: { kind: 'text', id: 30, text: 'express', translatable: false },
+          },
+          {
+            kind: 'text',
+            nodeId: 31,
+            node: {
+              kind: 'text', id: 31, text: 'ion(alert(1))',
+              translatable: false,
+            },
+          },
+        ],
+      )!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('.a{color:red}.b{color:blue}');
+    });
+
+    it('finds the owning style through an element nested inside it (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([{
+        kind: 'element',
+        id: 40,
+        namespace: 'html',
+        tagName: 'span',
+        attributes: [],
+        children: [styleText(41, '@'), styleText(42, '')],
+      }]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text',
+          nodeId: 42,
+          node: {
+            kind: 'text', id: 42,
+            text: 'import url("https://evil.example/t.css");',
+            translatable: false,
+          },
+        }],
+      )!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('@');
+    });
+
+    it('checks a multi-part frame after its later text part (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([styleText(30, '')]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      const first = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'reconcile-children', nodeId: 3, children: [
+            { kind: 'retain', nodeId: 30 },
+            {
+              kind: 'graph',
+              node: styleText(
+                31,
+                'import url("https://evil.example/t.css");',
+              ),
+            },
+          ],
+        }],
+      )!;
+      const second = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text',
+          nodeId: 30,
+          node: { kind: 'text', id: 30, text: '@', translatable: false },
+        }],
+      )!;
+      stream.observer?.onPatch(createHtmlMirrorPatchFrame([first, second])!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('');
+      expect(host.resolveNode?.(31)).toBeUndefined();
+    });
+
+    it('checks a text part on a node an earlier part created (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([styleText(30, '')]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      const first = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'children', nodeId: 3,
+          children: [
+            styleText(31, ''),
+            styleText(
+              32,
+              'import url("https://evil.example/t.css");',
+            ),
+          ],
+        }],
+      )!;
+      const second = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text',
+          nodeId: 31,
+          node: { kind: 'text', id: 31, text: '@', translatable: false },
+        }],
+      )!;
+      stream.observer?.onPatch(createHtmlMirrorPatchFrame([first, second])!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('');
+      expect(host.resolveNode?.(31)).toBeUndefined();
+      expect(host.resolveNode?.(32)).toBeUndefined();
+    });
+
+    it('commits a multi-part frame whose joined sheet is safe (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      const first = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'reconcile-children', nodeId: 3, children: [
+            { kind: 'retain', nodeId: 30 },
+            { kind: 'graph', node: styleText(31, '.b{color:blue}') },
+          ],
+        }],
+      )!;
+      const second = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text',
+          nodeId: 30,
+          node: {
+            kind: 'text', id: 30, text: '.c{color:green}',
+            translatable: false,
+          },
+        }],
+      )!;
+      stream.observer?.onPatch(createHtmlMirrorPatchFrame([first, second])!);
+      expect(stream.requested).toEqual([]);
+      expect(style.textContent).toBe('.c{color:green}.b{color:blue}');
+    });
+
+    it('checks a three-part frame whose first and last parts assemble an import (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([styleText(30, '')]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      // The source emits up to three turns; the import is assembled across
+      // the first and the last, with a benign part between.
+      const first = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'children', nodeId: 3,
+          children: [styleText(31, ''), styleText(32, '')],
+        }],
+      )!;
+      const second = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text', nodeId: 32,
+          node: {
+            kind: 'text', id: 32,
+            text: 'import url("https://evil.example/t.css");',
+            translatable: false,
+          },
+        }],
+      )!;
+      const third = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text', nodeId: 31,
+          node: { kind: 'text', id: 31, text: '@', translatable: false },
+        }],
+      )!;
+      stream.observer?.onPatch(createHtmlMirrorPatchFrame([first, second, third])!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('');
+      expect(host.resolveNode?.(31)).toBeUndefined();
+      expect(host.resolveNode?.(32)).toBeUndefined();
+    });
+
+    it('recovers a working mirror after a refused joined-import frame (R1)', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      const first = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'reconcile-children', nodeId: 3, children: [
+            { kind: 'retain', nodeId: 30 },
+            {
+              kind: 'graph',
+              node: styleText(
+                31,
+                'import url("https://evil.example/t.css");',
+              ),
+            },
+          ],
+        }],
+      )!;
+      const second = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text', nodeId: 30,
+          node: { kind: 'text', id: 30, text: '@', translatable: false },
+        }],
+      )!;
+      stream.observer?.onPatch(createHtmlMirrorPatchFrame([first, second])!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('.a{color:red}');
+
+      // The source answers with a checkpoint of sanitized text: the mirror
+      // is rebuilt from it and keeps working, not lost to a terminal failure.
+      stream.observer?.onCheckpoint(styleCheckpoint([
+        styleText(30, '.a{color:red}.b{color:blue}'),
+      ]));
+      await vi.waitFor(() => {
+        expect((host.resolveNode?.(3) as Element).textContent)
+          .toBe('.a{color:red}.b{color:blue}');
+      });
+      expect(stream.dispose).not.toHaveBeenCalled();
+      const after = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'text', nodeId: 30,
+          node: {
+            kind: 'text', id: 30, text: '.c{color:green}',
+            translatable: false,
+          },
+        }],
+      )!;
+      stream.observer?.onPatch(after);
+      await vi.waitFor(() => {
+        expect((host.resolveNode?.(3) as Element).textContent)
+          .toBe('.c{color:green}');
+      });
+    });
+
+    it('refuses a reconcile-children patch that joins into an import', async () => {
+      const stream = new FakeHtmlStream(styleCheckpoint([
+        styleText(30, '.a{color:red}'),
+      ]));
+      const host = new FakePresentationHost();
+      await makeEngine(stream, host).run(request);
+      const style = host.resolveNode?.(3) as Element;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'reconcile-children', nodeId: 3, children: [
+            { kind: 'graph', node: styleText(31, '@') },
+            {
+              kind: 'graph',
+              node: styleText(
+                32,
+                'import url("https://evil.example/t.css");',
+              ),
+            },
+          ],
+        }],
+      )!);
+      expect(stream.requested).toEqual([0]);
+      expect(style.textContent).toBe('.a{color:red}');
+    });
+  });
+
+  it('refuses a recovery checkpoint older than the committed mirror (R7)', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('before', 0));
+    const host = new FakePresentationHost();
+    await makeEngine(stream, host).run(request);
+    const body = host.iframe!.contentDocument!.body;
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'text', nodeId: 4,
+        node: { kind: 'text', id: 4, text: 'after', translatable: true },
+      }],
+    )!);
+    expect(body.textContent).toBe('after');
+    // A patch from the future asks for a checkpoint; the source then answers
+    // with one from before the mirror's committed sequence.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 3 }),
+      3,
+      3,
+      [{
+        kind: 'text', nodeId: 4,
+        node: { kind: 'text', id: 4, text: 'future', translatable: true },
+      }],
+    )!);
+    expect(stream.requested).toEqual([1]);
+    stream.observer?.onCheckpoint(makeCheckpoint('stale checkpoint', 0));
+    await vi.waitFor(() => expect(stream.dispose).toHaveBeenCalled());
+    expect(body.textContent).toBe('after');
+  });
+});
+
+describe('isolated replica host bookkeeping (R3)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  const textNode = (
+    id: number,
+    value: string,
+  ): Extract<HtmlMirrorNode, { kind: 'text' }> => ({
+    kind: 'text', id, text: value, translatable: true,
+  });
+  const elementNode = (
+    id: number,
+    tagName: string,
+    attributes: readonly (readonly [string, string])[],
+    children: readonly HtmlMirrorNode[] = [],
+  ): Extract<HtmlMirrorNode, { kind: 'element' }> => ({
+    kind: 'element', id, namespace: 'html', tagName, attributes, children,
+  });
+
+  /** Two dropdowns far apart, a target paragraph, and many id'd blocks. */
+  function hostsCheckpoint(): HtmlMirrorCheckpoint {
+    const blocks = Array.from({ length: 16 }, (_, index) =>
+      elementNode(100 + index * 2, 'div', [['id', `block-${index}`]]));
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], [
+            elementNode(4, 'div', [['id', 'left']], [
+              elementNode(5, 'select', [], [elementNode(6, 'option', [])]),
+            ]),
+            elementNode(8, 'div', [['id', 'right']], [
+              elementNode(9, 'select', [], [elementNode(10, 'option', [])]),
+            ]),
+            elementNode(12, 'p', [], [textNode(13, 'target')]),
+            ...blocks,
+          ]),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    );
+    if (!checkpoint) throw new Error('Host fixture checkpoint rejected.');
+    return checkpoint;
+  }
+
+  it('redraws only the select a patch can have changed (R3)', async () => {
+    const stream = new FakeHtmlStream(hostsCheckpoint());
+    const host = new FakePresentationHost();
+    await makeEngine(stream, host).run(request);
+    const selectA = host.resolveNode?.(5) as HTMLSelectElement;
+    const selectB = host.resolveNode?.(9) as HTMLSelectElement;
+    const hostA = (selectA.getRootNode() as ShadowRoot).host as HTMLElement;
+    const hostB = (selectB.getRootNode() as ShadowRoot).host as HTMLElement;
+    expect(hostA.getAttribute('data-simul-select-presentation')).toBe('popup');
+    expect(hostB.getAttribute('data-simul-select-presentation')).toBe('popup');
+
+    const spy = vi.spyOn(Element.prototype, 'getAttribute');
+    const contentReads = (select: Element): number => spy.mock.calls.filter(
+      ([name], index) =>
+        name === 'data-simul-source-selection-state' &&
+        spy.mock.contexts[index] === select,
+    ).length;
+    try {
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'children', nodeId: 5, children: [
+            elementNode(15, 'option', []),
+            elementNode(6, 'option', []),
+          ],
+        }],
+      )!);
+      expect(contentReads(selectA)).toBeGreaterThan(0);
+      expect(contentReads(selectB)).toBe(0);
+      const rows = (select: HTMLSelectElement): number =>
+        (select.getRootNode() as ShadowRoot).querySelectorAll(
+          '[data-simul-owned-select-option="v1"]',
+        ).length;
+      expect(rows(selectA)).toBe(2);
+      expect(rows(selectB)).toBe(1);
+      expect(hostA.getAttribute('data-simul-select-presentation')).toBe('popup');
+      expect(hostB.getAttribute('data-simul-select-presentation')).toBe('popup');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('reads no ids across the page for a structural patch (R3)', async () => {
+    const stream = new FakeHtmlStream(hostsCheckpoint());
+    const host = new FakePresentationHost();
+    await makeEngine(stream, host).run(request);
+    const block = host.resolveNode?.(100) as Element;
+    const paragraph = host.resolveNode?.(12) as Element;
+
+    const spy = vi.spyOn(Element.prototype, 'getAttribute');
+    const idReads = (element: Element): number => spy.mock.calls.filter(
+      ([name], index) =>
+        name === 'id' && spy.mock.contexts[index] === element,
+    ).length;
+    try {
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [{
+          kind: 'children', nodeId: 12,
+          children: [textNode(14, 'changed')],
+        }],
+      )!);
+      expect(paragraph.textContent).toBe('changed');
+      expect(idReads(block)).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('agrees with a full disclosure pass after an indexed refresh (R3)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], [
+            elementNode(4, 'button', [['role', 'button']], [textNode(5, 'Menu')]),
+            elementNode(6, 'div', [['role', 'menu']], [
+              elementNode(7, 'div', [['role', 'menuitem']], [textNode(8, 'Item')]),
+            ]),
+            elementNode(9, 'div', [['id', 'probe']]),
+            elementNode(10, 'select', [], [elementNode(11, 'option', [])]),
+          ]),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const replica = host.iframe!.contentDocument!;
+    expect(semantic.emit(createSemanticSourceBatch(
+      engine.snapshot()!.document,
+      'read-v1-111111',
+      1,
+      [],
+      [{
+        kind: 'disclosure-state', bridge: 'isolated-html',
+        relationId: 'semantic-relation-v1:4:6', revision: 1,
+        gate: 'disclosureContent', triggerNodeId: 4, panelNodeId: 6,
+        popupRole: 'menu', expanded: false, classifierVersion: 1,
+      }],
+    ))).toBe(true);
+    const trigger = replica.querySelector('button')!;
+    expect(trigger.getAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe('v1');
+
+    const markers = (): string => JSON.stringify(
+      [...replica.querySelectorAll('*')].flatMap((element) =>
+        [
+          'data-simul-replica-disclosure-trigger',
+          'data-simul-replica-disclosure-panel',
+          'data-simul-replica-disclosure-open',
+          'data-simul-select-presentation',
+        ].flatMap((name) => {
+          const value = element.getAttribute(name);
+          return value === null ? [] : [[element.localName, element.id, name, value]];
+        })),
+    );
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children', nodeId: 3, children: [
+          { kind: 'retain', nodeId: 4 },
+          { kind: 'retain', nodeId: 6 },
+          { kind: 'retain', nodeId: 9 },
+          { kind: 'retain', nodeId: 10 },
+          {
+            kind: 'graph',
+            node: elementNode(20, 'div', [], [textNode(21, 'added')]),
+          },
+        ],
+      }],
+    )!);
+    trigger.dispatchEvent(new replica.defaultView!.Event('click', {
+      bubbles: true, cancelable: true, composed: true,
+    }));
+    expect(trigger.getAttribute('data-simul-replica-disclosure-open')).toBe('v1');
+    const incremental = markers();
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'attributes', nodeId: 9, namespace: 'html', tagName: 'div',
+        attributes: [['id', 'probe-renamed']],
+      }],
+    )!);
+    expect(markers()).toBe(incremental);
+    expect(trigger.getAttribute('data-simul-replica-disclosure-open')).toBe('v1');
+  });
+
+  it('drops a disclosure when a patch removes the panel id (R3)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], [
+            elementNode(4, 'button', [['role', 'button']], [textNode(5, 'Menu')]),
+            elementNode(6, 'div', [['role', 'menu'], ['id', 'panel-6']], [
+              elementNode(7, 'div', [['role', 'menuitem']], [textNode(8, 'Item')]),
+            ]),
+            elementNode(9, 'div', [['id', 'probe']]),
+          ]),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    await makeEngine(stream, host).run(request);
+    const replica = host.iframe!.contentDocument!;
+    const trigger = replica.querySelector('button')!;
+    const panel = replica.querySelector('[role="menu"]')!;
+    // The semantic transport is the only legitimate writer of
+    // `aria-controls`; set the same state a presented disclosure leaves, so
+    // the index hook can be read on its own.
+    trigger.setAttribute('aria-controls', 'panel-6');
+    trigger.setAttribute('aria-haspopup', 'menu');
+
+    // A new id marks the index dirty and rebuilds it with the new binding.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 9, namespace: 'html', tagName: 'div',
+        attributes: [['id', 'probe-renamed']],
+      }],
+    )!);
+    expect(trigger.getAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe('v1');
+    expect(panel.getAttribute('data-simul-replica-disclosure-panel'))
+      .toBe('v1');
+
+    // The patch keeps the panel's menu role but removes its id; no attribute
+    // in the new list is an indexed name, so only the old list can say the
+    // index is stale.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'div',
+        attributes: [['role', 'menu']],
+      }],
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(panel.hasAttribute('id')).toBe(false);
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe(false);
+    expect(panel.hasAttribute('data-simul-replica-disclosure-panel'))
+      .toBe(false);
+  });
+
+  it('installs one disclosure when two triggers claim one panel (R3)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], [
+            elementNode(4, 'button', [['role', 'button']], [textNode(5, 'One')]),
+            elementNode(13, 'button', [['role', 'button']], [textNode(14, 'Two')]),
+            elementNode(6, 'div', [['role', 'listbox'], ['id', 'shared-panel']], [
+              elementNode(7, 'div', [['role', 'option']], [textNode(8, 'Opt')]),
+            ]),
+            elementNode(9, 'div', [['id', 'probe']]),
+            elementNode(15, 'div', []),
+          ]),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    await makeEngine(stream, host).run(request);
+    const replica = host.iframe!.contentDocument!;
+    const buttons = [...replica.querySelectorAll('button')];
+    const one = buttons[0]!;
+    const two = buttons[1]!;
+    // The transport derives one relation id per trigger/panel pair, so two
+    // valid disclosure proofs cannot name one panel; this pins the defensive
+    // pass that decides a state written outside that transport.
+    one!.setAttribute('aria-controls', 'shared-panel');
+    one!.setAttribute('aria-haspopup', 'listbox');
+    two!.setAttribute('aria-controls', 'shared-panel');
+    two!.setAttribute('aria-haspopup', 'listbox');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 9, namespace: 'html', tagName: 'div',
+        attributes: [['id', 'probe-renamed']],
+      }],
+    )!);
+    expect([...replica.querySelectorAll('button')].filter((element) =>
+      element.hasAttribute('data-simul-replica-disclosure-trigger')))
+      .toHaveLength(1);
+
+    // Move the trigger the registry saw first behind the other one. An
+    // attribute that is not indexed refreshes disclosures without rebuilding
+    // the index, so the indexed pass and the ordered pass now disagree; the
+    // ordered pass must decide, and it walks the page's children in reverse.
+    replica.body.append(one!);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'attributes', nodeId: 15, namespace: 'html', tagName: 'div',
+        attributes: [['title', 'refreshed']],
+      }],
+    )!);
+    expect(one!.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(
+      true,
+    );
+    expect(two!.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(
+      false,
+    );
   });
 });
 

@@ -134,6 +134,12 @@ implements OffscreenOcrProviderRunner {
     if (this.#detector && this.#language === language) return this.#detector;
     const api = this.#getApi();
     if (!api) throw new ProviderUnavailableError();
+    // Only an installed model may reach create(): `downloadable` and
+    // `downloading` would start a platform model download, which the project
+    // rules out. The evidence judge enforces the same ruling (C4).
+    if (api.create && !api.availability) {
+      throw new ProviderUnavailableError();
+    }
     if (api.availability) {
       let availability: TextDetectorAvailability;
       try {
@@ -143,11 +149,7 @@ implements OffscreenOcrProviderRunner {
       }
       signal.throwIfAborted();
       if (availability === 'unavailable') throw new UnsupportedLanguageError();
-      if (![
-        'available',
-        'downloadable',
-        'downloading',
-      ].includes(availability)) throw new ProviderUnavailableError();
+      if (availability !== 'available') throw new ProviderUnavailableError();
     }
     let detector: TextDetectorInstance;
     try {

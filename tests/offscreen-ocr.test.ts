@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { isTrustedOffscreenMessageSender } from '../lib/ocr/offscreen-message-sender';
+
 import {
   ImageRecognitionCoordinator,
   RECOGNITION_CACHE_REGION_OVERHEAD,
@@ -67,6 +69,60 @@ const pixels: AcquiredImagePixels = {
 };
 
 describe('offscreen OCR protocol and lifecycle', () => {
+  it('trusts extension pages, including the tab-hosted popout, and rejects content-script senders (C9)', () => {
+    const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
+    // An extension page (side panel, offscreen document).
+    expect(isTrustedOffscreenMessageSender({ id: extensionId }, extensionId))
+      .toBe(true);
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      url: `chrome-extension://${extensionId}/sidepanel.html`,
+    }, extensionId)).toBe(true);
+    // The popout is a tab-hosted extension page: Chromium reports a tab for
+    // it, and its extension URL is what proves it is an extension page.
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      tab: { windowId: 4, tabId: 9 },
+      url: `chrome-extension://${extensionId}/sidepanel.html?sourceTabId=9&sourceWindowId=4`,
+    }, extensionId)).toBe(true);
+    // The background service worker has no tab and may have no url.
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      tab: undefined,
+    }, extensionId)).toBe(true);
+    // Any content-script or page frame carries a tab and the page's URL.
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      tab: { windowId: 1 },
+      url: 'https://example.test/',
+    }, extensionId)).toBe(false);
+    // A tab-hosted sender that reports no URL cannot prove it is an
+    // extension page, so the missing URL is not a free pass.
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      tab: { windowId: 1 },
+    }, extensionId)).toBe(false);
+    // A different extension, or no sender identity at all.
+    expect(isTrustedOffscreenMessageSender({ id: 'other-extension' }, extensionId))
+      .toBe(false);
+    expect(isTrustedOffscreenMessageSender({}, extensionId)).toBe(false);
+    expect(isTrustedOffscreenMessageSender({ id: extensionId }, '')).toBe(false);
+    // A claimed extension URL must belong to this extension.
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      url: 'chrome-extension://other-id/sidepanel.html',
+    }, extensionId)).toBe(false);
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      tab: { windowId: 1 },
+      url: 'chrome-extension://other-id/sidepanel.html',
+    }, extensionId)).toBe(false);
+    expect(isTrustedOffscreenMessageSender({
+      id: extensionId,
+      url: 'https://example.test/',
+    }, extensionId)).toBe(false);
+  });
+
   it('requires a bounded reset epoch on host creation requests', () => {
     expect(readEnsureOcrHostCommand({
       kind: 'simul:ocr-v1:ensure-host',

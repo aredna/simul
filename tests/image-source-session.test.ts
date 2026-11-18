@@ -1058,6 +1058,7 @@ describe('image source capture safety', () => {
     );
     const image = document.querySelector<HTMLImageElement>('#image')!;
     setImageFacts(image);
+    installHitTest(document as unknown as Document, image);
     const identity: ReplicaSourceDocumentIdentity = {
       sessionId: 'control-image-session',
       pageEpoch: 1,
@@ -1160,6 +1161,7 @@ describe('image source capture safety', () => {
     const image = document.querySelector<HTMLImageElement>('#image')!;
     const navigation = document.querySelector('#navigation')!;
     setImageFacts(image);
+    installHitTest(document as unknown as Document, image);
     const identity: ReplicaSourceDocumentIdentity = {
       sessionId: 'public-navigation-session',
       pageEpoch: 1,
@@ -1287,6 +1289,7 @@ describe('image source capture safety', () => {
     );
     const image = document.querySelector<HTMLImageElement>('#image')!;
     setImageFacts(image);
+    installHitTest(document as unknown as Document, image);
     const identity: ReplicaSourceDocumentIdentity = {
       sessionId: 'pinch-session',
       pageEpoch: 1,
@@ -1373,6 +1376,7 @@ describe('image source capture safety', () => {
     );
     const image = document.querySelector<HTMLImageElement>('#image')!;
     setImageFacts(image);
+    installHitTest(document as unknown as Document, image);
     const identity: ReplicaSourceDocumentIdentity = {
       sessionId: 'pinch-end-session',
       pageEpoch: 1,
@@ -1591,6 +1595,7 @@ describe('image source capture safety', () => {
     );
     const image = document.querySelector<HTMLImageElement>('#image')!;
     setImageFacts(image);
+    installHitTest(document as unknown as Document, image);
     const picture = { content: 'normal' };
     const style = (element: Element) => ({
       ...baseStyle,
@@ -1729,16 +1734,21 @@ describe('image source capture safety', () => {
     measure('offered', offered);
     expect(answers('offered')).toMatchObject([{ status: 'ready' }]);
 
-    // No more than 32 rectangles wait at once: one more is answered as it
-    // would have been before.
+    // No more than 32 rectangles wait at once. One more is held pending, not
+    // answered with pre-paint geometry and not dropped as stale: on a static
+    // page a deferred job only becomes eligible on a later observation, so a
+    // stale answer here lost the image for good (C11).
     const many = swap('url("https://cdn.example.test/many.png")');
     for (let index = 0; index < 33; index += 1) measure(`many-${index}`, many);
     expect(answers('many-31')).toEqual([]);
-    expect(answers('many-32')).toMatchObject([{ status: 'ready' }]);
+    expect(answers('many-32')).toEqual([]);
     frames.frame();
     frames.frame();
     expect(answers('many-0')).toMatchObject([{ status: 'ready' }]);
     expect(answers('many-31')).toMatchObject([{ status: 'ready' }]);
+    // The overflowed request is measured and eligible to be read as soon as
+    // the picture paints, with no further page mutation.
+    expect(answers('many-32')).toMatchObject([{ status: 'ready' }]);
 
     // With the session, what waits goes: no answer, and no timer left.
     const last = swap('url("https://cdn.example.test/dark.png")');
@@ -2069,6 +2079,7 @@ describe('image source capture safety', () => {
     const publicControl = document.querySelector('#public')!;
     const button = document.querySelector('#button')!;
     const imageRect = rect(10, 10, 200, 100);
+    installHitTest(document as unknown as Document, image);
     Object.defineProperty(image, 'getBoundingClientRect', {
       value: () => imageRect,
     });
@@ -2177,6 +2188,7 @@ describe('image source capture safety', () => {
     const sourceWindow = {
       getComputedStyle: () => baseStyle,
     } as unknown as Window;
+    installHitTest(document as unknown as Document, image);
 
     // Only credential-secret overlaps block capture; a public link or button
     // is ordinary page text. Its painted label is handled by the text-cover
@@ -2535,14 +2547,61 @@ describe('foreign text cover detection', () => {
     expect(safe()).toBe(false);
   });
 
+  it('finds text nested a few levels inside the covering element (C8)', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<img id="image">' +
+      '<header id="bar"><div><div><span>Sign in</span></div></div></header>',
+    );
+    hitTest(() => document.querySelector('#bar'));
+    expect(safe()).toBe(false);
+  });
+
+  it('blocks a secret overlap and a foreign text cover together (C8)', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<img id="image"><input id="secret" type="password">' +
+      '<div id="caption">Sale ends Friday</div>',
+    );
+    const caption = document.querySelector('#caption')!;
+    const secret = document.querySelector('#secret')!;
+    Object.defineProperty(secret, 'getBoundingClientRect', {
+      value: () => rect(50, 30, 120, 20),
+    });
+    // The hit test names a real covering element here, so the cover check is
+    // not a no-op; the credential-overlap scan runs on the same document.
+    hitTest(() => caption);
+    expect(safe()).toBe(false);
+
+    caption.remove();
+    hitTest(() => secret);
+    expect(safe()).toBe(false);
+
+    // Remove the credential control too: the same document becomes capturable,
+    // so both checks were active rather than one masking the other.
+    secret.remove();
+    hitTest(() => null);
+    expect(safe()).toBe(true);
+  });
+
+  it('samples the edge midpoints, not only the centre and corners (C8)', () => {
+    const { document, image, safe, hitTest } = geometryFixture(
+      '<img id="image"><div id="caption">Sale ends Friday</div>',
+    );
+    const caption = document.querySelector('#caption')!;
+    // A thin caption along the top edge sits between the old corner samples.
+    hitTest((_x, y) => y < 25 ? caption : image);
+    expect(safe()).toBe(false);
+  });
+
   it('ignores transparent overlays and wrappers without text', () => {
     const { document, safe, hitTest } = geometryFixture(
       '<a id="link" href="/x"><span id="empty"></span></a>' +
-      '<div id="layout"><div><p>Deep layout text</p></div></div><img id="image">',
+      '<div id="layout"><div><div><div>' +
+      '<p>Deep layout text</p>' +
+      '</div></div></div></div><img id="image">',
     );
     hitTest(() => document.querySelector('#link'));
     expect(safe()).toBe(true);
-    // Text two levels down is layout structure, not a text cover.
+    // Text beyond the bounded own-text walk is layout structure, not a cover.
     hitTest(() => document.querySelector('#layout'));
     expect(safe()).toBe(true);
   });
@@ -2629,9 +2688,12 @@ describe('foreign text cover detection', () => {
     expect(safe()).toBe(false);
   });
 
-  it('skips the heuristic on documents without a hit test', () => {
-    const { safe } = geometryFixture('<img id="image"><div>Nearby text</div>');
-    expect(safe()).toBe(true);
+  it('fails closed on documents without a hit test', () => {
+    const { document, safe } = geometryFixture('<img id="image"><div>Nearby text</div>');
+    // The document cannot prove that no foreign text covers the image, so the
+    // capture is deferred instead of assumed safe (C8).
+    expect(typeof document.elementFromPoint).not.toBe('function');
+    expect(safe()).toBe(false);
   });
 });
 
@@ -2657,6 +2719,18 @@ function setImageFacts(image: HTMLImageElement): void {
       configurable: true,
       value: () => rect(0, 0, 200, 100),
     },
+  });
+}
+
+/**
+ * linkedom has no document-level hit test. Install one that answers with the
+ * image itself, which is how a document with no text overlay behaves now that
+ * the cover check fails closed without a hit test (C8).
+ */
+function installHitTest(document: Document, top: Element | null = null): void {
+  Object.defineProperty(document, 'elementFromPoint', {
+    configurable: true,
+    value: () => top,
   });
 }
 

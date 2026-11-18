@@ -252,6 +252,18 @@ describe('ChromeTranslatorProvider', () => {
     expect(created).toHaveLength(1);
   });
 
+  it('destroys the created session when a listener throws (O4)', async () => {
+    const destroy = vi.fn();
+    const provider = new ChromeTranslatorProvider(createApi({
+      create: vi.fn().mockResolvedValue({ translate: vi.fn(), destroy }),
+    }));
+    const failure = new Error('listener failed');
+    provider.onSessionCreated(() => { throw failure; });
+
+    await expect(provider.createSession(pair)).rejects.toBe(failure);
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it('keeps other creation failures on the generic code', async () => {
     const provider = new ChromeTranslatorProvider(
       createApi({

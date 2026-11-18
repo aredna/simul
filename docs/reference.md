@@ -196,14 +196,14 @@ on a page once it is drawn.
     is taken to be at its start (the top, or the address's `#page=N`), and
     with following on the panel opens there too.
   - Reading the toolbar: once the viewer has been still for a third of a
-    second after such a move, Simul takes one picture of the tab, keeps
-    only the page number and the page count that Chrome's toolbar shows
-    ("12 / 300"), reads them on your computer with Tesseract.js, and moves
-    the panel to that page. In a small window that takes about a twentieth
-    of a second; on a large high-density screen a quarter of a second or
-    more, because Chrome hands over a picture of the whole tab. If you have
-    scrolled the panel yourself since the guess, it stays where you put it
-    and follows from the right page from then on.
+    second after such a move, and Simul knows the tab's zoom, it takes one
+    picture of the tab, keeps only the page number and the page count that
+    Chrome's toolbar shows ("12 / 300"), reads them on your computer with
+    Tesseract.js, and moves the panel to that page. In a small window that
+    takes about a twentieth of a second; on a large high-density screen a
+    quarter of a second or more, because Chrome hands over a picture of the
+    whole tab. If you have scrolled the panel yourself since the guess, it stays
+    where you put it and follows from the right page from then on.
   - The number is taken only when everything fits: the toolbar is where the
     viewer says its view begins, the count beside the number is this PDF's
     own page count, the number has as many digits as the box holds, two
@@ -244,10 +244,13 @@ on a page once it is drawn.
   - Pressing a key where the viewer cannot go on (Page Down at the end of
     the PDF) takes no picture. Two such presses within a tenth of a second
     right after the press that reached the end can take one.
-  - Simul needs the tab's zoom to tell which pages a place fits. Chrome
-    tells of it as it changes; when what the viewer reports fits no page at
-    the zoom Simul was told, it asks Chrome for the tab's zoom once the
-    viewer is still. That asks nothing of the page and takes no picture.
+  - Simul needs the tab's zoom to tell which pages a place fits, and a view
+    turned a quarter cannot be told from an upright one without it. While
+    the zoom is unknown, Simul does not look into a place it is unsure of:
+    it asks Chrome for the tab's zoom once the viewer is still, and looks
+    once it has it. Chrome tells of the zoom as it changes, and when what
+    the viewer reports fits no page at the zoom Simul was told, it asks
+    again. Asking asks nothing of the page and takes no picture.
   - While Simul is reading scanned pages, a look may wait its turn.
   - Setting the viewer's zoom to what it already is, or switching it to fit
     to page, at the top of a page looks the same as ArrowRight; the panel
@@ -279,8 +282,9 @@ on a page once it is drawn.
   up to 50,000 paragraphs or about 8 million characters waiting at once
   (upwards of a thousand pages); past that the status says the translation
   is partial.
-  On the test computer, reading the text of 3,000 pages took 1.3 seconds and
-  of 10,000 pages 5.4 seconds.
+  Text-only pages are released after their text is read, and the document is
+  swept every 32 pages. On the test computer, reading the text of 3,000
+  pages took 1.3 seconds and of 10,000 pages 5.4 seconds.
 - If you come back to a PDF, or rebuild it, it opens where you left it.
 - Simul opens PDFs of up to 128 MB. A download that stalls for 60 seconds
   fails; a slow one that keeps going does not.
@@ -311,7 +315,8 @@ translates the page text of the mirrored page, and for images Simul:
    (`content: url()` of another picture, or an `object-view-box` that shows
    a part of the file) is read from the screen only: its file is not what it
    shows. Each crop is reduced to at most 4 megapixels;
-4. tries Chrome TextDetector when the installed platform exposes it, then the
+4. tries Chrome TextDetector only when the platform already has the model
+   installed (a model Chrome could download counts as unavailable), then the
    packaged Tesseract.js 7.0.0 fallback according to the saved method order;
 5. rejects blank, punctuation-only, and insufficient-confidence results, and
    when alt text and OCR text are too close to call, lets Gemini Nano (or
@@ -332,8 +337,10 @@ instead; see [PDFs](#pdfs)), hidden images, or
 credential-overlapping pixels, and text a page draws over an off-screen image
 is not part of its file. A public text field, button, or link that
 overlaps an image does not block capture; only password and other credential
-fields do, and capture waits while text from another element covers the
-image. See
+fields do, wherever they sit over the image. Text from another element over
+the image holds the capture back when the look finds it, but the look
+samples a few fixed points on the image, so a thin caption between them can
+still be read. See
 [Image text translation](image-translation-research.md) for the detailed
 boundary.
 
@@ -375,12 +382,15 @@ when a component attaches a new root to an element that is already on the
 page. Simul asks about it when a person clicks, types or moves the focus
 inside it, before the page's own handlers on the component run, and, while
 the panel is open, when anything changes there and in turn with the rest of
-the page. A password field in such a root that the page shows in clear
-before Simul has asked, with no input from a person inside the component
-(the page fills it after a click elsewhere, or handles every click and key
-for the whole window before Simul sees them), is read as the plain text
-field it then is, as a field shown in clear before Simul was first opened
-would be. Other extensions often draw their own parts of a page inside closed roots (a password manager's
+the page. A root found that way is used from then on, and the page is read
+again at that point, so text Simul had already sent as public is corrected
+rather than waiting for another change. Until a reader finds the root,
+nothing knows it is there. A password field in such a root that the page
+shows in clear before Simul has asked, with no input from a person inside
+the component (the page fills it after a click elsewhere, or handles every
+click and key for the whole window before Simul sees them), is read as the
+plain text field it then is, as a field shown in clear before Simul was
+first opened would be. Other extensions often draw their own parts of a page inside closed roots (a password manager's
 suggestion list, a grammar checker's bubble): while the tab shows them, the
 mirror shows them too. The insides of the browser's own
 controls (a text field's editor, a video's buttons) are not read.
@@ -417,7 +427,11 @@ copy is reused while it is fresh. The site's cookies go along, as they did for
 the tab. Simul requests nothing else for a PDF. Scanned pages are read on
 the computer, by the same local OCR as images: as for an image, each page's
 drawing goes to the local OCR host through extension-origin temporary
-storage, kept at most two minutes, and the recognized text stays in memory.
+storage, and the recognized text stays in memory. A crop is refused after
+two minutes; an expired one is deleted by the OCR host's sweep every 30
+seconds while a host lives, by the service worker when it starts, or by a
+new host when it is built. A browser restart that never starts the service
+worker is not covered.
 
 Diagnostics contain bounded stages, dimensions, and counts. They do not log
 page text, recognized text, URLs, pixels, hashes, DOM IDs, or attribute values.
@@ -457,7 +471,11 @@ Simul is a safe reconstruction, not a browser clone. Current limitations
 include script-only custom-element state, virtualized DOM that the page has
 not created, inaccessible cross-origin CSSOM, generated pseudo-element text,
 canvas/video pixels, protected media, active embedded documents, and
-cross-origin frame contents. Exact pixel parity is not claimed.
+cross-origin frame contents. A dropdown that an unreadable stylesheet
+(another origin without CORS) may hide, or one that a sheet with more rules
+than Simul reads may hide, is withheld when its panel opens: Simul does not
+show what it cannot prove the page would show. Exact pixel parity is not
+claimed.
 
 See [Replica fidelity](replica-fidelity.md) and the
 [translation companion architecture](translation-companion.md) for the
@@ -508,13 +526,14 @@ Useful commands:
 | `npm run artifact:sync` | Validate and refresh `dist/chrome-unpacked/`. |
 | `npm run artifact:check` | Rebuild, validate, and byte-compare the checked-in artifact. |
 | `npm run typecheck` | Type-check source and tests. |
-| `npm test` | Run the Vitest suite once. |
+| `npm test` | Run the Vitest suite once on Node 24. |
 | `npm run check` | Run typechecking, all tests, and the artifact check. |
 | `npm run zip` | Create WXT's Chrome distribution archive. |
 
 Do not edit `dist/chrome-unpacked` by hand. Change source, run
 `npm run artifact:sync`, then run `npm run check`. `npm run check` is the
-required handoff gate.
+required handoff gate. The test suite needs Node 24: the vendored pdf.js uses
+`Promise.try`, and a run on another major stops at startup with a message.
 
 Runtime entrypoints live under `entrypoints/`; browser-independent logic lives
 under `lib/`; tests live under `tests/`; and durable project knowledge lives

@@ -58,6 +58,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   #workerToken: symbol | undefined;
   #workerLossController: AbortController | undefined;
   #idleTimer: ReturnType<typeof setTimeout> | undefined;
+  #activeRecognitions = 0;
   #disposed = false;
 
   constructor(environment: TesseractRunnerEnvironment = {}) {
@@ -93,6 +94,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     }
     signal.throwIfAborted();
     this.#cancelIdleTimer();
+    this.#activeRecognitions += 1;
     try {
       // Worker bootstrap (core fetch, WASM compile, traineddata gunzip) has
       // its own deadline so a slow first start is not charged against the
@@ -129,6 +131,8 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
       if (signal.aborted) throw error;
       if (error instanceof WorkerLostError) throw error;
       throw new WorkerLostError();
+    } finally {
+      this.#activeRecognitions -= 1;
     }
   }
 
@@ -153,45 +157,28 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     job: OffscreenOcrJob,
     encoded: Blob,
   ): Promise<ImageTextResult> {
+    // Page segmentation is job-scoped: a cancelled banner job can still be
+    // draining SINGLE_LINE in the worker when the next job dispatches, so
+    // every recognition sets its own mode before it runs instead of
+    // inheriting whatever the previous job left behind (C1).
     const useSingleLine = isTesseractBannerPreprocessingVersion(
       job.preprocessingVersion,
     );
-    if (useSingleLine) {
-      await this.#setPageSegmentation(
-        acquired,
-        Tesseract.PSM.SINGLE_LINE,
-        job.jobId,
-      );
-    }
+    await this.#setPageSegmentation(
+      acquired,
+      useSingleLine ? Tesseract.PSM.SINGLE_LINE : Tesseract.PSM.SINGLE_BLOCK,
+      job.jobId,
+    );
     let recognition: Awaited<ReturnType<TesseractWorker['recognize']>>;
-    try {
-      recognition = await raceWorkerLoss(
-        Promise.resolve().then(() => acquired.worker.recognize(
-          encoded,
-          {},
-          { text: true, blocks: true },
-          job.jobId,
-        )),
-        acquired.loss,
-      );
-    } finally {
-      if (
-        useSingleLine &&
-        this.#workerToken === acquired.token &&
-        !this.#disposed
-      ) {
-        try {
-          await this.#setPageSegmentation(
-            acquired,
-            Tesseract.PSM.SINGLE_BLOCK,
-            job.jobId,
-          );
-        } catch {
-          this.#terminateWorker(acquired.token);
-          throw new WorkerLostError();
-        }
-      }
-    }
+    recognition = await raceWorkerLoss(
+      Promise.resolve().then(() => acquired.worker.recognize(
+        encoded,
+        {},
+        { text: true, blocks: true },
+        job.jobId,
+      )),
+      acquired.loss,
+    );
     if (this.#workerToken !== acquired.token || this.#disposed) {
       throw new WorkerLostError();
     }
@@ -280,6 +267,12 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     }
     this.#worker = worker;
     this.#workerGroup = group;
+    if (this.#activeRecognitions === 0) {
+      // The job that asked for this bootstrap was cancelled while it ran, so
+      // nothing owns the worker that just arrived. Idle-dispose it rather
+      // than keep the worker and its WASM alive with no timer (C2).
+      this.#scheduleIdleDisposal();
+    }
     return { worker, token, loss };
   }
 

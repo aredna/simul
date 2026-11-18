@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { SourceImageDescriptor } from '../lib/ocr/contracts';
 import {
@@ -12,7 +12,9 @@ import {
   type ImageFilePlacementInput,
 } from '../lib/ocr/image-file-pixels';
 import {
+  fetchImageFile,
   imageOffersUrl,
+  MAX_IMAGE_DOWNLOAD_BYTES,
   readImageFilePixels,
   type ImageFilePixelReaderEnvironment,
 } from '../lib/ocr/image-file-pixel-reader';
@@ -32,6 +34,73 @@ const box: ImageFilePlacementInput = {
   objectFit: 'fill',
   objectPosition: '50% 50%',
 };
+
+describe('image file download', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('returns an image blob with the response content type', async () => {
+    const body = new Blob([new Uint8Array([1, 2, 3])]).stream();
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      headers: new Headers({ 'content-type': 'image/png' }),
+      body,
+    })));
+
+    const blob = await fetchImageFile('https://cdn.example.test/a.png');
+    expect(blob?.size).toBe(3);
+    expect(blob?.type).toBe('image/png');
+  });
+
+  it('stops reading a download past the size cap instead of buffering it (C10)', async () => {
+    const chunk = new Uint8Array(1024 * 1024);
+    let reads = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      headers: new Headers({ 'content-type': 'image/png' }),
+      body,
+      // The old path buffered the whole body here before measuring it.
+      blob: async () => {
+        throw new Error('buffered');
+      },
+    })));
+
+    await expect(fetchImageFile('https://cdn.example.test/huge.png'))
+      .resolves.toBeUndefined();
+    expect(cancelled).toBe(true);
+    expect(reads).toBeLessThanOrEqual(
+      Math.ceil(MAX_IMAGE_DOWNLOAD_BYTES / chunk.byteLength) + 1,
+    );
+  });
+
+  it('refuses a declared length over the cap without reading the body', async () => {
+    let read = false;
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      headers: new Headers({
+        'content-type': 'image/png',
+        'content-length': String(MAX_IMAGE_DOWNLOAD_BYTES + 1),
+      }),
+      get body(): null {
+        read = true;
+        return null;
+      },
+    })));
+
+    await expect(fetchImageFile('https://cdn.example.test/huge.png'))
+      .resolves.toBeUndefined();
+    expect(read).toBe(false);
+  });
+});
 
 describe('image file placement', () => {
   it('maps fill, contain, cover, none and scale-down onto the content box', () => {
