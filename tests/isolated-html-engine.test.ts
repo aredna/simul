@@ -8709,6 +8709,324 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
   });
 });
 
+describe('a dropdown the page closes closes in the mirror', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  const textNode = (
+    id: number,
+    value: string,
+  ): Extract<HtmlMirrorNode, { kind: 'text' }> => ({
+    kind: 'text', id, text: value, translatable: true,
+  });
+  const elementNode = (
+    id: number,
+    tagName: string,
+    attributes: readonly (readonly [string, string])[],
+    children: readonly HtmlMirrorNode[] = [],
+  ): Extract<HtmlMirrorNode, { kind: 'element' }> => ({
+    kind: 'element', id, namespace: 'html', tagName, attributes, children,
+  });
+  const checkpointOf = (body: readonly HtmlMirrorNode[]): HtmlMirrorCheckpoint => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], body),
+        ]),
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    );
+    if (!checkpoint) throw new Error('Dropdown fixture checkpoint rejected.');
+    return checkpoint;
+  };
+  const optionLabel = (nodeId: number, text: string): SemanticSourceRecord => ({
+    bridge: 'isolated-html', recordId: nodeId * 8 + 1, nodeId, nodeRevision: 1,
+    category: 'public-semantic', gate: 'controlSemantics', tagName: 'option',
+    type: '', autocomplete: '', role: '', contentEditable: '',
+    text, presentation: 'label', classifierVersion: 1,
+  });
+  const selectProofs = (
+    selected: number,
+    pickerOpen: boolean,
+    revision: number,
+  ) => [{
+    kind: 'select-presentation' as const, bridge: 'isolated-html' as const,
+    nodeId: 4, revision: 1, gate: 'controlSemantics' as const,
+    multiple: false, size: null, classifierVersion: 1 as const,
+  }, {
+    kind: 'select-state' as const, bridge: 'isolated-html' as const,
+    nodeId: 4, revision, gate: 'formValues' as const,
+    selectedOptionNodeIds: [selected], multiple: false, pickerOpen,
+    classifierVersion: 1 as const,
+  }];
+
+  async function nativeSelect() {
+    const stream = new FakeHtmlStream(checkpointOf([
+      elementNode(4, 'select', [], [
+        elementNode(5, 'option', []),
+        elementNode(6, 'option', []),
+      ]),
+      elementNode(8, 'p', [], [textNode(9, 'Elsewhere')]),
+    ]));
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const sourceDocument = engine.snapshot()!.document;
+    const labels = [optionLabel(5, 'Tokyo'), optionLabel(6, 'Osaka')];
+    let sequence = 0;
+    const emit = (selected: number, pickerOpen: boolean): boolean => {
+      sequence += 1;
+      return semantic.emit(createSemanticSourceBatch(
+        sourceDocument, 'read-v1-111111', sequence, labels,
+        selectProofs(selected, pickerOpen, sequence),
+      ));
+    };
+    expect(emit(5, false)).toBe(true);
+    const select = host.resolveNode?.(4) as HTMLSelectElement;
+    const shadow = select.getRootNode() as ShadowRoot;
+    const trigger = shadow.querySelector<HTMLElement>(
+      '[data-simul-owned-select-trigger="v1"]',
+    )!;
+    const panel = (): HTMLElement => (shadow.host.ownerDocument as Document)
+      .querySelector<HTMLElement>('[data-simul-owned-select-options="v1"]') ??
+      shadow.querySelector<HTMLElement>('[data-simul-owned-select-options="v1"]')!;
+    const shown = (): boolean =>
+      trigger.getAttribute('aria-expanded') === 'true' &&
+      !panel().hasAttribute('hidden');
+    return { stream, emit, trigger, shown };
+  }
+
+  it('closes a native select\'s list when the page closes its picker with a choice', async () => {
+    const { emit, shown, trigger } = await nativeSelect();
+    expect(shown()).toBe(false);
+    expect(emit(5, true)).toBe(true);
+    expect(shown()).toBe(true);
+    // The reader picks Osaka on the page: the picker closes as the choice
+    // changes, in the same report.
+    expect(emit(6, false)).toBe(true);
+    expect(shown()).toBe(false);
+    expect(trigger.textContent).toBe('Osaka');
+  });
+
+  it('closes a native select\'s list when the page closes its picker without a choice', async () => {
+    const { emit, shown } = await nativeSelect();
+    expect(emit(5, true)).toBe(true);
+    expect(shown()).toBe(true);
+    // Escape or a click elsewhere on the page.
+    expect(emit(5, false)).toBe(true);
+    expect(shown()).toBe(false);
+    // And it opens again the next time the page opens it.
+    expect(emit(5, true)).toBe(true);
+    expect(shown()).toBe(true);
+  });
+
+  it('closes the list when the page closes its picker after a patch elsewhere', async () => {
+    const { emit, shown, stream } = await nativeSelect();
+    expect(emit(5, true)).toBe(true);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{ kind: 'children', nodeId: 8, children: [textNode(10, 'Changed')] }],
+      undefined,
+      'passive',
+    )!);
+    expect(shown()).toBe(true);
+    expect(emit(6, false)).toBe(true);
+    expect(shown()).toBe(false);
+  });
+
+  it('keeps the list open while the page changes the open select\'s own attributes', async () => {
+    const { emit, shown, stream, trigger } = await nativeSelect();
+    expect(emit(5, true)).toBe(true);
+    let closes = 0;
+    const observer = new (trigger.ownerDocument.defaultView as unknown as {
+      MutationObserver: typeof MutationObserver;
+    }).MutationObserver((records) => {
+      for (const record of records) {
+        if (record.oldValue === 'true') closes += 1;
+      }
+    });
+    observer.observe(trigger, {
+      attributes: true, attributeFilter: ['aria-expanded'], attributeOldValue: true,
+    });
+    // The page restyles its select while the picker is open.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+        attributes: [], selectPresentationStyle: 'color:rgb(0, 0, 255)',
+      }],
+      undefined,
+      'passive',
+    )!);
+    await Promise.resolve();
+    expect(shown()).toBe(true);
+    expect(closes).toBe(0);
+    expect(emit(5, false)).toBe(true);
+    await Promise.resolve();
+    observer.disconnect();
+    expect(shown()).toBe(false);
+    expect(closes).toBe(1);
+  });
+
+  it('keeps a list the reader opened in the mirror while the page\'s picker stays closed', async () => {
+    const { emit, shown, trigger } = await nativeSelect();
+    trigger.dispatchEvent(new trigger.ownerDocument.defaultView!.Event('click', {
+      bubbles: true, cancelable: true, composed: true,
+    }));
+    expect(shown()).toBe(true);
+    // The page changes the choice by script; its picker was never open.
+    expect(emit(6, false)).toBe(true);
+    expect(shown()).toBe(true);
+  });
+
+  it('closes an ARIA menu when the page collapses its button and hides the menu', async () => {
+    const stream = new FakeHtmlStream(checkpointOf([
+      elementNode(10, 'button', [['role', 'button']], [textNode(11, 'Currency')]),
+      elementNode(12, 'div', [['role', 'menu'], ['class', 'list']], [
+        elementNode(13, 'div', [['role', 'menuitem']], [textNode(14, 'Yen')]),
+      ]),
+    ]));
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const sourceDocument = engine.snapshot()!.document;
+    const emit = (sequence: number, expanded: boolean): boolean =>
+      semantic.emit(createSemanticSourceBatch(
+        sourceDocument, 'read-v1-111111', sequence, [],
+        [{
+          kind: 'disclosure-state', bridge: 'isolated-html',
+          relationId: 'semantic-relation-v1:10:12', revision: sequence,
+          gate: 'disclosureContent', triggerNodeId: 10, panelNodeId: 12,
+          popupRole: 'menu', expanded, classifierVersion: 1,
+        }],
+      ));
+    const replica = host.iframe!.contentDocument!;
+    const trigger = replica.querySelector('button')!;
+    const menu = replica.querySelector<HTMLElement>('[role="menu"]')!;
+    const opened = (): boolean =>
+      trigger.getAttribute('data-simul-replica-disclosure-open') === 'v1';
+
+    expect(emit(1, true)).toBe(true);
+    expect(opened()).toBe(true);
+    expect(menu.style.getPropertyValue('visibility')).toBe('visible');
+
+    // The page hides the list and collapses its button in one frame.
+    expect(emit(2, false)).toBe(true);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'div',
+        attributes: [['role', 'menu'], ['class', 'list'], ['hidden', '']],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(opened()).toBe(false);
+    expect(menu.hasAttribute('hidden')).toBe(true);
+    expect(menu.style.getPropertyValue('visibility')).not.toBe('visible');
+    expect(menu.style.getPropertyValue('display')).toBe('');
+  });
+
+  it('closes an ARIA menu when the page collapses its button and removes the menu', async () => {
+    const stream = new FakeHtmlStream(checkpointOf([
+      elementNode(10, 'button', [['role', 'button']], [textNode(11, 'Currency')]),
+      elementNode(12, 'div', [['role', 'menu']], [
+        elementNode(13, 'div', [['role', 'menuitem']], [textNode(14, 'Yen')]),
+      ]),
+    ]));
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const sourceDocument = engine.snapshot()!.document;
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 1, [],
+      [{
+        kind: 'disclosure-state', bridge: 'isolated-html',
+        relationId: 'semantic-relation-v1:10:12', revision: 1,
+        gate: 'disclosureContent', triggerNodeId: 10, panelNodeId: 12,
+        popupRole: 'menu', expanded: true, classifierVersion: 1,
+      }],
+    ))).toBe(true);
+    const replica = host.iframe!.contentDocument!;
+    const trigger = replica.querySelector('button')!;
+    expect(trigger.getAttribute('data-simul-replica-disclosure-open')).toBe('v1');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children', nodeId: 3,
+        children: [{ kind: 'retain', nodeId: 10 }],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 2, [], [],
+    ))).toBe(true);
+    expect(replica.querySelector('[role="menu"]')).toBeNull();
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-open')).toBe(false);
+    expect([...replica.querySelectorAll('[data-simul-replica-disclosure-panel]')])
+      .toEqual([]);
+  });
+
+  it('hides a listbox the page hides beside its collapsed combobox', async () => {
+    // A listbox carries form-like state, so it is no disclosure panel: the
+    // mirror draws it as the page does, shown and then hidden.
+    const stream = new FakeHtmlStream(checkpointOf([
+      elementNode(10, 'button', [['role', 'combobox']], [textNode(11, 'Currency')]),
+      elementNode(12, 'div', [['role', 'listbox']], [
+        elementNode(13, 'div', [['role', 'option']], [textNode(14, 'Yen')]),
+      ]),
+    ]));
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const replica = host.iframe!.contentDocument!;
+    const listbox = replica.querySelector<HTMLElement>('[role="listbox"]')!;
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'div',
+        attributes: [['role', 'listbox'], ['style', 'display:none']],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(listbox.style.getPropertyValue('display')).toBe('none');
+    expect(listbox.hasAttribute('data-simul-replica-disclosure-panel')).toBe(false);
+  });
+});
+
 const identityParts = {
   sessionId: 'session',
   pageEpoch: 1,

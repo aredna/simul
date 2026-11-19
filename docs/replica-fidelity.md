@@ -423,7 +423,11 @@ leaves the page (D132). Before, every change to the page took it down and put
 it up again, which moved an open list out and back and scrolled it to the
 selected option: on a page with a carousel the far end of a long list could
 not be reached. A list drawn again while it is open (a translation arriving)
-keeps its scroll position.
+keeps its scroll position. A list the page's own picker opened closes when
+that picker closes (a choice, Escape, a click elsewhere on the page); before,
+the kept controller was told to open but never to close, and the list stayed
+in the mirror until the page was loaded again. A list the reader opened while
+the page's picker stayed shut stays open.
 
 When the page replaces a dropdown's options, the mirror takes the new list as
 a patch (D132). The current choice arrives on the semantic channel and nothing

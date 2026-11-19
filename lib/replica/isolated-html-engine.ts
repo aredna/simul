@@ -175,6 +175,8 @@ interface IsolatedSelectFacsimile {
   /** What `controller` was installed for: `popup` or `list`, and its rows. */
   controllerShape?: string;
   contentSignature?: string;
+  /** The page's own picker was open at the last refresh. */
+  pickerOpen?: boolean;
 }
 const ISOLATED_SELECT_FACSIMILES = new WeakMap<HTMLElement, IsolatedSelectFacsimile>();
 /**
@@ -3111,6 +3113,11 @@ function refreshIsolatedSelectHost(
     facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1';
   const shape = `${presentation}:${size}`;
   const current = facsimile.controller;
+  // The page closed its picker (a choice, Escape, a click elsewhere): the
+  // list it had opened here closes too. Only the change closes it; a list
+  // the reader opened here while the page's stayed shut stays open.
+  const pickerClosed = facsimile.pickerOpen === true && !pickerOpen;
+  facsimile.pickerOpen = pickerOpen;
   // The button and the list are Simul's own, so nothing in a page change
   // can touch this controller. It stays unless the dropdown itself changed
   // shape: taking it down and putting it up again on every change moved an
@@ -3119,6 +3126,7 @@ function refreshIsolatedSelectHost(
   // (D132).
   if (current && !current.isDisposed() && facsimile.controllerShape === shape) {
     if (pickerOpen) current.open();
+    else if (pickerClosed) current.close();
     current.sync();
     return;
   }
@@ -3133,8 +3141,9 @@ function refreshIsolatedSelectHost(
     // A native select does not open on hover.
     openOnHover: false,
     survivesRefresh: true,
-    initiallyOpen: presentation === 'popup' &&
-      (retainedOpenDisclosures.has(host) || pickerOpen),
+    initiallyOpen: presentation === 'popup' && (
+      pickerOpen || (!pickerClosed && retainedOpenDisclosures.has(host))
+    ),
     visibleRows: size,
   });
 }
