@@ -22,6 +22,12 @@ export interface SourceImageUpsert extends ImageDimensions {
   readonly observationChanged: boolean;
   /** True only when capture inputs/crop may differ, not for pure motion. */
   readonly captureChanged?: boolean;
+  /**
+   * True when what the image itself paints may differ. False for a capture
+   * change that scrolling alone made (another crop, a cover passed under).
+   * Without it every capture change counts as one.
+   */
+  readonly pictureChanged?: boolean;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
   /** The number of the picture CSS gives the image, when CSS decides it. */
@@ -36,6 +42,7 @@ export type SourceImageModelResult =
 interface ImageRevisionState {
   readonly contentRevision: number;
   readonly captureRevision: number;
+  readonly pictureRevision: number;
   readonly observationRevision: number;
   readonly tombstoned: boolean;
 }
@@ -138,16 +145,33 @@ export class SourceImageModel {
     const captureRevision = needsCaptureRevision
       ? nextRevision(revision?.captureRevision, newIdentityRevisionFloor)
       : revision?.captureRevision;
+    const needsPictureRevision = needsCaptureRevision &&
+      (
+        !previous ||
+        revision?.tombstoned === true ||
+        needsContentRevision ||
+        pixelGeometryChanged ||
+        parsed.pictureChanged !== false
+      );
+    const pictureRevision = needsPictureRevision
+      ? nextRevision(revision?.pictureRevision, newIdentityRevisionFloor)
+      : revision?.pictureRevision;
     const observationRevision = nextRevision(
       revision?.observationRevision,
       newIdentityRevisionFloor,
     );
-    if (!contentRevision || !captureRevision || !observationRevision) {
+    if (
+      !contentRevision ||
+      !captureRevision ||
+      !pictureRevision ||
+      !observationRevision
+    ) {
       return { status: 'overflow' };
     }
     const nextRevisionState: ImageRevisionState = {
       contentRevision,
       captureRevision,
+      pictureRevision,
       observationRevision,
       tombstoned: false,
     };
@@ -182,14 +206,21 @@ export class SourceImageModel {
     }
     const contentRevision = nextRevision(revision.contentRevision);
     const captureRevision = nextRevision(revision.captureRevision);
+    const pictureRevision = nextRevision(revision.pictureRevision);
     const observationRevision = nextRevision(revision.observationRevision);
-    if (!contentRevision || !captureRevision || !observationRevision) {
+    if (
+      !contentRevision ||
+      !captureRevision ||
+      !pictureRevision ||
+      !observationRevision
+    ) {
       return { status: 'overflow' };
     }
     this.#records.delete(nodeId);
     this.#revisions.set(nodeId, {
       contentRevision,
       captureRevision,
+      pictureRevision,
       observationRevision,
       tombstoned: true,
     });
@@ -214,6 +245,7 @@ export class SourceImageModel {
       sameSourceDocument(current.document, parsed.document) &&
       current.contentRevision === parsed.contentRevision &&
       current.captureRevision === parsed.captureRevision &&
+      current.pictureRevision === parsed.pictureRevision &&
       current.observationRevision === parsed.observationRevision &&
       sameDescriptorFacts(current, parsed),
     );
@@ -233,6 +265,7 @@ export class SourceImageModel {
         this.#retiredRevisionFloor,
         revision.contentRevision,
         revision.captureRevision,
+        revision.pictureRevision,
         revision.observationRevision,
       );
       this.#revisions.delete(nodeId);
@@ -252,6 +285,7 @@ function createDescriptor(
     sourceKind: 'img',
     contentRevision: revision.contentRevision,
     captureRevision: revision.captureRevision,
+    pictureRevision: revision.pictureRevision,
     observationRevision: revision.observationRevision,
     visibility: input.visibility,
     connected: true,
@@ -297,7 +331,13 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     'connected',
     'renderedWidth',
     'renderedHeight',
-  ], ['intrinsicWidth', 'intrinsicHeight', 'captureChanged', 'cssPicture'])) {
+  ], [
+    'intrinsicWidth',
+    'intrinsicHeight',
+    'captureChanged',
+    'pictureChanged',
+    'cssPicture',
+  ])) {
     return undefined;
   }
   const document = readSourceDocumentIdentity(input.document);
@@ -321,6 +361,8 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     typeof input.observationChanged !== 'boolean' ||
     (Object.hasOwn(input, 'captureChanged') &&
       typeof input.captureChanged !== 'boolean') ||
+    (Object.hasOwn(input, 'pictureChanged') &&
+      typeof input.pictureChanged !== 'boolean') ||
     (Object.hasOwn(input, 'cssPicture') &&
       !(Number.isSafeInteger(input.cssPicture) &&
         (input.cssPicture as number) > 0)) ||
@@ -336,6 +378,9 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     captureChanged: Object.hasOwn(input, 'captureChanged')
       ? input.captureChanged as boolean
       : input.observationChanged as boolean,
+    ...(Object.hasOwn(input, 'pictureChanged')
+      ? { pictureChanged: input.pictureChanged as boolean }
+      : {}),
     visibility: input.visibility as ImageVisibilityTier,
     connected: true,
     renderedWidth: dimensions.renderedWidth,

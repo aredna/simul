@@ -343,16 +343,20 @@ describe('SourceImageObserver', () => {
     fixture.document.dispatchEvent(scroll);
     fixture.frames.flush();
     expect(events).toHaveLength(1);
+    // The crop is new, the picture is the one it had.
     expect(events[0]).toMatchObject({
       kind: 'upsert',
       input: {
         nodeId: 7,
         contentChanged: false,
         observationChanged: true,
+        captureChanged: true,
+        pictureChanged: false,
         visibility: 'visible',
       },
     });
     expect(model.get(7)?.contentRevision).toBe(1);
+    expect(model.get(7)?.pictureRevision).toBe(1);
     expect(model.get(7)?.observationRevision).toBe(
       (revisionBeforeScroll ?? 0) + 1,
     );
@@ -383,12 +387,15 @@ describe('SourceImageObserver', () => {
     fixture.frames.flush();
 
     expect(events.map(eventNodeId)).toEqual([7]);
+    // A control the image passes under on a scroll is a new capture of the
+    // same picture.
     expect(events[0]).toMatchObject({
       kind: 'upsert',
       input: {
         nodeId: 7,
         observationChanged: true,
         captureChanged: true,
+        pictureChanged: false,
       },
     });
     stop();
@@ -1207,7 +1214,12 @@ describe('SourceImageObserver', () => {
 
     expect(events).toMatchObject([{
       kind: 'upsert',
-      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+        pictureChanged: true,
+      },
     }]);
     stop();
   });

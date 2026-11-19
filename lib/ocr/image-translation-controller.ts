@@ -4211,15 +4211,13 @@ export class ImageTranslationController {
       descriptor.document,
       descriptor.nodeId,
     );
-    const key = imageIdentityKey(
+    const kept = this.#findImageIdentityAnalysis(this.#imageIdentityKeys(
       anchor,
       descriptor,
       descriptor.renderedWidth,
       descriptor.renderedHeight,
       last.finalConfigurationKey,
-      this.#pageFileAddress(descriptor),
-    );
-    const kept = key ? this.#imageIdentityAnalyses.get(key) : undefined;
+    ))?.analysis;
     if (!anchor || !kept?.projection || kept.expiresAt <= this.#now()) {
       return undefined;
     }
@@ -4501,6 +4499,50 @@ export class ImageTranslationController {
       : null;
   }
 
+  /**
+   * The keys a whole image's outcome is kept and looked up under, first the
+   * one it is kept under: the image's identity (its address, or the number
+   * of the picture CSS gives it) when it has one, and the image itself for as
+   * long as its picture is unchanged. The second answers an image that
+   * scrolls back into view also when it has no identity: its copy in the
+   * mirror did not load, or the page did not say which file it shows.
+   */
+  #imageIdentityKeys(
+    anchor: ReplicaImageAnchor | undefined,
+    descriptor: SourceImageDescriptor,
+    renderedWidth: number,
+    renderedHeight: number,
+    finalConfigurationKey: string,
+  ): readonly string[] {
+    return [
+      imageIdentityKey(
+        anchor,
+        descriptor,
+        renderedWidth,
+        renderedHeight,
+        finalConfigurationKey,
+        this.#pageFileAddress(descriptor),
+      ),
+      imagePictureKey(
+        descriptor,
+        this.#sourceVersion,
+        renderedWidth,
+        renderedHeight,
+        finalConfigurationKey,
+      ),
+    ].filter((key): key is string => key !== undefined);
+  }
+
+  #findImageIdentityAnalysis(
+    keys: readonly string[],
+  ): { readonly key: string; readonly analysis: ImageIdentityAnalysis } | undefined {
+    for (const key of keys) {
+      const analysis = this.#imageIdentityAnalyses.get(key);
+      if (analysis) return { key, analysis };
+    }
+    return undefined;
+  }
+
   #rememberImageIdentityAnalysis(
     descriptor: SourceImageDescriptor,
     projection: ImageOverlayProjection,
@@ -4511,13 +4553,12 @@ export class ImageTranslationController {
       projection.evidenceKind !== 'ocr' ||
       projection.regions.length === 0
     ) return;
-    const key = imageIdentityKey(
+    const [key] = this.#imageIdentityKeys(
       this.environment.resolveAnchor(projection.document, projection.nodeId),
       descriptor,
       projection.renderedWidthCss,
       projection.renderedHeightCss,
       finalConfigurationKey,
-      this.#pageFileAddress(descriptor),
     );
     if (!isWholeImageCrop(projection)) {
       // Text in a part of a picture that CSS gives: a "no text" kept for the
@@ -4548,14 +4589,13 @@ export class ImageTranslationController {
   ): void {
     if (!isWholeImageCrop(pixels)) return;
     this.#rememberImageIdentityOutcome(
-      imageIdentityKey(
+      this.#imageIdentityKeys(
         anchor,
         pixels.descriptor,
         pixels.renderedWidthCss,
         pixels.renderedHeightCss,
         finalConfigurationKey,
-        this.#pageFileAddress(pixels.descriptor),
-      ),
+      )[0],
       undefined,
       pixels.descriptor.cssPicture === undefined
         ? 0
@@ -4609,16 +4649,15 @@ export class ImageTranslationController {
     finalConfigurationKey: string,
     signal: AbortSignal,
   ): boolean {
-    const key = imageIdentityKey(
+    const found = this.#findImageIdentityAnalysis(this.#imageIdentityKeys(
       anchor,
       job.descriptor,
       job.descriptor.renderedWidth,
       job.descriptor.renderedHeight,
       finalConfigurationKey,
-      this.#pageFileAddress(job.descriptor),
-    );
-    const retained = key ? this.#imageIdentityAnalyses.get(key) : undefined;
-    if (!key || !retained) return false;
+    ));
+    if (!found) return false;
+    const { key, analysis: retained } = found;
     this.#imageIdentityAnalyses.delete(key);
     if (retained.expiresAt <= this.#now()) {
       this.#imageIdentityAnalysisWeight -= retained.weight;
@@ -6769,6 +6808,48 @@ function imageIdentityKey(
   } catch {
     return undefined;
   }
+}
+
+const IMAGE_PICTURE_SCHEMA_VERSION = 'image-picture-v1';
+
+/**
+ * The image itself while its picture is the one it had: its node in its
+ * document and source lease, its content and picture revisions, its rendered
+ * size and how it is read. A scroll leaves every part of it (the picture
+ * revision does not advance for a crop), so a whole image's result read
+ * before answers the image's return to view without a capture. A new file,
+ * style, size or cover, and a new lease of the source, whose revisions start
+ * again, give another key. A picture CSS gives is kept by its number.
+ */
+function imagePictureKey(
+  descriptor: SourceImageDescriptor,
+  sourceVersion: number,
+  renderedWidth: number,
+  renderedHeight: number,
+  finalConfigurationKey: string,
+): string | undefined {
+  if (
+    descriptor.cssPicture !== undefined ||
+    descriptor.pictureRevision === undefined ||
+    !(renderedWidth > 0) ||
+    !(renderedHeight > 0)
+  ) return undefined;
+  const document = descriptor.document;
+  return JSON.stringify([
+    IMAGE_PICTURE_SCHEMA_VERSION,
+    document.sessionId,
+    document.pageEpoch,
+    document.generation,
+    document.documentId,
+    document.frameId,
+    sourceVersion,
+    descriptor.nodeId,
+    descriptor.contentRevision,
+    descriptor.pictureRevision,
+    Math.round(renderedWidth),
+    Math.round(renderedHeight),
+    finalConfigurationKey,
+  ]);
 }
 
 /**

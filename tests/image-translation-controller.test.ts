@@ -3958,6 +3958,173 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('keeps an image\'s result, words or none, when it scrolls away and back with no identity of its own', async () => {
+    // The mirror's copies did not load (a host that checks the Referer, a
+    // `blob:` address) and the page names no file, so neither image has an
+    // identity by address. Each was captured again every time it scrolled
+    // back into view: a new crop is a new capture revision. The page now
+    // says that its picture stayed (`pictureRevision`).
+    const { document } = parseHTML('<html><body><img id="a"><img id="b"></body></html>');
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, id] of [[12, 'a'], [13, 'b']] as const) {
+      const image = document.getElementById(id) as unknown as HTMLImageElement;
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: `https://assets.example.test/${id}.png` },
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 0 },
+        naturalHeight: { configurable: true, value: 0 },
+      });
+      images.set(nodeId, image);
+    }
+    const at = (
+      nodeId: number,
+      revision: number,
+      more: Partial<SourceImageDescriptor> = {},
+    ): SourceImageDescriptor => ({
+      ...descriptor,
+      nodeId,
+      captureRevision: revision,
+      observationRevision: revision,
+      pictureRevision: 1,
+      ...more,
+    });
+    // What the screen shows of each image: the top of it is cut off while
+    // it scrolls away; a cleared image (13) has no words at all.
+    const cut = new Map<string, number>();
+    let picture = 'first';
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      const top = cut.get(`${current.nodeId}:${current.observationRevision}`) ?? 0;
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(
+            current,
+            `${current.nodeId}${['first', 'second', 'third'].indexOf(picture)}${top}`
+              .padEnd(64, 'f'),
+          ),
+          cropOffsetYCss: top,
+          cropHeightCss: current.renderedHeight - top,
+          nearestElementLanguage: 'en' as const,
+        },
+      };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.descriptor.nodeId === 12 ? `Headline ${picture}` : '',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const readFile = vi.fn(async () => undefined);
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => {
+          onChange({ kind: 'upsert', descriptor: at(12, 1) });
+          onChange({ kind: 'upsert', descriptor: at(13, 1) });
+        });
+        return {
+          measure: vi.fn(),
+          readFile: readFile as unknown as NonNullable<ImageSourceLease['readFile']>,
+          dispose: vi.fn(),
+        };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-first-background-prescan',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = () => overlayText(
+      document.querySelector('[data-simul-image-overlay="12"]'),
+    );
+    const settle = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    controller.activateReplica(request, 3, 1);
+    // Image 12 is read once; image 13's "no text" is confirmed by a second
+    // read of the same pixels.
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(3));
+    await settle();
+    expect(shown()).toBe('ja:Headline first');
+    expect(recognize).toHaveBeenCalledTimes(3);
+
+    // Both scroll off the top of the view and come back down into it: cut,
+    // gone, cut, whole. Every step is a new capture of the same picture.
+    let revision = 1;
+    for (const [visibility, top] of [
+      ['visible', 40], ['near', 100], ['background', 100], ['near', 100],
+      ['visible', 60], ['visible', 0],
+    ] as const) {
+      revision += 1;
+      for (const nodeId of [12, 13]) {
+        cut.set(`${nodeId}:${revision}`, top);
+        emitChange?.({
+          kind: 'upsert',
+          descriptor: at(nodeId, revision, { visibility }),
+        });
+      }
+      await settle();
+      expect(shown()).toBe('ja:Headline first');
+    }
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(recognize).toHaveBeenCalledTimes(3);
+    expect(diagnostics).toContain('image-identity-reused');
+
+    // A change of what the image paints (a style, a cover that left) is
+    // another picture: it is read again.
+    picture = 'second';
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, { pictureRevision: 2 }),
+    });
+    await vi.waitFor(() => expect(shown()).toBe('ja:Headline second'));
+    expect(acquire).toHaveBeenCalledTimes(4);
+    // So is another file.
+    picture = 'third';
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, { contentRevision: 2, pictureRevision: 3 }),
+    });
+    await vi.waitFor(() => expect(shown()).toBe('ja:Headline third'));
+    expect(acquire).toHaveBeenCalledTimes(5);
+    controller.dispose();
+  });
+
   it('reads an image again when CSS alone swaps its picture, and keeps that picture\'s result under its number', async () => {
     // A class swaps the picture through `content: url()`: the image's
     // address, sizes and fit stay, so the first picture's words were reused.

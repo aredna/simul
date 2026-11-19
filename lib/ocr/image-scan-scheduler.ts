@@ -821,6 +821,7 @@ function sameDescriptor(
     sameContent(left, right) &&
     left.sourceKind === right.sourceKind &&
     left.captureRevision === right.captureRevision &&
+    left.pictureRevision === right.pictureRevision &&
     left.observationRevision === right.observationRevision &&
     left.visibility === right.visibility &&
     left.connected === right.connected &&

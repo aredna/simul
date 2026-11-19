@@ -44,6 +44,7 @@ describe('SourceImageModel', () => {
       'intrinsicWidth',
       'nodeId',
       'observationRevision',
+      'pictureRevision',
       'renderedHeight',
       'renderedWidth',
       'sourceKind',
@@ -132,6 +133,78 @@ describe('SourceImageModel', () => {
         },
       },
     });
+  });
+
+  it('keeps the picture revision through a capture change that scrolling alone made', () => {
+    // An image that scrolls away and back is captured anew (its crop
+    // changed) but shows the picture it had, so a whole-image result read
+    // before is still its own.
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    model.upsert(upsert(7));
+    expect(model.get(7)).toMatchObject({ captureRevision: 1, pictureRevision: 1 });
+    const scrolled = {
+      contentChanged: false,
+      observationChanged: true,
+      captureChanged: true,
+      pictureChanged: false,
+    };
+    expect(model.upsert(upsert(7, { ...scrolled, visibility: 'background' })))
+      .toMatchObject({
+        change: { descriptor: { captureRevision: 2, pictureRevision: 1 } },
+      });
+    expect(model.upsert(upsert(7, scrolled))).toMatchObject({
+      change: {
+        descriptor: { captureRevision: 3, pictureRevision: 1, observationRevision: 3 },
+      },
+    });
+    const returned = model.get(7)!;
+    expect(model.isCurrent(returned)).toBe(true);
+    expect(model.isCurrent({ ...returned, pictureRevision: 2 })).toBe(false);
+
+    // A capture change that does not say, a new size, a new CSS picture and
+    // new content are each another picture.
+    expect(model.upsert(upsert(7, {
+      contentChanged: false,
+      observationChanged: true,
+      captureChanged: true,
+    }))).toMatchObject({
+      change: {
+        descriptor: { contentRevision: 1, captureRevision: 4, pictureRevision: 2 },
+      },
+    });
+    expect(model.upsert(upsert(7, { ...scrolled, renderedWidth: 201 })))
+      .toMatchObject({
+        change: { descriptor: { captureRevision: 5, pictureRevision: 3 } },
+      });
+    expect(model.upsert(upsert(7, { ...scrolled, renderedWidth: 201, cssPicture: 2 })))
+      .toMatchObject({
+        change: { descriptor: { captureRevision: 6, pictureRevision: 4 } },
+      });
+    expect(model.upsert(upsert(7, {
+      ...scrolled,
+      renderedWidth: 201,
+      cssPicture: 2,
+      contentChanged: true,
+    }))).toMatchObject({
+      change: {
+        descriptor: { contentRevision: 2, captureRevision: 7, pictureRevision: 5 },
+      },
+    });
+    // Without a capture change the picture is the same.
+    expect(model.upsert(upsert(7, {
+      contentChanged: false,
+      observationChanged: true,
+      captureChanged: false,
+      renderedWidth: 201,
+      cssPicture: 2,
+    }))).toMatchObject({
+      change: { descriptor: { captureRevision: 7, pictureRevision: 5 } },
+    });
+    for (const value of [0, 1, 'false', null]) {
+      expect(model.upsert(upsert(7, { pictureChanged: value as never })))
+        .toEqual({ status: 'rejected' });
+    }
   });
 
   it('carries the number of a CSS picture, and counts its change as another picture', () => {

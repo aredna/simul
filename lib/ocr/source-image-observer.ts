@@ -594,11 +594,15 @@ export class SourceImageObserver {
         const failClosedCandidates = safetyAssessment?.changedImages ?? visible;
         for (const image of visible) {
           const captureSafetyChanged = failClosedCandidates.has(image);
+          // What a scroll changes is where the image is: its crop by the
+          // view, and what it passes under on the way. Its capture is new;
+          // its picture is the one it had.
           this.#refresh(
             image,
             false,
             captureSafetyChanged,
             captureSafetyChanged,
+            false,
           );
         }
         this.#applyCaptureSafetyAssessment(safetyAssessment);
@@ -1015,6 +1019,7 @@ export class SourceImageObserver {
     forceContentChange = false,
     forceObservationChange = false,
     forceCaptureChange = false,
+    forcedCaptureChangesPicture = true,
   ): void {
     if (!this.#started) return;
     const state = this.#states.get(image);
@@ -1064,6 +1069,9 @@ export class SourceImageObserver {
       previous.intrinsicHeight !== facts.intrinsicHeight;
     const captureChanged = forceCaptureChange || sourceChanged || cropChanged ||
       layoutChanged || dimensionsChanged;
+    // A crop alone is the same picture seen through another part of the view.
+    const pictureChanged = contentChanged || layoutChanged ||
+      dimensionsChanged || (forceCaptureChange && forcedCaptureChangesPicture);
     const observationChanged = forceObservationChange || cropChanged ||
       layoutChanged;
     state.sourceToken = token;
@@ -1078,6 +1086,7 @@ export class SourceImageObserver {
       observationChanged,
       captureChanged,
       facts,
+      pictureChanged,
     );
   }
 
@@ -1087,6 +1096,7 @@ export class SourceImageObserver {
     observationChanged: boolean,
     captureChanged: boolean,
     facts: ImageFacts,
+    pictureChanged = captureChanged,
   ): void {
     // IntersectionObserver reports an initial state for every observed image.
     // Wait for both tiers so an above-the-fold image is never first queued as
@@ -1099,6 +1109,7 @@ export class SourceImageObserver {
       contentChanged: initial || contentChanged,
       observationChanged: initial || observationChanged,
       captureChanged: initial || captureChanged,
+      pictureChanged: initial || pictureChanged,
       visibility: this.#visibility(state.image),
       connected: true,
       renderedWidth: facts.renderedWidth,

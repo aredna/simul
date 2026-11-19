@@ -43,6 +43,14 @@ export interface SourceImageDescriptor extends ImageDimensions {
    * and position-only observations deliberately leave it unchanged.
    */
   readonly captureRevision?: number;
+  /**
+   * Advances when what the image itself paints may differ: another file, a
+   * style along its path, another size or CSS picture, or a change of the
+   * page around it. A scroll that only moves the image (another crop by the
+   * view, a cover it passes under on the way) leaves it, so a whole-image
+   * result read before stays the image's own when it scrolls back.
+   */
+  readonly pictureRevision?: number;
   readonly observationRevision: number;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
@@ -181,7 +189,13 @@ export function readSourceImageDescriptor(
     'connected',
     'renderedWidth',
     'renderedHeight',
-  ], ['intrinsicWidth', 'intrinsicHeight', 'captureRevision', 'cssPicture'])) {
+  ], [
+    'intrinsicWidth',
+    'intrinsicHeight',
+    'captureRevision',
+    'pictureRevision',
+    'cssPicture',
+  ])) {
     return undefined;
   }
   const document = readSourceDocumentIdentity(input.document);
@@ -192,6 +206,8 @@ export function readSourceImageDescriptor(
     !isPositiveSafeInteger(input.contentRevision) ||
     (Object.hasOwn(input, 'captureRevision') &&
       !isPositiveSafeInteger(input.captureRevision)) ||
+    (Object.hasOwn(input, 'pictureRevision') &&
+      !isPositiveSafeInteger(input.pictureRevision)) ||
     (Object.hasOwn(input, 'cssPicture') &&
       !isPositiveSafeInteger(input.cssPicture)) ||
     !isPositiveSafeInteger(input.observationRevision) ||
@@ -219,6 +235,9 @@ export function readSourceImageDescriptor(
     contentRevision: input.contentRevision,
     ...(Object.hasOwn(input, 'captureRevision')
       ? { captureRevision: input.captureRevision as number }
+      : {}),
+    ...(Object.hasOwn(input, 'pictureRevision')
+      ? { pictureRevision: input.pictureRevision as number }
       : {}),
     observationRevision: input.observationRevision,
     visibility: input.visibility,
