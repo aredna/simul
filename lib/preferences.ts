@@ -201,11 +201,21 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
 const MAX_SAVED_ORIGINS = 256;
 const MAX_GRANTED_PERMISSION_ORIGINS = 512;
 
+/**
+ * Snapshots this module produced. Preferences are replaced rather than
+ * mutated, so a snapshot is already canonical and need not be validated
+ * again on the side panel's per-update hot path (O7).
+ */
+const parsedPreferenceSnapshots = new WeakSet<object>();
+
 /** Parse untrusted persisted data without allowing it to broaden site access. */
 export function parseCompanionPreferences(
   input: unknown,
 ): CompanionPreferences {
   if (!isRecord(input)) return createDefaultPreferences();
+  if (parsedPreferenceSnapshots.has(input)) {
+    return input as unknown as CompanionPreferences;
+  }
 
   const autoTranslateOrigins: string[] = [];
   const seenOrigins = new Set<string>();
@@ -262,7 +272,7 @@ export function parseCompanionPreferences(
       disabledImageReadingMethodIds.includes(id),
     );
 
-  return {
+  const parsed: CompanionPreferences = {
     autoTranslateAllSites: input.autoTranslateAllSites === true,
     autoTranslateOrigins,
     grantedPermissionOrigins: parseGrantedPermissionOrigins(
@@ -339,6 +349,20 @@ export function parseCompanionPreferences(
         ? input.usePromptForImageText
         : DEFAULT_COMPANION_PREFERENCES.usePromptForImageText,
   };
+  parsedPreferenceSnapshots.add(parsed);
+  return parsed;
+}
+
+/**
+ * A parsed snapshot is already canonical; any other value is validated.
+ * Only this module's own snapshots take the fast path.
+ */
+function readNormalizedCompanionPreferences(
+  preferences: CompanionPreferences,
+): CompanionPreferences {
+  return parsedPreferenceSnapshots.has(preferences)
+    ? preferences
+    : parseCompanionPreferences(preferences);
 }
 
 export function isAutoTranslationMode(
@@ -426,7 +450,7 @@ export function permissionOriginsForMode(
 export function permissionOriginsForPreferences(
   preferences: CompanionPreferences,
 ): string[] {
-  const normalized = parseCompanionPreferences(preferences);
+  const normalized = readNormalizedCompanionPreferences(preferences);
   if (normalized.autoTranslateAllSites) {
     return [...ALL_SITES_PERMISSION_ORIGINS];
   }
@@ -441,7 +465,7 @@ export function autoTranslationModeForPage(
   preferences: CompanionPreferences,
   url: string | undefined,
 ): AutoTranslationMode {
-  const normalized = parseCompanionPreferences(preferences);
+  const normalized = readNormalizedCompanionPreferences(preferences);
   if (normalized.autoTranslateAllSites) return 'all';
 
   const origin = pageOrigin(url);
@@ -546,7 +570,7 @@ export function withViewSettings(
   settings: CompanionViewSettingsPatch,
 ): CompanionPreferences {
   return parseCompanionPreferences({
-    ...parseCompanionPreferences(preferences),
+    ...readNormalizedCompanionPreferences(preferences),
     ...settings,
   });
 }

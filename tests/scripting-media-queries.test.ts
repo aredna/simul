@@ -201,23 +201,31 @@ describe('media queries about scripts, read as the tab reads them', () => {
       .toBe('@media\u00a0(scripting){.a{color:red}}');
   });
 
-  it('reads a comment as what parts two names: a feature only its removal makes is none', () => {
-    // To a browser these are no feature and no media rule. The comments are
-    // taken out all the same, as before, which joins the halves: what that
-    // makes is written as two names, which is no feature and never applies.
+  it('reads a comment as what parts two names: nothing its removal would join is made', () => {
+    // To a browser these are no feature and no media rule. The comment is
+    // taken out, but the names it parts stay parted: what the browser
+    // discards, the mirror discards too, and no name, at-rule or value is
+    // joined into one the page never wrote (R4).
     const NONE = '(scrip ting)';
     expect(sheet('@media (scrip/**/ting){.a{color:red}}'))
       .toBe(`@media ${NONE}{.a{color:red}}`);
+    // The value stays two names: no scripting value, so the feature is
+    // invalid and `not` of it applies, as in the page.
     expect(sheet('@media not (scripting: no/* */ne){.a{color:red}}'))
-      .toBe(`@media not ${NONE}{.a{color:red}}`);
+      .toBe('@media not (scripting: no ne){.a{color:red}}');
+    // An at-rule name a comment parts stays an unknown at-rule: the rule
+    // is discarded, and the feature in it is never read as a query.
     expect(sheet('@med/**/ia (scripting){.a{color:red}}'))
-      .toBe(`@media ${NONE}{.a{color:red}}`);
+      .toBe('@med ia (scripting){.a{color:red}}');
     expect(sheet('@/**/media screen and (scripting: none){.a{color:red}}'))
-      .toBe(`@media screen and ${NONE}{.a{color:red}}`);
+      .toBe('@ media screen and (scripting: none){.a{color:red}}');
+    // Taking the comment out of an at-rule's name does not join it into a
+    // live rule: a browser reads `@im` and `port` as two names, and so does
+    // the mirror (R4).
     expect(sheet('@im/**/port "a.css" (scripting);.a{color:red}'))
-      .toBe(`@import url("https://example.test/app/a.css") ${NONE};.a{color:red}`);
+      .toBe(`@im port "a.css" (scripting);.a{color:red}`);
     expect(sheet('.a{-/**/-q:x;@me/**/dia (scripting){color:red}}'))
-      .toBe(`.a{--q:x;@media ${NONE}{color:red}}`);
+      .toBe('.a{- -q:x;@me dia (scripting){color:red}}');
     // One that a comment does not cut is answered, beside one that it does.
     expect(sheet('@media (scripting), (scrip/**/ting){.a{color:red}}'))
       .toBe(`@media ${ALWAYS}, ${NONE}{.a{color:red}}`);
@@ -231,18 +239,21 @@ describe('media queries about scripts, read as the tab reads them', () => {
       .toBe(`@media not ${NEVER}{.a{color:red}}`);
     expect(sheet('@media screen and/* x */(scripting){.a{color:red}}'))
       .toBe(`@media screen and ${ALWAYS}{.a{color:red}}`);
-    // An escaped colon is a letter of the name it stands in.
+    // An escaped colon is a letter of the name it stands in; the comment
+    // before it keeps the feature's name and that name apart.
     expect(sheet('@media (scripting/**/\\3a none){.a{color:red}}'))
-      .toBe('@media (scripting\\3a none){.a{color:red}}');
-    // Elsewhere a comment is taken out as before.
+      .toBe('@media (scripting \\3a none){.a{color:red}}');
+    // Elsewhere a comment is taken out, and the names it parts stay parted:
+    // no value or property is joined into one the page never wrote.
     expect(sheet('.a{color:r/**/ed}@media (scripting){.b{mar/**/gin:0}}'))
-      .toBe(`.a{color:red}@media ${ALWAYS}{.b{margin:0}}`);
+      .toBe(`.a{color:r ed}@media ${ALWAYS}{.b{mar gin:0}}`);
     // What is written reads the same when read again, and is no feature.
     expect(sheet(`@media not ${NONE}{.a{color:red}}`))
       .toBe(`@media not ${NONE}{.a{color:red}}`);
-    // The conservative reading takes an import out, however it is spelled.
+    // A comment inside an at-rule's name parts it: the rule is inert, and
+    // the conservative reading leaves it alone instead of inventing an import.
     expect(sheet('@im/**/port "a.css" (scripting);.a{color:red}', 'conservative'))
-      .toBe('.a{color:red}');
+      .toBe('@im port "a.css" (scripting);.a{color:red}');
     // An attribute's value keeps its comments: nothing is joined there.
     expect(answerScriptingMediaFeatures('(scrip/**/ting) or (scripting/* x */)'))
       .toBe(`(scrip/**/ting) or ${ALWAYS}`);

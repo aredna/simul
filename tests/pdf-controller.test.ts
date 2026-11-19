@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { PdfController, type PdfControllerOcr } from '../entrypoints/sidepanel/pdf-controller';
+import {
+  PDF_TEXT_CLEANUP_PAGES,
+  PdfController,
+  type PdfControllerOcr,
+} from '../entrypoints/sidepanel/pdf-controller';
 import type { ImageRecognitionResult } from '../lib/ocr/image-analysis-coordinator';
 import type { PdfOcrCanvas } from '../lib/pdf/pdf-ocr';
 import type {
@@ -44,6 +48,7 @@ function fakeDocument(pageCount = 3) {
     render: vi.fn(async (_page: number, _canvas: unknown, _scale: number) => 1),
     fontFaces: vi.fn(async () => ({})),
     releasePage: vi.fn(async (_page: number) => undefined),
+    cleanup: vi.fn(async () => undefined),
     destroy: vi.fn(async () => undefined),
   };
   return document satisfies PdfDocumentHandle;
@@ -568,6 +573,19 @@ describe('PdfController text', () => {
       milliseconds: 0,
     });
     expect(JSON.stringify(harness.diagnostics)).not.toContain('Page');
+  });
+
+  it('lets pdf.js drop page state as a long reading goes on (P2)', async () => {
+    const document = fakeDocument(PDF_TEXT_CLEANUP_PAGES + 1);
+    const harness = setup({ withText: true, openDocument: async () => document });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    expect(document.cleanup).not.toHaveBeenCalled();
+
+    await expect(harness.controller.readText(signal)).resolves.toEqual({ hasText: true });
+
+    // One sweep per PDF_TEXT_CLEANUP_PAGES pages read.
+    expect(document.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it('reads on from the page the reader moved to, and asks for a new order', async () => {

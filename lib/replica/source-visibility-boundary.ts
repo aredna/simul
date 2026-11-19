@@ -70,7 +70,6 @@ export class SourceVisibilityBoundaryIndex {
   refreshMutations(
     records: readonly MutationRecord[],
   ): SourceVisibilityBoundaryRefresh {
-    const roots: Element[] = [];
     let global = false;
     let imageSelectorSurface = false;
     for (const record of records) {
@@ -113,15 +112,11 @@ export class SourceVisibilityBoundaryIndex {
         overflow: true,
       });
     }
-    const result = this.#scanRoots(
-      minimizeVisibilityRoots(roots),
-      this.#states,
-      createSourcePaintScanCache(),
-    );
-    this.#complete &&= !result.overflow;
+    // A batch that names no element (a stand-in's attribute record on a text
+    // node) compares nothing: every real record makes the comparison global.
     return Object.freeze({
-      changedTargets: result.changedTargets,
-      overflow: result.overflow || !this.#complete,
+      changedTargets: Object.freeze([]),
+      overflow: !this.#complete,
     });
   }
 
@@ -450,14 +445,15 @@ function pushSourceVisibilityChildren(
   return true;
 }
 
-interface SourceElementLinks {
-  last(element: Element): Element | null;
-  previous(element: Element): Element | null;
+export interface SourceElementLinks {
+  last(element: Element | DocumentFragment): Element | null;
+  previous(element: Element | DocumentFragment): Element | null;
 }
 
 const DIRECT_ELEMENT_LINKS: SourceElementLinks = Object.freeze({
-  last: (element: Element) => element.lastElementChild,
-  previous: (element: Element) => element.previousElementSibling,
+  last: (element: Element | DocumentFragment) => element.lastElementChild,
+  previous: (element: Element | DocumentFragment) =>
+    element instanceof Element ? element.previousElementSibling : null,
 });
 
 const knownElementLinks = new WeakMap<object, SourceElementLinks>();
@@ -476,19 +472,25 @@ const knownElementLinks = new WeakMap<object, SourceElementLinks>();
  * once a scan, on the element the scan starts from. An object without them
  * (a test's stand-in) is read as it was.
  */
-function sourceElementLinks(element: Element): SourceElementLinks {
+export function sourceElementLinks(
+  element: Element | DocumentFragment | null | undefined,
+): SourceElementLinks {
+  if (!element) return DIRECT_ELEMENT_LINKS;
   const prototype: object | null = Object.getPrototypeOf(element);
   if (!prototype) return DIRECT_ELEMENT_LINKS;
   const known = knownElementLinks.get(prototype);
   if (known) return known;
-  const accessor = (name: string): ((this: Element) => Element | null) | undefined => {
+  const accessor = (
+    name: string,
+  ): ((this: Element | DocumentFragment) => Element | null) | undefined => {
     for (
       let current: object | null = prototype;
       current;
       current = Object.getPrototypeOf(current)
     ) {
       const getter = Object.getOwnPropertyDescriptor(current, name)?.get;
-      if (getter) return getter as (this: Element) => Element | null;
+      if (getter) return getter as
+        (this: Element | DocumentFragment) => Element | null;
     }
     return undefined;
   };
@@ -496,8 +498,8 @@ function sourceElementLinks(element: Element): SourceElementLinks {
   const previous = accessor('previousElementSibling');
   const links: SourceElementLinks = last && previous
     ? Object.freeze({
-        last: (target: Element) => last.call(target),
-        previous: (target: Element) => previous.call(target),
+        last: (target: Element | DocumentFragment) => last.call(target),
+        previous: (target: Element | DocumentFragment) => previous.call(target),
       })
     : DIRECT_ELEMENT_LINKS;
   knownElementLinks.set(prototype, links);

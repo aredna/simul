@@ -1789,35 +1789,6 @@ export function sourceElementStartsPrivateRegionInContext(
   return sourceElementStartsPrivateRegion(tag, attributes);
 }
 
-/** Reads only current, user-visible native text-control state and fails closed. */
-export function readSourceControlText(
-  element: Element,
-): SourceControlText | undefined {
-  const tagName = element.localName.toLowerCase();
-  const attributes = readSourceStructuralAttributes(element);
-  if (
-    !isEligibleSourceTextControl(tagName, attributes) ||
-    hasSourceCredentialSecretAncestor(element)
-  ) return undefined;
-  try {
-    const control = element as Element & {
-      readonly value?: unknown;
-      readonly placeholder?: unknown;
-    };
-    if (typeof control.value !== 'string' ||
-      typeof control.placeholder !== 'string') return undefined;
-    if (control.value.length > 0) {
-      return Object.freeze({ kind: 'value', text: control.value });
-    }
-    if (control.placeholder.length > 0) {
-      return Object.freeze({ kind: 'placeholder', text: control.placeholder });
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
 export function isSourceNativeTextControlTagName(value: string): boolean {
   const tag = value.trim().toLowerCase();
   return tag === 'input' || tag === 'textarea';
@@ -1857,80 +1828,6 @@ export function isSourceNativeSelectImplicitRole(
     ) return role === 'combobox' || role === 'listbox';
   }
   return false;
-}
-
-/** Reads indices only; raw option values and names never enter the protocol. */
-export function readSourceSelectedOptionIndexes(
-  element: Element,
-): readonly number[] | undefined {
-  if (!isEligibleSourceSelect(
-    element.localName,
-    readSourceStructuralAttributes(element),
-  )) return undefined;
-  try {
-    const select = element as HTMLSelectElement;
-    const options = select.options;
-    if (!options || options.length > MAX_SOURCE_SELECT_DESCENDANTS) {
-      return undefined;
-    }
-    const multiple = select.multiple === true || element.hasAttribute('multiple');
-    if (!multiple && typeof select.selectedIndex === 'number') {
-      const selectedIndex = select.selectedIndex;
-      if (selectedIndex < 0) return Object.freeze([]);
-      const option = options.item(selectedIndex);
-      return option && sourceSelectOptionPathIsPublic(option, element)
-        ? Object.freeze([selectedIndex])
-        : Object.freeze([]);
-    }
-    const selected: number[] = [];
-    const selectedOptions = select.selectedOptions;
-    if (multiple && selectedOptions) {
-      if (selectedOptions.length > MAX_SOURCE_SELECTED_OPTION_INDEXES) {
-        return undefined;
-      }
-      for (let position = 0; position < selectedOptions.length; position += 1) {
-        const option = selectedOptions.item(position);
-        if (!option) return undefined;
-        if (
-          !sourceSelectOptionPathIsPublic(option, element)
-        ) continue;
-        const index = option.index;
-        if (!Number.isSafeInteger(index) || index < 0 || index >= options.length) {
-          return undefined;
-        }
-        selected.push(index);
-      }
-      return Object.freeze(selected);
-    }
-    // DOM test doubles and older implementations may omit selectedIndex or
-    // selectedOptions. Keep that compatibility path bounded and allocation
-    // free; real Chromium takes the constant/sparse branches above.
-    for (let index = 0; index < options.length; index += 1) {
-      const option = options.item(index);
-      if (!option?.selected) continue;
-      if (
-        !sourceSelectOptionPathIsPublic(option, element)
-      ) continue;
-      selected.push(index);
-      if (!multiple) break;
-    }
-    return Object.freeze(selected);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Chrome exposes :open for customizable selects; the boolean carries no content. */
-export function readSourceSelectPickerOpen(element: Element): true | undefined {
-  if (!isEligibleSourceSelect(
-    element.localName,
-    readSourceStructuralAttributes(element),
-  )) return undefined;
-  try {
-    return element.matches(':open') ? true : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /** Standalone/datalist options stay private; only select descendants are public. */

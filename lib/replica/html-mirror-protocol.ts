@@ -11,12 +11,10 @@ import {
   htmlMirrorJsonBytes,
   readHtmlMirrorDocumentContent,
   readHtmlMirrorCanvasBackgroundColor,
-  readHtmlMirrorSelectedOptionIndexes,
   readHtmlMirrorNode,
   readHtmlMirrorRepresentability,
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
-  type HtmlMirrorControlText,
   type HtmlMirrorDocumentMode,
   type HtmlMirrorNode,
   type HtmlMirrorRepresentabilitySummary,
@@ -88,10 +86,7 @@ export type HtmlMirrorPatchOperation =
       readonly attributes: readonly (readonly [string, string])[];
       readonly visuallyHidden?: true;
       readonly selectedImageSource?: string;
-      readonly selectedOptionIndexes?: readonly number[];
-      readonly selectPickerOpen?: true;
       readonly selectPresentationStyle?: string;
-      readonly controlText?: HtmlMirrorControlText;
       readonly canvasBackgroundColor?: string;
       readonly resolvedStyleSheetText?: string;
       /**
@@ -911,9 +906,12 @@ function readOperations(
       hasExactKeysWithOptional(
         raw,
         ['kind', 'nodeId', 'namespace', 'tagName', 'attributes'],
+        // Control state (selected positions, picker state, control text)
+        // travels only on the semantic channel. An attributes operation that
+        // names it is refused here rather than later, where the canonical
+        // node reader would reject it as a malformed graph (R8).
         [
-          'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
-          'selectPickerOpen', 'selectPresentationStyle', 'controlText',
+          'visuallyHidden', 'selectedImageSource', 'selectPresentationStyle',
           'canvasBackgroundColor', 'resolvedStyleSheetText',
           'resolvedStyleSheetTextFrom', 'customElementDefined',
           'assignedNodeIds',
@@ -928,11 +926,8 @@ function readOperations(
         (raw.visuallyHidden !== undefined && raw.visuallyHidden !== true) ||
         (raw.selectedImageSource !== undefined &&
           typeof raw.selectedImageSource !== 'string') ||
-        (raw.selectedOptionIndexes !== undefined &&
-          !Array.isArray(raw.selectedOptionIndexes)) ||
         (raw.selectPresentationStyle !== undefined &&
           typeof raw.selectPresentationStyle !== 'string') ||
-        (raw.selectPickerOpen !== undefined && raw.selectPickerOpen !== true) ||
         // Only a `<style>` holds its sheet as text that more can be added to.
         (raw.resolvedStyleSheetTextFrom !== undefined && (
           !Number.isSafeInteger(raw.resolvedStyleSheetTextFrom) ||
@@ -941,18 +936,6 @@ function readOperations(
           typeof raw.resolvedStyleSheetText !== 'string'
         ))
       ) return undefined;
-      const selectedOptionIndexes = readHtmlMirrorSelectedOptionIndexes(
-        raw.selectedOptionIndexes,
-        raw.tagName,
-      );
-      if (
-        raw.selectedOptionIndexes !== undefined &&
-        selectedOptionIndexes === undefined
-      ) return undefined;
-      if (selectedOptionIndexes) {
-        graphBudget.bytes += selectedOptionIndexes.length * 8 + 16;
-        if (graphBudget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
-      }
       const sentinel = readHtmlMirrorNode({
         kind: 'element',
         id: raw.nodeId,
@@ -963,12 +946,6 @@ function readOperations(
         ...(raw.visuallyHidden === true ? { visuallyHidden: true } : {}),
         ...(typeof raw.selectedImageSource === 'string'
           ? { selectedImageSource: raw.selectedImageSource }
-          : {}),
-        ...(raw.controlText !== undefined
-          ? { controlText: raw.controlText }
-          : {}),
-        ...(raw.selectPickerOpen === true
-          ? { selectPickerOpen: true }
           : {}),
         ...(typeof raw.selectPresentationStyle === 'string'
           ? { selectPresentationStyle: raw.selectPresentationStyle }
@@ -1002,17 +979,8 @@ function readOperations(
         ...(sentinel.selectedImageSource
           ? { selectedImageSource: sentinel.selectedImageSource }
           : {}),
-        ...(selectedOptionIndexes !== undefined
-          ? { selectedOptionIndexes }
-          : {}),
-        ...(sentinel.selectPickerOpen
-          ? { selectPickerOpen: true as const }
-          : {}),
         ...(sentinel.selectPresentationStyle
           ? { selectPresentationStyle: sentinel.selectPresentationStyle }
-          : {}),
-        ...(sentinel.controlText
-          ? { controlText: sentinel.controlText }
           : {}),
         ...(sentinel.canvasBackgroundColor
           ? { canvasBackgroundColor: sentinel.canvasBackgroundColor }

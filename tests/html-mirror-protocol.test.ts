@@ -20,6 +20,7 @@ import {
   HtmlMirrorScrollPaneLedger,
   readHtmlMirrorSourceMessage,
   withHtmlMirrorScrollPanes,
+  type HtmlMirrorPatchOperation,
 } from '../lib/replica/html-mirror-protocol';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
@@ -3534,6 +3535,39 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBeUndefined();
   });
 
+  it('refuses select state on an attributes operation, which the semantic channel carries (R8)', () => {
+    const patchIdentity = createReplicaIdentity({
+      sessionId: 'hint-asymmetry', pageEpoch: 1, generation: 1,
+      documentId: 'hint-asymmetry-document', frameId: 0, sequence: 1,
+    });
+    const base = {
+      kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'select',
+      attributes: [],
+    } as const;
+    // The declared type no longer offers the semantic channel's state.
+    const legacy: HtmlMirrorPatchOperation = {
+      kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'select',
+      attributes: [],
+      // @ts-expect-error controlText is not part of an attributes operation.
+      controlText: { kind: 'value', text: 'chosen', translatable: true },
+    };
+    expect(legacy).toBeDefined();
+    // The operation shape itself is accepted: only the semantic-superseded
+    // hints are refused.
+    expect(createHtmlMirrorPatch(patchIdentity, 1, 1, [base])).toBeDefined();
+    for (const hint of [
+      { selectedOptionIndexes: [0] },
+      { selectPickerOpen: true },
+      { controlText: { kind: 'value', text: 'chosen', translatable: true } },
+    ]) {
+      expect(createHtmlMirrorPatch(patchIdentity, 1, 1, [{
+        ...base,
+        ...hint,
+      } as unknown as Parameters<typeof createHtmlMirrorPatch>[3][number]]))
+        .toBeUndefined();
+    }
+  });
+
   it('requires and enforces the namespace on SVG attribute patches', () => {
     const patchIdentity = createReplicaIdentity({
       sessionId: 'svg-attribute-patch', pageEpoch: 1, generation: 1,
@@ -5083,7 +5117,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(graph?.adoptedStyleSheets).toEqual([]);
   });
 
-  it('removes comment/escape-obfuscated CSS imports but preserves passive rules', () => {
+  it('keeps comment/escape-obfuscated CSS imports inert and preserves passive rules', () => {
     const { document, window } = parseHTML(`<!doctype html><html><head><style>
       @\\69m/**/port url("https://tracker.invalid/a.css");
       .hero{background:url('/hero.png')}
@@ -5096,8 +5130,10 @@ describe('isolated HTML sanitizer and protocol', () => {
       new WeakNodeIdRegistry(),
     );
     const json = JSON.stringify(graph);
-    expect(json).not.toContain('tracker.invalid');
+    // The obfuscated import is no import: its name stays two names, so the
+    // mirror reads an unknown at-rule and fetches nothing, as the page does.
     expect(json).not.toMatch(/@\s*import/iu);
+    expect(json).toContain('@\\\\69m port');
     expect(json).toContain('https://example.com/hero.png');
   });
 
@@ -5403,11 +5439,14 @@ describe('isolated HTML sanitizer and protocol', () => {
     }
   });
 
-  it('preserves meaningful CSS escapes while still removing escaped imports', () => {
+  it('preserves meaningful CSS escapes and keeps escaped imports inert', () => {
     const css = '@\\69m/**/port url("https://tracker.invalid/a.css");' +
       '.sm\\:hidden{display:none}.bullet::before{content:"\\2022"}';
 
+    // The obfuscated import stays an unknown at-rule (its name is two
+    // names); the escapes that are letters of real names are preserved.
     expect(sanitizeCss(css, 'https://example.com/')).toBe(
+      '@\\69m port url("https://tracker.invalid/a.css");' +
       '.sm\\:hidden{display:none}.bullet::before{content:"\\2022"}',
     );
   });

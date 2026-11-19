@@ -3,6 +3,7 @@ import {
 } from 'virtual:simul-ocr-provider-runtime-registry';
 
 import { OffscreenComputeHost } from '../../lib/ocr/offscreen-host';
+import { isTrustedOffscreenMessageSender } from '../../lib/ocr/offscreen-message-sender';
 import { OffscreenOcrProviderRouter } from '../../lib/ocr/offscreen-provider-router';
 import { readOffscreenOcrCommand } from '../../lib/ocr/offscreen-protocol';
 import {
@@ -20,7 +21,7 @@ const host = new OffscreenComputeHost(
 );
 
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (sender.id !== browser.runtime.id) return;
+  if (!isTrustedOffscreenMessageSender(sender, browser.runtime.id)) return;
   const probe = readProbeOcrProviderCommand(message);
   if (probe) {
     void router.probe(probe.providerId).then(

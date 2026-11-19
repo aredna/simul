@@ -387,8 +387,61 @@ export async function fetchImageFile(
   if (Number.isFinite(length) && length > MAX_IMAGE_DOWNLOAD_BYTES) {
     return undefined;
   }
-  const blob = await response.blob();
-  return blob.size > 0 && blob.size <= MAX_IMAGE_DOWNLOAD_BYTES
+  const blob = await readBoundedDownloadBody(response, signal);
+  return blob && blob.size > 0 && blob.size <= MAX_IMAGE_DOWNLOAD_BYTES
     ? blob
     : undefined;
+}
+
+/**
+ * Stream the response with a running byte count: the 15 s timeout bounds the
+ * duration, not the size, and `content-length` is advisory. Reading stops and
+ * the body is cancelled as soon as the cap is passed, so an oversized image is
+ * never buffered in full (C10).
+ */
+async function readBoundedDownloadBody(
+  response: Response,
+  signal: AbortSignal | undefined,
+): Promise<Blob | undefined> {
+  const body = response.body;
+  if (!body) return undefined;
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      total += value.byteLength;
+      if (total > MAX_IMAGE_DOWNLOAD_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (isDownloadAbort(error, signal)) throw error;
+    return undefined;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancelled reader has already released its lock.
+    }
+  }
+  if (total < 1) return undefined;
+  const type = response.headers.get('content-type') ?? '';
+  return new Blob(chunks as unknown as BlobPart[], { type });
+}
+
+function isDownloadAbort(
+  error: unknown,
+  signal: AbortSignal | undefined,
+): boolean {
+  if (signal?.aborted) return true;
+  return Boolean(
+    error && typeof error === 'object' && 'name' in error &&
+    (error.name === 'AbortError' || error.name === 'TimeoutError'),
+  );
 }

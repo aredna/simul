@@ -60,6 +60,34 @@ describe('toolbar launch', () => {
     ]);
   });
 
+  it('keeps launching when preference hydration rejects (O1)', async () => {
+    const fixture = createFixture({ surface: 'side-panel', hydrated: false });
+    const launch = fixture.launcher.click(tabA);
+    expect(fixture.calls).toEqual(['open:1']);
+    fixture.failHydration(new Error('offscreen close failed'));
+
+    await expect(launch).resolves.toBeUndefined();
+    expect(fixture.calls).toEqual([
+      'open:1', 'send:authorized:11', 'remember:side-panel',
+    ]);
+    expect(fixture.reports).toEqual([
+      'preference-load-failed:preferences_not_hydrated',
+    ]);
+  });
+
+  it('does not fail a side-panel launch when the surface cannot be remembered (O3)', async () => {
+    const fixture = createFixture({ surface: 'side-panel', hydrated: true });
+    fixture.fail('remember:side-panel', 'storage unavailable');
+
+    await expect(fixture.launcher.click(tabA)).resolves.toBeUndefined();
+    expect(fixture.calls).toEqual([
+      'open:1', 'send:authorized:11', 'remember:side-panel',
+    ]);
+    expect(fixture.reports).toEqual([
+      'preference-save-failed:surface_not_remembered',
+    ]);
+  });
+
   it('falls back to closing every panel where Chrome has no per-window close', async () => {
     const fixture = createFixture({
       surface: 'popout', hydrated: false, perWindowClose: false,
@@ -973,16 +1001,21 @@ function createFixture(options: {
   /** Browser windows with the companion page in a tab, by the tab it names. */
   const asTabs = new Map<number, number>();
   const holds = new Map<string, { reached: () => void; released: Promise<void> }>();
+  const reports: string[] = [];
+  const failures = new Map<string, Error>();
   // The worker's clock, in milliseconds; it moves only when a test says so.
   let clock = 1_000;
-  const failures = new Map<string, Error>();
   let surface = options.surface;
   let hydrated = options.hydrated;
   let nextWindowId = 100;
   let resolveReady: () => void = () => undefined;
+  let rejectReady: (error: unknown) => void = () => undefined;
   const preferencesReady = options.hydrated
     ? Promise.resolve()
-    : new Promise<void>((resolve) => { resolveReady = resolve; });
+    : new Promise<void>((resolve, reject) => {
+        resolveReady = resolve;
+        rejectReady = reject;
+      });
 
   // Records the step, waits if the test holds it, and rejects if the test
   // makes it fail.
@@ -1072,6 +1105,7 @@ function createFixture(options: {
     launchEpoch: Promise.resolve('7.epoch'),
     rememberSurface: (remembered) => step(`remember:${remembered}`),
     now: () => clock,
+    report: (state, code) => { reports.push(`${state}:${code}`); },
   };
 
   const launcher = new ToolbarLauncher(environment);
@@ -1081,11 +1115,17 @@ function createFixture(options: {
     messages,
     clicks,
     created,
+    reports,
     openWindows: () => [...open].sort(),
     /** The saved preferences were read: later clicks know the choice. */
     hydrate: () => {
       hydrated = true;
       resolveReady();
+    },
+    /** Hydration fails: later clicks use the defaults the worker already has. */
+    failHydration: (error: unknown) => {
+      hydrated = true;
+      rejectReady(error);
     },
     setHydrated: (value: boolean) => { hydrated = value; },
     setSurface: (value: 'side-panel' | 'popout') => { surface = value; },

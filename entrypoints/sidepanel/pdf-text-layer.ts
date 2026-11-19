@@ -244,8 +244,12 @@ export class PdfPageTextLayer {
     for (const entry of this.#fitting) {
       const size = entry.measured;
       entry.measured = undefined;
-      // Not laid out: keep what is known, and try again in a later run.
-      if (!size) continue;
+      // Not laid out: it stays unfitted and is measured again by a later run.
+      // Dropping it here would leave it at full size on a quiet view.
+      if (!size) {
+        next.push(entry);
+        continue;
+      }
       const step = fitStep(entry.fit, size.needed, size.available);
       if (step.fits) entry.fits = entry.fit;
       else entry.overflows = entry.fit;
@@ -266,6 +270,8 @@ export class PdfPageTextLayer {
   /** Ends a run: a search cut short keeps the largest size known to fit. */
   finishFit(): void {
     for (const entry of this.#fitting) {
+      // Never measured in this run (no layout): it still waits to be fitted.
+      if (entry.fits === undefined && entry.overflows === undefined) continue;
       entry.fit = entry.fits ?? entry.fit;
       entry.fitted = true;
       setFontSize(entry);

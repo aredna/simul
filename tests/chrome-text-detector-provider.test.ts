@@ -7,6 +7,7 @@ import chromeTextDetectorOffscreenFactory from '../lib/ocr/providers/chrome-text
 import { probeChromeTextDetector } from '../lib/ocr/providers/chrome-text-detector/probe';
 import {
   ChromeTextDetectorOffscreenRunner,
+  ProviderUnavailableError,
   UnsupportedLanguageError,
 } from '../lib/ocr/providers/chrome-text-detector/runtime';
 
@@ -75,18 +76,61 @@ describe('Chrome TextDetector provider', () => {
 
   it('uses a real local detect call for its capability probe', async () => {
     const detect = vi.fn(async () => []);
+    const availability = vi.fn(async () => 'available' as const);
     const create = vi.fn(async () => ({ detect }));
     const capability = await probeChromeTextDetector({
-      getApi: () => ({ create } as unknown as TextDetectorConstructor),
+      getApi: () => ({ availability, create } as unknown as TextDetectorConstructor),
       createProbeSource: () => ({ local: true } as unknown as ImageBitmapSource),
     });
 
     expect(capability).toEqual({ status: 'available' });
+    expect(availability).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledOnce();
+    // The probe creates exactly the model it asked availability about, so it
+    // cannot pick a different (and possibly downloadable) default (C4).
+    expect(create).toHaveBeenCalledWith({
+      languages: ['en'],
+      signal: expect.any(AbortSignal),
+    });
     expect(detect).toHaveBeenCalledWith({ local: true });
     await expect(probeChromeTextDetector({
       getApi: () => undefined,
     })).resolves.toMatchObject({ status: 'unavailable' });
+  });
+
+  it('never calls create() for a model that is not installed (C4)', async () => {
+    const create = vi.fn(async () => ({ detect: async () => [] }));
+    for (const availability of ['downloadable', 'downloading', 'unavailable'] as const) {
+      await expect(probeChromeTextDetector({
+        getApi: () => ({
+          availability: async () => availability,
+          create,
+        } as unknown as TextDetectorConstructor),
+        createProbeSource: () => ({ local: true } as unknown as ImageBitmapSource),
+      })).resolves.toMatchObject({ status: 'unavailable' });
+    }
+    // An API that offers create() but cannot say what is installed is not
+    // trusted to create without downloading.
+    await expect(probeChromeTextDetector({
+      getApi: () => ({ create } as unknown as TextDetectorConstructor),
+      createProbeSource: () => ({ local: true } as unknown as ImageBitmapSource),
+    })).resolves.toMatchObject({ status: 'unavailable' });
+    expect(create).not.toHaveBeenCalled();
+
+    const runner = new ChromeTextDetectorOffscreenRunner({
+      getApi: () => ({
+        availability: async () => 'downloadable',
+        create,
+      } as unknown as TextDetectorConstructor),
+      decode: async () => ({ width: 100, height: 50, close: vi.fn() } as ImageBitmap),
+    });
+    await expect(runner.recognize(
+      textDetectorJob('es'),
+      new Blob([new Uint8Array([1])]),
+      new AbortController().signal,
+    )).rejects.toBeInstanceOf(ProviderUnavailableError);
+    expect(create).not.toHaveBeenCalled();
+    await runner.dispose();
   });
 
   it('reports a missing experimental API before constructing a runner', async () => {
@@ -122,10 +166,11 @@ describe('Chrome TextDetector provider', () => {
       receivers.push(this);
     };
     const detect = vi.fn(async () => []);
+    const availability = async () => 'available' as const;
     const create = vi.fn(async () => ({ detect }));
 
     await expect(probeChromeTextDetector({
-      getApi: () => ({ create } as unknown as TextDetectorConstructor),
+      getApi: () => ({ availability, create } as unknown as TextDetectorConstructor),
       createProbeSource: () => ({ local: true } as unknown as ImageBitmapSource),
       setTimer,
       clearTimer,
@@ -133,7 +178,7 @@ describe('Chrome TextDetector provider', () => {
 
     const close = vi.fn();
     const runner = new ChromeTextDetectorOffscreenRunner({
-      getApi: () => ({ create } as unknown as TextDetectorConstructor),
+      getApi: () => ({ availability, create } as unknown as TextDetectorConstructor),
       decode: async () => ({ width: 100, height: 50, close } as ImageBitmap),
       setTimer,
       clearTimer,
@@ -206,7 +251,10 @@ describe('Chrome TextDetector provider', () => {
       .mockResolvedValueOnce({ width: 100, height: 50, close: firstClose })
       .mockResolvedValueOnce({ width: 100, height: 50, close: secondClose });
     const runner = new ChromeTextDetectorOffscreenRunner({
-      getApi: () => ({ create } as unknown as TextDetectorConstructor),
+      getApi: () => ({
+        availability: async () => 'available' as const,
+        create,
+      } as unknown as TextDetectorConstructor),
       decode: decode as (encoded: Blob) => Promise<ImageBitmap>,
       setTimer: timers.setTimer,
       clearTimer: timers.clearTimer,
@@ -248,7 +296,10 @@ describe('Chrome TextDetector provider', () => {
       .mockResolvedValueOnce({ width: 100, height: 50, close: firstClose })
       .mockResolvedValueOnce({ width: 100, height: 50, close: secondClose });
     const runner = new ChromeTextDetectorOffscreenRunner({
-      getApi: () => ({ create } as unknown as TextDetectorConstructor),
+      getApi: () => ({
+        availability: async () => 'available' as const,
+        create,
+      } as unknown as TextDetectorConstructor),
       decode: decode as (encoded: Blob) => Promise<ImageBitmap>,
       setTimer: timers.setTimer,
       clearTimer: timers.clearTimer,

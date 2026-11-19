@@ -820,6 +820,33 @@ describe('source visibility boundary index', () => {
       .toEqual({ changedTargets: [], overflow: false });
     index.dispose();
   });
+
+  it('compares nothing for a batch that names no element (A9)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><p>words</p></body></html>',
+    );
+    installPositivePaintRects(document);
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: () => paintedStyle(),
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+    // No record a real observer makes names a text node's attribute. Such a
+    // batch compares nothing and reports the completeness of the last whole
+    // walk; it has no roots of its own (A9).
+    expect(index.refreshMutations([{
+      ...attributeRecord(document.body, 'class'),
+      target: document.createTextNode('words'),
+    }])).toEqual({
+      changedTargets: [],
+      overflow: false,
+    });
+    index.dispose();
+  });
 });
 
 interface PaintedStyleOptions {

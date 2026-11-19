@@ -100,8 +100,9 @@ export class ChromeTranslatorProvider implements TranslationProvider {
       : this.firstBrowserPair(pair);
     options.signal?.throwIfAborted();
 
+    let instance: BrowserTranslatorInstance;
     try {
-      const instance = await api.create({
+      instance = await api.create({
         ...browserPair,
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.onDownloadProgress
@@ -114,14 +115,6 @@ export class ChromeTranslatorProvider implements TranslationProvider {
             }
           : {}),
       });
-
-      if (options.signal?.aborted) {
-        instance.destroy();
-        options.signal.throwIfAborted();
-      }
-
-      for (const listener of this.sessionListeners) listener(pair);
-      return new ChromeTranslationSession(instance);
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw error;
       // Chrome refuses to start a language-pack download without a recent
@@ -139,6 +132,22 @@ export class ChromeTranslatorProvider implements TranslationProvider {
         { cause: error },
       );
     }
+
+    if (options.signal?.aborted) {
+      instance.destroy();
+      options.signal.throwIfAborted();
+    }
+
+    // Listeners observe a session that already exists, so they run outside
+    // the creation try: a throwing listener is not reported as a creation
+    // failure and does not leak the instance (O4).
+    try {
+      for (const listener of this.sessionListeners) listener(pair);
+    } catch (error) {
+      instance.destroy();
+      throw error;
+    }
+    return new ChromeTranslationSession(instance);
   }
 
   /**

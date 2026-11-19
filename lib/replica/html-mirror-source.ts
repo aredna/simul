@@ -97,6 +97,7 @@ import {
 } from './source-privacy-policy';
 import {
   SourceVisibilityBoundaryIndex,
+  sourceElementLinks,
   type SourceVisibilityBoundaryRefresh,
 } from './source-visibility-boundary';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
@@ -231,7 +232,9 @@ export function installHtmlMirrorSourceBridge(
     environment.openShadowRoot ?? chromeSourceShadowRootReader(),
   );
   const documentSecretClassifier = sourceDocumentSecretClassifier(sourceDocument);
-  let secretObserver: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined;
+  let secretObserver: (Pick<MutationObserver, 'observe' | 'disconnect'> & {
+    readonly takeRecords?: () => MutationRecord[];
+  }) | undefined;
   try {
     const createSecretObserver = environment.createMutationObserver ??
       ((callback: MutationCallback) => new MutationObserver(callback));
@@ -257,15 +260,91 @@ export function installHtmlMirrorSourceBridge(
     // way, so a field added to it while no panel is open is still known as
     // a password when the page later shows it in clear (D125).
     const observer = secretObserver;
-    listenForSourceShadowRoots(sourceDocument, (shadow) => {
+    const setTimer = environment.setTimer ??
+      ((callback: () => void, milliseconds: number) =>
+        setTimeout(callback, milliseconds));
+    // Kept by how strongly the page holds a root, not the other way round:
+    // the observer watches a root while it is in the page. A root that left
+    // is let go and one the page holds again is watched again by a bounded
+    // maintenance pass, whether or not another root is met meanwhile (A3).
+    const watchedRoots = new Set<WeakRef<ShadowRoot>>();
+    let observedRoots = new WeakSet<ShadowRoot>();
+    let maintenanceTimer: unknown;
+    const observeRoot = (shadow: ShadowRoot): void => {
       try {
         observer.observe(shadow, SOURCE_LIFETIME_RECORD_OPTIONS);
+        observedRoots.add(shadow);
       } catch {
         documentSecretClassifier.classify(shadow.host, {
           tagName: shadow.host.localName,
           secretAncestor: true,
         });
       }
+    };
+    const rememberPending = (): void => {
+      // A detached tree's last records are remembered before the observer
+      // lets go of it: disconnecting drops what it has queued.
+      try {
+        const pending = observer.takeRecords?.() ?? [];
+        if (pending.length > 0) {
+          rememberSourceMutationSecrets(
+            pending,
+            sourceWindow,
+            documentSecretClassifier,
+            { freshRoots: true },
+          );
+        }
+      } catch {
+        // A record that cannot be read leaves the ledger as it was.
+      }
+    };
+    const maintainWatchedRoots = (): void => {
+      let rebind = false;
+      for (const reference of watchedRoots) {
+        const root = reference.deref();
+        if (!root) {
+          watchedRoots.delete(reference);
+          continue;
+        }
+        const connected = root.host?.isConnected !== false;
+        if (connected === observedRoots.has(root)) continue;
+        rebind = true;
+      }
+      if (!rebind) return;
+      rememberPending();
+      observer.disconnect();
+      observedRoots = new WeakSet();
+      try {
+        observer.observe(sourceDocument, SOURCE_LIFETIME_RECORD_OPTIONS);
+      } catch {
+        // The document cannot be watched any more; nothing is either.
+      }
+      for (const reference of watchedRoots) {
+        const root = reference.deref();
+        if (!root) {
+          watchedRoots.delete(reference);
+          continue;
+        }
+        if (root.host?.isConnected === false) continue;
+        observeRoot(root);
+      }
+    };
+    const scheduleMaintenance = (): void => {
+      if (maintenanceTimer !== undefined || watchedRoots.size === 0) return;
+      maintenanceTimer = setTimer(() => {
+        maintenanceTimer = undefined;
+        maintainWatchedRoots();
+        scheduleMaintenance();
+      }, SECRET_ROOT_MAINTENANCE_INTERVAL_MS);
+    };
+    const watchRoot = (shadow: ShadowRoot): void => {
+      watchedRoots.add(new WeakRef(shadow));
+      if (shadow.host?.isConnected !== false) observeRoot(shadow);
+      scheduleMaintenance();
+    };
+    listenForSourceShadowRoots(sourceDocument, (shadow) => {
+      maintainWatchedRoots();
+      watchRoot(shadow);
     });
   }
   eagerlyClassifySourceDocumentSecrets(
@@ -487,6 +566,8 @@ const SOURCE_LIFETIME_RECORD_OPTIONS: MutationObserverInit = Object.freeze({
 });
 const MAX_HTML_MIRROR_PENDING_TARGETS = 4_000;
 const SHADOW_DISCOVERY_INTERVAL_MS = 500;
+/** How often the document-lifetime secret observer revisits its roots (A3). */
+const SECRET_ROOT_MAINTENANCE_INTERVAL_MS = 1_000;
 const MAX_SHADOW_HOSTS_PER_TICK = 1_000;
 const MAX_SHADOW_OBSERVATION_NODES = 20_000;
 const MAX_STYLE_SHEETS_PER_TICK = 512;
@@ -2942,6 +3023,11 @@ export class HtmlMirrorSourceSession {
     const view = this.environment.window;
     const root = this.environment.document.documentElement;
     const pending: Element[] = root ? [root] : [];
+    // The children of an element are stepped through by the accessors its
+    // prototype defines, never by a read on the element itself: a form
+    // answers `form.lastElementChild` with one of its fields when a field
+    // is named so (D144).
+    const links = sourceElementLinks(root);
     let inspected = 0;
     while (pending.length > 0) {
       const element = pending.pop() as Element;
@@ -2979,20 +3065,23 @@ export class HtmlMirrorSourceSession {
         if (!this.#queueSlottedContent(element)) return;
       }
       for (
-        let child = element.lastElementChild;
+        let child = links.last(element);
         child;
-        child = child.previousElementSibling
+        child = links.previous(child)
       ) pending.push(child);
       const shadow = readSourceShadowRoot(element);
       if (shadow && this.#mirroredNodes.has(shadow)) {
         // How a child of the host is read comes from the boxes around its
         // slot in this root, which a sheet restyles: each child is asked
         // again, and read again if it is read otherwise than it was (D142).
+        // The root is stepped through by its own accessors too: page script
+        // holding it can define an own property of either name (A7).
         this.#slotChanges.add(shadow);
+        const shadowLinks = sourceElementLinks(shadow);
         for (
-          let child = shadow.lastElementChild;
+          let child = shadowLinks.last(shadow);
           child;
-          child = child.previousElementSibling
+          child = shadowLinks.previous(child)
         ) pending.push(child);
       }
     }

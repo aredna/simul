@@ -205,6 +205,94 @@ describe('fetchPdfBytes', () => {
     expect([...shorter]).toEqual([...PDF_BYTES]);
   });
 
+  it('copies each piece of a download with no length as it arrives (P5)', async () => {
+    // A producer may hand out one buffer again and again. A reader that keeps
+    // the pieces by reference would end with the last piece repeated, and
+    // would hold every piece next to the finished file near the size cap.
+    const piece = new Uint8Array(8);
+    const pieces = ['%PDF-1.7', '%PDF-2.0', '%PDF-3.0'];
+    let index = 0;
+    const body = new ReadableStream<Uint8Array>({
+      // One buffer, filled again for each piece: a reader that keeps pieces by
+      // reference holds the last contents for all of them.
+      pull(controller) {
+        const text = pieces[index];
+        index += 1;
+        if (text === undefined) {
+          controller.close();
+          return;
+        }
+        piece.set(new TextEncoder().encode(text));
+        controller.enqueue(piece);
+      },
+    }, { highWaterMark: 0 });
+
+    const bytes = await fetchPdfBytes(URL_UNDER_TEST, {
+      fetch: async () => response(body),
+    });
+
+    expect(new TextDecoder().decode(bytes)).toBe('%PDF-1.7%PDF-2.0%PDF-3.0');
+  });
+
+  it('returns a buffer of the file\'s own length after gathering (P5 repair)', async () => {
+    // Just above the first gather capacity (64 KiB): the gather buffer doubles
+    // to 128 KiB, and a view of it would keep that half-empty buffer alive for
+    // as long as the document holds the file.
+    const size = 64 * 1024 + 100;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const first = new Uint8Array(64 * 1024);
+        first.set(new TextEncoder().encode('%PDF-1.7'));
+        controller.enqueue(first);
+        controller.enqueue(new Uint8Array(size - first.byteLength));
+        controller.close();
+      },
+    });
+
+    const bytes = await fetchPdfBytes(URL_UNDER_TEST, {
+      fetch: async () => response(body),
+    });
+
+    expect(bytes.byteLength).toBe(size);
+    expect(bytes.buffer.byteLength).toBe(size);
+  });
+
+  it('returns an exact buffer when transfer is refused (P5 repair)', async () => {
+    // Node 24 and this project's Chrome have ArrayBuffer.prototype.transfer, so
+    // the test above never reaches the copy. A runtime without it, or one that
+    // refuses the transfer, falls back to .slice: the result must still be a
+    // buffer of the file's own length, not a view of the gather slack.
+    const descriptor = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'transfer');
+    Object.defineProperty(ArrayBuffer.prototype, 'transfer', {
+      configurable: true,
+      value: () => {
+        throw new TypeError('ArrayBuffer.transfer is not available here.');
+      },
+    });
+    try {
+      const size = 64 * 1024 + 100;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const first = new Uint8Array(64 * 1024);
+          first.set(new TextEncoder().encode('%PDF-1.7'));
+          controller.enqueue(first);
+          controller.enqueue(new Uint8Array(size - first.byteLength));
+          controller.close();
+        },
+      });
+
+      const bytes = await fetchPdfBytes(URL_UNDER_TEST, {
+        fetch: async () => response(body),
+      });
+
+      expect(bytes.byteLength).toBe(size);
+      expect(bytes.buffer.byteLength).toBe(size);
+    } finally {
+      if (descriptor) Object.defineProperty(ArrayBuffer.prototype, 'transfer', descriptor);
+      else delete (ArrayBuffer.prototype as { transfer?: unknown }).transfer;
+    }
+  });
+
   it('reports the caller cancelling, before or during the download', async () => {
     const before = new AbortController();
     before.abort();

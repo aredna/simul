@@ -755,8 +755,14 @@ describe('sidepanel UI structure', () => {
   });
 
   it('does not guard the definitely assigned image translation controller', () => {
-    expect(script).toContain('let imageTranslationController!: ImageTranslationController;');
+    // The controller is a lazy facade now, still definitely assigned before
+    // any callback can reach it (O8).
+    expect(script).toContain('let imageTranslationController!: LazyImageTranslationController;');
     expect(script).not.toContain('imageTranslationController?.');
+  });
+
+  it('does not carry an unused AbortError helper (O5)', () => {
+    expect(script).not.toContain('isAbortError');
   });
 });
 

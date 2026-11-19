@@ -24,7 +24,10 @@ import { SemanticSourceReceiver } from '../lib/replica/semantic-source-receiver'
 import { StickySourceSecretClassifier } from '../lib/replica/source-secret-classifier';
 import { hasSourceCredentialSecretAncestor } from '../lib/replica/source-privacy-policy';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
-import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
+import {
+  installSourceShadowRootReader,
+  probeSourceShadowRoot,
+} from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
 
 const identity: ReplicaSourceDocumentIdentity = {
@@ -4981,6 +4984,222 @@ describe('semantic source session', () => {
       session.dispose();
     }
   });
+
+  it('reads a panel that holds an element saying it is not an editor (A4)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button aria-expanded="true" aria-controls="panel">More</button>' +
+      '<div id="panel"><div contenteditable="false">plain words</div></div></body></html>',
+    );
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, STANDARD_REPLICA_READ_SCOPE,
+    ));
+    const batch = port.messages[0]!;
+    // A rich-text toolbar says `contenteditable="false"` on its buttons; the
+    // panel around them is still a panel the mirror may open.
+    expect(batch.proofs.some((proof) => proof.kind === 'disclosure-state'))
+      .toBe(true);
+    expect(batch.records.map(({ text }) => text)).toContain('plain words');
+    session.dispose();
+  });
+
+  it('reads the page again when a late closed root is found above it (A1)', () => {
+    const { document, window } = parseHTML(
+      '<html><body>' +
+      '<button aria-expanded="false" aria-controls="panel">More</button>' +
+      '<div id="panel" hidden>slotted words</div>' +
+      '</body></html>',
+    );
+    const host = document.querySelector('#panel')!;
+    const text = host.firstChild!;
+    const roots = closedRootReader();
+    installSourceShadowRootReader(document, roots.read);
+    let assignedSlot: Element | null = null;
+    Object.defineProperty(text, 'assignedSlot', {
+      configurable: true,
+      get: () => assignedSlot,
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html', undefined,
+      (element) => ({
+        display: element.hasAttribute('hidden') ? 'none' : 'block',
+        visibility: 'visible',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' &&
+            element.getAttribute('data-mask') === '' ? 'disc' : 'none',
+      }) as unknown as CSSStyleDeclaration,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!;
+    expect(first.records.map(({ text: value }) => value))
+      .toContain('slotted words');
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+
+    // The page wraps the slot in a masking box, in a root Chrome keeps
+    // closed. Nothing fires, and the text is public until a reader finds it.
+    const root = roots.attach(host, '<div data-mask=""><slot></slot></div>');
+    assignedSlot = root.querySelector('slot')!;
+    // The base channel's host rotation asks Chrome again about the host.
+    expect(probeSourceShadowRoot(host)).toBe(root);
+
+    const second = port.messages[1];
+    expect(second).toBeDefined();
+    expect(second!.records.map(({ text: value }) => value))
+      .not.toContain('slotted words');
+    session.dispose();
+  });
+
+  it('remembers a same-task credential change the observer has not delivered (A2)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main id="page">page words</main></body></html>',
+    );
+    const page = document.querySelector('#page')!;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const harness: SemanticMutationHarness = { observed: [], pending: [] };
+    const session = createSession(
+      port, document, window, 'isolated-html',
+      undefined, undefined, undefined, harness,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+
+    // One task: the page makes a password field, types a credential into it
+    // and shows it as text. The scan is scheduled before the observer's own
+    // microtask, and the record that says what the field was is still queued.
+    const field = document.createElement('input');
+    field.setAttribute('type', 'password');
+    field.value = 'hunter22';
+    page.append(field);
+    field.setAttribute('type', 'text');
+    harness.pending!.push(
+      {
+        type: 'childList',
+        target: page,
+        addedNodes: [field],
+        removedNodes: [],
+      } as unknown as MutationRecord,
+      {
+        type: 'attributes',
+        target: field,
+        attributeName: 'type',
+        oldValue: 'password',
+      } as unknown as MutationRecord,
+    );
+    session.refresh();
+
+    expect(JSON.stringify(port.messages)).not.toContain('hunter22');
+    session.dispose();
+  });
+
+  it('remembers a mask removed through the field\'s own style object (A2)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main id="page">page words</main></body></html>',
+    );
+    const page = document.querySelector('#page')!;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const harness: SemanticMutationHarness = { observed: [], pending: [] };
+    const session = createSession(
+      port, document, window, 'isolated-html',
+      undefined, undefined, undefined, harness,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+
+    // One task: a masked field is made and unmasked through its style object.
+    // The style attribute's record, with the old mask, is not delivered yet.
+    const field = document.createElement('input');
+    field.setAttribute('type', 'text');
+    field.setAttribute('style', '-webkit-text-security:disc');
+    field.value = 'hunter22';
+    page.append(field);
+    field.style.setProperty('-webkit-text-security', 'none');
+    harness.pending!.push(
+      {
+        type: 'childList',
+        target: page,
+        addedNodes: [field],
+        removedNodes: [],
+      } as unknown as MutationRecord,
+      {
+        type: 'attributes',
+        target: field,
+        attributeName: 'style',
+        oldValue: '-webkit-text-security:disc',
+      } as unknown as MutationRecord,
+    );
+    session.refresh();
+
+    expect(JSON.stringify(port.messages)).not.toContain('hunter22');
+    session.dispose();
+  });
+
+  it('stops watching and listening to a shadow root whose host left the page (A3)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host">host words</div></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<span>inside words</span>';
+    const listeners = trackedRootListeners(root);
+    const harness: SemanticMutationHarness = { observed: [] };
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html',
+      undefined, undefined, undefined, harness,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!;
+    expect(harness.observed).toContain(root);
+    expect(listeners.count()).toBeGreaterThan(0);
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+
+    host.remove();
+    const observedBefore = harness.observed.length;
+    session.refresh();
+    // The root is let go instead of kept, with everything in it, for the
+    // session's lifetime; the document is watched again, and nothing else.
+    expect(harness.observed.slice(observedBefore)).toEqual([document]);
+    expect(harness.disconnects).toBe(1);
+    expect(listeners.count()).toBe(0);
+
+    // A host put back is met by the next scan and watched again.
+    document.body.append(host);
+    const reobservedBefore = harness.observed.length;
+    session.refresh();
+    expect(harness.observed.slice(reobservedBefore)).toContain(root);
+    expect(listeners.count()).toBeGreaterThan(0);
+    session.dispose();
+  });
 });
 
 const ids = new WeakMap<object, number>();
@@ -5022,7 +5241,12 @@ function createSession(
       if (mutationHarness) mutationHarness.callback = callback;
       return {
         observe: (target) => mutationHarness?.observed.push(target),
-        disconnect: () => undefined,
+        disconnect: () => {
+          if (mutationHarness) {
+            mutationHarness.disconnects = (mutationHarness.disconnects ?? 0) + 1;
+          }
+        },
+        takeRecords: () => mutationHarness?.pending?.splice(0) ?? [],
       };
     },
     schedule: (callback) => callback(),
@@ -5045,6 +5269,42 @@ const timerDelays = new WeakMap<() => void, number>();
 interface SemanticMutationHarness {
   readonly observed: Node[];
   callback?: MutationCallback;
+  /** Records the observer holds until its own microtask (A2). */
+  pending?: MutationRecord[];
+  /** How many times the session let go of every observed root (A3). */
+  disconnects?: number;
+}
+
+/** How many listeners a root holds, through its own two methods. */
+function trackedRootListeners(root: ShadowRoot): { count: () => number } {
+  const listeners = new Set<unknown>();
+  const add = root.addEventListener.bind(root);
+  const remove = root.removeEventListener.bind(root);
+  Object.defineProperties(root, {
+    addEventListener: {
+      configurable: true,
+      value: (
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) => {
+        listeners.add(listener);
+        add(type, listener, options);
+      },
+    },
+    removeEventListener: {
+      configurable: true,
+      value: (
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) => {
+        listeners.delete(listener);
+        remove(type, listener, options);
+      },
+    },
+  });
+  return { count: () => listeners.size };
 }
 
 function installPaintedTabFixture(

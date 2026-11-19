@@ -238,6 +238,23 @@ export class PixelAcquisitionCoordinator {
     }
     const cropped = await this.#crop(descriptor, before, screenshotUrl, signal);
     if (cropped.status !== 'ready') return cropped;
+    // The capture window is [before, after]: nothing measured after the
+    // screenshot can see what its pixels contained. This third measure only
+    // closes the after-measure-to-crop window (geometry drift, a page that
+    // stops admitting the image while the crop decodes, pixel-to-revision
+    // attribution). A credential field that appears and leaves again strictly
+    // inside the before/after window is not observable here and would need
+    // per-frame DOM sampling.
+    //
+    // Cost: one extra full safety measure per accepted crop: a port round trip
+    // plus the session's document-wide overlap scan and style reads, roughly
+    // half again the measure work of a capture and a longer hold of the
+    // capture lane. There is no cheap change signal to skip it when nothing
+    // has changed since the after-measure, so the check stays.
+    const confirmed = await this.environment.source.measure(descriptor, signal);
+    if (!confirmed || !sameImageCaptureMetrics(after, confirmed)) {
+      return { status: 'deferred', reason: 'unstable' };
+    }
     return {
       status: 'ready',
       pixels: Object.freeze({
@@ -280,7 +297,15 @@ export class PixelAcquisitionCoordinator {
       const visible = visibleImageRect(metrics);
       if (!visible) return { status: 'deferred', reason: 'hidden' };
       const crop = toPixelCrop(visible, scaleX, scaleY, bitmap.width, bitmap.height);
-      if (!crop) return { status: 'deferred', reason: 'oversized' };
+      if (!crop) {
+        // The visible rectangle is smaller than one whole device pixel, or it
+        // lies past the bitmap edge, so rounding inward leaves nothing to
+        // read. That is the same retryable "too small right now" state as an
+        // output below MIN_OCR_BITMAP_AXIS_PX, not a permanently oversized
+        // image: settling here would lose an image that a later observation
+        // can expose (C7).
+        return { status: 'deferred', reason: 'too-small-visible' };
+      }
       const output = selectOcrPreprocessingPlan(
         crop.width,
         crop.height,
@@ -529,10 +554,13 @@ function toPixelCrop(
   bitmapWidth: number,
   bitmapHeight: number,
 ): { readonly left: number; readonly top: number; readonly width: number; readonly height: number } | undefined {
-  const left = Math.max(0, Math.floor(visible.left * scaleX));
-  const top = Math.max(0, Math.floor(visible.top * scaleY));
-  const right = Math.min(bitmapWidth, Math.ceil(visible.right * scaleX));
-  const bottom = Math.min(bitmapHeight, Math.ceil(visible.bottom * scaleY));
+  // Round inward: a box that exactly touches a credential field must not pull
+  // in the fraction of a device pixel that belongs to its neighbour. Losing a
+  // fraction of the image edge is harmless; including a mask dot is not (C7).
+  const left = Math.max(0, Math.ceil(visible.left * scaleX));
+  const top = Math.max(0, Math.ceil(visible.top * scaleY));
+  const right = Math.min(bitmapWidth, Math.floor(visible.right * scaleX));
+  const bottom = Math.min(bitmapHeight, Math.floor(visible.bottom * scaleY));
   const width = right - left;
   const height = bottom - top;
   return width > 0 && height > 0 ? { left, top, width, height } : undefined;

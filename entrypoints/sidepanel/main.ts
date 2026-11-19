@@ -17,10 +17,11 @@ import {
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { ALL_UI_STRINGS, UI_STRINGS } from '../../lib/companion-ui-strings';
 import { CapturePipeline } from './capture-pipeline';
-import { PdfController, type PdfDiagnostic } from './pdf-controller';
+import type { PdfDiagnostic } from './pdf-controller';
+import { LazyPdfController } from './lazy-pdf-controller';
+import { LazyImageTranslationController } from './lazy-image-translation-controller';
 import { PdfView } from './pdf-view';
-import { PdfPageBoxReader, captureChromePdfTab } from './pdf-page-box-reader';
-import { PdfViewerFollower, connectChromePdfViewer } from './pdf-viewer-follower';
+import type { PdfViewerFollower as PdfViewerFollowerInstance } from './pdf-viewer-follower';
 import {
   CompanionState,
   type CaptureRequest,
@@ -60,13 +61,7 @@ import {
   readableError,
 } from '../../lib/page-identity';
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
-import { fetchPdfBytes } from '../../lib/pdf/pdf-fetch';
 import { chooseDroppedPdf } from '../../lib/pdf/pdf-file';
-import {
-  PDF_RECOGNITION_CACHE_ENTRIES,
-  PDF_RECOGNITION_CACHE_WEIGHT,
-} from '../../lib/pdf/pdf-ocr';
-import { chromePdfjsEnvironment, openPdfDocument } from '../../lib/pdf/pdfjs-runtime';
 import { PdfTextSurface } from '../../lib/pdf/pdf-text-surface';
 import {
   compiledImageAnalysisCapabilities,
@@ -77,23 +72,11 @@ import {
 import {
   ACCESSIBILITY_TEXT_METHOD_ID,
 } from '../../lib/ocr/image-reading-methods';
-import {
-  ImageTranslationController,
-  type ImageTranslationDiagnostic,
+import type {
+  ImageTranslationControllerEnvironment,
+  ImageTranslationDiagnostic,
 } from '../../lib/ocr/image-translation-controller';
-import { openChromeImageSource } from '../../lib/ocr/image-source-client';
-import {
-  PixelAcquisitionCoordinator,
-  createBrowserPixelAcquisitionEnvironment,
-} from '../../lib/ocr/pixel-acquisition';
-import {
-  createBrowserImageRecognitionCoordinator,
-  type ImageRecognitionCoordinator,
-} from '../../lib/ocr/image-analysis-coordinator';
-import { browserImageFileRenderEnvironment } from '../../lib/ocr/image-file-pixel-reader';
-import { repairOcrMinimumConfidence } from '../../lib/ocr/result-quality';
-import { OnDeviceEvidenceJudge } from '../../lib/ocr/on-device-evidence-judge';
-import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
+import type { ImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
 import {
   STORAGE_KEY,
   autoTranslationModeForPage,
@@ -296,51 +279,89 @@ let pdfRecognition: ImageRecognitionCoordinator | undefined;
 let pdfRecognitionOrigin: string | undefined;
 // How far the running translation's scanned-page reading is: [read, total].
 let pdfReadingProgress: readonly [number, number] | undefined;
-// The PDF view moves with the tab's PDF viewer under Follow source scrolling.
-const pdfViewerFollower = new PdfViewerFollower({
-  connect: (target) => connectChromePdfViewer(target, mirrorSessionId),
-  view: pdfView,
-  enabled: () => state.preferences.syncScroll,
-  onDiagnostic: (followState) => logPdfDiagnostic({ stage: 'follow', state: followState }),
-  // Not the 1 a failed read leaves: a turned view is then not looked for (D123).
-  viewerZoom: () => (state.sourceZoomKnown ? state.sourceZoomFactor : undefined),
-  // The viewer reports at a zoom the panel was not told of: Chrome is asked (D146).
-  askViewerZoom: (target) => void capturePipeline.refreshSourceZoom(target.tabId),
-  // A place that could be pages off is settled by the page box of the
-  // viewer's toolbar, read from one capture of the tab (D133).
-  locate: (target, doubt, signal) => pdfController.locatePage(target, doubt, signal),
-});
-const pdfPageBoxReader = new PdfPageBoxReader({
-  capture: captureChromePdfTab,
-  onDiagnostic: logPdfDiagnostic,
-});
-const pdfController = new PdfController({
-  fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
-  openDocument: (bytes, signal) => openPdfDocument(
-    bytes,
-    chromePdfjsEnvironment((path) =>
-      (browser.runtime.getURL as (value: string) => string)(path)),
-    signal,
-  ),
-  view: pdfView,
-  viewerFollower: pdfViewerFollower,
-  pageBoxReader: pdfPageBoxReader,
-  surface: pdfTextSurface,
-  onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),
-  onDiagnostic: logPdfDiagnostic,
-  ocr: {
-    environment: {
-      createCanvas: () => new OffscreenCanvas(1, 1),
-      render: browserImageFileRenderEnvironment(),
-      recognize: (pixels, route, signal) => pdfRecognizer().recognize(pixels, route, signal),
-      detectLanguage: async (text) => browser.i18n.detectLanguage(text),
-    },
-    providerOrder: () => imageTranslationConfig.usablePixelProviderOrder(),
-    minimumConfidence: () => repairOcrMinimumConfidence(state.preferences.ocrMinimumConfidence),
+// The PDF viewer follower is part of the PDF stack and loads with it. Until
+// then there is no PDF to realign or to report a zoom change for; the real
+// follower is created with the current view and preferences on first use.
+let realPdfViewerFollower: PdfViewerFollowerInstance | undefined;
+const pdfViewerFollower = {
+  realign: () => realPdfViewerFollower?.realign(),
+  zoomChanged: () => realPdfViewerFollower?.zoomChanged(),
+};
+// The PDF controller and its pdf.js/OCR reading stack load on the first PDF
+// shown (O8), so a panel that only follows web pages never parses or
+// compiles them. The view and text surface stay eager: the surface is the
+// translation target the router selects before a PDF opens.
+const pdfController = new LazyPdfController({
+  load: async () => {
+    const [
+      { PdfController },
+      { PdfViewerFollower, connectChromePdfViewer },
+      { PdfPageBoxReader, captureChromePdfTab },
+      { fetchPdfBytes },
+      { openPdfDocument, chromePdfjsEnvironment },
+      { browserImageFileRenderEnvironment },
+      { repairOcrMinimumConfidence },
+    ] = await Promise.all([
+      import('./pdf-controller'),
+      import('./pdf-viewer-follower'),
+      import('./pdf-page-box-reader'),
+      import('../../lib/pdf/pdf-fetch'),
+      import('../../lib/pdf/pdfjs-runtime'),
+      import('../../lib/ocr/image-file-pixel-reader'),
+      import('../../lib/ocr/result-quality'),
+    ]);
+    // The PDF view moves with the tab's PDF viewer under Follow source
+    // scrolling.
+    const follower = new PdfViewerFollower({
+      connect: (target) => connectChromePdfViewer(target, mirrorSessionId),
+      view: pdfView,
+      enabled: () => state.preferences.syncScroll,
+      onDiagnostic: (followState) =>
+        logPdfDiagnostic({ stage: 'follow', state: followState }),
+      // Not the 1 a failed read leaves: a turned view is then not looked for (D123).
+      viewerZoom: () => (state.sourceZoomKnown ? state.sourceZoomFactor : undefined),
+      // The viewer reports at a zoom the panel was not told of: Chrome is asked (D146).
+      askViewerZoom: (target) => void capturePipeline.refreshSourceZoom(target.tabId),
+      // A place that could be pages off is settled by the page box of the
+      // viewer's toolbar, read from one capture of the tab (D133).
+      locate: (target, doubt, signal) => pdfController.locatePage(target, doubt, signal),
+    });
+    realPdfViewerFollower = follower;
+    const pageBoxReader = new PdfPageBoxReader({
+      capture: captureChromePdfTab,
+      onDiagnostic: logPdfDiagnostic,
+    });
+    return new PdfController({
+      fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
+      openDocument: (bytes, signal) => openPdfDocument(
+        bytes,
+        chromePdfjsEnvironment((path) =>
+          (browser.runtime.getURL as (value: string) => string)(path)),
+        signal,
+      ),
+      view: pdfView,
+      viewerFollower: follower,
+      pageBoxReader,
+      surface: pdfTextSurface,
+      onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),
+      onDiagnostic: logPdfDiagnostic,
+      ocr: {
+        environment: {
+          createCanvas: () => new OffscreenCanvas(1, 1),
+          render: browserImageFileRenderEnvironment(),
+          recognize: async (pixels, route, signal) =>
+            (await pdfRecognizer()).recognize(pixels, route, signal),
+          detectLanguage: async (text) => browser.i18n.detectLanguage(text),
+        },
+        providerOrder: () => imageTranslationConfig.usablePixelProviderOrder(),
+        minimumConfidence: () =>
+          repairOcrMinimumConfidence(state.preferences.ocrMinimumConfidence),
+      },
+    });
   },
 });
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
-let imageTranslationController!: ImageTranslationController;
+let imageTranslationController!: LazyImageTranslationController;
 // Set when Chrome refused image access after a toolbar request; the next
 // toolbar click then turns image text off instead of prompting again (G3).
 let toolbarOcrAccessDeclined = false;
@@ -419,57 +440,93 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   },
 );
 
-// Uses Gemini Nano or the Language Detector only when already installed;
-// never starts a model download (owner ruling, D59).
-const evidenceJudge = new OnDeviceEvidenceJudge({
-  onResolved: (judge) => logImageTranslationDiagnostic(Object.freeze({
-    stage: 'evidence-judge' as const,
-    judge,
-  })),
-});
-
-imageTranslationController = new ImageTranslationController({
-  openSource: (request, onChange, signal, policy) => openChromeImageSource(
-    request,
-    onChange,
-    signal,
-    'isolated-html',
-    policy,
-  ),
-  createPixelCoordinator: (source, sourceTabId, sourceWindowId) =>
-    new PixelAcquisitionCoordinator(
-      createBrowserPixelAcquisitionEnvironment(
-        source,
-        sourceTabId,
-        sourceWindowId,
-        {
-          resolveMirrorImage: (descriptor) =>
-            replicaSurfaceRouter.resolveImageAnchor(
-              descriptor.document,
-              descriptor.nodeId,
-            )?.image,
-          downloadsEnabled: () =>
-            state.preferences.replicaFidelityPolicy === 'passive',
-        },
+async function createImageTranslationEnvironment(): Promise<ImageTranslationControllerEnvironment> {
+  const [
+    { openChromeImageSource },
+    { PixelAcquisitionCoordinator, createBrowserPixelAcquisitionEnvironment },
+    { createBrowserImageRecognitionCoordinator },
+    { OnDeviceEvidenceJudge },
+    { IndexedDbTransientImageStore },
+  ] = await Promise.all([
+    import('../../lib/ocr/image-source-client'),
+    import('../../lib/ocr/pixel-acquisition'),
+    import('../../lib/ocr/image-analysis-coordinator'),
+    import('../../lib/ocr/on-device-evidence-judge'),
+    import('../../lib/ocr/transient-image-store'),
+  ]);
+  // Uses Gemini Nano or the Language Detector only when already installed;
+  // never starts a model download (owner ruling, D59).
+  const evidenceJudge = new OnDeviceEvidenceJudge({
+    onResolved: (judge) => logImageTranslationDiagnostic(Object.freeze({
+      stage: 'evidence-judge' as const,
+      judge,
+    })),
+  });
+  return {
+    openSource: (request, onChange, signal, policy) => openChromeImageSource(
+      request,
+      onChange,
+      signal,
+      'isolated-html',
+      policy,
+    ),
+    createPixelCoordinator: (source, sourceTabId, sourceWindowId) =>
+      new PixelAcquisitionCoordinator(
+        createBrowserPixelAcquisitionEnvironment(
+          source,
+          sourceTabId,
+          sourceWindowId,
+          {
+            resolveMirrorImage: (descriptor) =>
+              replicaSurfaceRouter.resolveImageAnchor(
+                descriptor.document,
+                descriptor.nodeId,
+              )?.image,
+            downloadsEnabled: () =>
+              state.preferences.replicaFidelityPolicy === 'passive',
+          },
+        ),
       ),
-    ),
-  createRecognitionCoordinator: () =>
-    createBrowserImageRecognitionCoordinator(
-      new IndexedDbTransientImageStore(),
-      state.preferences.resetRevision,
-    ),
-  resolveAnchor: (sourceDocument, nodeId) =>
-    replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
-  translationProvider: provider,
-  translationMemory: imageTranslationMemory,
-  judgeImageText: (input, signal) => evidenceJudge.judge(input, signal),
-  onBusyChange: (busy) => setImageTranslationBusy(busy),
-  onDiagnostic: logImageTranslationDiagnostic,
-  detectLanguage: async (text) => browser.i18n.detectLanguage(text),
-  onAutoLanguageDetected: (language, evidence, document, origin) =>
-    translationDriver.offerImageLanguageEvidence(language, evidence, document, origin),
-  onAutoLanguageInvalidated: (document) =>
-    translationDriver.handleAutoImageLanguageInvalidated(document),
+    createRecognitionCoordinator: () =>
+      createBrowserImageRecognitionCoordinator(
+        new IndexedDbTransientImageStore(),
+        state.preferences.resetRevision,
+      ),
+    resolveAnchor: (sourceDocument, nodeId) =>
+      replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
+    translationProvider: provider,
+    translationMemory: imageTranslationMemory,
+    judgeImageText: (input, signal) => evidenceJudge.judge(input, signal),
+    onBusyChange: (busy) => setImageTranslationBusy(busy),
+    onDiagnostic: logImageTranslationDiagnostic,
+    detectLanguage: async (text) => browser.i18n.detectLanguage(text),
+    onAutoLanguageDetected: (language, evidence, document, origin) =>
+      translationDriver.offerImageLanguageEvidence(language, evidence, document, origin),
+    onAutoLanguageInvalidated: (document) =>
+      translationDriver.handleAutoImageLanguageInvalidated(document),
+  };
+}
+
+// The image-translation controller and its OCR stack load on the first
+// replica activation with image translation enabled (O8). Configuration,
+// source scoping and release calls made before then are replayed on it.
+imageTranslationController = new LazyImageTranslationController({
+  load: async () => {
+    const { ImageTranslationController } = await import(
+      '../../lib/ocr/image-translation-controller'
+    );
+    return new ImageTranslationController(
+      await createImageTranslationEnvironment(),
+    );
+  },
+  onLoadError: (error) => {
+    if (import.meta.env.DEV) {
+      console.info('[Simul image translation]', {
+        stage: 'controller-load-failed',
+        code: readableError(error),
+      });
+    }
+  },
 });
 
 const autoLanguageEvidencePrecedence =
@@ -1162,6 +1219,13 @@ document.addEventListener('visibilitychange', () => {
   // A hidden companion defers image work; re-kick it when it is shown again.
   if (document.visibilityState === 'visible') imageTranslationController.resume();
 });
+// Chromium disables bfcache for frames that use extension messaging
+// (MaybeDisableBackForwardCacheForMessaging), so this page is not restored from
+// bfcache in practice; that is a narrower reason than a categorical extension
+// page exemption and was not browser-verified here (O9). No pageshow path
+// restores the disposed state, so pagehide is treated as terminal. The
+// pageLeaving flag below still reads event.persisted so a persisted restore
+// would not silence later clicks.
 window.addEventListener('pagehide', () => {
   preferenceClient.flushPendingZoom();
   uiLocalizer.dispose();
@@ -1954,18 +2018,30 @@ function logImageTranslationDiagnostic(
  * for one top-page origin, or one chosen file, at a time (a page without
  * either keeps nothing).
  */
-function pdfRecognizer(): ImageRecognitionCoordinator {
-  pdfRecognition ??= createBrowserImageRecognitionCoordinator(
-    new IndexedDbTransientImageStore(),
-    state.preferences.resetRevision,
-    PDF_RECOGNITION_CACHE_WEIGHT,
-    PDF_RECOGNITION_CACHE_ENTRIES,
-  );
-  pdfRecognition.advanceResetEpoch(state.preferences.resetRevision);
+async function pdfRecognizer(): Promise<ImageRecognitionCoordinator> {
+  let recognition = pdfRecognition;
+  if (!recognition) {
+    const [
+      { createBrowserImageRecognitionCoordinator },
+      { IndexedDbTransientImageStore },
+      { PDF_RECOGNITION_CACHE_ENTRIES, PDF_RECOGNITION_CACHE_WEIGHT },
+    ] = await Promise.all([
+      import('../../lib/ocr/image-analysis-coordinator'),
+      import('../../lib/ocr/transient-image-store'),
+      import('../../lib/pdf/pdf-ocr'),
+    ]);
+    recognition = pdfRecognition ??= createBrowserImageRecognitionCoordinator(
+      new IndexedDbTransientImageStore(),
+      state.preferences.resetRevision,
+      PDF_RECOGNITION_CACHE_WEIGHT,
+      PDF_RECOGNITION_CACHE_ENTRIES,
+    );
+  }
+  recognition.advanceResetEpoch(state.preferences.resetRevision);
   const origin = state.localPdf?.key ?? pageOrigin(state.capturedPageIdentity?.url);
-  if (origin === undefined || origin !== pdfRecognitionOrigin) pdfRecognition.clear();
+  if (origin === undefined || origin !== pdfRecognitionOrigin) recognition.clear();
   pdfRecognitionOrigin = origin;
-  return pdfRecognition;
+  return recognition;
 }
 
 function logPdfDiagnostic(diagnostic: PdfDiagnostic): void {
@@ -1987,10 +2063,6 @@ function logTranslationCache(
 /** A drag that carries files from the computer, not text or a link. */
 function carriesFiles(event: DragEvent): boolean {
   return event.dataTransfer?.types.includes('Files') ?? false;
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 function requireElement<T extends Element>(selector: string): T {
