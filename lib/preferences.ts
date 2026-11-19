@@ -9,9 +9,11 @@ export const AUTO_TRANSLATION_MODES = ['off', 'site', 'all'] as const;
 export type AutoTranslationMode = (typeof AUTO_TRANSLATION_MODES)[number];
 
 import {
+  canonicalizeLanguageTag,
   isSupportedLanguage,
   type SupportedLanguage,
 } from './translation-provider';
+import { SIMUL_EDITION, type SimulEdition } from './edition';
 import {
   isSelectableReplicaFidelityPolicy,
   type SelectableReplicaFidelityPolicy,
@@ -22,8 +24,9 @@ import {
   type HtmlMirrorLimitSettings,
 } from './replica/html-mirror-limits';
 import {
-  FULL_VISIBLE_REPLICA_READ_SCOPE,
+  DEFAULT_REPLICA_READ_SCOPE,
   REPLICA_READ_SCOPE_SETUP_VERSION,
+  effectiveReplicaReadScope,
   repairReplicaReadScope,
   type ReplicaReadScope,
 } from './replica/read-scope-policy';
@@ -173,7 +176,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'active',
-    replicaReadScope: FULL_VISIBLE_REPLICA_READ_SCOPE,
+    replicaReadScope: DEFAULT_REPLICA_READ_SCOPE,
     readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
     settingsRevision: 0,
     resetRevision: 0,
@@ -198,6 +201,26 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     usePromptForImageText: false,
   });
 
+/**
+ * The settings the public edition does not show. There they are pinned to
+ * DEFAULT_COMPANION_PREFERENCES whatever storage holds, so a value set while
+ * testing another build cannot carry over; storage keeps its own value.
+ */
+export const PUBLIC_EDITION_PINNED_PREFERENCE_KEYS = Object.freeze([
+  'mirrorLimits',
+  'mirrorShowEverything',
+  'replicaViewMode',
+  'replicaFidelityPolicy',
+  'imageReadingMethodOrder',
+  'disabledImageReadingMethodIds',
+  'imageTextProviderOrder',
+  'disabledImageTextProviderIds',
+  'imageScanPolicy',
+  'skipSmallImages',
+  'usePromptForImageLanguage',
+  'usePromptForImageText',
+] as const satisfies readonly (keyof CompanionPreferences)[]);
+
 const MAX_SAVED_ORIGINS = 256;
 const MAX_GRANTED_PERMISSION_ORIGINS = 512;
 
@@ -207,9 +230,93 @@ const MAX_GRANTED_PERMISSION_ORIGINS = 512;
  * again on the side panel's per-update hot path (O7).
  */
 const parsedPreferenceSnapshots = new WeakSet<object>();
+/** Snapshots already pinned for the public edition. */
+const publicEditionSnapshots = new WeakSet<object>();
 
-/** Parse untrusted persisted data without allowing it to broaden site access. */
+/**
+ * The To language a fresh install starts with: Chrome's UI language when
+ * Simul supports it, else English. Each entrypoint sets it once from
+ * `i18n.getUILanguage()`; a saved To language is never replaced by it.
+ */
+let defaultTargetLanguage: SupportedLanguage =
+  DEFAULT_COMPANION_PREFERENCES.targetLanguage;
+
+/** Chrome's UI language as a supported To language, or English. */
+export function defaultTargetLanguageForUiLanguage(
+  uiLanguage: string | undefined,
+): SupportedLanguage {
+  return canonicalizeLanguageTag(uiLanguage) ??
+    DEFAULT_COMPANION_PREFERENCES.targetLanguage;
+}
+
+/** Sets the To language used when none is saved; returns it. */
+export function configureDefaultTargetLanguage(
+  uiLanguage: string | undefined,
+): SupportedLanguage {
+  defaultTargetLanguage = defaultTargetLanguageForUiLanguage(uiLanguage);
+  return defaultTargetLanguage;
+}
+
+/**
+ * Parse untrusted persisted data without allowing it to broaden site access,
+ * then apply the edition: the preferences every reader uses. In the public
+ * edition the hidden settings read as their defaults (see
+ * applyEditionToPreferences).
+ */
 export function parseCompanionPreferences(
+  input: unknown,
+  edition: SimulEdition = SIMUL_EDITION,
+): CompanionPreferences {
+  return applyEditionToPreferences(parseStoredCompanionPreferences(input), edition);
+}
+
+/**
+ * The public edition's view of canonical preferences: every setting it does
+ * not show reads as its default, and the read scope reads as the profile the
+ * public edition would use (setup counts as done; a custom scope becomes the
+ * widest profile within it). The dev edition sees them unchanged. Storage is
+ * never written from this view: the preference service saves the canonical
+ * form, so a dev build still finds its own values.
+ */
+export function applyEditionToPreferences(
+  preferences: CompanionPreferences,
+  edition: SimulEdition,
+): CompanionPreferences {
+  if (edition === 'dev' || publicEditionSnapshots.has(preferences)) {
+    return preferences;
+  }
+  const defaults = DEFAULT_COMPANION_PREFERENCES;
+  const pinned: CompanionPreferences = {
+    ...preferences,
+    mirrorLimits: defaults.mirrorLimits,
+    mirrorShowEverything: defaults.mirrorShowEverything,
+    replicaViewMode: defaults.replicaViewMode,
+    replicaFidelityPolicy: defaults.replicaFidelityPolicy,
+    replicaReadScope: effectiveReplicaReadScope(
+      preferences.replicaReadScope,
+      preferences.readScopeSetupVersion,
+      'public',
+    ),
+    readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
+    imageReadingMethodOrder: [...defaults.imageReadingMethodOrder],
+    disabledImageReadingMethodIds: [...defaults.disabledImageReadingMethodIds],
+    imageTextProviderOrder: [...defaults.imageTextProviderOrder],
+    disabledImageTextProviderIds: [...defaults.disabledImageTextProviderIds],
+    imageScanPolicy: defaults.imageScanPolicy,
+    skipSmallImages: defaults.skipSmallImages,
+    usePromptForImageLanguage: defaults.usePromptForImageLanguage,
+    usePromptForImageText: defaults.usePromptForImageText,
+  };
+  parsedPreferenceSnapshots.add(pinned);
+  publicEditionSnapshots.add(pinned);
+  return pinned;
+}
+
+/**
+ * Parse untrusted persisted data into the canonical stored form, without the
+ * edition's view. The preference service reads and writes this form.
+ */
+export function parseStoredCompanionPreferences(
   input: unknown,
 ): CompanionPreferences {
   if (!isRecord(input)) return createDefaultPreferences();
@@ -287,7 +394,7 @@ export function parseCompanionPreferences(
         : DEFAULT_COMPANION_PREFERENCES.sourceLanguage,
     targetLanguage: isSupportedLanguage(input.targetLanguage)
       ? input.targetLanguage
-      : DEFAULT_COMPANION_PREFERENCES.targetLanguage,
+      : defaultTargetLanguage,
     zoomPercent: parseZoomPercent(input.zoomPercent),
     syncScroll:
       typeof input.syncScroll === 'boolean'
@@ -362,7 +469,7 @@ function readNormalizedCompanionPreferences(
 ): CompanionPreferences {
   return parsedPreferenceSnapshots.has(preferences)
     ? preferences
-    : parseCompanionPreferences(preferences);
+    : parseStoredCompanionPreferences(preferences);
 }
 
 export function isAutoTranslationMode(
@@ -491,7 +598,7 @@ export function withAutoTranslationMode(
   url: string | undefined,
   mode: AutoTranslationMode,
 ): CompanionPreferences {
-  const normalized = parseCompanionPreferences(preferences);
+  const normalized = parseStoredCompanionPreferences(preferences);
   const origin = pageOrigin(url);
 
   if (mode === 'all') {
@@ -519,7 +626,7 @@ export function withDisplayMode(
   displayMode: MirrorDisplayMode,
 ): CompanionPreferences {
   return {
-    ...parseCompanionPreferences(preferences),
+    ...parseStoredCompanionPreferences(preferences),
     displayMode,
   };
 }
@@ -569,7 +676,7 @@ export function withViewSettings(
   preferences: CompanionPreferences,
   settings: CompanionViewSettingsPatch,
 ): CompanionPreferences {
-  return parseCompanionPreferences({
+  return parseStoredCompanionPreferences({
     ...readNormalizedCompanionPreferences(preferences),
     ...settings,
   });
@@ -579,7 +686,7 @@ export function withImageAnalysisSettings(
   preferences: CompanionPreferences,
   settings: CompanionImageAnalysisSettingsPatch,
 ): CompanionPreferences {
-  const current = parseCompanionPreferences(preferences);
+  const current = parseStoredCompanionPreferences(preferences);
   const merged: Record<string, unknown> = { ...current, ...settings };
   if (
     settings.imageTextProviderOrder &&
@@ -607,15 +714,15 @@ export function withImageAnalysisSettings(
       ...settings.disabledImageTextProviderIds,
     ];
   }
-  return parseCompanionPreferences(merged);
+  return parseStoredCompanionPreferences(merged);
 }
 
 export function withReadSettings(
   preferences: CompanionPreferences,
   settings: CompanionReadSettingsPatch,
 ): CompanionPreferences {
-  return parseCompanionPreferences({
-    ...parseCompanionPreferences(preferences),
+  return parseStoredCompanionPreferences({
+    ...parseStoredCompanionPreferences(preferences),
     ...settings,
   });
 }
@@ -624,7 +731,7 @@ export function withReadSettings(
 export function resetCompanionPreferences(
   preferences: CompanionPreferences,
 ): CompanionPreferences {
-  const current = parseCompanionPreferences(preferences);
+  const current = parseStoredCompanionPreferences(preferences);
   const resetRevision = nextRevision(current.resetRevision);
   return {
     ...createDefaultPreferences(),
@@ -638,7 +745,7 @@ export function resetCompanionPreferences(
 export function advanceCompanionSettingsRevision(
   preferences: CompanionPreferences,
 ): CompanionPreferences {
-  const current = parseCompanionPreferences(preferences);
+  const current = parseStoredCompanionPreferences(preferences);
   return {
     ...current,
     settingsRevision: nextRevision(current.settingsRevision),
@@ -652,9 +759,10 @@ export function advanceCompanionSettingsRevision(
 export function selectLatestCompanionPreferences(
   current: CompanionPreferences,
   candidate: CompanionPreferences,
+  edition: SimulEdition = SIMUL_EDITION,
 ): CompanionPreferences {
-  const existing = parseCompanionPreferences(current);
-  const next = parseCompanionPreferences(candidate);
+  const existing = parseCompanionPreferences(current, edition);
+  const next = parseCompanionPreferences(candidate, edition);
   if (next.resetRevision !== existing.resetRevision) {
     return next.resetRevision > existing.resetRevision ? next : existing;
   }
@@ -680,9 +788,14 @@ export interface LiveCompanionPreferenceChange {
  */
 export function readValidStoredCompanionPreferences(
   value: unknown,
+  edition: SimulEdition = SIMUL_EDITION,
 ): CompanionPreferences | undefined {
-  const parsed = parseCompanionPreferences(value);
-  return matchesCanonicalStoredValue(value, parsed) ? parsed : undefined;
+  // Validity is a property of what storage holds, so it is judged on the
+  // canonical form; the reader then gets the edition's view of it.
+  const parsed = parseStoredCompanionPreferences(value);
+  return matchesCanonicalStoredValue(value, parsed)
+    ? applyEditionToPreferences(parsed, edition)
+    : undefined;
 }
 
 /**
@@ -695,9 +808,10 @@ export function selectLiveCompanionPreferenceChange(
   current: CompanionPreferences,
   failClosed: boolean,
   value: unknown,
+  edition: SimulEdition = SIMUL_EDITION,
 ): LiveCompanionPreferenceChange {
-  const existing = parseCompanionPreferences(current);
-  const candidate = readValidStoredCompanionPreferences(value);
+  const existing = parseCompanionPreferences(current, edition);
+  const candidate = readValidStoredCompanionPreferences(value, edition);
   if (!candidate) {
     return { preferences: existing, failClosed: true, status: 'invalid' };
   }
@@ -751,7 +865,7 @@ function createDefaultPreferences(): CompanionPreferences {
     grantedPermissionOrigins: [],
     displayMode: 'actual',
     sourceLanguage: 'auto',
-    targetLanguage: 'en',
+    targetLanguage: defaultTargetLanguage,
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
@@ -762,7 +876,7 @@ function createDefaultPreferences(): CompanionPreferences {
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'active',
-    replicaReadScope: { ...FULL_VISIBLE_REPLICA_READ_SCOPE },
+    replicaReadScope: { ...DEFAULT_REPLICA_READ_SCOPE },
     readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
     settingsRevision: 0,
     resetRevision: 0,

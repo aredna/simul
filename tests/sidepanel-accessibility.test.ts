@@ -3,14 +3,17 @@ import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
+import { applyEditionToDocument } from '../lib/edition-markup';
+
 const markup = readFileSync(
   new URL('../entrypoints/sidepanel/index.html', import.meta.url),
   'utf8',
 );
 
 describe('sidepanel static control accessibility', () => {
-  it('gives every static form control an accessible name', () => {
+  it.each(['public', 'dev'] as const)('gives every static form control of the %s edition an accessible name', (edition) => {
     const { document } = parseHTML(markup);
+    applyEditionToDocument(document as unknown as Document, edition);
     const unnamed = [...document.querySelectorAll<HTMLElement>(
       'button, input, select, textarea',
     )].filter((control) => !controlName(control, document));

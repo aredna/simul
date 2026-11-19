@@ -159,8 +159,9 @@ on a page once it is drawn.
   when the PDF's text has been read, when From becomes Auto-detect, or when
   Live source only ends, once per PDF. The OCR draws each page itself (at
   most 4 megapixels and 300 dpi), so it needs no image access, and the
-  toolbar's **OCR** switch does not apply; the image reading methods under
-  **Advanced & experimental** do, and Tesseract.js must be on (Chrome's text
+  toolbar's **OCR** switch does not apply; the image reading methods do (all
+  of them in the public edition; in the dev edition, the ones on under
+  **Advanced & experimental**), and Tesseract.js must be on (Chrome's text
   detector alone cannot read a page). A page is read when it has no text at
   all, or when its own text covers at most 3% of it and its pictures cover
   at least four fifths of it: a scan under a typed header, page number or
@@ -344,17 +345,60 @@ still be read. See
 [Image text translation](image-translation-research.md) for the detailed
 boundary.
 
+### Options
+
+The toolbar holds what is used most: From (with Auto-detect) and To, swap,
+**Rebuild mirror** (↻), Size, the **OCR** switch, Follow or Pinned, quick
+translation, the detached window, and the options (⚙). The options panel
+lists:
+
+- **Automatic translation**: Off, This site, or All sites.
+- **Size** and the zoom slider.
+- **Follow source scrolling** (on by default).
+- **Translate page**, and **Cancel** while a translation runs.
+- **Read profile**: **Page only** (the page's text and pictures only),
+  **Standard** (adds button labels, button pictures and folded sections), or
+  **Full visible** (adds what is filled in forms and text editors), the
+  default. Passwords, one-time codes and card numbers are never read. See
+  [Privacy and security boundary](#privacy-and-security-boundary).
+- **Image text**: on or off, and the button that grants image access when
+  Chrome needs it.
+- **Reset all extension settings**.
+- **Advanced** (closed until opened): **Translated text** (Let boxes grow or
+  Keep geometry), **Toolbar opens** (Last used view, Always side panel, or
+  Always detached window), and **Minimum OCR confidence**.
+
+The To language starts as Chrome's own language when Simul can translate
+into it (a regional variant such as `pt-BR` or `zh-TW` counts as Portuguese
+or Traditional Chinese), and as English otherwise. A To language you have
+chosen is kept.
+
+Everything else is fixed at its default: Passive Fidelity, the mirror's
+default size limits, every image reading method in the default order,
+visible images read first, small images skipped, and no local Prompt for
+image text. The release zips and the Chrome Web Store carry this edition.
+A separate dev edition, built for testing (see [Development](#development)),
+adds those settings: the per-item read choices, Replica text and fidelity,
+the size limits, **Show everything (testing)**, the image reading methods,
+scan order, small images, the Prompt options, and OCR diagnostics, all under
+**Advanced & experimental**, as well as a first-run read-profile question for
+settings saved before that question was dropped. A value set in the dev
+edition is not used by the public one.
+
 ## Privacy and security boundary
 
 Reading and acting are separate contracts. Broader readable-content settings
 never make the replica interactive.
 
 Simul starts at **Full visible**, with no setup question: the mirror shows
-what the page shows. You can narrow it in settings. The Page-only, Standard,
-Full visible, and custom profiles control whether the mirror may read public
-control semantics, non-secret images in controls, validated disclosure
-content, visible text/search/URL/textarea values and selection state,
-personal/autofill values, and editable text.
+what the page shows. You can narrow it with **Read profile** in the options.
+The Page-only, Standard, and Full visible profiles (and, in the dev edition,
+custom choices per item) control whether the mirror may read public control
+semantics, non-secret images in controls, validated disclosure content,
+visible text/search/URL/textarea values and selection state,
+personal/autofill values, and editable text. The public edition reads custom
+choices saved by the dev edition as the widest profile that reads nothing
+more than they did.
 
 Passwords, authentication and one-time-code fields, WebAuthn and payment-card
 autocomplete classes, hidden inputs, file names, and CSS-masked text are
@@ -366,11 +410,13 @@ classified as secret remains secret for that document. Narrowing
 the scope clears the current replica, translations, and image overlays before
 rebuilding.
 
-**Show everything (testing)**, under **Advanced & experimental**, turns every
-privacy filter off, to find out whether a privacy rule hides a missing part of
-a page: hidden text, labels, card numbers, one-time codes, and form values are
-copied as the page holds them (typed passwords are not). The mirror still
-cannot act on the page. It is off by default.
+**Show everything (testing)**, in the dev edition only, under **Advanced &
+experimental**, turns every privacy filter off, to find out whether a privacy
+rule hides a missing part of a page: hidden text, labels, card numbers,
+one-time codes, and form values are copied as the page holds them (typed
+passwords are not). The mirror still cannot act on the page. It is off by
+default. The public edition does not contain it, and ignores it if a dev
+build saved it on.
 
 **Closed shadow roots.** A page component can close its shadow root, which
 hides its inside from the page's own scripts. Chrome lets an extension read
@@ -463,9 +509,10 @@ passive CSS, images, fonts, responsive sources, static posters, and static SVG
 presentation. Those references can make ordinary HTTP(S) requests to their
 existing hosts. **Conservative** admits fewer passive semantics but is not a
 zero-network mode. Both policies keep the same scriptless sandbox and
-active-content blocks. The policy, the mirror's size limits (largest single
-item, largest page, most page elements), and **Show everything (testing)** are
-under **Advanced & experimental**.
+active-content blocks. The public edition uses Passive Fidelity and the
+default size limits. In the dev edition, the policy, the mirror's size limits
+(largest single item, largest page, most page elements), and **Show everything
+(testing)** are under **Advanced & experimental**.
 
 Simul is a safe reconstruction, not a browser clone. Current limitations
 include script-only custom-element state, virtualized DOM that the page has
@@ -504,7 +551,7 @@ complete design and browser-boundary rationale.
   visible in the source tab and use a supported source language. Small images are skipped by default, and an image inside a link or
   button is read only under the **Standard** or **Full visible** readable-content
   scope (Page-only leaves images in controls alone).
-- **The replica is stale:** use **Rebuild mirror**. Some closed-root, opaque
+- **The replica is stale:** use **Rebuild mirror** (↻ in the toolbar). Some closed-root, opaque
   resource, CSSOM, and script-only changes cannot be observed safely.
 - **An update still looks old:** reload Simul at `chrome://extensions`, then
   reload the source tab and reopen the companion.
@@ -523,15 +570,24 @@ Useful commands:
 | --- | --- |
 | `npm run dev` | Start WXT's development runner. |
 | `npm run build` | Build the Chrome extension under `.output/`. |
-| `npm run artifact:sync` | Validate and refresh `dist/chrome-unpacked/`. |
-| `npm run artifact:check` | Rebuild, validate, and byte-compare the checked-in artifact. |
+| `npm run artifact:sync` | Validate and refresh `dist/chrome-unpacked/` (and the dev edition where the checkout keeps it). |
+| `npm run artifact:check` | Rebuild, validate, and byte-compare the checked-in artifacts. |
 | `npm run typecheck` | Type-check source and tests. |
 | `npm test` | Run the Vitest suite once on Node 24. |
 | `npm run check` | Run typechecking, all tests, and the artifact check. |
 | `npm run zip` | Create WXT's Chrome distribution archive. |
 
 Do not edit `dist/chrome-unpacked` by hand. Change source, run
-`npm run artifact:sync`, then run `npm run check`. `npm run check` is the
+`npm run artifact:sync`, then run `npm run check`.
+
+Simul builds in two editions from the same source. `SIMUL_EDITION` picks one
+at build time (`lib/edition.ts`): unset or anything else builds the public
+edition, `dev` builds the dev edition, whose version name ends in `dev`. The
+public edition leaves the dev-only controls out of its pages and bundles,
+and reads every setting it does not show as its default (in
+`lib/preferences.ts`); storage keeps whatever was saved. The tests run as
+the dev edition and pass the edition explicitly where the public one
+differs. `npm run check` is the
 required handoff gate. The test suite needs Node 24: the vendored pdf.js uses
 `Promise.try`, and a run on another major stops at startup with a message.
 

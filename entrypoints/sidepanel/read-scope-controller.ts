@@ -27,17 +27,25 @@ import { installResetConfirmationController } from '../../lib/reset-confirmation
 import type { CompanionState } from './companion-state';
 import { DynamicStatusText } from './dynamic-status-text';
 
+/**
+ * The dev edition has the first-run setup dialog, the profile menu and the
+ * six per-key toggles. The public edition has none of them: it offers the
+ * three profiles as one radio group (`readProfileChoices`) and never asks a
+ * first-run question, since its preferences always count setup as done.
+ */
 export interface ReadScopeElements {
-  readonly readScopeSetup: HTMLDialogElement;
-  readonly setupReadProfile: HTMLSelectElement;
-  readonly setupReadScopeControls: HTMLElement;
-  readonly completeReadScopeSetupButton: HTMLButtonElement;
-  readonly setupReadScopeStatus: HTMLElement;
-  readonly setupResetCleanup: HTMLElement;
-  readonly setupResetCleanupStatus: HTMLElement;
-  readonly retrySetupResetCleanupButton: HTMLButtonElement;
-  readonly readScopeProfile: HTMLSelectElement;
-  readonly readScopeControls: HTMLElement;
+  readonly readScopeSetup?: HTMLDialogElement;
+  readonly setupReadProfile?: HTMLSelectElement;
+  readonly setupReadScopeControls?: HTMLElement;
+  readonly completeReadScopeSetupButton?: HTMLButtonElement;
+  readonly setupReadScopeStatus?: HTMLElement;
+  readonly setupResetCleanup?: HTMLElement;
+  readonly setupResetCleanupStatus?: HTMLElement;
+  readonly retrySetupResetCleanupButton?: HTMLButtonElement;
+  readonly readScopeProfile?: HTMLSelectElement;
+  readonly readScopeControls?: HTMLElement;
+  /** Radio inputs named for the three profiles (public edition). */
+  readonly readProfileChoices?: HTMLElement;
   readonly resetAllSettingsButton: HTMLButtonElement;
   readonly resetSettingsDialog: HTMLDialogElement;
   readonly resetSettingsStatus: HTMLElement;
@@ -107,17 +115,18 @@ const READ_SCOPE_COPY: Readonly<Record<
  * so a purge runs before the save and a failed save keeps the ceiling.
  */
 export class ReadScopeController {
-  readonly #setupStatus: DynamicStatusText;
-  readonly #resetCleanupStatus: DynamicStatusText;
+  readonly #setupStatus: DynamicStatusText | undefined;
+  readonly #resetCleanupStatus: DynamicStatusText | undefined;
   readonly #resetStatus: DynamicStatusText;
 
   constructor(private readonly environment: ReadScopeControllerEnvironment) {
     const { elements, localizeUi } = environment;
-    this.#setupStatus = new DynamicStatusText(elements.setupReadScopeStatus, localizeUi);
-    this.#resetCleanupStatus = new DynamicStatusText(
-      elements.setupResetCleanupStatus,
-      localizeUi,
-    );
+    this.#setupStatus = elements.setupReadScopeStatus
+      ? new DynamicStatusText(elements.setupReadScopeStatus, localizeUi)
+      : undefined;
+    this.#resetCleanupStatus = elements.setupResetCleanupStatus
+      ? new DynamicStatusText(elements.setupResetCleanupStatus, localizeUi)
+      : undefined;
     this.#resetStatus = new DynamicStatusText(elements.resetSettingsStatus, localizeUi);
   }
 
@@ -127,33 +136,46 @@ export class ReadScopeController {
 
   /** Re-renders this module's imperatively written status lines (F2). */
   relocalize(): void {
-    this.#setupStatus.relocalize();
-    this.#resetCleanupStatus.relocalize();
+    this.#setupStatus?.relocalize();
+    this.#resetCleanupStatus?.relocalize();
     this.#resetStatus.relocalize();
   }
 
   /** Wires the setup dialog, the profile menus and the reset confirmation. */
   installListeners(): void {
     const { elements, state } = this.environment;
-    elements.readScopeProfile.addEventListener('change', () => {
-      if (!isReplicaReadScopeProfileId(elements.readScopeProfile.value)) return;
+    const {
+      readScopeProfile,
+      readProfileChoices,
+      setupReadProfile,
+      completeReadScopeSetupButton,
+      retrySetupResetCleanupButton,
+      readScopeSetup,
+    } = elements;
+    readScopeProfile?.addEventListener('change', () => {
+      if (!isReplicaReadScopeProfileId(readScopeProfile.value)) return;
       void this.commitReplicaReadScope(
-        replicaReadScopeForProfile(elements.readScopeProfile.value),
+        replicaReadScopeForProfile(readScopeProfile.value),
         false,
       );
     });
-    elements.setupReadProfile.addEventListener('change', () => {
-      if (!isReplicaReadScopeProfileId(elements.setupReadProfile.value)) return;
-      state.setupReadScopeDraft = replicaReadScopeForProfile(elements.setupReadProfile.value);
+    readProfileChoices?.addEventListener('change', (event) => {
+      const input = event.target as HTMLInputElement | null;
+      if (!input?.checked || !isReplicaReadScopeProfileId(input.value)) return;
+      void this.commitReplicaReadScope(replicaReadScopeForProfile(input.value), false);
+    });
+    setupReadProfile?.addEventListener('change', () => {
+      if (!isReplicaReadScopeProfileId(setupReadProfile.value)) return;
+      state.setupReadScopeDraft = replicaReadScopeForProfile(setupReadProfile.value);
       this.renderControls();
     });
-    elements.completeReadScopeSetupButton.addEventListener('click', () => {
+    completeReadScopeSetupButton?.addEventListener('click', () => {
       void this.commitReplicaReadScope(state.setupReadScopeDraft, true);
     });
-    elements.retrySetupResetCleanupButton.addEventListener('click', () => {
+    retrySetupResetCleanupButton?.addEventListener('click', () => {
       void this.resetAllExtensionSettings();
     });
-    elements.readScopeSetup.addEventListener('cancel', (event) => {
+    readScopeSetup?.addEventListener('cancel', (event) => {
       // Choosing a read scope is mandatory. Keep the effective policy at
       // Page-only until a setup choice has been committed successfully.
       event.preventDefault();
@@ -222,9 +244,11 @@ export class ReadScopeController {
       });
       void this.environment.purgeSourceDerivedRuntime(UI_STRINGS.statusApplyingNarrower);
     }
-    elements.completeReadScopeSetupButton.disabled = completeSetup;
-    if (completeSetup) this.#setupStatus.set(UI_STRINGS.statusSaving);
-    else this.#setupStatus.clear();
+    if (elements.completeReadScopeSetupButton) {
+      elements.completeReadScopeSetupButton.disabled = completeSetup;
+    }
+    if (completeSetup) this.#setupStatus?.set(UI_STRINGS.statusSaving);
+    else this.#setupStatus?.clear();
     try {
       const result = await preferenceClient.send(completeSetup
         ? {
@@ -260,13 +284,13 @@ export class ReadScopeController {
       state.setupReadScopeDraft = { ...state.preferences.replicaReadScope };
       this.environment.syncPreferenceControls();
       this.environment.restartReplica();
-      this.#setupStatus.clear();
+      this.#setupStatus?.clear();
       setStatus(UI_STRINGS.statusReadableApplied, 'success');
     } catch (error) {
       const gate = state.localReadScopeNarrowingGates.get(sequence);
       if (gate) gate.failed = true;
-      this.#setupStatus.set(readableError(error));
-      elements.setupReadScopeStatus.dataset.tone = 'error';
+      this.#setupStatus?.set(readableError(error));
+      if (elements.setupReadScopeStatus) elements.setupReadScopeStatus.dataset.tone = 'error';
       this.environment.syncPreferenceControls();
       if (state.localReadScopeNarrowingGates.has(sequence)) {
         this.environment.restartReplica();
@@ -276,7 +300,9 @@ export class ReadScopeController {
         'error',
       );
     } finally {
-      elements.completeReadScopeSetupButton.disabled = false;
+      if (elements.completeReadScopeSetupButton) {
+        elements.completeReadScopeSetupButton.disabled = false;
+      }
     }
   }
 
@@ -286,10 +312,12 @@ export class ReadScopeController {
     if (state.resetInFlight) return;
     state.resetInFlight = true;
     elements.resetAllSettingsButton.disabled = true;
-    elements.retrySetupResetCleanupButton.disabled = true;
+    if (elements.retrySetupResetCleanupButton) {
+      elements.retrySetupResetCleanupButton.disabled = true;
+    }
     this.#resetStatus.set(UI_STRINGS.statusResettingSettingsPermissions);
     if (state.preferences.resetCleanupPendingRevision > 0) {
-      this.#resetCleanupStatus.set(UI_STRINGS.statusRetryingCleanup);
+      this.#resetCleanupStatus?.set(UI_STRINGS.statusRetryingCleanup);
     }
     try {
       const retry = state.preferences.resetCleanupPendingRevision > 0;
@@ -307,7 +335,7 @@ export class ReadScopeController {
         this.environment.syncPreferenceControls();
         this.#resetStatus.set(UI_STRINGS.statusResetChangedElsewhere);
         if (state.preferences.resetCleanupPendingRevision > 0) {
-          this.#resetCleanupStatus.set(UI_STRINGS.statusResetChangedElsewhere);
+          this.#resetCleanupStatus?.set(UI_STRINGS.statusResetChangedElsewhere);
         }
         return;
       }
@@ -330,7 +358,7 @@ export class ReadScopeController {
             : UI_STRINGS.statusResetPendingGeneric;
         const cleanupArgs = remaining > 0 ? [remaining] : [];
         this.#resetStatus.set(cleanupFrame, cleanupArgs);
-        this.#resetCleanupStatus.set(cleanupFrame, cleanupArgs);
+        this.#resetCleanupStatus?.set(cleanupFrame, cleanupArgs);
       } else {
         this.#resetStatus.set(UI_STRINGS.statusResetComplete);
       }
@@ -338,12 +366,14 @@ export class ReadScopeController {
       const detail = readableError(error);
       this.#resetStatus.set(UI_STRINGS.statusResetCouldNotFinish, [detail]);
       if (state.preferences.resetCleanupPendingRevision > 0) {
-        this.#resetCleanupStatus.set(UI_STRINGS.statusResetCouldNotFinish, [detail]);
+        this.#resetCleanupStatus?.set(UI_STRINGS.statusResetCouldNotFinish, [detail]);
       }
     } finally {
       state.resetInFlight = false;
       elements.resetAllSettingsButton.disabled = false;
-      elements.retrySetupResetCleanupButton.disabled = false;
+      if (elements.retrySetupResetCleanupButton) {
+        elements.retrySetupResetCleanupButton.disabled = false;
+      }
       this.renderControls();
     }
   }
@@ -398,58 +428,84 @@ export class ReadScopeController {
   renderControls(): void {
     const state = this.#state;
     const { elements, document } = this.environment;
+    const {
+      readScopeSetup,
+      setupReadProfile,
+      setupReadScopeControls,
+      setupResetCleanup,
+      retrySetupResetCleanupButton,
+      readScopeProfile,
+      readScopeControls,
+      readProfileChoices,
+    } = elements;
     const setupComplete =
       state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION;
     const cleanupPending = state.preferences.resetCleanupPendingRevision > 0;
-    const setupDialogWasOpen = elements.readScopeSetup.open;
+    const setupDialogWasOpen = readScopeSetup?.open ?? false;
     if (setupComplete) {
-      if (elements.readScopeSetup.open) elements.readScopeSetup.close();
-    } else if (!elements.readScopeSetup.open) {
+      if (readScopeSetup?.open) readScopeSetup.close();
+    } else if (readScopeSetup && !readScopeSetup.open) {
       // A reset committed in another companion can arrive while this panel's
       // reset confirmation is open. Do not leave a stale modal underneath the
       // mandatory setup dialog.
       if (elements.resetSettingsDialog.open) elements.resetSettingsDialog.close('cancel');
-      elements.readScopeSetup.showModal();
+      readScopeSetup.showModal();
     }
     const configuredScope = setupComplete
       ? state.preferences.replicaReadScope
       : replicaReadScopeForProfile('page-only');
-    elements.readScopeProfile.value = deriveReplicaReadScopeProfile(configuredScope);
-    elements.setupReadProfile.value = deriveReplicaReadScopeProfile(state.setupReadScopeDraft);
-    this.#renderToggleSet(elements.readScopeControls, configuredScope, (key, checked) => {
-      const next = normalizeReadScopeToggle(configuredScope, key, checked);
-      void this.commitReplicaReadScope(next, false);
-    });
-    this.#renderToggleSet(
-      elements.setupReadScopeControls,
-      state.setupReadScopeDraft,
-      (key, checked) => {
-        state.setupReadScopeDraft = normalizeReadScopeToggle(
-          state.setupReadScopeDraft,
-          key,
-          checked,
-        );
-        this.renderControls();
-      },
-    );
-    elements.setupResetCleanup.hidden = !cleanupPending;
-    elements.retrySetupResetCleanupButton.disabled = state.resetInFlight;
+    const configuredProfile = deriveReplicaReadScopeProfile(configuredScope);
+    if (readScopeProfile) readScopeProfile.value = configuredProfile;
+    if (readProfileChoices) {
+      for (const input of readProfileChoices.querySelectorAll<HTMLInputElement>(
+        'input[type="radio"]',
+      )) {
+        input.checked = input.value === configuredProfile;
+      }
+    }
+    if (setupReadProfile) {
+      setupReadProfile.value = deriveReplicaReadScopeProfile(state.setupReadScopeDraft);
+    }
+    if (readScopeControls) {
+      this.#renderToggleSet(readScopeControls, configuredScope, (key, checked) => {
+        const next = normalizeReadScopeToggle(configuredScope, key, checked);
+        void this.commitReplicaReadScope(next, false);
+      });
+    }
+    if (setupReadScopeControls) {
+      this.#renderToggleSet(
+        setupReadScopeControls,
+        state.setupReadScopeDraft,
+        (key, checked) => {
+          state.setupReadScopeDraft = normalizeReadScopeToggle(
+            state.setupReadScopeDraft,
+            key,
+            checked,
+          );
+          this.renderControls();
+        },
+      );
+    }
+    if (setupResetCleanup) setupResetCleanup.hidden = !cleanupPending;
+    if (retrySetupResetCleanupButton) {
+      retrySetupResetCleanupButton.disabled = state.resetInFlight;
+    }
     if (cleanupPending && !state.setupCleanupWasPending && !state.resetInFlight) {
-      this.#resetCleanupStatus.set(UI_STRINGS.setupCleanupPending);
+      this.#resetCleanupStatus?.set(UI_STRINGS.setupCleanupPending);
     }
     if (
       cleanupPending &&
       !setupComplete &&
       (!setupDialogWasOpen || !state.setupCleanupWasPending)
     ) {
-      elements.retrySetupResetCleanupButton.focus();
+      retrySetupResetCleanupButton?.focus();
     } else if (
       !cleanupPending &&
       state.setupCleanupWasPending &&
-      elements.readScopeSetup.open &&
-      document.activeElement === elements.retrySetupResetCleanupButton
+      readScopeSetup?.open &&
+      document.activeElement === retrySetupResetCleanupButton
     ) {
-      elements.setupReadProfile.focus();
+      setupReadProfile?.focus();
     }
     state.setupCleanupWasPending = cleanupPending;
     this.environment.setUiText(

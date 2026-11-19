@@ -4,17 +4,21 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  ARTIFACT_EDITIONS,
+  PUBLIC_EDITION_FORBIDDEN_MARKERS,
   REQUIRED_ICON_SIZES,
   APPROVED_EXTENSION_PAGE_CSP,
   APPROVED_OCR_PACKAGE_LOCK_METADATA,
@@ -35,6 +39,8 @@ import {
   canonicalArtifactDirectory,
   checkArtifact,
   compareArtifactDirectories,
+  defaultArtifactEditions,
+  releaseBuildEnvironment,
   syncArtifact,
   validateArtifact,
 } from '../tools/extension-artifact.mjs';
@@ -1198,6 +1204,160 @@ describe('artifact orchestration', () => {
     );
     await expect(access(backupPath)).resolves.toBeUndefined();
   });
+});
+
+describe('public and dev editions', () => {
+  it('keeps each edition in its own canonical directory', () => {
+    const projectRoot = path.resolve('/project');
+    expect(ARTIFACT_EDITIONS).toEqual(['public', 'dev']);
+    expect(canonicalArtifactDirectory(projectRoot)).toBe(
+      path.join(projectRoot, 'dist', 'chrome-unpacked'),
+    );
+    expect(canonicalArtifactDirectory(projectRoot, 'public')).toBe(
+      path.join(projectRoot, 'dist', 'chrome-unpacked'),
+    );
+    expect(canonicalArtifactDirectory(projectRoot, 'dev')).toBe(
+      path.join(projectRoot, 'dist', 'chrome-dev'),
+    );
+    expect(() => canonicalArtifactDirectory(projectRoot, 'store')).toThrow(
+      'Unknown extension edition',
+    );
+  });
+
+  it('keeps the dev edition only where the checkout keeps it', async () => {
+    const publicCheckout = await createTemporaryDirectory('simul-public-checkout-');
+    expect(await defaultArtifactEditions(publicCheckout)).toEqual(['public']);
+
+    const privateCheckout = await createTemporaryDirectory('simul-private-checkout-');
+    await mkdir(path.join(privateCheckout, '_dev'));
+    await writeFile(path.join(privateCheckout, '_dev', 'public-exclude.txt'), 'dist/chrome-dev\n');
+    expect(await defaultArtifactEditions(privateCheckout)).toEqual(['public', 'dev']);
+
+    const devBuildCheckout = await createTemporaryDirectory('simul-dev-checkout-');
+    await mkdir(canonicalArtifactDirectory(devBuildCheckout, 'dev'), { recursive: true });
+    expect(await defaultArtifactEditions(devBuildCheckout)).toEqual(['public', 'dev']);
+  });
+
+  it('never lets a developer environment choose the release edition', () => {
+    expect(releaseBuildEnvironment({
+      SIMUL_EDITION: 'dev',
+      SIMUL_OCR_TESSERACT: '0',
+      PATH: '/bin',
+    })).toEqual({ PATH: '/bin' });
+  });
+
+  it('requires the dev marker on the dev edition only', async () => {
+    const devArtifact = await createTemporaryArtifact({
+      manifest: { version_name: '0.1.0 test dev' },
+    });
+    const publicArtifact = await createTemporaryArtifact();
+
+    await expect(validateArtifact(devArtifact, { edition: 'dev' }))
+      .resolves.toMatchObject({ directory: devArtifact });
+    await expect(validateArtifact(devArtifact, { edition: 'public' }))
+      .rejects.toThrow('must not carry the "dev" marker');
+    await expect(validateArtifact(publicArtifact, { edition: 'public' }))
+      .resolves.toMatchObject({ directory: publicArtifact });
+    await expect(validateArtifact(publicArtifact, { edition: 'dev' }))
+      .rejects.toThrow('must end with "dev"');
+  });
+
+  it.each(PUBLIC_EDITION_FORBIDDEN_MARKERS)(
+    'rejects a public artifact that carries the testing switch (%s)',
+    async (marker) => {
+      const artifact = await createTemporaryArtifact({
+        manifest: { version_name: '0.1.0 test' },
+        popupScript: `console.info(${JSON.stringify(marker)});`,
+      });
+
+      await expect(validateArtifact(artifact, { edition: 'public' }))
+        .rejects.toThrow('must not contain a dev-only control');
+      await writeFile(
+        path.join(artifact, 'manifest.json'),
+        JSON.stringify({
+          ...JSON.parse(await readFile(path.join(artifact, 'manifest.json'), 'utf8')),
+          version_name: '0.1.0 test dev',
+        }),
+      );
+      await expect(validateArtifact(artifact, { edition: 'dev' }))
+        .resolves.toMatchObject({ directory: artifact });
+    },
+  );
+
+  it('syncs and checks the dev edition in its own directory only', async () => {
+    const projectRoot = await createTemporaryProjectRoot('simul-dev-sync-');
+    const publicDirectory = canonicalArtifactDirectory(projectRoot, 'public');
+    await createValidArtifact(publicDirectory, { popupScript: 'console.info("public");' });
+    const editions = [];
+    const buildArtifact = async ({ temporaryRoot, edition }) => {
+      editions.push(edition);
+      const built = path.join(temporaryRoot, 'built');
+      await createValidArtifact(built, {
+        manifest: { version_name: '0.1.0 test dev' },
+        popupScript: 'console.info("dev");',
+      });
+      return built;
+    };
+
+    const target = await syncArtifact({ projectRoot, buildArtifact, edition: 'dev' });
+    const checked = await checkArtifact({ projectRoot, buildArtifact, edition: 'dev' });
+
+    expect(target).toBe(canonicalArtifactDirectory(projectRoot, 'dev'));
+    expect(checked).toEqual({ committedDirectory: target });
+    expect(editions).toEqual(['dev', 'dev']);
+    expect(await readFile(path.join(target, 'popup.js'), 'utf8')).toBe('console.info("dev");');
+    expect(await readFile(path.join(publicDirectory, 'popup.js'), 'utf8'))
+      .toBe('console.info("public");');
+    await expect(
+      assertCanonicalSyncTarget(publicDirectory, projectRoot, 'dev'),
+    ).rejects.toThrow('Refusing artifact sync outside exact target');
+  });
+
+  it('commits the public edition without the testing switch', async () => {
+    const publicManifest = JSON.parse(
+      await readFile('dist/chrome-unpacked/manifest.json', 'utf8'),
+    );
+    expect(publicManifest.version_name).toBe('0.6.5 beta v.20261119.2');
+
+    const publicHtml = await readFile('dist/chrome-unpacked/sidepanel.html', 'utf8');
+    for (const marker of PUBLIC_EDITION_FORBIDDEN_MARKERS) {
+      expect(publicHtml).not.toContain(marker);
+    }
+    for (const name of await readdir('dist/chrome-unpacked/chunks')) {
+      const code = await readFile(`dist/chrome-unpacked/chunks/${name}`, 'utf8');
+      for (const marker of PUBLIC_EDITION_FORBIDDEN_MARKERS) {
+        expect(code, name).not.toContain(marker);
+      }
+    }
+    expect(publicHtml).toContain('id="read-profile-choices"');
+    expect(publicHtml).not.toContain('id="refresh"');
+  });
+
+  // The public repository is made without dist/chrome-dev.
+  it.skipIf(!existsSync('dist/chrome-dev'))(
+    'commits the dev edition with every option and the same boundary',
+    async () => {
+      const publicManifest = JSON.parse(
+        await readFile('dist/chrome-unpacked/manifest.json', 'utf8'),
+      );
+      const devManifest = JSON.parse(
+        await readFile('dist/chrome-dev/manifest.json', 'utf8'),
+      );
+      expect(devManifest.version_name).toBe('0.6.5 beta v.20261119.2 dev');
+      expect(devManifest.permissions).toEqual(publicManifest.permissions);
+      expect(devManifest.optional_host_permissions)
+        .toEqual(publicManifest.optional_host_permissions);
+      expect(devManifest.content_security_policy)
+        .toEqual(publicManifest.content_security_policy);
+
+      const devHtml = await readFile('dist/chrome-dev/sidepanel.html', 'utf8');
+      for (const marker of PUBLIC_EDITION_FORBIDDEN_MARKERS) {
+        expect(devHtml).toContain(marker);
+      }
+      expect(devHtml).toContain('id="refresh"');
+      expect(devHtml).not.toContain('id="read-profile-choices"');
+    },
+  );
 });
 
 describe('extension icons', () => {

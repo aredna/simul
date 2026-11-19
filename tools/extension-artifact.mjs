@@ -37,6 +37,26 @@ export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
   '<all_urls>',
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
+/**
+ * Two editions are built from one source (lib/edition.ts): the public one in
+ * dist/chrome-unpacked (release zips, Chrome Web Store) and the owner's dev
+ * one, with every option, in dist/chrome-dev.
+ */
+export const ARTIFACT_EDITIONS = Object.freeze(['public', 'dev']);
+export const ARTIFACT_EDITION_DIRECTORIES = Object.freeze({
+  public: 'chrome-unpacked',
+  dev: 'chrome-dev',
+});
+/** The dev edition's version_name ends with this visible marker. */
+export const DEV_EDITION_VERSION_SUFFIX = ' dev';
+/**
+ * Text the public edition must not carry anywhere: the testing switch that
+ * turns every privacy filter off is not reachable in it at all.
+ */
+export const PUBLIC_EDITION_FORBIDDEN_MARKERS = Object.freeze([
+  'mirror-show-everything',
+  'Show everything (testing)',
+]);
 export const REQUIRED_ICON_SIZES = Object.freeze([16, 32, 48, 128]);
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
   'page-mirror.js',
@@ -358,8 +378,24 @@ export class ArtifactError extends Error {
   }
 }
 
-export function canonicalArtifactDirectory(projectRoot = PROJECT_ROOT) {
-  return path.join(path.resolve(projectRoot), 'dist', 'chrome-unpacked');
+export function assertArtifactEdition(edition) {
+  if (!ARTIFACT_EDITIONS.includes(edition)) {
+    throw new ArtifactError(
+      `Unknown extension edition: ${String(edition)}. Use one of: ${ARTIFACT_EDITIONS.join(', ')}.`,
+    );
+  }
+  return edition;
+}
+
+export function canonicalArtifactDirectory(
+  projectRoot = PROJECT_ROOT,
+  edition = 'public',
+) {
+  return path.join(
+    path.resolve(projectRoot),
+    'dist',
+    ARTIFACT_EDITION_DIRECTORIES[assertArtifactEdition(edition)],
+  );
 }
 
 export async function buildProductionArtifact({
@@ -367,10 +403,12 @@ export async function buildProductionArtifact({
   temporaryRoot,
   ocrEnabled = true,
   ocrProviderIds,
+  edition = 'public',
 } = {}) {
   if (!temporaryRoot) {
     throw new ArtifactError('A temporary build root is required.');
   }
+  assertArtifactEdition(edition);
 
   const resolvedRoot = path.resolve(projectRoot);
   const enabledOcrProviderIds = normalizeBuildOcrProviderIds(
@@ -393,6 +431,7 @@ export async function buildProductionArtifact({
         FORCE_COLOR: '0',
         NO_COLOR: '1',
         NODE_ENV: 'production',
+        SIMUL_EDITION: edition,
         SIMUL_WXT_OUT_DIR: outputBase,
         SIMUL_OCR_TEXT_DETECTOR:
           enabledOcrProviderIds.includes('chrome-text-detector') ? '1' : '0',
@@ -411,15 +450,16 @@ export async function buildProductionArtifact({
 export function releaseBuildEnvironment(environment) {
   return Object.fromEntries(
     Object.entries(environment).filter(
-      ([name]) => !/^(?:WXT_|VITE_|SIMUL_OCR_)/u.test(name),
+      ([name]) => !/^(?:WXT_|VITE_|SIMUL_OCR_|SIMUL_EDITION$)/u.test(name),
     ),
   );
 }
 
 export async function validateArtifact(
   artifactDirectory,
-  { projectRoot = PROJECT_ROOT } = {},
+  { projectRoot = PROJECT_ROOT, edition } = {},
 ) {
+  if (edition !== undefined) assertArtifactEdition(edition);
   const root = path.resolve(artifactDirectory);
   // Reviewed sources (legal files, vendor OCR manifests) are compared from the
   // caller's project root, so a check or sync run for another checkout never
@@ -476,6 +516,7 @@ export async function validateArtifact(
         assertNoRemoteExecutableReference(entry.path, text);
         executableTextByPath.set(entry.path, text);
       }
+      if (edition === 'public') assertPublicEditionText(entry.path, text);
       await validateTextReferences(root, entry.path, text, filePaths);
     }
   }
@@ -520,6 +561,7 @@ export async function validateArtifact(
     throw new ArtifactError('manifest.json is not valid JSON.', { cause: error });
   }
   const offscreenOcrEnabled = validateManifest(manifest, filePaths);
+  if (edition !== undefined) validateManifestEdition(manifest, edition);
   const ocrProviderIds = offscreenOcrEnabled
     ? detectOcrRuntimeProfile(executableTextByPath, filePaths)
     : Object.freeze([]);
@@ -568,6 +610,33 @@ export async function validateArtifact(
     pdfjs: pdfjsRuntimePaths.size > 0,
     unpackedBytes,
   };
+}
+
+function assertPublicEditionText(relativePath, text) {
+  for (const marker of PUBLIC_EDITION_FORBIDDEN_MARKERS) {
+    if (text.includes(marker)) {
+      throw new ArtifactError(
+        `The public edition must not contain a dev-only control (${marker}): ${relativePath}`,
+      );
+    }
+  }
+}
+
+function validateManifestEdition(manifest, edition) {
+  const versionName = typeof manifest.version_name === 'string'
+    ? manifest.version_name.trim()
+    : '';
+  const marked = versionName.endsWith(DEV_EDITION_VERSION_SUFFIX);
+  if (edition === 'dev' && !marked) {
+    throw new ArtifactError(
+      `The dev edition's manifest version_name must end with "${DEV_EDITION_VERSION_SUFFIX.trim()}".`,
+    );
+  }
+  if (edition === 'public' && marked) {
+    throw new ArtifactError(
+      `The public edition's manifest version_name must not carry the "${DEV_EDITION_VERSION_SUFFIX.trim()}" marker.`,
+    );
+  }
 }
 
 async function validatePdfjsRuntimeAssets({
@@ -797,9 +866,10 @@ export async function compareArtifactDirectories(expectedDirectory, actualDirect
 export async function checkArtifact({
   projectRoot = PROJECT_ROOT,
   buildArtifact = buildProductionArtifact,
+  edition = 'public',
 } = {}) {
   const resolvedRoot = path.resolve(projectRoot);
-  const committedDirectory = canonicalArtifactDirectory(resolvedRoot);
+  const committedDirectory = canonicalArtifactDirectory(resolvedRoot, edition);
 
   return withTemporaryDirectory(async (temporaryRoot) => {
     let builtDirectory;
@@ -807,8 +877,9 @@ export async function checkArtifact({
       builtDirectory = await buildArtifact({
         projectRoot: resolvedRoot,
         temporaryRoot,
+        edition,
       });
-      await validateArtifact(builtDirectory, { projectRoot: resolvedRoot });
+      await validateArtifact(builtDirectory, { projectRoot: resolvedRoot, edition });
     } catch (error) {
       throw new ArtifactError(
         [
@@ -820,7 +891,7 @@ export async function checkArtifact({
     }
 
     try {
-      await validateArtifact(committedDirectory, { projectRoot: resolvedRoot });
+      await validateArtifact(committedDirectory, { projectRoot: resolvedRoot, edition });
       const differences = await compareArtifactDirectories(
         builtDirectory,
         committedDirectory,
@@ -828,7 +899,7 @@ export async function checkArtifact({
       if (differences.length > 0) {
         throw new ArtifactError(
           [
-            'Committed Chrome artifact differs from the production build:',
+            `Committed Chrome artifact (${edition} edition) differs from the production build:`,
             ...formatDifferences(differences),
             'Run `npm run artifact:sync` to intentionally refresh it.',
           ].join('\n'),
@@ -856,23 +927,26 @@ export async function syncArtifact({
   buildArtifact = buildProductionArtifact,
   validatePromotedArtifact = validateArtifact,
   removeBackup = removeDirectory,
+  edition = 'public',
 } = {}) {
   const resolvedRoot = path.resolve(projectRoot);
-  const target = canonicalArtifactDirectory(resolvedRoot);
-  await assertCanonicalSyncTarget(target, resolvedRoot);
+  const target = canonicalArtifactDirectory(resolvedRoot, edition);
+  await assertCanonicalSyncTarget(target, resolvedRoot, edition);
 
   return withTemporaryDirectory(async (temporaryRoot) => {
     const builtDirectory = await buildArtifact({
       projectRoot: resolvedRoot,
       temporaryRoot,
+      edition,
     });
-    await validateArtifact(builtDirectory, { projectRoot: resolvedRoot });
+    await validateArtifact(builtDirectory, { projectRoot: resolvedRoot, edition });
     await replaceCanonicalDirectory({
       projectRoot: resolvedRoot,
       sourceDirectory: builtDirectory,
       targetDirectory: target,
       validatePromotedArtifact,
       removeBackup,
+      edition,
     });
     return target;
   });
@@ -881,9 +955,10 @@ export async function syncArtifact({
 export async function assertCanonicalSyncTarget(
   targetDirectory,
   projectRoot = PROJECT_ROOT,
+  edition = 'public',
 ) {
   const root = path.resolve(projectRoot);
-  const expected = canonicalArtifactDirectory(root);
+  const expected = canonicalArtifactDirectory(root, edition);
   const target = path.resolve(targetDirectory);
   if (target !== expected) {
     throw new ArtifactError(
@@ -913,14 +988,16 @@ async function replaceCanonicalDirectory({
   validatePromotedArtifact,
   validateStagedArtifact = validateArtifact,
   removeBackup,
+  edition,
 }) {
-  await assertCanonicalSyncTarget(targetDirectory, projectRoot);
+  await assertCanonicalSyncTarget(targetDirectory, projectRoot, edition);
   const distDirectory = path.dirname(targetDirectory);
   await mkdir(distDirectory, { recursive: true });
 
   const nonce = `${process.pid}-${randomUUID()}`;
-  const stage = path.join(distDirectory, `.chrome-unpacked-stage-${nonce}`);
-  const backup = path.join(distDirectory, `.chrome-unpacked-backup-${nonce}`);
+  const name = path.basename(targetDirectory);
+  const stage = path.join(distDirectory, `.${name}-stage-${nonce}`);
+  const backup = path.join(distDirectory, `.${name}-backup-${nonce}`);
   let backupPresent = false;
   let targetPromoted = false;
   let backupCleanupFailed = false;
@@ -932,7 +1009,7 @@ async function replaceCanonicalDirectory({
       force: false,
       preserveTimestamps: false,
     });
-    await validateStagedArtifact(stage);
+    await validateStagedArtifact(stage, { projectRoot, edition });
 
     if (await safeLstat(targetDirectory)) {
       await rename(targetDirectory, backup);
@@ -954,7 +1031,7 @@ async function replaceCanonicalDirectory({
     }
 
     try {
-      await validatePromotedArtifact(targetDirectory, { projectRoot });
+      await validatePromotedArtifact(targetDirectory, { projectRoot, edition });
     } catch (error) {
       await rm(targetDirectory, { recursive: true, force: true });
       targetPromoted = false;
@@ -2463,20 +2540,47 @@ function errorMessage(error) {
     : 'Unknown artifact verification error.';
 }
 
+/**
+ * The editions a checkout keeps. The private working repository keeps both;
+ * the public repository is made without dist/chrome-dev and without _dev/
+ * (_dev/public-exclude.txt), so there only the public edition is built and
+ * checked. A checkout that has dist/chrome-dev always checks it.
+ */
+export async function defaultArtifactEditions(projectRoot = PROJECT_ROOT) {
+  const root = path.resolve(projectRoot);
+  const keepsDevEdition =
+    (await safeLstat(canonicalArtifactDirectory(root, 'dev'))) !== undefined ||
+    (await safeLstat(path.join(root, '_dev', 'public-exclude.txt'))) !== undefined;
+  return keepsDevEdition ? ARTIFACT_EDITIONS : Object.freeze(['public']);
+}
+
 async function main() {
   const command = process.argv[2];
+  // Every edition this checkout keeps; `check public` or `sync dev` limits
+  // it to one.
+  const editions = process.argv[3]
+    ? [assertArtifactEdition(process.argv[3])]
+    : await defaultArtifactEditions();
   if (command === 'check') {
-    const { committedDirectory } = await checkArtifact();
-    console.log(`Verified committed Chrome artifact: ${committedDirectory}`);
+    for (const edition of editions) {
+      const { committedDirectory } = await checkArtifact({ edition });
+      console.log(
+        `Verified committed Chrome artifact (${edition} edition): ${committedDirectory}`,
+      );
+    }
     return;
   }
   if (command === 'sync') {
-    const target = await syncArtifact();
-    console.log(`Synchronized validated Chrome artifact: ${target}`);
+    for (const edition of editions) {
+      const target = await syncArtifact({ edition });
+      console.log(
+        `Synchronized validated Chrome artifact (${edition} edition): ${target}`,
+      );
+    }
     return;
   }
   throw new ArtifactError(
-    'Usage: node tools/extension-artifact.mjs <check|sync>',
+    'Usage: node tools/extension-artifact.mjs <check|sync> [public|dev]',
   );
 }
 

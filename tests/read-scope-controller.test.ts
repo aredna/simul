@@ -403,3 +403,109 @@ describe('ReadScopeController reset and safety', () => {
     expect(replies).toHaveLength(1);
   });
 });
+
+const PUBLIC_MARKUP = `<html><body>
+  <fieldset id="choices">
+    <input type="radio" name="read-profile" value="page-only">
+    <input type="radio" name="read-profile" value="standard">
+    <input type="radio" name="read-profile" value="full-visible">
+  </fieldset>
+  <button id="reset"></button>
+  <dialog id="reset-dialog"></dialog>
+  <p id="reset-status"></p>
+</body></html>`;
+
+/** The public edition's panel: three profile radios, no setup dialog. */
+function setupPublic(stored: CompanionPreferences) {
+  const { document, window } = parseHTML(PUBLIC_MARKUP);
+  const el = <T extends Element>(id: string) => document.getElementById(id) as unknown as T;
+  const elements = {
+    readProfileChoices: el<HTMLElement>('choices'),
+    resetAllSettingsButton: el<HTMLButtonElement>('reset'),
+    resetSettingsDialog: el<HTMLDialogElement>('reset-dialog'),
+    resetSettingsStatus: el<HTMLElement>('reset-status'),
+  };
+  stubDialog(elements.resetSettingsDialog);
+  let canonical = stored;
+  const state = new CompanionState({ isDetachedWindow: false });
+  state.preferences = parseCompanionPreferences(stored, 'public');
+  state.preferenceSafetyConnectionReady = true;
+  const commands: PreferenceCommand[] = [];
+  let controller!: ReadScopeController;
+  const preferenceClient = {
+    send: vi.fn(async (command: PreferenceCommand): Promise<PreferenceCommandResult> => {
+      commands.push(command);
+      if (command.type !== 'simul:preferences:patch-read-scope') {
+        throw new Error(`unexpected ${command.type}`);
+      }
+      canonical = withReadSettings(canonical, command.patch);
+      return { type: 'simul:preferences:result', applied: true, preferences: canonical };
+    }),
+    applyCommitted: vi.fn((value: unknown) => {
+      const previous = state.preferences;
+      state.preferences = parseCompanionPreferences(value, 'public');
+      controller.handleCommittedPreferences(previous);
+      return true;
+    }),
+  };
+  controller = new ReadScopeController({
+    state,
+    document: document as unknown as Document,
+    elements,
+    preferenceClient,
+    purgeSourceDerivedRuntime: async () => undefined,
+    clearResetOnlyRuntimeState: () => undefined,
+    restartReplica: () => undefined,
+    syncPreferenceControls: () => controller.renderControls(),
+    setStatus: () => undefined,
+    setUiText: (element: HTMLElement, english: string) => {
+      element.textContent = english;
+    },
+    localizeUi: (english: string) => english,
+    localizeTemplate: (frame: string) => frame,
+  });
+  const checked = () => [
+    ...elements.readProfileChoices.querySelectorAll<HTMLInputElement>('input'),
+  ].filter((input) => input.checked).map((input) => input.value);
+  return { window, controller, state, elements, commands, checked };
+}
+
+describe('ReadScopeController in the public edition', () => {
+  it('never shows a setup screen and reads the default profile for an install never set up', () => {
+    const harness = setupPublic(neverSetUp());
+    harness.controller.installListeners();
+    harness.controller.renderControls();
+
+    expect(harness.commands).toEqual([]);
+    expect(harness.checked()).toEqual(['full-visible']);
+    expect(committedReplicaReadScope(harness.state.preferences))
+      .toEqual(DEFAULT_COMPANION_PREFERENCES.replicaReadScope);
+  });
+
+  it('shows a stored custom scope as the profile within it and saves the profile chosen', async () => {
+    const custom = withReadSettings(setupComplete('standard'), {
+      replicaReadScope: { ...replicaReadScopeForProfile('standard'), formValues: true },
+    });
+    const harness = setupPublic(custom);
+    harness.controller.installListeners();
+    harness.controller.renderControls();
+    expect(harness.checked()).toEqual(['standard']);
+
+    const pageOnly = harness.elements.readProfileChoices
+      .querySelector<HTMLInputElement>('input[value="page-only"]')!;
+    pageOnly.checked = true;
+    pageOnly.dispatchEvent(new harness.window.Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(harness.commands).toHaveLength(1));
+
+    expect(harness.commands[0]).toMatchObject({
+      type: 'simul:preferences:patch-read-scope',
+      // The fingerprint names the profile the panel showed, which the
+      // public edition's preference service compares against.
+      expectedReadScopeFingerprint: replicaReadScopeFingerprint(
+        replicaReadScopeForProfile('standard'),
+      ),
+      patch: { replicaReadScope: replicaReadScopeForProfile('page-only') },
+    });
+    await vi.waitFor(() => expect(harness.checked()).toEqual(['page-only']));
+  });
+});

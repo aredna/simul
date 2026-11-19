@@ -13,6 +13,7 @@ import {
   isReplicaViewMode,
   isTextLayoutMode,
   parseCompanionPreferences,
+  parseStoredCompanionPreferences,
   permissionOriginsForMode,
   resetCompanionPreferences,
   withAutoTranslationMode,
@@ -36,6 +37,7 @@ import {
 import { isOcrMinimumConfidence } from './ocr/result-quality';
 import { isSelectableReplicaFidelityPolicy } from './replica/fidelity-policy';
 import { isSupportedLanguage } from './translation-provider';
+import { SIMUL_EDITION, type SimulEdition } from './edition';
 import {
   REPLICA_READ_SCOPE_SETUP_VERSION,
   effectiveReplicaReadScope,
@@ -152,10 +154,16 @@ export class PreferenceCoordinator {
   /** Managed origins the current command released; pruned from the ledger. */
   private removedOrigins = new Set<string>();
 
+  /**
+   * Storage holds the canonical preferences of every edition; the edition
+   * only decides which read scope a command's expected fingerprint names
+   * (the public edition reads a custom scope as a profile).
+   */
   constructor(
     private readonly adapter: PreferenceCoordinatorAdapter,
     private readonly resetRuntime: PreferenceResetRuntimeAdapter =
       NOOP_RESET_RUNTIME_ADAPTER,
+    private readonly edition: SimulEdition = SIMUL_EDITION,
   ) {}
 
   run(command: PreferenceCommand): Promise<PreferenceCommandResult> {
@@ -176,7 +184,7 @@ export class PreferenceCoordinator {
   ): Promise<PreferenceCommandResult> {
     this.removedOrigins = new Set<string>();
     const stored = await this.adapter.load();
-    let current = parseCompanionPreferences(stored);
+    let current = parseStoredCompanionPreferences(stored);
     // An install that predates the grant ledger adopts every managed grant it
     // holds, once, so its cleanup stays exactly as it was. Grants the user
     // makes in chrome://extensions from then on stay theirs.
@@ -232,7 +240,7 @@ export class PreferenceCoordinator {
     }
 
     if (command.type === 'simul:preferences:patch-read-scope') {
-      if (!hasExpectedReadScope(current, command.expectedReadScopeFingerprint)) {
+      if (!hasExpectedReadScope(current, command.expectedReadScopeFingerprint, this.edition)) {
         return result(current, false, 'stale-read-scope');
       }
       const preferences = await this.saveNext(
@@ -248,7 +256,7 @@ export class PreferenceCoordinator {
       ) {
         return result(current, false, 'stale-setup-version');
       }
-      if (!hasExpectedReadScope(current, command.expectedReadScopeFingerprint)) {
+      if (!hasExpectedReadScope(current, command.expectedReadScopeFingerprint, this.edition)) {
         return result(current, false, 'stale-read-scope');
       }
       const preferences = withReadSettings(current, {
@@ -387,7 +395,7 @@ export class PreferenceCoordinator {
     preferences: CompanionPreferences,
   ): Promise<PreferenceCommandResult> {
     const pendingRevision = preferences.resetCleanupPendingRevision;
-    const latest = parseCompanionPreferences(await this.adapter.load());
+    const latest = parseStoredCompanionPreferences(await this.adapter.load());
     if (latest.resetCleanupPendingRevision !== pendingRevision) {
       return latest.resetCleanupPendingRevision === 0
         ? result(latest, true, undefined, {
@@ -416,7 +424,7 @@ export class PreferenceCoordinator {
       });
     }
 
-    const current = parseCompanionPreferences(await this.adapter.load());
+    const current = parseStoredCompanionPreferences(await this.adapter.load());
     if (current.resetCleanupPendingRevision !== pendingRevision) {
       return current.resetCleanupPendingRevision === 0
         ? result(current, true, undefined, {
@@ -480,7 +488,7 @@ export class PreferenceCoordinator {
   private async reconcile(
     candidate: CompanionPreferences,
   ): Promise<CompanionPreferences> {
-    let preferences = parseCompanionPreferences(candidate);
+    let preferences = parseStoredCompanionPreferences(candidate);
     const actualOrigins = new Set(await this.adapter.getAllOrigins());
     const hasCanonicalGlobalGrant = ALL_SITES_PERMISSION_ORIGINS.every(
       (origin) => actualOrigins.has(origin),
@@ -887,10 +895,12 @@ function samePreferences(
 function hasExpectedReadScope(
   preferences: CompanionPreferences,
   expectedFingerprint: string,
+  edition: SimulEdition,
 ): boolean {
   const effective = effectiveReplicaReadScope(
     preferences.replicaReadScope,
     preferences.readScopeSetupVersion,
+    edition,
   );
   return replicaReadScopeFingerprint(effective) === expectedFingerprint;
 }

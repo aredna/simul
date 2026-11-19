@@ -3,12 +3,157 @@ import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
+import type { SimulEdition } from '../lib/edition';
+import { applyEditionToDocument } from '../lib/edition-markup';
 import { DEFAULT_COMPANION_PREFERENCES } from '../lib/preferences';
 
 const markup = readFileSync(
   new URL('../entrypoints/sidepanel/index.html', import.meta.url),
   'utf8',
 );
+
+/** The side panel exactly as one edition's build ships it. */
+function editionDocument(edition: SimulEdition): Document {
+  const { document } = parseHTML(markup);
+  applyEditionToDocument(document as unknown as Document, edition);
+  return document as unknown as Document;
+}
+
+/** Every control the dev edition has and the public edition leaves out. */
+const DEV_ONLY_CONTROL_IDS = [
+  'refresh',
+  'read-scope-setup',
+  'setup-read-profile',
+  'read-scope-profile',
+  'read-scope-controls',
+  'readable-content-options',
+  'experimental-options',
+  'replica-view-mode',
+  'replica-fidelity-policy',
+  'replica-fidelity-disclosure',
+  'mirror-item-megabytes',
+  'mirror-page-megabytes',
+  'mirror-max-elements',
+  'restore-mirror-limits',
+  'mirror-show-everything',
+  'mirror-show-everything-disclosure',
+] as const;
+
+describe('sidepanel editions', () => {
+  it.each(['public', 'dev'] as const)(
+    'gives every element of the %s edition a unique id and resolves every marker',
+    (edition) => {
+      const document = editionDocument(edition);
+      const ids = [...document.querySelectorAll<HTMLElement>('[id]')]
+        .map((element) => element.id);
+
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(document.querySelector('[data-edition], [data-public-move]')).toBeNull();
+      expect(ids.some((id) => id.startsWith('public-slot-'))).toBe(false);
+    },
+  );
+
+  it('keeps the same toolbar in both editions', () => {
+    const toolbarIds = (edition: SimulEdition) => [
+      ...editionDocument(edition).querySelectorAll<HTMLElement>(
+        '#compact-toolbar button, #compact-toolbar select',
+      ),
+    ].map((element) => element.id);
+
+    expect(toolbarIds('public')).toEqual(toolbarIds('dev'));
+    expect(toolbarIds('public')).toContain('compact-refresh');
+  });
+
+  it('leaves every tuning control out of the public edition', () => {
+    const document = editionDocument('public');
+
+    for (const id of DEV_ONLY_CONTROL_IDS) {
+      expect(document.getElementById(id), id).toBeNull();
+    }
+    expect(document.body.textContent).not.toContain('Custom (set with the choices below)');
+    expect(document.querySelector('#image-analysis-host')).not.toBeNull();
+    const text = document.body.textContent ?? '';
+    expect(text).not.toContain('Show everything');
+    expect(text).not.toContain('Window behavior');
+    expect(text).not.toContain('Replica fidelity');
+    expect(document.body.innerHTML).not.toContain('mirror-show-everything');
+  });
+
+  it('lists the options anybody needs in the public options panel', () => {
+    const document = editionDocument('public');
+    const overlay = document.querySelector('#control-overlay');
+    const advanced = document.querySelector<HTMLDetailsElement>('#advanced-options');
+    const outsideAdvanced = (selector: string) => {
+      const element = overlay?.querySelector(selector);
+      return element !== null && element !== undefined && !advanced?.contains(element);
+    };
+
+    for (const selector of [
+      '#auto-translate-mode',
+      '#mirror-display-mode',
+      '#zoom',
+      '#sync-scroll',
+      '#read-profile-choices',
+      '#translate',
+      '#cancel',
+      '#reset-all-settings',
+      '#image-analysis-host',
+    ]) {
+      expect(outsideAdvanced(selector), selector).toBe(true);
+    }
+    const profiles = [
+      ...document.querySelectorAll<HTMLInputElement>(
+        '#read-profile-choices input[type="radio"]',
+      ),
+    ];
+    expect(profiles.map((input) => input.value))
+      .toEqual(['page-only', 'standard', 'full-visible']);
+    expect(new Set(profiles.map((input) => input.name)).size).toBe(1);
+    for (const input of profiles) {
+      const label = input.closest('label');
+      // Each profile has its name and one short line, both localizable.
+      expect(label?.querySelectorAll('[data-ui-label]')).toHaveLength(2);
+      expect(label?.querySelector('small')?.hasAttribute('data-ui-label')).toBe(true);
+    }
+    expect(
+      document.querySelector('#read-profile-choices legend')?.hasAttribute('data-ui-label'),
+    ).toBe(true);
+  });
+
+  it('holds exactly three settings in the closed public Advanced group', () => {
+    const document = editionDocument('public');
+    const advanced = document.querySelector<HTMLDetailsElement>('#advanced-options');
+
+    expect(advanced?.localName).toBe('details');
+    expect(advanced?.hasAttribute('open')).toBe(false);
+    expect(advanced?.querySelector('summary')?.getAttribute('data-ui-label'))
+      .toBe('Advanced');
+    const grid = advanced?.querySelector('#advanced-options-grid');
+    expect([...grid?.children ?? []].map((child) =>
+      child.id || child.querySelector('select')?.id,
+    )).toEqual(['text-layout-mode', 'launch-behavior', 'ocr-confidence-host']);
+    expect(advanced?.querySelectorAll('select, input, button')).toHaveLength(2);
+  });
+
+  it('keeps every dev control and none of the public-only ones in the dev edition', () => {
+    const document = editionDocument('dev');
+
+    for (const id of DEV_ONLY_CONTROL_IDS) {
+      expect(document.getElementById(id), id).not.toBeNull();
+    }
+    expect(document.querySelector('#read-profile-choices')).toBeNull();
+    expect(document.querySelector('#advanced-options')).toBeNull();
+    expect(document.querySelector('#ocr-confidence-host')).toBeNull();
+    expect(document.querySelector('#settings-grid #text-layout-mode')).not.toBeNull();
+    expect(
+      document.querySelector('.options-group:not([id]) #launch-behavior'),
+    ).not.toBeNull();
+    expect(document.querySelector('#readable-content-options #reset-all-settings'))
+      .not.toBeNull();
+    expect(document.querySelector('#experimental-options #image-analysis-host'))
+      .not.toBeNull();
+  });
+});
 const style = readFileSync(
   new URL('../entrypoints/sidepanel/style.css', import.meta.url),
   'utf8',
@@ -44,7 +189,7 @@ const providerRegistry = readFileSync(
 
 describe('sidepanel UI structure', () => {
   it('keeps one quick composer outside settings and exposes semantic progress', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const ids = [...document.querySelectorAll<HTMLElement>('[id]')]
       .map((element) => element.id);
 
@@ -59,7 +204,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('announces mirror rebuilds and labels controls with their current action', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
 
     expect(document.querySelector('main > section')?.getAttribute('aria-busy'))
       .toBe('false');
@@ -75,7 +220,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('shows the quick-translation input limit without announcing every keystroke', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const input = document.querySelector('#composer-input');
     const count = document.querySelector('#composer-character-count');
 
@@ -90,7 +235,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('orders every primary toolbar action in one direct row', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const controls = [...document.querySelectorAll<HTMLElement>(
       '#compact-toolbar button, #compact-toolbar select',
     )].map((element) => element.id);
@@ -124,7 +269,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('attaches warning state to actionable toolbar buttons without a healthy dot', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
 
     expect(document.querySelector('#status-dot')).toBeNull();
     expect(document.querySelector('#compact-refresh > #refresh-attention'))
@@ -137,7 +282,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('shows explicit OCR state and preserves compact button affordance', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     expect(document.querySelector('#toolbar-ocr-label')?.textContent).toBe('OCR Off');
     expect(script).toContain(
       'state.preferences.imageTranslationEnabled ? UI_STRINGS.ocrOn : UI_STRINGS.ocrOff',
@@ -188,7 +333,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('marks toolbar and settings copy for atomic target-language localization', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const settingsLabels = document.querySelectorAll(
       '#control-overlay [data-ui-label]',
     );
@@ -216,7 +361,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('places common controls before OCR experiments', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const experimental = document.querySelector('#experimental-options');
 
     expect(document.querySelector('#settings-grid #auto-translate-mode')).not.toBeNull();
@@ -276,7 +421,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('offers first-run read-scope setup, live independent controls, and reset', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const setup = document.querySelector('#read-scope-setup');
     const controls = document.querySelector('#read-scope-controls');
 
@@ -328,7 +473,7 @@ describe('sidepanel UI structure', () => {
     expect(script).not.toContain('window.confirm(');
     expect(readScope).toContain('installResetConfirmationController({');
     expect(readScope).toContain('readScopeSetup.showModal()');
-    expect(readScope).toContain("readScopeSetup.addEventListener('cancel'");
+    expect(readScope).toContain("readScopeSetup?.addEventListener('cancel'");
     expect(readScope).toContain("resetSettingsDialog.close('cancel')");
     expect(readScope).toContain('preferences.resetCleanupPendingRevision > 0');
     expect(readScope).toContain("type: 'simul:preferences:patch-read-scope'");
@@ -372,9 +517,9 @@ describe('sidepanel UI structure', () => {
     );
     expect(script).toContain('livePreferenceStorageFailClosed');
     expect(script).toContain('selectLiveCompanionPreferenceChange(');
-    expect(readScope).toContain('retrySetupResetCleanupButton.focus()');
+    expect(readScope).toContain('retrySetupResetCleanupButton?.focus()');
     expect(readScope).toContain(
-      "retrySetupResetCleanupButton.addEventListener('click'",
+      "retrySetupResetCleanupButton?.addEventListener('click'",
     );
     expect(readScope).toContain('expectedReadScopeFingerprint:');
     const purgeStart = script.indexOf(
@@ -413,7 +558,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('offers only selectable fidelity policies with a visible request disclosure', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const select = document.querySelector<HTMLSelectElement>(
       '#replica-fidelity-policy',
     );
@@ -531,7 +676,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('shows PDFs in their own focusable, labelled section after the replica', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const sections = [...document.querySelectorAll('main > section')].map(
       (section) => section.id,
     );
@@ -554,7 +699,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('offers a PDF from this computer in every error panel, and by drop (D107)', () => {
-    const { document } = parseHTML(markup);
+    const document = editionDocument('dev');
     const input = document.querySelector<HTMLInputElement>('main > #pdf-file-input');
     expect(input?.getAttribute('type')).toBe('file');
     expect(input?.getAttribute('accept')).toBe('application/pdf,.pdf');

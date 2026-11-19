@@ -1,4 +1,5 @@
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { SIMUL_EDITION, type SimulEdition } from '../../lib/edition';
 import { IMAGE_SCAN_POLICIES, isImageScanPolicy } from '../../lib/ocr/contracts';
 import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
 import {
@@ -75,10 +76,17 @@ export interface ImageAnalysisPanelEnvironment {
   ) => Promise<void>;
   readonly commitPatch: (patch: CompanionImageAnalysisSettingsPatch) => Promise<void>;
   readonly diagnostics?: ImageTranslationDiagnosticHistory;
+  /**
+   * The public edition shows only the on/off switch and the access grant
+   * here, puts the minimum OCR confidence in `confidenceHost` (its Advanced
+   * group), and keeps no diagnostics. Defaults to the build's edition.
+   */
+  readonly edition?: SimulEdition;
+  readonly confidenceHost?: HTMLElement;
 }
 
 /**
- * The "Image text" section under Advanced & experimental: the image
+ * The "Image text" section under Advanced & experimental (dev edition): the image
  * translation toggle and access grant, the minimum OCR confidence, the
  * image-reading method order with per-method toggles and runtime status,
  * scan policy, Prompt sidecars, and the memory-only diagnostics log. It
@@ -99,10 +107,12 @@ export class ImageAnalysisPanel {
    * whenever the method list is.
    */
   #methodToggleRelocalizers: readonly (() => void)[] = [];
+  readonly #edition: SimulEdition;
 
   constructor(private readonly environment: ImageAnalysisPanelEnvironment) {
     this.diagnostics =
       environment.diagnostics ?? new ImageTranslationDiagnosticHistory();
+    this.#edition = environment.edition ?? SIMUL_EDITION;
   }
 
   /** The section element, present only when image analysis is compiled in. */
@@ -120,8 +130,12 @@ export class ImageAnalysisPanel {
     this.render();
   }
 
-  /** Appends one content-free diagnostic and refreshes the log output. */
+  /**
+   * Appends one content-free diagnostic and refreshes the log output. The
+   * public edition has no diagnostics view, so it keeps none.
+   */
   recordDiagnostic(diagnostic: ImageTranslationDiagnostic): void {
+    if (this.#edition === 'public') return;
     this.diagnostics.append(diagnostic);
     this.renderDiagnostics();
   }
@@ -218,6 +232,16 @@ export class ImageAnalysisPanel {
     const compiledOrder = this.environment.compiledProviderOrder(
       view.imageTextProviderOrder,
     );
+    if (this.#edition === 'public') {
+      // Everything below is tuning the public edition pins to its defaults;
+      // only the confidence threshold stays, under Advanced.
+      this.environment.confidenceHost?.replaceChildren(
+        ...(compiledOrder.length > 0
+          ? [this.#createConfidenceControl(view.ocrMinimumConfidence)]
+          : []),
+      );
+      return;
+    }
     if (compiledOrder.length > 0) {
       root.append(this.#createConfidenceControl(view.ocrMinimumConfidence));
     }

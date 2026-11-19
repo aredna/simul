@@ -120,8 +120,14 @@
       ></span>
     </nav>
 
+    <!--
+      data-edition="dev" / "public": only that edition keeps the element.
+      data-public-move="slot": the public edition moves the element into the
+      public-only slot with that id. See lib/edition-markup.ts.
+    -->
     <dialog
       id="read-scope-setup"
+      data-edition="dev"
       class="setup-dialog"
       aria-modal="true"
       aria-labelledby="read-scope-setup-title"
@@ -206,7 +212,7 @@
             <option value="custom" data-ui-label="Custom zoom">Custom zoom</option>
           </select>
         </label>
-        <label title="Allow translated text to expand or preserve the source element geometry." data-ui-title="Allow translated text to expand or preserve the source element geometry.">
+        <label data-public-move="public-slot-text-layout" title="Allow translated text to expand or preserve the source element geometry." data-ui-title="Allow translated text to expand or preserve the source element geometry.">
           <span data-ui-label="Translated text">Translated text</span>
           <select id="text-layout-mode">
             <option value="adaptive" data-ui-label="Let boxes grow">Let boxes grow</option>
@@ -228,14 +234,50 @@
 
       <div class="action-row">
         <button id="translate" class="primary" type="button" disabled data-ui-label="Translate page">Translate page</button>
-        <button id="refresh" type="button" data-ui-label="Rebuild mirror">Rebuild mirror</button>
+        <button id="refresh" type="button" data-edition="dev" data-ui-label="Rebuild mirror">Rebuild mirror</button>
         <button id="cancel" class="danger" type="button" hidden data-ui-label="Cancel">Cancel</button>
       </div>
 
-      <details class="options-group">
+      <fieldset id="read-profile-choices" class="read-profile-choices" data-edition="public">
+        <legend data-ui-label="Read profile">Read profile</legend>
+        <label class="read-profile-choice">
+          <input type="radio" name="read-profile" value="page-only" />
+          <span>
+            <span data-ui-label="Page only">Page only</span>
+            <small data-ui-label="The page's text and pictures only.">The page's text and pictures only.</small>
+          </span>
+        </label>
+        <label class="read-profile-choice">
+          <input type="radio" name="read-profile" value="standard" />
+          <span>
+            <span data-ui-label="Standard">Standard</span>
+            <small data-ui-label="Adds button labels, button pictures and folded sections.">Adds button labels, button pictures and folded sections.</small>
+          </span>
+        </label>
+        <label class="read-profile-choice">
+          <input type="radio" name="read-profile" value="full-visible" />
+          <span>
+            <span data-ui-label="Full visible">Full visible</span>
+            <small data-ui-label="Adds what is filled in forms and text editors.">Adds what is filled in forms and text editors.</small>
+          </span>
+        </label>
+        <small class="microcopy" data-ui-label="Passwords, one-time codes and card numbers are never read.">Passwords, one-time codes and card numbers are never read.</small>
+      </fieldset>
+      <div id="public-slot-image-text" data-edition="public"></div>
+      <div id="public-slot-reset" data-edition="public"></div>
+      <details id="advanced-options" class="options-group" data-edition="public">
+        <summary data-ui-label="Advanced">Advanced</summary>
+        <div id="advanced-options-grid" class="settings-grid">
+          <div id="public-slot-text-layout" data-edition="public"></div>
+          <div id="public-slot-launch-behavior" data-edition="public"></div>
+          <div id="ocr-confidence-host"></div>
+        </div>
+      </details>
+
+      <details class="options-group" data-edition="dev">
         <summary title="Control where Simul opens." data-ui-title="Control where Simul opens." data-ui-label="Window behavior">Window behavior</summary>
         <div class="settings-grid">
-          <label title="Use the last companion view or always open a particular view." data-ui-title="Use the last companion view or always open a particular view.">
+          <label data-public-move="public-slot-launch-behavior" title="Use the last companion view or always open a particular view." data-ui-title="Use the last companion view or always open a particular view.">
             <span data-ui-label="Toolbar opens">Toolbar opens</span>
             <select id="launch-behavior">
               <option value="last-used" data-ui-label="Last used view">Last used view</option>
@@ -246,7 +288,7 @@
         </div>
       </details>
 
-      <details id="readable-content-options" class="options-group" open>
+      <details id="readable-content-options" class="options-group" data-edition="dev" open>
         <summary data-ui-label="Readable content & security">Readable content &amp; security</summary>
         <p class="microcopy" data-ui-label="The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.">The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.</p>
         <label>
@@ -259,13 +301,13 @@
           </select>
         </label>
         <div id="read-scope-controls" class="read-scope-controls"></div>
-        <div class="reset-settings">
+        <div class="reset-settings" data-public-move="public-slot-reset">
           <button id="reset-all-settings" class="danger" type="button">Reset all extension settings…</button>
           <p id="reset-settings-status" class="microcopy" role="status" aria-live="polite"></p>
         </div>
       </details>
 
-      <details id="experimental-options" class="options-group options-group--experimental">
+      <details id="experimental-options" class="options-group options-group--experimental" data-edition="dev">
         <summary title="Inspect untranslated source text, set the replica's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the replica's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
           <label title="Show translated text or temporarily inspect the live source text without translation." data-ui-title="Show translated text or temporarily inspect the live source text without translation.">
@@ -313,7 +355,7 @@
             data-ui-label="Turns off every privacy filter. Hidden text, labels, card numbers, one-time codes and form values are copied as the page holds them; typed passwords are not. The mirror still cannot act on the page."
           >Turns off every privacy filter. Hidden text, labels, card numbers, one-time codes and form values are copied as the page holds them; typed passwords are not. The mirror still cannot act on the page.</small>
         </div>
-        <div id="image-analysis-host"></div>
+        <div id="image-analysis-host" data-public-move="public-slot-image-text"></div>
       </details>
 
       <div id="progress-region" class="progress-region" hidden>

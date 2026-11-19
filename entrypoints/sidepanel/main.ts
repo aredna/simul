@@ -16,6 +16,7 @@ import {
 } from '../../lib/companion-ui-state';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { ALL_UI_STRINGS, UI_STRINGS } from '../../lib/companion-ui-strings';
+import { IS_DEV_EDITION, SIMUL_EDITION } from '../../lib/edition';
 import { CapturePipeline } from './capture-pipeline';
 import type { PdfDiagnostic } from './pdf-controller';
 import { LazyPdfController } from './lazy-pdf-controller';
@@ -80,6 +81,7 @@ import type { ImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-c
 import {
   STORAGE_KEY,
   autoTranslationModeForPage,
+  configureDefaultTargetLanguage,
   isCompanionLaunchBehavior,
   isAutoTranslationMode,
   isMirrorDisplayMode,
@@ -152,21 +154,16 @@ const targetSelect = requireElement<HTMLSelectElement>('#target-language');
 const autoTranslateSelect = requireElement<HTMLSelectElement>('#auto-translate-mode');
 const displayModeSelect = requireElement<HTMLSelectElement>('#mirror-display-mode');
 const textLayoutSelect = requireElement<HTMLSelectElement>('#text-layout-mode');
-const replicaFidelityPolicySelect = requireElement<HTMLSelectElement>(
-  '#replica-fidelity-policy',
-);
-const replicaViewModeSelect = requireElement<HTMLSelectElement>('#replica-view-mode');
-const mirrorLimitInputs = {
-  itemMegabytes: requireElement<HTMLInputElement>('#mirror-item-megabytes'),
-  pageMegabytes: requireElement<HTMLInputElement>('#mirror-page-megabytes'),
-  maxElements: requireElement<HTMLInputElement>('#mirror-max-elements'),
-} as const satisfies Record<HtmlMirrorLimitKey, HTMLInputElement>;
-const restoreMirrorLimitsButton = requireElement<HTMLButtonElement>(
-  '#restore-mirror-limits',
-);
-const mirrorShowEverythingInput = requireElement<HTMLInputElement>(
-  '#mirror-show-everything',
-);
+// Controls only one edition has (lib/edition.ts). In a public build
+// IS_DEV_EDITION is the constant false, so the dev lookups and everything
+// that wires them are dropped from the bundle.
+const devOptions = IS_DEV_EDITION ? requireDevOptionElements() : undefined;
+const readProfileChoices = IS_DEV_EDITION
+  ? undefined
+  : requireElement<HTMLElement>('#read-profile-choices');
+const ocrConfidenceHost = IS_DEV_EDITION
+  ? undefined
+  : requireElement<HTMLElement>('#ocr-confidence-host');
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
 const syncScrollInput = requireElement<HTMLInputElement>('#sync-scroll');
 const zoomInput = requireElement<HTMLInputElement>('#zoom');
@@ -175,7 +172,6 @@ const zoomInButton = requireElement<HTMLButtonElement>('#zoom-in');
 const zoomOutButton = requireElement<HTMLButtonElement>('#zoom-out');
 const swapButton = requireElement<HTMLButtonElement>('#swap-languages');
 const translateButton = requireElement<HTMLButtonElement>('#translate');
-const refreshButton = requireElement<HTMLButtonElement>('#refresh');
 const compactRefreshButton = requireElement<HTMLButtonElement>('#compact-refresh');
 const refreshAttention = requireElement<HTMLElement>('#refresh-attention');
 const toolbarAutoDetectButton = requireElement<HTMLButtonElement>('#toolbar-auto-detect');
@@ -198,26 +194,6 @@ const controlsOverlay = requireElement<HTMLElement>('#control-overlay');
 const quickTranslatorOverlay = requireElement<HTMLElement>('#quick-translator');
 const buildVersionElement = requireElement<HTMLElement>('#build-version');
 const imageAnalysisHost = requireElement<HTMLElement>('#image-analysis-host');
-const readScopeSetup = requireElement<HTMLDialogElement>('#read-scope-setup');
-const setupReadProfile = requireElement<HTMLSelectElement>('#setup-read-profile');
-const setupReadScopeControls = requireElement<HTMLElement>(
-  '#setup-read-scope-controls',
-);
-const completeReadScopeSetupButton = requireElement<HTMLButtonElement>(
-  '#complete-read-scope-setup',
-);
-const setupReadScopeStatus = requireElement<HTMLElement>(
-  '#setup-read-scope-status',
-);
-const setupResetCleanup = requireElement<HTMLElement>('#setup-reset-cleanup');
-const setupResetCleanupStatus = requireElement<HTMLElement>(
-  '#setup-reset-cleanup-status',
-);
-const retrySetupResetCleanupButton = requireElement<HTMLButtonElement>(
-  '#retry-setup-reset-cleanup',
-);
-const readScopeProfile = requireElement<HTMLSelectElement>('#read-scope-profile');
-const readScopeControls = requireElement<HTMLElement>('#read-scope-controls');
 const resetAllSettingsButton = requireElement<HTMLButtonElement>(
   '#reset-all-settings',
 );
@@ -249,6 +225,10 @@ const composerFromLanguage = requireElement<HTMLElement>('#composer-from-languag
 const composerToLanguage = requireElement<HTMLElement>('#composer-to-language');
 const composerGuidance = requireElement<HTMLElement>('#composer-guidance');
 const composerStatus = requireElement<HTMLElement>('#composer-status');
+
+// A fresh install's To language is Chrome's UI language when Simul supports
+// it; a saved To language always wins.
+configureDefaultTargetLanguage(browser.i18n.getUILanguage());
 
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
 const isDetachedWindow = detachedIdentityHint !== undefined;
@@ -663,6 +643,8 @@ const quickComposer = new QuickComposer({
 const imageAnalysisPanel = new ImageAnalysisPanel({
   document,
   host: imageAnalysisHost,
+  edition: SIMUL_EDITION,
+  confidenceHost: ocrConfidenceHost,
   capabilities: compiledImageAnalysisCapabilities,
   compiledProviderOrder: effectiveCompiledProviderOrder,
   hasCompiledCapability: hasCompiledImageAnalysisCapability,
@@ -737,16 +719,8 @@ const readScopeController = new ReadScopeController({
   state,
   document,
   elements: {
-    readScopeSetup,
-    setupReadProfile,
-    setupReadScopeControls,
-    completeReadScopeSetupButton,
-    setupReadScopeStatus,
-    setupResetCleanup,
-    setupResetCleanupStatus,
-    retrySetupResetCleanupButton,
-    readScopeProfile,
-    readScopeControls,
+    ...devOptions?.readScope,
+    readProfileChoices,
     resetAllSettingsButton,
     resetSettingsDialog,
     resetSettingsStatus,
@@ -987,7 +961,7 @@ const sourceFollower = new SourceFollower({
 const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
 );
-renderExtensionBuildIdentity(buildVersionElement, companionBuildIdentity);
+renderExtensionBuildIdentity(buildVersionElement, companionBuildIdentity, SIMUL_EDITION);
 if (import.meta.env.DEV) {
   console.info(companionBuildIdentity.companionReadyMessage);
 }
@@ -1105,41 +1079,6 @@ textLayoutSelect.addEventListener('change', () => {
   updateMirrorLayout();
 });
 
-replicaFidelityPolicySelect.addEventListener('change', () => {
-  const replicaFidelityPolicy: SelectableReplicaFidelityPolicy =
-    isSelectableReplicaFidelityPolicy(replicaFidelityPolicySelect.value)
-      ? replicaFidelityPolicySelect.value
-      : 'passive';
-  void changeReplicaFidelityPolicy(replicaFidelityPolicy);
-});
-
-for (const key of Object.keys(mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
-  mirrorLimitInputs[key].addEventListener('change', () => {
-    const value = Number(mirrorLimitInputs[key].value);
-    if (!isHtmlMirrorLimitValue(key, value)) {
-      syncPreferenceControls();
-      return;
-    }
-    void changeMirrorLimits({ ...state.preferences.mirrorLimits, [key]: value });
-  });
-}
-
-restoreMirrorLimitsButton.addEventListener('click', () => {
-  void changeMirrorLimits(DEFAULT_HTML_MIRROR_LIMIT_SETTINGS);
-});
-
-mirrorShowEverythingInput.addEventListener('change', () => {
-  void changeMirrorShowEverything(mirrorShowEverythingInput.checked);
-});
-
-replicaViewModeSelect.addEventListener('change', () => {
-  const replicaViewMode: ReplicaViewMode =
-    isReplicaViewMode(replicaViewModeSelect.value)
-      ? replicaViewModeSelect.value
-      : 'translated';
-  void changeReplicaViewMode(replicaViewMode);
-});
-
 launchBehaviorSelect.addEventListener('change', () => {
   const launchBehavior: CompanionLaunchBehavior =
     isCompanionLaunchBehavior(launchBehaviorSelect.value)
@@ -1166,7 +1105,7 @@ const requestManualRefresh = (): void => {
   if (state.localPdf) capturePipeline.reopenLocalPdf('manual');
   else void sourceFollower.refreshFollowedPage('manual');
 };
-refreshButton.addEventListener('click', requestManualRefresh);
+if (IS_DEV_EDITION && devOptions) installDevOptionListeners(devOptions);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
 translateButton.addEventListener('click', () => {
   if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
@@ -1700,12 +1639,7 @@ function syncPreferenceControls(): void {
   autoTranslateSelect.value = autoTranslationModeForPage(state.preferences, pageUrl);
   displayModeSelect.value = state.preferences.displayMode;
   textLayoutSelect.value = state.preferences.textLayoutMode;
-  replicaFidelityPolicySelect.value = state.preferences.replicaFidelityPolicy;
-  for (const key of Object.keys(mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
-    mirrorLimitInputs[key].value = String(state.preferences.mirrorLimits[key]);
-  }
-  mirrorShowEverythingInput.checked = state.preferences.mirrorShowEverything;
-  replicaViewModeSelect.value = state.preferences.replicaViewMode;
+  if (IS_DEV_EDITION && devOptions) syncDevOptionControls(devOptions);
   launchBehaviorSelect.value = state.preferences.launchBehavior;
   syncScrollInput.checked = state.preferences.syncScroll;
   zoomInput.value = String(state.preferences.zoomPercent);
@@ -1906,22 +1840,12 @@ function updateControls(): void {
   autoTranslateSelect.disabled = busy;
   displayModeSelect.disabled = busy;
   textLayoutSelect.disabled = busy;
-  replicaFidelityPolicySelect.disabled = busy || state.replicaFidelityCommitInFlight;
-  for (const input of Object.values(mirrorLimitInputs)) {
-    input.disabled = busy || state.mirrorLimitsCommitInFlight;
-  }
-  restoreMirrorLimitsButton.disabled = busy || state.mirrorLimitsCommitInFlight;
-  mirrorShowEverythingInput.disabled = busy;
+  if (IS_DEV_EDITION && devOptions) updateDevOptionControls(devOptions, busy);
   launchBehaviorSelect.disabled = busy;
   syncScrollInput.disabled = busy;
   zoomInButton.disabled = busy;
   zoomOutButton.disabled = busy;
-  refreshButton.disabled = state.captureInFlight;
   compactRefreshButton.disabled = state.captureInFlight;
-  setUiText(
-    refreshButton,
-    state.captureInFlight ? UI_STRINGS.rebuildingMirrorEllipsis : UI_STRINGS.rebuildMirror,
-  );
   setUiAttr(
     compactRefreshButton,
     'aria-label',
@@ -2063,6 +1987,123 @@ function logTranslationCache(
 /** A drag that carries files from the computer, not text or a link. */
 function carriesFiles(event: DragEvent): boolean {
   return event.dataTransfer?.types.includes('Files') ?? false;
+}
+
+type DevOptionElements = ReturnType<typeof requireDevOptionElements>;
+
+/** The dev edition's extra controls; the public edition's markup lacks them. */
+function requireDevOptionElements() {
+  return {
+    refreshButton: requireElement<HTMLButtonElement>('#refresh'),
+    replicaFidelityPolicySelect: requireElement<HTMLSelectElement>(
+      '#replica-fidelity-policy',
+    ),
+    replicaViewModeSelect: requireElement<HTMLSelectElement>('#replica-view-mode'),
+    mirrorLimitInputs: {
+      itemMegabytes: requireElement<HTMLInputElement>('#mirror-item-megabytes'),
+      pageMegabytes: requireElement<HTMLInputElement>('#mirror-page-megabytes'),
+      maxElements: requireElement<HTMLInputElement>('#mirror-max-elements'),
+    } as const satisfies Record<HtmlMirrorLimitKey, HTMLInputElement>,
+    restoreMirrorLimitsButton: requireElement<HTMLButtonElement>(
+      '#restore-mirror-limits',
+    ),
+    mirrorShowEverythingInput: requireElement<HTMLInputElement>(
+      '#mirror-show-everything',
+    ),
+    readScope: {
+      readScopeSetup: requireElement<HTMLDialogElement>('#read-scope-setup'),
+      setupReadProfile: requireElement<HTMLSelectElement>('#setup-read-profile'),
+      setupReadScopeControls: requireElement<HTMLElement>(
+        '#setup-read-scope-controls',
+      ),
+      completeReadScopeSetupButton: requireElement<HTMLButtonElement>(
+        '#complete-read-scope-setup',
+      ),
+      setupReadScopeStatus: requireElement<HTMLElement>(
+        '#setup-read-scope-status',
+      ),
+      setupResetCleanup: requireElement<HTMLElement>('#setup-reset-cleanup'),
+      setupResetCleanupStatus: requireElement<HTMLElement>(
+        '#setup-reset-cleanup-status',
+      ),
+      retrySetupResetCleanupButton: requireElement<HTMLButtonElement>(
+        '#retry-setup-reset-cleanup',
+      ),
+      readScopeProfile: requireElement<HTMLSelectElement>('#read-scope-profile'),
+      readScopeControls: requireElement<HTMLElement>('#read-scope-controls'),
+    },
+  };
+}
+
+function installDevOptionListeners(dev: DevOptionElements): void {
+  const {
+    refreshButton,
+    replicaFidelityPolicySelect,
+    replicaViewModeSelect,
+    mirrorLimitInputs,
+    restoreMirrorLimitsButton,
+    mirrorShowEverythingInput,
+  } = dev;
+  refreshButton.addEventListener('click', requestManualRefresh);
+
+  replicaFidelityPolicySelect.addEventListener('change', () => {
+    const replicaFidelityPolicy: SelectableReplicaFidelityPolicy =
+      isSelectableReplicaFidelityPolicy(replicaFidelityPolicySelect.value)
+        ? replicaFidelityPolicySelect.value
+        : 'passive';
+    void changeReplicaFidelityPolicy(replicaFidelityPolicy);
+  });
+
+  for (const key of Object.keys(mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
+    mirrorLimitInputs[key].addEventListener('change', () => {
+      const value = Number(mirrorLimitInputs[key].value);
+      if (!isHtmlMirrorLimitValue(key, value)) {
+        syncPreferenceControls();
+        return;
+      }
+      void changeMirrorLimits({ ...state.preferences.mirrorLimits, [key]: value });
+    });
+  }
+
+  restoreMirrorLimitsButton.addEventListener('click', () => {
+    void changeMirrorLimits(DEFAULT_HTML_MIRROR_LIMIT_SETTINGS);
+  });
+
+  mirrorShowEverythingInput.addEventListener('change', () => {
+    void changeMirrorShowEverything(mirrorShowEverythingInput.checked);
+  });
+
+  replicaViewModeSelect.addEventListener('change', () => {
+    const replicaViewMode: ReplicaViewMode =
+      isReplicaViewMode(replicaViewModeSelect.value)
+        ? replicaViewModeSelect.value
+        : 'translated';
+    void changeReplicaViewMode(replicaViewMode);
+  });
+}
+
+function syncDevOptionControls(dev: DevOptionElements): void {
+  dev.replicaFidelityPolicySelect.value = state.preferences.replicaFidelityPolicy;
+  for (const key of Object.keys(dev.mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
+    dev.mirrorLimitInputs[key].value = String(state.preferences.mirrorLimits[key]);
+  }
+  dev.mirrorShowEverythingInput.checked = state.preferences.mirrorShowEverything;
+  dev.replicaViewModeSelect.value = state.preferences.replicaViewMode;
+}
+
+function updateDevOptionControls(dev: DevOptionElements, busy: boolean): void {
+  const { refreshButton } = dev;
+  dev.replicaFidelityPolicySelect.disabled = busy || state.replicaFidelityCommitInFlight;
+  for (const input of Object.values(dev.mirrorLimitInputs)) {
+    input.disabled = busy || state.mirrorLimitsCommitInFlight;
+  }
+  dev.restoreMirrorLimitsButton.disabled = busy || state.mirrorLimitsCommitInFlight;
+  dev.mirrorShowEverythingInput.disabled = busy;
+  refreshButton.disabled = state.captureInFlight;
+  setUiText(
+    refreshButton,
+    state.captureInFlight ? UI_STRINGS.rebuildingMirrorEllipsis : UI_STRINGS.rebuildMirror,
+  );
 }
 
 function requireElement<T extends Element>(selector: string): T {

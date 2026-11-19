@@ -1,3 +1,5 @@
+import { SIMUL_EDITION, type SimulEdition } from './edition';
+
 export interface ExtensionBuildIdentity {
   readonly version: string;
   readonly label: string;
@@ -20,9 +22,21 @@ export function createExtensionBuildIdentity(
   });
 }
 
+/**
+ * What the options header shows: the plain version in the public edition
+ * ("0.6.5"), the full build identity in the dev edition.
+ */
+export function extensionBuildHeaderText(
+  identity: ExtensionBuildIdentity,
+  edition: SimulEdition,
+): string {
+  return edition === 'public' ? identity.version : identity.label;
+}
+
 export function renderExtensionBuildIdentity(
   target: Pick<HTMLElement, 'textContent'>,
   identity: ExtensionBuildIdentity,
+  edition: SimulEdition = SIMUL_EDITION,
 ): void {
-  target.textContent = identity.label;
+  target.textContent = extensionBuildHeaderText(identity, edition);
 }

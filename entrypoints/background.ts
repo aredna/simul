@@ -7,6 +7,7 @@ import {
   type PreferenceCommandResult,
 } from '../lib/preference-coordinator';
 import { createExtensionBuildIdentity } from '../lib/build-identity';
+import { SIMUL_EDITION } from '../lib/edition';
 import {
   COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
   allocateCompanionLaunchGeneration,
@@ -25,6 +26,7 @@ import { readEnsureOcrHostCommand } from '../lib/ocr/offscreen-protocol';
 import {
   DEFAULT_COMPANION_PREFERENCES,
   STORAGE_KEY,
+  configureDefaultTargetLanguage,
   parseCompanionPreferences,
   selectLiveCompanionPreferenceChange,
   selectLatestCompanionPreferences,
@@ -50,6 +52,9 @@ import {
 } from '../lib/replica/read-scope-policy';
 
 export default defineBackground(() => {
+  // A fresh install's To language is Chrome's UI language when Simul
+  // supports it; a saved To language always wins.
+  configureDefaultTargetLanguage(browser.i18n.getUILanguage());
   const buildIdentity = createExtensionBuildIdentity(
     browser.runtime.getManifest(),
   );
@@ -76,6 +81,7 @@ export default defineBackground(() => {
         await offscreenManager.close();
       },
     },
+    SIMUL_EDITION,
   );
   const preferenceSafetyJournal: PreferenceSafetyJournalAdapter = {
     load: async () => {

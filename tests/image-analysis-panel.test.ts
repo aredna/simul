@@ -7,12 +7,18 @@ import {
   imageScanPolicyName,
   type ImageAnalysisPanelView,
 } from '../entrypoints/sidepanel/image-analysis-panel';
+import type { SimulEdition } from '../lib/edition';
 import type { ImageTextProviderId } from '../lib/ocr/known-provider-ids';
 
 const COMPILED: readonly ImageTextProviderId[] = ['chrome-text-detector', 'tesseract'];
 
-function setup(initial: Partial<ImageAnalysisPanelView> = {}) {
-  const { document, window } = parseHTML('<html><body><div id="host"></div></body></html>');
+function setup(
+  initial: Partial<ImageAnalysisPanelView> = {},
+  edition: SimulEdition = 'dev',
+) {
+  const { document, window } = parseHTML(
+    '<html><body><div id="host"></div><div id="confidence"></div></body></html>',
+  );
   let view: ImageAnalysisPanelView = {
     imageTranslationEnabled: false,
     imageCaptureAccess: 'granted',
@@ -57,6 +63,8 @@ function setup(initial: Partial<ImageAnalysisPanelView> = {}) {
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     changeImageTranslationEnabled,
     commitPatch,
+    edition,
+    confidenceHost: document.getElementById('confidence') as unknown as HTMLElement,
   });
   return {
     document,
@@ -339,5 +347,50 @@ describe('ImageAnalysisPanel', () => {
     expect(imageScanPolicyName('visible-only')).toBe('Only when visible');
     expect(imageScanPolicyName('eager-all')).toBe('Everything immediately');
     expect(imageScanPolicyName('visible-first-background-prescan')).toBe('Visible first, then background');
+  });
+});
+
+describe('ImageAnalysisPanel in the public edition', () => {
+  it('shows only the switch and the access grant, with the confidence under Advanced', () => {
+    const { document, panel, setView } = setup({}, 'public');
+    panel.initialize();
+    const root = panel.root!;
+    const confidence = document.getElementById('confidence')!;
+
+    expect(root.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+    expect(root.querySelector('.ocr-provider-order')).toBeNull();
+    expect(root.querySelector('select')).toBeNull();
+    expect(root.querySelector('details.image-diagnostics')).toBeNull();
+    expect(root.querySelector('#ocr-minimum-confidence')).toBeNull();
+    expect(confidence.querySelectorAll('#ocr-minimum-confidence')).toHaveLength(1);
+    const labels = [...root.querySelectorAll<HTMLElement>('[data-ui-label]')]
+      .map((element) => element.dataset.uiLabel);
+    expect(labels.some((label) => label?.includes('Prompt'))).toBe(false);
+
+    setView({ imageTranslationEnabled: true, imageCaptureAccess: 'missing' });
+    panel.render();
+    expect(root.querySelector('.image-access-grant')).not.toBeNull();
+    expect(confidence.querySelectorAll('#ocr-minimum-confidence')).toHaveLength(1);
+  });
+
+  it('keeps no diagnostics, since it has no view of them', () => {
+    const { panel } = setup({}, 'public');
+    panel.initialize();
+
+    panel.recordDiagnostic('image-discovered');
+
+    expect(panel.diagnostics.entries).toEqual([]);
+  });
+
+  it('keeps every image option in the dev edition', () => {
+    const { document, panel } = setup({}, 'dev');
+    panel.initialize();
+    const root = panel.root!;
+
+    expect(root.querySelector('.ocr-provider-order')).not.toBeNull();
+    expect(root.querySelector('select')).not.toBeNull();
+    expect(root.querySelector('details.image-diagnostics')).not.toBeNull();
+    expect(root.querySelector('#ocr-minimum-confidence')).not.toBeNull();
+    expect(document.getElementById('confidence')?.childElementCount).toBe(0);
   });
 });

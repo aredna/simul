@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createExtensionBuildIdentity,
+  extensionBuildHeaderText,
   renderExtensionBuildIdentity,
 } from '../lib/build-identity';
 
@@ -49,5 +50,28 @@ describe('extension build identity', () => {
     });
     expect(target.textContent).toBe('Build 0.2.1');
     expect(identityWithVersionName).toEqual(identity);
+  });
+});
+
+describe('options header build text', () => {
+  it('shows the plain version in the public edition and the build in the dev one', () => {
+    const publicIdentity = createExtensionBuildIdentity({
+      version: '0.6.5',
+      version_name: '0.6.5 beta v.20261119.2',
+    });
+    const devIdentity = createExtensionBuildIdentity({
+      version: '0.6.5',
+      version_name: '0.6.5 beta v.20261119.2 dev',
+    });
+    const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
+
+    expect(extensionBuildHeaderText(publicIdentity, 'public')).toBe('0.6.5');
+    expect(extensionBuildHeaderText(devIdentity, 'dev'))
+      .toBe('Build 0.6.5 beta v.20261119.2 dev');
+    renderExtensionBuildIdentity(target, publicIdentity, 'public');
+    expect(target.textContent).toBe('0.6.5');
+    // The console line keeps the full identity in both editions.
+    expect(publicIdentity.companionReadyMessage)
+      .toBe('[Simul] Companion ready. Build 0.6.5 beta v.20261119.2.');
   });
 });

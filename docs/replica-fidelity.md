@@ -17,8 +17,9 @@ resource as equally safe or equally private.
 | **Conservative** | Selectable fallback | Uses the earlier stricter sanitizer and omits newer passive semantics such as anchor identity, responsive `<source>` candidates, static posters, external SVG references, and retained unreadable imports. It can still load allowlisted images, stylesheet links, fonts, and CSS URLs, so it is not a zero-network policy. | The same scriptless, inert receiver and active-content blocks as Passive Fidelity. |
 | **Strict Local Mirror** | Hidden and deferred | Will become selectable only after every replica visual is local and deterministic no-network tests pass. | Must retain every current active-content block and add a restrictive no-network backstop. |
 
-The policy is chosen under **Advanced & experimental** (moved there in D64,
-since Passive Fidelity is the default and the truthful choice). Changing it is
+The policy is chosen under **Advanced & experimental** in the dev edition
+(moved there in D64, since Passive Fidelity is the default and the truthful
+choice); the public edition always uses Passive Fidelity. Changing it is
 saved with the other companion settings and rebuilds Isolated HTML through that
 policy. The policy is fixed for the lifetime
 of each source/receiver stream and is validated on both sides; a wider payload
@@ -128,7 +129,8 @@ counted at two bytes per character, because one checkpoint crosses the runtime
 port as a single message and Chrome refuses messages above 64 MiB. A stylesheet
 over its cap is omitted and the page still mirrors; a page over the total
 budget or the node cap is not mirrored (the panel reports that the replica
-could not be prepared). These three are **Advanced & experimental** settings:
+could not be prepared). These three are **Advanced & experimental** settings
+of the dev edition (the public edition uses the defaults):
 largest single item (1–30 MB), largest page (1–60 MB) and most page elements
 (1,000–1,000,000), with a button that restores the defaults above. Rule caps
 follow them. The panel applies them before it opens a mirror and sends them in
@@ -824,7 +826,8 @@ Both selectable policies continue to block:
 
 ### Show everything (testing)
 
-**Show everything (testing)**, under **Advanced & experimental** (D75), turns
+**Show everything (testing)**, under **Advanced & experimental** of the dev
+edition only (D75; the public edition reads it as off), turns
 every privacy filter off so a missing part of a page can be traced to a
 privacy rule or ruled out. Credential fields, file inputs and CSS-masked text
 are drawn as the page draws them; hidden, collapsed and controlled regions,

@@ -14,7 +14,10 @@ import {
   permissionOriginsForMode,
   type CompanionPreferences,
 } from '../lib/preferences';
-import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
+import {
+  replicaReadScopeFingerprint,
+  replicaReadScopeForProfile,
+} from '../lib/replica/read-scope-policy';
 
 describe('preference coordinator', () => {
   it('commits selectable read scope only at the current reset/setup revision', async () => {
@@ -1386,6 +1389,65 @@ describe('preference coordinator message boundary', () => {
       applied: true,
       preferences: { displayMode: 'actual' },
     });
+  });
+});
+
+describe('preference coordinator in the public edition', () => {
+  /** What a dev build saved: a custom read scope and tuning values. */
+  const devSaved = (): CompanionPreferences => ({
+    ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES, 'dev'),
+    replicaReadScope: {
+      ...replicaReadScopeForProfile('standard'),
+      formValues: true,
+    },
+    mirrorShowEverything: true,
+    replicaViewMode: 'source-only',
+    imageScanPolicy: 'eager-all',
+  });
+
+  it('never writes the public view back to storage', async () => {
+    const adapter = new MemoryPreferenceAdapter(devSaved());
+    const coordinator = new PreferenceCoordinator(adapter, undefined, 'public');
+
+    const result = await coordinator.run({
+      type: 'simul:preferences:patch-view',
+      expectedResetRevision: 0,
+      patch: { textLayoutMode: 'faithful' },
+    });
+
+    expect(result.applied).toBe(true);
+    expect(adapter.preferences).toMatchObject({
+      textLayoutMode: 'faithful',
+      mirrorShowEverything: true,
+      replicaViewMode: 'source-only',
+      imageScanPolicy: 'eager-all',
+      replicaReadScope: devSaved().replicaReadScope,
+    });
+  });
+
+  it('takes a profile chosen against the profile the public edition showed', async () => {
+    const adapter = new MemoryPreferenceAdapter(devSaved());
+    const coordinator = new PreferenceCoordinator(adapter, undefined, 'public');
+    const shownScope = parseCompanionPreferences(devSaved(), 'public').replicaReadScope;
+    expect(shownScope).toEqual(replicaReadScopeForProfile('standard'));
+
+    const stale = await coordinator.run({
+      type: 'simul:preferences:patch-read-scope',
+      expectedResetRevision: 0,
+      expectedReadScopeFingerprint: replicaReadScopeFingerprint(devSaved().replicaReadScope),
+      patch: { replicaReadScope: replicaReadScopeForProfile('page-only') },
+    });
+    expect(stale).toMatchObject({ applied: false, code: 'stale-read-scope' });
+
+    const applied = await coordinator.run({
+      type: 'simul:preferences:patch-read-scope',
+      expectedResetRevision: 0,
+      expectedReadScopeFingerprint: replicaReadScopeFingerprint(shownScope),
+      patch: { replicaReadScope: replicaReadScopeForProfile('page-only') },
+    });
+    expect(applied.applied).toBe(true);
+    expect(adapter.preferences.replicaReadScope)
+      .toEqual(replicaReadScopeForProfile('page-only'));
   });
 });
 

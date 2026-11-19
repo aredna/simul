@@ -1,14 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   ALL_SITES_PERMISSION_ORIGINS,
   DEFAULT_COMPANION_PREFERENCES,
+  PUBLIC_EDITION_PINNED_PREFERENCE_KEYS,
   advanceCompanionSettingsRevision,
+  applyEditionToPreferences,
   autoTranslationModeForPage,
   clampZoomPercent,
+  configureDefaultTargetLanguage,
+  defaultTargetLanguageForUiLanguage,
   isAutoTranslationEnabled,
   pageOrigin,
   parseCompanionPreferences,
+  parseStoredCompanionPreferences,
   permissionOriginsForMode,
   permissionOriginsForPreferences,
   readValidStoredCompanionPreferences,
@@ -18,6 +23,7 @@ import {
   sitePermissionPattern,
   withAutoTranslationMode,
   withDisplayMode,
+  withImageAnalysisSettings,
   withViewSettings,
   type CompanionPreferences,
 } from '../lib/preferences';
@@ -25,7 +31,11 @@ import {
   isReplicaFidelityPolicy,
   isSelectableReplicaFidelityPolicy,
 } from '../lib/replica/fidelity-policy';
-import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
+import {
+  DEFAULT_REPLICA_READ_SCOPE,
+  REPLICA_READ_SCOPE_SETUP_VERSION,
+  replicaReadScopeForProfile,
+} from '../lib/replica/read-scope-policy';
 
 describe('parseCompanionPreferences', () => {
   it('uses the defaults for absent or invalid data', () => {
@@ -742,5 +752,195 @@ describe('preference updates', () => {
     expect(
       autoTranslationModeForPage(unchanged, 'https://overflow.example'),
     ).toBe('off');
+  });
+});
+
+/** What a dev build may have saved: every hidden setting off its default. */
+function testerPreferences(): CompanionPreferences {
+  const base = parseStoredCompanionPreferences({
+    ...DEFAULT_COMPANION_PREFERENCES,
+    targetLanguage: 'ja',
+    textLayoutMode: 'faithful',
+    launchBehavior: 'popout',
+    ocrMinimumConfidence: 0.8,
+    settingsRevision: 7,
+  });
+  return withImageAnalysisSettings(
+    withViewSettings(base, {
+      mirrorLimits: { itemMegabytes: 2, pageMegabytes: 5, maxElements: 5000 },
+      mirrorShowEverything: true,
+      replicaViewMode: 'source-only',
+      replicaFidelityPolicy: 'conservative',
+    }),
+    {
+      imageReadingMethodOrder: [...DEFAULT_COMPANION_PREFERENCES.imageReadingMethodOrder]
+        .reverse(),
+      disabledImageReadingMethodIds: ['tesseract'],
+      imageScanPolicy: 'eager-all',
+      skipSmallImages: false,
+      usePromptForImageLanguage: true,
+      usePromptForImageText: true,
+    },
+  );
+}
+
+describe('public edition preferences', () => {
+  it('pins exactly the settings the public edition does not show', () => {
+    expect(PUBLIC_EDITION_PINNED_PREFERENCE_KEYS).toEqual([
+      'mirrorLimits',
+      'mirrorShowEverything',
+      'replicaViewMode',
+      'replicaFidelityPolicy',
+      'imageReadingMethodOrder',
+      'disabledImageReadingMethodIds',
+      'imageTextProviderOrder',
+      'disabledImageTextProviderIds',
+      'imageScanPolicy',
+      'skipSmallImages',
+      'usePromptForImageLanguage',
+      'usePromptForImageText',
+    ]);
+  });
+
+  it('reads every hidden setting as its default in the public edition', () => {
+    const stored = testerPreferences();
+    const shown = parseCompanionPreferences(stored, 'public');
+
+    for (const key of PUBLIC_EDITION_PINNED_PREFERENCE_KEYS) {
+      // The fixture really moved each one, so the pin is what restores it.
+      expect(stored[key], key).not.toEqual(DEFAULT_COMPANION_PREFERENCES[key]);
+      expect(shown[key], key).toEqual(DEFAULT_COMPANION_PREFERENCES[key]);
+    }
+    expect(shown.mirrorShowEverything).toBe(false);
+  });
+
+  it('keeps the settings the public edition shows', () => {
+    const shown = parseCompanionPreferences(testerPreferences(), 'public');
+
+    expect(shown).toMatchObject({
+      targetLanguage: 'ja',
+      textLayoutMode: 'faithful',
+      launchBehavior: 'popout',
+      ocrMinimumConfidence: 0.8,
+      imageTranslationEnabled: true,
+      syncScroll: true,
+      settingsRevision: 7,
+    });
+  });
+
+  it('passes every setting through unchanged in the dev edition', () => {
+    const stored = testerPreferences();
+
+    expect(parseCompanionPreferences(stored, 'dev')).toEqual(stored);
+    expect(applyEditionToPreferences(stored, 'dev')).toBe(stored);
+  });
+
+  it.each([
+    ['standard plus form values', { ...replicaReadScopeForProfile('standard'), formValues: true }, 'standard'],
+    ['control labels and images only', { ...replicaReadScopeForProfile('page-only'), controlSemantics: true, controlImages: true }, 'page-only'],
+    ['full visible without editable content', { ...replicaReadScopeForProfile('full-visible'), editableContent: false }, 'standard'],
+    ['disclosures only', { ...replicaReadScopeForProfile('page-only'), disclosureContent: true }, 'page-only'],
+    ['exactly Page only', replicaReadScopeForProfile('page-only'), 'page-only'],
+    ['exactly Standard', replicaReadScopeForProfile('standard'), 'standard'],
+    ['exactly Full visible', replicaReadScopeForProfile('full-visible'), 'full-visible'],
+  ] as const)('reads a stored %s scope as the widest profile within it', (_case, scope, profile) => {
+    const stored = parseStoredCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      replicaReadScope: scope,
+    });
+
+    expect(parseCompanionPreferences(stored, 'public').replicaReadScope)
+      .toEqual(replicaReadScopeForProfile(profile));
+    // The dev edition keeps the custom scope exactly as stored.
+    expect(parseCompanionPreferences(stored, 'dev').replicaReadScope).toEqual(scope);
+  });
+
+  it('counts first-run setup as done at the default profile in the public edition', () => {
+    const neverSetUp = parseStoredCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      replicaReadScope: replicaReadScopeForProfile('standard'),
+      readScopeSetupVersion: 0,
+    });
+
+    expect(parseCompanionPreferences(neverSetUp, 'public')).toMatchObject({
+      readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
+      replicaReadScope: DEFAULT_REPLICA_READ_SCOPE,
+    });
+    expect(DEFAULT_COMPANION_PREFERENCES.replicaReadScope).toEqual(DEFAULT_REPLICA_READ_SCOPE);
+    expect(parseCompanionPreferences(neverSetUp, 'dev').readScopeSetupVersion).toBe(0);
+  });
+
+  it('accepts what storage holds as valid and shows the public view of it', () => {
+    const stored = testerPreferences();
+    const raw = JSON.parse(JSON.stringify(stored)) as unknown;
+    const shown = parseCompanionPreferences(stored, 'public');
+
+    expect(readValidStoredCompanionPreferences(raw, 'public')).toEqual(shown);
+    // The same revision arriving from storage is the same snapshot, not an
+    // equivocation, although storage holds values the public view pins.
+    expect(selectLiveCompanionPreferenceChange(shown, false, raw, 'public'))
+      .toEqual({ preferences: shown, failClosed: false, status: 'accepted' });
+    expect(parseStoredCompanionPreferences(raw)).toEqual(stored);
+  });
+
+  it('is a fixed point of both parses, so view patches keep it pinned', () => {
+    const shown = parseCompanionPreferences(testerPreferences(), 'public');
+
+    expect(applyEditionToPreferences(shown, 'public')).toBe(shown);
+    expect(parseStoredCompanionPreferences({ ...shown })).toEqual(shown);
+    expect(withViewSettings(shown, { textLayoutMode: 'adaptive' })).toEqual({
+      ...shown,
+      textLayoutMode: 'adaptive',
+    });
+  });
+});
+
+describe('default To language', () => {
+  afterEach(() => {
+    configureDefaultTargetLanguage(undefined);
+  });
+
+  it.each([
+    ['ja', 'ja'],
+    ['de-AT', 'de'],
+    ['pt-BR', 'pt'],
+    ['pt_PT', 'pt'],
+    ['zh-TW', 'zh-Hant'],
+    ['zh-HK', 'zh-Hant'],
+    ['zh-CN', 'zh'],
+    ['nb', 'no'],
+    ['es-419', 'es'],
+    ['en-GB', 'en'],
+    ['fil', 'en'],
+    ['', 'en'],
+    [undefined, 'en'],
+  ] as const)('starts a fresh install for UI language %j at %s', (uiLanguage, expected) => {
+    expect(defaultTargetLanguageForUiLanguage(uiLanguage)).toBe(expected);
+    configureDefaultTargetLanguage(uiLanguage);
+    expect(parseCompanionPreferences(undefined).targetLanguage).toBe(expected);
+  });
+
+  it('never replaces a saved To language', () => {
+    configureDefaultTargetLanguage('fr-CA');
+    const saved = { ...DEFAULT_COMPANION_PREFERENCES, targetLanguage: 'en' };
+
+    expect(parseCompanionPreferences(saved).targetLanguage).toBe('en');
+    expect(parseCompanionPreferences({ ...saved, targetLanguage: 'ko' }).targetLanguage)
+      .toBe('ko');
+    // Only a missing or unusable value takes the default.
+    expect(parseCompanionPreferences({ ...saved, targetLanguage: undefined }).targetLanguage)
+      .toBe('fr');
+    expect(parseCompanionPreferences({ ...saved, targetLanguage: 'xx' }).targetLanguage)
+      .toBe('fr');
+  });
+
+  it('starts a reset from the UI language too, like a fresh install', () => {
+    configureDefaultTargetLanguage('it');
+    const saved = parseCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      targetLanguage: 'en',
+    });
+
+    expect(resetCompanionPreferences(saved).targetLanguage).toBe('it');
   });
 });

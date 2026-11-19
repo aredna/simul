@@ -1,3 +1,5 @@
+import { SIMUL_EDITION, type SimulEdition } from '../edition';
+
 /**
  * Runtime-readable evidence capabilities.  This policy never controls replica
  * actions: navigation, form submission and source event forwarding remain
@@ -68,6 +70,8 @@ const FULL_VISIBLE: ReplicaReadScope = Object.freeze({
 export const PAGE_ONLY_REPLICA_READ_SCOPE = PAGE_ONLY;
 export const STANDARD_REPLICA_READ_SCOPE = STANDARD;
 export const FULL_VISIBLE_REPLICA_READ_SCOPE = FULL_VISIBLE;
+/** What a new install and a reset read (D54 addendum, D66). */
+export const DEFAULT_REPLICA_READ_SCOPE = FULL_VISIBLE;
 
 export function replicaReadScopeForProfile(
   profile: ReplicaReadScopeProfileId,
@@ -149,10 +153,39 @@ export function replicaReadScopeFingerprint(scope: ReplicaReadScope): string {
   }`;
 }
 
+/**
+ * The widest profile that reads nothing the scope does not. The profiles nest
+ * (Page only within Standard within Full visible), so this never widens what
+ * a custom scope allowed.
+ */
+export function replicaReadScopeProfileWithin(
+  scope: ReplicaReadScope,
+): ReplicaReadScopeProfileId {
+  const mask = normalizedReplicaReadScopeMask(scope);
+  if ((mask & 63) === 63) return 'full-visible';
+  if ((mask & 56) === 56) return 'standard';
+  return 'page-only';
+}
+
+/**
+ * The scope the mirror may read. In the dev edition that is the saved scope
+ * once first-run setup is done, and Page only before it. The public edition
+ * has no setup screen and offers only the three profiles: an install that
+ * never finished setup reads the default, and a custom scope saved by
+ * another build reads as the widest profile within it.
+ */
 export function effectiveReplicaReadScope(
   configured: ReplicaReadScope,
   setupVersion: number,
+  edition: SimulEdition = SIMUL_EDITION,
 ): ReplicaReadScope {
+  if (edition === 'public') {
+    return setupVersion === REPLICA_READ_SCOPE_SETUP_VERSION
+      ? replicaReadScopeForProfile(
+          replicaReadScopeProfileWithin(repairReplicaReadScope(configured)),
+        )
+      : cloneScope(DEFAULT_REPLICA_READ_SCOPE);
+  }
   return setupVersion === REPLICA_READ_SCOPE_SETUP_VERSION
     ? repairReplicaReadScope(configured)
     : cloneScope(PAGE_ONLY);

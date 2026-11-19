@@ -2,7 +2,13 @@ import { parse, type Comment } from 'acorn';
 import { readFileSync, readdirSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseHTML } from 'linkedom';
 import { defineConfig } from 'wxt';
+import { parseSimulEdition } from './lib/edition';
+import {
+  applyEditionToDocument,
+  hasEditionMarkers,
+} from './lib/edition-markup';
 import {
   createOcrBuildProfilePlugin,
   readOcrBuildProfile,
@@ -10,6 +16,10 @@ import {
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
 const betaBuildSuffix = 'beta v.20261119.2';
+// `SIMUL_EDITION=dev` builds the owner's edition with every option; anything
+// else builds the public edition (lib/edition.ts).
+const simulEdition = parseSimulEdition(process.env.SIMUL_EDITION);
+const editionVersionSuffix = simulEdition === 'dev' ? ' dev' : '';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
@@ -117,7 +127,8 @@ export default defineConfig({
   publicDir: 'public',
   hooks: {
     'build:manifestGenerated': (_wxt, manifest) => {
-      manifest.version_name = `${manifest.version} ${betaBuildSuffix}`;
+      manifest.version_name =
+        `${manifest.version} ${betaBuildSuffix}${editionVersionSuffix}`;
       // The toolbar action launches the saved surface directly. Retaining a
       // default popup would suppress action.onClicked and reintroduce a
       // two-button chooser before every detached-window launch.
@@ -126,6 +137,9 @@ export default defineConfig({
   },
   filterEntrypoints: [...selectedEntrypoints],
   vite: () => ({
+    define: {
+      __SIMUL_EDITION__: JSON.stringify(simulEdition),
+    },
     build: {
       target: 'chrome138',
       cssTarget: 'chrome138',
@@ -139,6 +153,20 @@ export default defineConfig({
     },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
+      {
+        // Each edition's pages carry only that edition's controls; the
+        // markers are resolved before Vite reads the page's scripts.
+        name: 'simul-edition-markup',
+        transformIndexHtml: {
+          order: 'pre',
+          handler(html: string) {
+            if (!hasEditionMarkers(html)) return html;
+            const { document } = parseHTML(html);
+            applyEditionToDocument(document, simulEdition);
+            return document.toString();
+          },
+        },
+      },
       {
         name: 'simul-release-legal-files',
         generateBundle() {
