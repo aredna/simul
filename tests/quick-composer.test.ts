@@ -100,6 +100,8 @@ describe('QuickComposer', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(elements.output.value).toBe('<Thanks!>');
+    // The result says its language (Translator guide; D159).
+    expect(elements.output.getAttribute('lang')).toBe('ja');
     expect(elements.copyButton.disabled).toBe(false);
     expect(elements.status.textContent).toBe('Translation is ready to copy.');
     expect(destroy).toHaveBeenCalledOnce();
@@ -140,6 +142,31 @@ describe('QuickComposer', () => {
     await composer.translate();
     expect(provider.createSession).toHaveBeenCalledOnce();
     expect(elements.output.value).toBe('<Hello>');
+  });
+
+  it('shows a language-pack download in steps of ten and labels its languages (D159)', async () => {
+    const { composer, elements, provider } = setup({ availability: 'downloadable' });
+    const seen: string[] = [];
+    vi.mocked(provider.createSession).mockImplementationOnce(async (_pair, options) => {
+      for (const progress of [0.01, 0.04, 0.12, 0.5, 0.55]) {
+        options?.onDownloadProgress?.(progress);
+        seen.push(elements.status.textContent ?? '');
+      }
+      return { translate: async (text: string) => `<${text}>`, destroy: vi.fn() } as never;
+    });
+    composer.syncPanel();
+    expect(elements.input.getAttribute('lang')).toBe('en');
+    elements.input.value = 'Hello';
+    await composer.translate();
+    expect(seen).toEqual([
+      'Downloading language pack… 0%',
+      'Downloading language pack… 0%',
+      'Downloading language pack… 10%',
+      'Downloading language pack… 50%',
+      'Downloading language pack… 50%',
+    ]);
+    composer.invalidate();
+    expect(elements.output.hasAttribute('lang')).toBe(false);
   });
 
   it('drops a result when the draft or the page pair changed meanwhile', async () => {

@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
+    <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
       <span
         id="toolbar-progress"
         class="toolbar-progress"
@@ -63,7 +63,7 @@
         id="toolbar-ocr-toggle"
         class="toolbar-button toolbar-text-button"
         type="button"
-        aria-label="Toggle image text translation" data-ui-aria-label="Toggle image text translation"
+        aria-label="OCR image text translation" data-ui-aria-label="OCR image text translation"
         aria-pressed="false"
         title="Image text translation is off"
       >
@@ -73,7 +73,7 @@
         id="toolbar-tab-follow"
         class="toolbar-button toolbar-text-button"
         type="button"
-        aria-label="Pin the mirror to the tab it shows instead of following the active browser tab"
+        aria-label="Follow active tab" data-ui-aria-label="Follow active tab"
         aria-pressed="true"
         title="Following the active browser tab. Click to pin the mirror to the tab it shows."
       >
@@ -118,7 +118,8 @@
         aria-live="polite"
         hidden
       ></span>
-    </nav>
+    </header>
+    <p id="status-announcer" class="visually-hidden" role="status" aria-live="polite"></p>
 
     <!--
       data-edition="dev" / "public": only that edition keeps the element.
@@ -187,7 +188,7 @@
     <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options" data-ui-aria-label="Translation options">
       <div class="overlay-heading">
         <div class="overlay-title">
-          <strong data-ui-label="Options">Options</strong>
+          <h2 class="overlay-title-text" data-ui-label="Options">Options</h2>
           <span id="build-version" class="build-version"></span>
         </div>
         <button id="close-settings" class="quiet-button" type="button" aria-label="Close options" data-ui-aria-label="Close options">×</button>
@@ -377,7 +378,7 @@
       hidden
     >
       <div class="overlay-heading">
-        <strong id="quick-translator-title" data-ui-label="Quick translation">Quick translation</strong>
+        <h2 id="quick-translator-title" class="overlay-title-text" data-ui-label="Quick translation">Quick translation</h2>
         <button id="close-quick-translate" class="quiet-button" type="button" aria-label="Close quick translation" data-ui-aria-label="Close quick translation">×</button>
       </div>
       <div class="quick-language-row" aria-label="Quick translation direction" data-ui-aria-label="Quick translation direction">
@@ -405,6 +406,7 @@
         id="composer-character-count"
         class="composer-character-count"
         for="composer-input"
+        aria-live="off"
         aria-label="0 of 5,000 characters used"
       >0 / 5,000</output>
       <div class="composer-actions">

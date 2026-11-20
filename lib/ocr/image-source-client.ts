@@ -155,18 +155,12 @@ class ChromeImageSourceLease implements ImageSourceLease {
     private readonly signal?: AbortSignal,
     private readonly policy?: ImageSourceReadPolicy,
   ) {
-    let resolveReady!: (
-      summary: ImageSourceReadySummary | undefined,
-    ) => void;
-    this.ready = new Promise((resolve) => {
-      resolveReady = resolve;
-    });
-    this.#resolveReady = resolveReady;
-    let resolveUnavailable!: (error: ImageSourceUnavailableError) => void;
-    this.unavailable = new Promise((resolve) => {
-      resolveUnavailable = resolve;
-    });
-    this.#resolveUnavailable = resolveUnavailable;
+    const ready = Promise.withResolvers<ImageSourceReadySummary | undefined>();
+    this.ready = ready.promise;
+    this.#resolveReady = ready.resolve;
+    const unavailable = Promise.withResolvers<ImageSourceUnavailableError>();
+    this.unavailable = unavailable.promise;
+    this.#resolveUnavailable = unavailable.resolve;
     port.onMessage.addListener(this.#onMessage);
     port.onDisconnect.addListener(this.#onDisconnect);
     signal?.addEventListener('abort', this.#onAbort, { once: true });

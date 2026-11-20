@@ -30,12 +30,17 @@ export function installResetConfirmationController(
 
   const run = (): void => {
     confirmationInFlight = true;
-    void Promise.resolve()
-      .then(() => options.onConfirm())
-      .catch(() => undefined)
-      .finally(() => {
+    void (async () => {
+      try {
+        // onConfirm starts after this turn, as a queued task.
+        await null;
+        await options.onConfirm();
+      } catch {
+        // The caller reports its own failure.
+      } finally {
         confirmationInFlight = false;
-      });
+      }
+    })();
   };
   const request = (): void => {
     if (disposed || confirmationInFlight) return;

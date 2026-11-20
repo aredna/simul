@@ -28,7 +28,7 @@
     "tam",
     "tel"
   ],
-  "totalBytes": 38522313,
+  "totalBytes": 38523026,
   "files": [
     {
       "path": "core/tesseract-core-lstm.wasm.js",
@@ -239,6 +239,13 @@
       "source": "npm:tesseract.js@7.0.0/dist/worker.min.js.LICENSE.txt",
       "bytes": 466,
       "sha256": "45f54171aeaa1d10c0c1a66f374b7bba1f02472b1487fbe892eec04f840002ac"
+    },
+    {
+      "path": "worker/simul-worker.js",
+      "role": "worker-entry",
+      "source": "repo:tools/tesseract-simul-worker.js",
+      "bytes": 713,
+      "sha256": "01fe5eedd8bfb63714a3f0a9fd12db1aedeaa3810e20fc4ece6af73f9cb70185"
     },
     {
       "path": "worker/worker.min.js",

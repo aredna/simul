@@ -91,6 +91,11 @@ describe('OnDeviceEvidenceJudge', () => {
     });
     // Each judgment runs in a fresh clone that is released afterwards.
     expect(nano.destroyed).toHaveBeenCalledOnce();
+    // The answer is declared as English text, at creation and in the probe.
+    expect((nano.model.create.mock.calls[0] as unknown[])[0]).toMatchObject({
+      expectedOutputs: [{ type: 'text', languages: ['en'] }],
+      initialPrompts: [{ role: 'system' }],
+    });
 
     for (const [answer, expected] of [
       ['{"choice":"A"}', { selected: 'semantic', method: 'nano-judge' }],
@@ -127,6 +132,19 @@ describe('OnDeviceEvidenceJudge', () => {
       expect(await judge.judge(input)).toEqual(expected);
       expect(kinds).toEqual(['language-detector']);
     }
+  });
+
+  it('asks the Language Detector nothing about a word or two (D159)', async () => {
+    const detector = fakeDetector('available', [{ detectedLanguage: 'en', confidence: 0.99 }]);
+    const { judge } = judgeWith({ LanguageDetector: detector });
+    expect(await judge.judge({ ...input, ocrText: 'SALE 50%' })).toBeUndefined();
+    const created = await detector.create.mock.results[0]!.value as {
+      detect: ReturnType<typeof vi.fn>;
+    };
+    expect(created.detect).not.toHaveBeenCalled();
+    // Eight letters is enough, in any script.
+    expect(await judge.judge({ ...input, ocrText: '春のセール開催中です' }))
+      .toEqual({ selected: 'ocr', method: 'language-check' });
   });
 
   it('checks again later when no model was installed', async () => {

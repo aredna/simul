@@ -230,7 +230,7 @@ describe('packaged Tesseract provider', () => {
     expect(third.transcript).toBe('two');
     expect(createWorker).toHaveBeenCalledTimes(2);
     expect(createWorker.mock.calls[0]?.[2]).toMatchObject({
-      workerPath: 'chrome-extension://id/ocr/tesseract/worker/worker.min.js',
+      workerPath: 'chrome-extension://id/ocr/tesseract/worker/simul-worker.js',
       corePath: 'chrome-extension://id/ocr/tesseract/core',
       langPath: 'chrome-extension://id/ocr/tesseract/lang',
       workerBlobURL: false,

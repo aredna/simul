@@ -54,6 +54,12 @@ place. Scanned pages are read on your computer while they are translated.
 Simul cannot read a PDF saved on your computer from its tab: select the Simul
 icon there and choose **Open a PDF file…**, or drop the file on Simul.
 
+## Privacy
+
+Simul has no server, no account and no analytics. What it reads, where that
+stays, and the few requests that go over the network are in
+[PRIVACY.md](PRIVACY.md).
+
 ## License
 
 Simul is under the [MIT License with the Commons Clause](LICENSE): free to

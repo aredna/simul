@@ -15,7 +15,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20261119.3';
+const betaBuildSuffix = 'beta v.20261119.4';
 // `SIMUL_EDITION=dev` builds the owner's edition with every option; anything
 // else builds the public edition (lib/edition.ts).
 const simulEdition = parseSimulEdition(process.env.SIMUL_EDITION);
@@ -25,9 +25,13 @@ const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
 );
 // pdf.js ships in every build and needs Wasm and a module worker; Tesseract
-// needs the same when it is on.
+// needs the same when it is on. No plugins and no <base> on Simul's pages
+// (Modern Web Guidance security: object-src 'none', base-uri 'none').
+// Trusted Types (D161): only the mirror shells become HTML, and only the
+// extension's own files become script URLs (lib/trusted-types.ts).
 const privilegedCsp =
-  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
+  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'none'; base-uri 'none'; " +
+  "require-trusted-types-for 'script'; trusted-types simul-mirror-shell default;";
 const selectedEntrypoints = Object.freeze([
   'background',
   ...(offscreenOcrEnabled ? ['offscreen'] : []),
@@ -143,6 +147,8 @@ export default defineConfig({
     build: {
       target: 'chrome138',
       cssTarget: 'chrome138',
+      // SIMUL_NO_MINIFY=1 keeps names for CPU profiles; never for a release.
+      ...(process.env.SIMUL_NO_MINIFY === '1' ? { minify: false } : {}),
       // Vite 8 bundles with rolldown; legal comments are a rolldown output
       // option now (the former esbuild option is not read for the bundle).
       rolldownOptions: {

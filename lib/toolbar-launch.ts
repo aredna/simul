@@ -15,6 +15,7 @@ import type {
   UnreadableTabMessage,
 } from './page-identity';
 import type { CompanionPreferences, CompanionSurface } from './preferences';
+import { settle } from './settle';
 
 /** The facts of the clicked tab the launch reads. */
 export interface ToolbarLaunchTab {
@@ -316,10 +317,9 @@ export class ToolbarLauncher {
       existing = found;
     }
     if (clickSequence !== this.#clickSequence) return false;
-    const focused = await this.#environment.windows.update(existing.id, { focused: true }).then(
-      () => true,
-      () => false,
-    );
+    const focused = (
+      await settle(this.#environment.windows.update(existing.id, { focused: true }))
+    ).ok;
     if (!focused) {
       // The window closed meanwhile (Chrome lists a closing window's page
       // for a moment): there is none to reuse, and the caller opens one.
@@ -522,10 +522,7 @@ export class ToolbarLauncher {
   async #closeSidePanelOfWindow(windowId: number): Promise<boolean> {
     const sidePanel = this.#environment.sidePanel;
     if (typeof sidePanel.close !== 'function') return false;
-    return sidePanel.close({ windowId }).then(
-      () => true,
-      () => false,
-    );
+    return (await settle(sidePanel.close({ windowId }))).ok;
   }
 
   async #closeStaleDetachedWindow(windowId: number | undefined): Promise<void> {
@@ -564,11 +561,9 @@ export class ToolbarLauncher {
   }
 
   /** Whether `windowId` is an open window of the companion's own kind. */
-  #isOpenCompanionWindow(windowId: number): Promise<boolean> {
-    return this.#environment.windows.get(windowId).then(
-      (window) => window.type === 'popup',
-      () => false,
-    );
+  async #isOpenCompanionWindow(windowId: number): Promise<boolean> {
+    const found = await settle(this.#environment.windows.get(windowId));
+    return found.ok && found.value.type === 'popup';
   }
 }
 

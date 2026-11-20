@@ -131,12 +131,17 @@ import {
   splitBoundaryWhitespace,
 } from '../../lib/translation/replica-translation-coordinator';
 import { TranslationMemory } from '../../lib/translation/translation-memory';
+import { isTrustedOffscreenMessageSender } from '../../lib/ocr/offscreen-message-sender';
 import {
   SUPPORTED_LANGUAGES,
   languageName,
   type SupportedLanguage,
   type TranslationPair,
 } from '../../lib/translation-provider';
+import { installDefaultScriptUrlPolicy } from '../../lib/trusted-types';
+
+// pdf.js starts its worker from a URL string (Trusted Types, D161).
+installDefaultScriptUrlPolicy();
 
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
@@ -202,6 +207,7 @@ const resetSettingsDialog = requireElement<HTMLDialogElement>(
 );
 const resetSettingsStatus = requireElement<HTMLElement>('#reset-settings-status');
 const statusElement = requireElement<HTMLElement>('#status');
+const statusAnnouncer = requireElement<HTMLElement>('#status-announcer');
 const settingsAttention = requireElement<HTMLElement>('#settings-attention');
 const detectedLanguageElement = requireElement<HTMLElement>('#detected-language');
 const captureNotes = requireElement<HTMLElement>('#capture-notes');
@@ -685,6 +691,7 @@ const toolbarStatus = new ToolbarStatus({
     progressRegion,
     progressLabel,
     progressElement,
+    announcer: statusAnnouncer,
   },
   readActivity: () => ({
     ...state.activity,
@@ -1031,11 +1038,12 @@ toolbarOcrToggleButton.addEventListener('click', () => {
     toolbarOcrAccessDeclined = false;
     void permissionFlows.changeImageTranslationEnabled(true);
   } else if (action === 'request-access') {
-    void permissionFlows.changeImageTranslationEnabled(true, true).then((result) => {
+    void (async () => {
+      const result = await permissionFlows.changeImageTranslationEnabled(true, true);
       if (result !== 'denied') return;
       toolbarOcrAccessDeclined = true;
       updateControls();
-    });
+    })();
   } else {
     void permissionFlows.changeImageTranslationEnabled(false);
   }
@@ -1149,6 +1157,10 @@ translateComposerButton.addEventListener('click', () => void quickComposer.trans
 copyComposerButton.addEventListener('click', () => void quickComposer.copy());
 quickComposer.install();
 document.addEventListener('keydown', (event) => {
+  // Escape inside the open reset dialog is Chrome's to close the dialog,
+  // and Escape during an IME composition cancels the composition.
+  if (event.isComposing) return;
+  if (event.target instanceof Element && event.target.closest('dialog[open]')) return;
   if (event.key === 'Escape' && state.openCompanionOverlay) {
     event.preventDefault();
     setCompanionOverlay();
@@ -1184,7 +1196,10 @@ window.addEventListener('pagehide', (event) => {
   pageLeaving = !event.persisted;
 });
 
-browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+  // Only the service worker and Simul's other pages send these; Simul's
+  // scripts inside web pages never do, so their messages are refused.
+  if (!isTrustedOffscreenMessageSender(sender, browser.runtime.id)) return;
   // A toolbar click that brought this window forward waits for this answer:
   // Chrome brings a closing window forward too, and only its page can say
   // that the window is there, and staying.
@@ -1740,11 +1755,6 @@ function syncToolbarPreferenceControls(): void {
   const followsActive = state.preferences.popoutTabMode === 'active';
   setUiText(toolbarTabFollowLabel, followsActive ? UI_STRINGS.tabFollowActive : UI_STRINGS.tabFollowCurrent);
   toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
-  setUiAttr(
-    toolbarTabFollowButton,
-    'aria-label',
-    followsActive ? UI_STRINGS.tabFollowActiveAria : UI_STRINGS.tabFollowCurrentAria,
-  );
   setUiAttr(
     toolbarTabFollowButton,
     'title',

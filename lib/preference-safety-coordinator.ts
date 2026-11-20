@@ -4,6 +4,7 @@ import {
   replicaReadScopeFingerprint,
   type ReplicaReadScope,
 } from './replica/read-scope-policy';
+import { settle } from './settle';
 
 export const PREFERENCE_SAFETY_PORT_NAME = 'simul:preference-safety-v1';
 export const PREFERENCE_SAFETY_PROTOCOL_VERSION = 1;
@@ -138,14 +139,15 @@ export class PreferenceSafetyCoordinator {
   observeJournalStorageChange(
     value: unknown,
   ): Promise<PreferenceSafetyJournalObservation> {
-    const observation = this.#journalObservations.then(
-      () => this.reconcileJournalStorageChange(value),
-      () => this.reconcileJournalStorageChange(value),
-    );
-    this.#journalObservations = observation.then(
-      () => undefined,
-      () => undefined,
-    );
+    // After the previous observation, whether it worked or not.
+    const previous = this.#journalObservations;
+    const observation = (async () => {
+      await settle(previous);
+      return this.reconcileJournalStorageChange(value);
+    })();
+    this.#journalObservations = (async () => {
+      await settle(observation);
+    })();
     return observation;
   }
 
@@ -183,12 +185,11 @@ export class PreferenceSafetyCoordinator {
       throw new Error('preference-safety-journal-capacity');
     }
     const requestId = this.createRequestId();
-    let resolveReady!: () => void;
-    let rejectReady!: (error: Error) => void;
-    const ready = new Promise<void>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
-    });
+    const {
+      promise: ready,
+      resolve: resolveReady,
+      reject: rejectReady,
+    } = Promise.withResolvers<void>();
     const message: PreferenceSafetyPrepareMessage = {
       kind: 'simul:preference-safety-v1:prepare',
       version: PREFERENCE_SAFETY_PROTOCOL_VERSION,
@@ -502,14 +503,15 @@ export class PreferenceSafetyCoordinator {
       version: PREFERENCE_SAFETY_PROTOCOL_VERSION,
       ceilings: [...this.#unresolvedCeilings.values()],
     };
-    const write = this.#journalWrites.then(
-      () => this.journal!.save(snapshot),
-      () => this.journal!.save(snapshot),
-    );
-    this.#journalWrites = write.then(
-      () => undefined,
-      () => undefined,
-    );
+    // After the previous write, whether it worked or not.
+    const previous = this.#journalWrites;
+    const write = (async () => {
+      await settle(previous);
+      return this.journal!.save(snapshot);
+    })();
+    this.#journalWrites = (async () => {
+      await settle(write);
+    })();
     return write;
   }
 }

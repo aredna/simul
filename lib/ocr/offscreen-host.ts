@@ -213,10 +213,7 @@ export class OffscreenComputeHost {
 }
 
 function createQueuedJob(job: OffscreenOcrJob): QueuedHostJob {
-  let resolve!: (response: OffscreenOcrResponse) => void;
-  const promise = new Promise<OffscreenOcrResponse>((next) => {
-    resolve = next;
-  });
+  const { promise, resolve } = Promise.withResolvers<OffscreenOcrResponse>();
   return { job, resolve, promise };
 }
 

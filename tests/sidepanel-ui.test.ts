@@ -188,6 +188,34 @@ const providerRegistry = readFileSync(
 );
 
 describe('sidepanel UI structure', () => {
+  it('follows the Modern Web Guidance accessibility rules adopted in D158', () => {
+    for (const edition of ['public', 'dev'] as const) {
+      const document = editionDocument(edition);
+      // A live region that is never hidden: the status line in Options is.
+      const announcer = document.querySelector('#status-announcer');
+      expect(announcer?.getAttribute('role')).toBe('status');
+      expect(announcer?.closest('[hidden]')).toBeNull();
+      expect(announcer?.classList.contains('visually-hidden')).toBe(true);
+      // Toggles keep one name; their state is aria-pressed.
+      expect(document.querySelector('#toolbar-tab-follow')?.getAttribute('aria-label'))
+        .toBe('Follow active tab');
+      expect(document.querySelector('#toolbar-ocr-toggle')?.getAttribute('aria-label'))
+        .toMatch(/^OCR /);
+      expect(document.querySelector('header#compact-toolbar')).not.toBeNull();
+      expect(document.querySelector('#control-overlay h2')?.textContent).toBe('Options');
+      expect(document.querySelector('#quick-translator-title')?.tagName).toBe('H2');
+    }
+    expect(script).not.toContain("'aria-label',\n    followsActive");
+    // Escape belongs to the open dialog and to an IME composition.
+    const escape = script.slice(script.indexOf("document.addEventListener('keydown'"));
+    expect(escape.indexOf('if (event.isComposing) return;'))
+      .toBeLessThan(escape.indexOf("event.key === 'Escape'"));
+    expect(escape.indexOf("closest('dialog[open]')"))
+      .toBeLessThan(escape.indexOf("event.key === 'Escape'"));
+    expect(style).toContain('outline: 2px solid var(--green);');
+    expect(style).toContain('@media (forced-colors: active)');
+  });
+
   it('keeps one quick composer outside settings and exposes semantic progress', () => {
     const document = editionDocument('dev');
     const ids = [...document.querySelectorAll<HTMLElement>('[id]')]
@@ -229,7 +257,9 @@ describe('sidepanel UI structure', () => {
       'composer-character-count',
     );
     expect(count?.textContent).toBe('0 / 5,000');
-    expect(count?.hasAttribute('aria-live')).toBe(false);
+    // <output> is a polite live region by default; the count is read on
+    // focus through aria-describedby, not on every keystroke (D158).
+    expect(count?.getAttribute('aria-live')).toBe('off');
     expect(script).toContain('quickComposer.install();');
     expect(style).toContain('.composer-character-count[data-near-limit="true"]');
   });

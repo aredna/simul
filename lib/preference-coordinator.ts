@@ -49,6 +49,7 @@ import {
   readExactDisabledImageReadingMethodIds,
   readExactImageReadingMethodOrder,
 } from './ocr/image-reading-methods';
+import { settle } from './settle';
 
 export const PREFERENCE_LOCK_NAME = 'simul:companion-preferences';
 
@@ -171,11 +172,15 @@ export class PreferenceCoordinator {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.pending.then(operation, operation);
-    this.pending = result.then(
-      () => undefined,
-      () => undefined,
-    );
+    // After the previous operation, whether it worked or not.
+    const previous = this.pending;
+    const result = (async () => {
+      await settle(previous);
+      return operation();
+    })();
+    this.pending = (async () => {
+      await settle(result);
+    })();
     return result;
   }
 

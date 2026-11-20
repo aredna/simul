@@ -6,6 +6,7 @@ import {
   type PdfFontFace,
 } from './pdf-overlay-style';
 import { pdfImageCoverage, type PdfPaintOperator } from './pdf-scanned-page';
+import { settle } from '../settle';
 
 /**
  * The packaged pdf.js (`vendor/pdfjs/`, shipped as `pdfjs/`) behind a narrow
@@ -207,9 +208,15 @@ export async function openPdfDocument(
         reject(abortedError(signal?.reason));
       };
       signal?.addEventListener('abort', cancel, { once: true });
-      task.promise
-        .then(resolve, reject)
-        .finally(() => signal?.removeEventListener('abort', cancel));
+      void (async () => {
+        try {
+          resolve(await task.promise);
+        } catch (error) {
+          reject(error);
+        } finally {
+          signal?.removeEventListener('abort', cancel);
+        }
+      })();
     });
   } catch (error) {
     if (error instanceof PdfjsOpenError) throw error;
@@ -326,16 +333,14 @@ function createDocumentHandle(
         previous = rendering.get(canvas);
       }
       let replaced = false;
-      let settle!: () => void;
+      const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
       const slot: CanvasRender = {
         task: undefined,
         cancel() {
           replaced = true;
           slot.task?.cancel();
         },
-        settled: new Promise<void>((resolve) => {
-          settle = resolve;
-        }),
+        settled,
       };
       rendering.set(canvas, slot);
       try {
@@ -425,13 +430,8 @@ interface CanvasRender {
  */
 function releaseQuietly(page: { cleanup(): unknown }): void {
   try {
-    const cleaning: unknown = page.cleanup();
-    if (
-      typeof cleaning === 'object' && cleaning !== null &&
-      typeof (cleaning as PromiseLike<unknown>).then === 'function'
-    ) {
-      void (cleaning as PromiseLike<unknown>).then(undefined, () => undefined);
-    }
+    // A promise it may return is awaited only so its failure is caught.
+    void settle(page.cleanup());
   } catch {
     // The page keeps its state until the document's own sweep.
   }

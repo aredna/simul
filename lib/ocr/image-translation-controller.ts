@@ -110,6 +110,7 @@ import {
   repairOcrMinimumConfidence,
   type OcrMinimumConfidence,
 } from './result-quality';
+import { settle } from '../settle';
 
 const MUTATION_QUIET_MS = 1_000;
 const MAX_TRANSLATED_IMAGE_REGIONS = 512;
@@ -1251,31 +1252,36 @@ export class ImageTranslationController {
       this.#source = source;
       this.environment.onDiagnostic?.('source-connected');
       if (source.ready) {
-        void source.ready.then(
-          (summary) => {
-            if (
-              !summary ||
-              version !== this.#sourceVersion ||
-              source !== this.#source ||
-              abortController.signal.aborted ||
-              !request.isCurrent()
-            ) return;
-            this.environment.onDiagnostic?.(Object.freeze({
-              stage: 'source-summary' as const,
-              candidateImages: summary.candidateImages,
-              observedImages: summary.observedImages,
-            }));
-            if (summary.observedImages === 0) {
-              this.environment.onDiagnostic?.('source-empty');
-            }
-          },
-          (error: unknown) => this.#handleSourceUnavailable(error, version),
-        );
+        const ready = source.ready;
+        void (async () => {
+          const result = await settle(ready);
+          if (!result.ok) {
+            this.#handleSourceUnavailable(result.error, version);
+            return;
+          }
+          const summary = result.value;
+          if (
+            !summary ||
+            version !== this.#sourceVersion ||
+            source !== this.#source ||
+            abortController.signal.aborted ||
+            !request.isCurrent()
+          ) return;
+          this.environment.onDiagnostic?.(Object.freeze({
+            stage: 'source-summary' as const,
+            candidateImages: summary.candidateImages,
+            observedImages: summary.observedImages,
+          }));
+          if (summary.observedImages === 0) {
+            this.environment.onDiagnostic?.('source-empty');
+          }
+        })();
       }
       if (source.unavailable) {
-        void source.unavailable.then((error) => {
-          this.#handleSourceUnavailable(error, version);
-        });
+        const unavailable = source.unavailable;
+        void (async () => {
+          this.#handleSourceUnavailable(await unavailable, version);
+        })();
       }
       this.#pixels = this.environment.createPixelCoordinator(
         source,
@@ -7016,15 +7022,11 @@ function raceAbortPromise<T>(task: Promise<T>, signal: AbortSignal): Promise<T> 
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });
-    task.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(error);
-      },
-    );
+    void (async () => {
+      const result = await settle(task);
+      signal.removeEventListener('abort', onAbort);
+      if (result.ok) resolve(result.value);
+      else reject(result.error);
+    })();
   });
 }

@@ -11,6 +11,11 @@ import {
   readProbeOcrProviderCommand,
 } from '../../lib/ocr/provider-status-protocol';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
+import { settle } from '../../lib/settle';
+import { installDefaultScriptUrlPolicy } from '../../lib/trusted-types';
+
+// tesseract.js starts its worker from a URL string (Trusted Types, D161).
+installDefaultScriptUrlPolicy();
 
 const router = new OffscreenOcrProviderRouter(
   compiledOcrProviderRunnerFactories,
@@ -24,22 +29,22 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isTrustedOffscreenMessageSender(sender, browser.runtime.id)) return;
   const probe = readProbeOcrProviderCommand(message);
   if (probe) {
-    void router.probe(probe.providerId).then(
-      (provider) => sendResponse(createProbeOcrProviderResponse(provider)),
-      () => sendResponse(createProbeOcrProviderResponse({
+    void (async () => {
+      const provider = await settle(router.probe(probe.providerId));
+      sendResponse(createProbeOcrProviderResponse(provider.ok ? provider.value : {
         status: 'unavailable',
         providerId: probe.providerId,
         reason: 'probe-failed',
-      })),
-    );
+      }));
+    })();
     return true;
   }
   const command = readOffscreenOcrCommand(message);
   if (!command) return;
-  void host.handle(command).then(
-    (response) => sendResponse(response),
-    () => sendResponse(undefined),
-  );
+  void (async () => {
+    const response = await settle(host.handle(command));
+    sendResponse(response.ok ? response.value : undefined);
+  })();
   return true;
 });
 

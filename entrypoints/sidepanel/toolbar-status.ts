@@ -27,6 +27,13 @@ export interface ToolbarStatusElements {
   readonly progressRegion: HTMLElement;
   readonly progressLabel: HTMLElement;
   readonly progressElement: HTMLElement;
+  /**
+   * A live region that is always in the page. The status line sits in the
+   * Options panel, which is hidden most of the time, and a hidden live
+   * region is never spoken; warnings and errors are spoken here instead
+   * while that panel is closed.
+   */
+  readonly announcer?: HTMLElement;
 }
 
 /** Activity flags the companion owns; the determinate ratio is owned here. */
@@ -99,7 +106,17 @@ export class ToolbarStatus {
     if (tone === 'warning' || tone === 'error') this.#attentionTone = tone;
     refreshAttention.title = this.#attention === 'refresh' ? localized : '';
     settingsAttention.title = this.#attention === 'settings' ? localized : '';
+    this.#announce(tone, localized);
     this.renderAttention();
+  }
+
+  #announce(tone: CompanionStatusTone, localized: string): void {
+    const { announcer } = this.environment.elements;
+    if (!announcer) return;
+    const speak = (tone === 'warning' || tone === 'error') &&
+      !this.environment.isSettingsOpen();
+    const next = speak ? localized : '';
+    if (announcer.textContent !== next) announcer.textContent = next;
   }
 
   /** Re-renders the current status and progress labels in the current set. */
@@ -109,6 +126,8 @@ export class ToolbarStatus {
     if (this.#englishMessage) {
       const localized = renderUiText(this.#message, this.#renderer());
       if (status.textContent !== localized) status.textContent = localized;
+      const { announcer } = this.environment.elements;
+      if (announcer?.textContent) announcer.textContent = localized;
       if (this.#attention === 'refresh') refreshAttention.title = localized;
       if (this.#attention === 'settings') settingsAttention.title = localized;
     }

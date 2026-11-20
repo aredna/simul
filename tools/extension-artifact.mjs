@@ -31,7 +31,8 @@ export const APPROVED_OCR_PERMISSIONS = Object.freeze([
 // Required whenever a packaged Wasm runtime ships (pdf.js in every build,
 // Tesseract in OCR builds); Chrome's default CSP applies otherwise.
 export const APPROVED_EXTENSION_PAGE_CSP =
-  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
+  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'none'; base-uri 'none'; " +
+  "require-trusted-types-for 'script'; trusted-types simul-mirror-shell default;";
 export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
 export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
   '<all_urls>',
@@ -165,6 +166,8 @@ export const APPROVED_TESSERACT_CORE_PATHS = Object.freeze([
   'core/tesseract-core-simd-lstm.wasm.js',
 ]);
 export const APPROVED_TESSERACT_WORKER_PATH = 'worker/worker.min.js';
+/** Simul's worker entry: a Trusted Types policy, then worker.min.js (D161). */
+export const APPROVED_TESSERACT_WORKER_ENTRY_PATH = 'worker/simul-worker.js';
 export const APPROVED_TESSERACT_LICENSE_PATHS = Object.freeze([
   'licenses/CORE_THIRD_PARTY_NOTICES.txt',
   'licenses/TESSDATA_FAST_APACHE-2.0.txt',
@@ -180,7 +183,7 @@ export const REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS = Object.freeze([
 ]);
 export const REQUIRED_TESSERACT_RUNTIME_MARKERS = Object.freeze([
   'tesseract.js-7.0.0',
-  '/ocr/tesseract/worker/worker.min.js',
+  '/ocr/tesseract/worker/simul-worker.js',
   '/ocr/tesseract/core',
   '/ocr/tesseract/lang',
 ]);
@@ -1940,6 +1943,11 @@ function assertApprovedTesseractAssetLayout(files) {
       path: APPROVED_TESSERACT_LICENSE_PATHS[4],
       role: 'license',
       source: 'npm:tesseract.js@7.0.0/dist/worker.min.js.LICENSE.txt',
+    },
+    {
+      path: APPROVED_TESSERACT_WORKER_ENTRY_PATH,
+      role: 'worker-entry',
+      source: 'repo:tools/tesseract-simul-worker.js',
     },
     {
       path: APPROVED_TESSERACT_WORKER_PATH,

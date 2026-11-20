@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Simul at 32 px: the same two pages on the pixel grid. Rendered to public/icon/32.png. -->
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="1" x2="0" y2="31">
+      <stop offset="0" stop-color="#1f8c60"/>
+      <stop offset="1" stop-color="#10553a"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="7.5" fill="url(#tile)"/>
+  <rect x="4" y="6" width="11" height="20" rx="2" fill="#ffffff"/>
+  <g fill="none" stroke="#176c4a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.5 20.5L9.5 11.5L12.5 20.5"/>
+    <path d="M7.7 17.5h3.6"/>
+  </g>
+  <rect x="17" y="6" width="11" height="20" rx="2" fill="#8fe4b9"/>
+  <g fill="none" stroke="#0e4d34" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22.5 11v1"/>
+    <path d="M19.5 14h6"/>
+    <path d="M24.3 15.3C23.6 17.6 22.3 19 19.8 20.2"/>
+    <path d="M20.7 15.3C21.4 17.6 22.7 19 25.2 20.2"/>
+  </g>
+</svg>

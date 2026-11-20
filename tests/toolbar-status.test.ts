@@ -28,6 +28,7 @@ function setup() {
     </nav>
     <div id="region" hidden><label id="label"></label><progress id="bar" max="1" value="0"></progress></div>
     <p id="status"></p>
+    <p id="announcer" role="status"></p>
   </body></html>`);
   const el = <T extends Element = HTMLElement>(id: string) =>
     document.getElementById(id) as unknown as T;
@@ -44,6 +45,7 @@ function setup() {
       progressRegion: el('region'),
       progressLabel: el('label'),
       progressElement: el('bar'),
+      announcer: el('announcer'),
     },
     localize: (english: string) => translations.get(english) ?? english,
     languageName: (language) => translations.get(`language:${language}`) ?? language,
@@ -64,6 +66,25 @@ function setup() {
 }
 
 describe('ToolbarStatus', () => {
+  it('speaks warnings and errors in the always-present region only while Options is closed (D158)', () => {
+    const { el, status, setSettingsOpen, translations } = setup();
+    status.setStatus(UI_STRINGS.statusSettingsResetElsewhere, 'error');
+    expect(el('announcer').textContent).toBe(UI_STRINGS.statusSettingsResetElsewhere);
+
+    translations.set(UI_STRINGS.statusSettingsResetElsewhere, 'Restablecido en otro acompañante.');
+    status.relocalize();
+    expect(el('announcer').textContent).toBe('Restablecido en otro acompañante.');
+
+    // Routine progress is not spoken, and clears the last warning.
+    status.setStatus(UI_STRINGS.statusSettingsResetElsewhere, 'normal');
+    expect(el('announcer').textContent).toBe('');
+
+    // With Options open its own status line is in the page and speaks.
+    setSettingsOpen(true);
+    status.setStatus(UI_STRINGS.statusSettingsResetElsewhere, 'warning');
+    expect(el('announcer').textContent).toBe('');
+  });
+
   it('renders a filled status again in a new UI language (review L2-L4)', () => {
     const { el, status, translations } = setup();
     status.setStatus(uiText(

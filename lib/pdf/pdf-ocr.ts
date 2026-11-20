@@ -375,7 +375,15 @@ async function withinPageDeadline<T>(
         return;
       }
       bounded.addEventListener('abort', stop, { once: true });
-      task(bounded).then(resolve, reject).finally(() => bounded.removeEventListener('abort', stop));
+      void (async () => {
+        try {
+          resolve(await task(bounded));
+        } catch (error) {
+          reject(error);
+        } finally {
+          bounded.removeEventListener('abort', stop);
+        }
+      })();
     });
   } finally {
     clearTimeout(timer);

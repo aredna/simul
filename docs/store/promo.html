@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- Source of the Chrome Web Store promo tiles. Rendered at 440x280
+     (?size=small) and 1400x560 (?size=marquee) with headless Chrome; text
+     in Lato. -->
+<html lang="en"><head><meta charset="utf-8"><style>
+  html, body { margin: 0; }
+  body { width: var(--w); height: var(--h); overflow: hidden;
+    background: linear-gradient(160deg, #1f8c60 0%, #10553a 100%);
+    font-family: Lato, sans-serif; color: #fff;
+    display: flex; align-items: center; gap: var(--gap); padding: 0 var(--pad); box-sizing: border-box; }
+  svg { width: var(--art); height: var(--art); flex: none; }
+  h1 { margin: 0; font-weight: 700; font-size: var(--title); letter-spacing: -0.01em; line-height: 1; }
+  p { margin: var(--space) 0 0; font-weight: 400; font-size: var(--tag); line-height: 1.25; color: #dff7ea; max-width: var(--measure); }
+  .small { --w: 440px; --h: 280px; --art: 150px; --gap: 22px; --pad: 30px; --title: 46px; --tag: 19px; --space: 12px; --measure: 210px; }
+  .marquee { --w: 1400px; --h: 560px; --art: 380px; --gap: 70px; --pad: 120px; --title: 120px; --tag: 44px; --space: 26px; --measure: 780px; }
+</style></head>
+<body>
+  <svg viewBox="22 29 84 70" aria-hidden="true">
+    <rect x="26" y="33" width="37" height="62" rx="7" fill="#ffffff"/>
+    <g fill="none" stroke="#176c4a" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M35.5 75L44.5 51L53.5 75"/><path d="M38.8 67h11.4"/>
+    </g>
+    <rect x="65" y="33" width="37" height="62" rx="7" fill="#8fe4b9"/>
+    <g fill="none" stroke="#0e4d34" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M83.5 50.5v3.5"/><path d="M73.5 59h20"/>
+      <path d="M89.5 62.5C87 69.5 82.5 73.5 74.5 77"/><path d="M77.5 62.5C80 69.5 84.5 73.5 92.5 77"/>
+    </g>
+  </svg>
+  <div>
+    <h1>Simul</h1>
+    <p>The page you read and its translation, side by side, on your computer.</p>
+  </div>
+  <script>document.body.className = new URLSearchParams(location.search).get('size') || 'small';</script>
+</body></html>

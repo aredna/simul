@@ -1,5 +1,6 @@
 import { UI_STRINGS } from './companion-ui-strings';
 import type { CompanionLaunchStamp } from './companion-surface';
+import { settle } from './settle';
 
 export interface CapturedPageIdentity {
   tabId: number;
@@ -396,13 +397,11 @@ export function withPageTimeout<T>(
       milliseconds,
     );
     signal?.addEventListener('abort', onAbort, { once: true });
-    operation.then(
-      (value) => {
-        if (finish()) resolve(value);
-      },
-      (error: unknown) => {
-        if (finish()) reject(error);
-      },
-    );
+    void (async () => {
+      const result = await settle(operation);
+      if (!finish()) return;
+      if (result.ok) resolve(result.value);
+      else reject(result.error);
+    })();
   });
 }

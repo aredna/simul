@@ -182,7 +182,15 @@ export class PdfViewerFollower {
       this.#report('unavailable');
       return;
     }
-    void connecting.then((connection) => {
+    void (async () => {
+      let connection: PdfViewerConnection;
+      try {
+        connection = await connecting;
+      } catch {
+        // No grant or no document: the view scrolls on its own.
+        if (this.#session === session) this.#report('unavailable');
+        return;
+      }
       if (this.#session !== session) {
         connection.disconnect();
         return;
@@ -193,10 +201,7 @@ export class PdfViewerFollower {
       connection.onDisconnect(() => {
         if (this.#session === session) this.#end(session);
       });
-    }, () => {
-      // No grant or no document: the view scrolls on its own.
-      if (this.#session === session) this.#report('unavailable');
-    });
+    })();
   }
 
   /** Stops following; reports still on their way are ignored. Idempotent. */

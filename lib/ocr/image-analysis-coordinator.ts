@@ -23,6 +23,7 @@ import {
   type OcrMinimumConfidence,
 } from './result-quality';
 import type { TransientImageInputStore } from './transient-image-store';
+import { settle } from '../settle';
 
 export const MAX_RECOGNITION_CACHE_ENTRIES = 128;
 export const MAX_RECOGNITION_CACHE_WEIGHT = 1_000_000;
@@ -1372,9 +1373,10 @@ function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
       new DOMException('Image recognition cancelled.', 'AbortError'),
     ));
     signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => finish(() => resolve(value)),
-      (error: unknown) => finish(() => reject(error)),
-    );
+    void (async () => {
+      const result = await settle(promise);
+      if (result.ok) finish(() => resolve(result.value));
+      else finish(() => reject(result.error));
+    })();
   });
 }

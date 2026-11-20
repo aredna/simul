@@ -9,6 +9,7 @@ import {
   APPROVED_TESSERACT_LANGUAGE_CODES,
   APPROVED_TESSERACT_LICENSE_PATHS,
   APPROVED_TESSERACT_TRAINEDDATA_CODES,
+  APPROVED_TESSERACT_WORKER_ENTRY_PATH,
   APPROVED_TESSERACT_WORKER_PATH,
 } from '../tools/extension-artifact.mjs';
 
@@ -74,6 +75,11 @@ describe('vendored Tesseract artifact catalog', () => {
         path: APPROVED_TESSERACT_LICENSE_PATHS[4],
         role: 'license',
         source: 'npm:tesseract.js@7.0.0/dist/worker.min.js.LICENSE.txt',
+      },
+      {
+        path: APPROVED_TESSERACT_WORKER_ENTRY_PATH,
+        role: 'worker-entry',
+        source: 'repo:tools/tesseract-simul-worker.js',
       },
       {
         path: APPROVED_TESSERACT_WORKER_PATH,

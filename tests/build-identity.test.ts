@@ -9,22 +9,22 @@ import {
 describe('extension build identity', () => {
   it('renders and logs the trimmed runtime manifest version name', () => {
     const identity = createExtensionBuildIdentity({
-      version: '0.6.5',
-      version_name: ' 0.6.5 beta v.20261119.3 ',
+      version: '0.6.6',
+      version_name: ' 0.6.6 beta v.20261119.4 ',
     });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
     renderExtensionBuildIdentity(target, identity);
 
     expect(identity).toEqual({
-      version: '0.6.5',
-      label: 'Build 0.6.5 beta v.20261119.3',
+      version: '0.6.6',
+      label: 'Build 0.6.6 beta v.20261119.4',
       companionReadyMessage:
-        '[Simul] Companion ready. Build 0.6.5 beta v.20261119.3.',
+        '[Simul] Companion ready. Build 0.6.6 beta v.20261119.4.',
       backgroundReadyMessage:
-        '[Simul] Background service worker ready. Build 0.6.5 beta v.20261119.3.',
+        '[Simul] Background service worker ready. Build 0.6.6 beta v.20261119.4.',
     });
-    expect(target.textContent).toBe('Build 0.6.5 beta v.20261119.3');
+    expect(target.textContent).toBe('Build 0.6.6 beta v.20261119.4');
   });
 
   it.each([
@@ -56,22 +56,22 @@ describe('extension build identity', () => {
 describe('options header build text', () => {
   it('shows the plain version in the public edition and the build in the dev one', () => {
     const publicIdentity = createExtensionBuildIdentity({
-      version: '0.6.5',
-      version_name: '0.6.5 beta v.20261119.3',
+      version: '0.6.6',
+      version_name: '0.6.6 beta v.20261119.4',
     });
     const devIdentity = createExtensionBuildIdentity({
-      version: '0.6.5',
-      version_name: '0.6.5 beta v.20261119.3 dev',
+      version: '0.6.6',
+      version_name: '0.6.6 beta v.20261119.4 dev',
     });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
-    expect(extensionBuildHeaderText(publicIdentity, 'public')).toBe('0.6.5');
+    expect(extensionBuildHeaderText(publicIdentity, 'public')).toBe('0.6.6');
     expect(extensionBuildHeaderText(devIdentity, 'dev'))
-      .toBe('Build 0.6.5 beta v.20261119.3 dev');
+      .toBe('Build 0.6.6 beta v.20261119.4 dev');
     renderExtensionBuildIdentity(target, publicIdentity, 'public');
-    expect(target.textContent).toBe('0.6.5');
+    expect(target.textContent).toBe('0.6.6');
     // The console line keeps the full identity in both editions.
     expect(publicIdentity.companionReadyMessage)
-      .toBe('[Simul] Companion ready. Build 0.6.5 beta v.20261119.3.');
+      .toBe('[Simul] Companion ready. Build 0.6.6 beta v.20261119.4.');
   });
 });

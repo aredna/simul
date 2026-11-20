@@ -29,8 +29,8 @@ export function autoLanguageProbeDetectedLanguage(detected: {
   readonly languages: readonly { readonly language: string; readonly percentage: number }[];
 }): SupportedLanguage | undefined {
   if (!detected.isReliable) return undefined;
-  const candidate = [...detected.languages]
-    .sort((left, right) => right.percentage - left.percentage)
+  const candidate = detected.languages
+    .toSorted((left, right) => right.percentage - left.percentage)
     .find((entry) =>
       entry.percentage >= AUTO_LANGUAGE_PROBE_DETECTED_PERCENTAGE &&
       canonicalizeLanguageTag(entry.language));

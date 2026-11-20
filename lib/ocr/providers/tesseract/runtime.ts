@@ -18,6 +18,7 @@ import {
   isPackagedTesseractLanguageGroup,
 } from './language-catalog';
 import { normalizeTesseractPage } from './normalize';
+import { later, settle } from '../../../settle';
 
 export const TESSERACT_IDLE_TIMEOUT_MS = 90_000;
 export const TESSERACT_JOB_TIMEOUT_MS = 30_000;
@@ -171,7 +172,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     );
     let recognition: Awaited<ReturnType<TesseractWorker['recognize']>>;
     recognition = await raceWorkerLoss(
-      Promise.resolve().then(() => acquired.worker.recognize(
+      later(() => acquired.worker.recognize(
         encoded,
         {},
         { text: true, blocks: true },
@@ -203,7 +204,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     jobId: string,
   ): Promise<unknown> {
     return raceWorkerLoss(
-      Promise.resolve().then(() => acquired.worker.setParameters({
+      later(() => acquired.worker.setParameters({
         tessedit_pageseg_mode: mode,
       }, jobId)),
       acquired.loss,
@@ -227,11 +228,12 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
       const lossController = this.#createWorkerLossController();
       this.#workerToken = token;
       this.#workerLossController = lossController;
-      const creation = Promise.resolve().then(() => this.#createWorker(
+      const creation = later(() => this.#createWorker(
         group,
         Tesseract.OEM.LSTM_ONLY,
         {
-          workerPath: this.#getUrl('/ocr/tesseract/worker/worker.min.js'),
+          // Simul's entry sets up Trusted Types, then loads worker.min.js (D161).
+          workerPath: this.#getUrl('/ocr/tesseract/worker/simul-worker.js'),
           corePath: this.#getUrl('/ocr/tesseract/core'),
           langPath: this.#getUrl('/ocr/tesseract/lang'),
           workerBlobURL: false,
@@ -244,18 +246,16 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
         },
       ));
       this.#creating = creation;
-      void creation.then(
-        () => {
-          if (this.#creating === creation && this.#workerToken === token) {
-            this.#creating = undefined;
-          }
-        },
-        () => {
-          if (this.#creating === creation && this.#workerToken === token) {
-            this.#creating = undefined;
-          }
-        },
-      );
+      void (async () => {
+        try {
+          await creation;
+        } catch {
+          // Cleared below either way.
+        }
+        if (this.#creating === creation && this.#workerToken === token) {
+          this.#creating = undefined;
+        }
+      })();
     }
     const creation = this.#creating;
     const token = this.#workerToken;
@@ -296,13 +296,16 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     // active slot after this runner has dropped ownership.
     terminateWorkerDetached(worker);
     if (creating) {
-      void creating.then(
-        (lateWorker) => {
-          if (lateWorker === worker) return;
-          terminateWorkerDetached(lateWorker);
-        },
-        () => undefined,
-      );
+      void (async () => {
+        let lateWorker: TesseractWorker;
+        try {
+          lateWorker = await creating;
+        } catch {
+          return;
+        }
+        if (lateWorker === worker) return;
+        terminateWorkerDetached(lateWorker);
+      })();
     }
   }
 
@@ -370,10 +373,11 @@ function withDeadline<T>(
       milliseconds,
     );
     signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => finish(() => resolve(value)),
-      (error: unknown) => finish(() => reject(error)),
-    );
+    void (async () => {
+      const result = await settle(promise);
+      if (result.ok) finish(() => resolve(result.value));
+      else finish(() => reject(result.error));
+    })();
   });
 }
 
@@ -389,10 +393,11 @@ function raceWorkerLoss<T>(promise: Promise<T>, loss: AbortSignal): Promise<T> {
     };
     const onLoss = (): void => finish(() => reject(new WorkerLostError()));
     loss.addEventListener('abort', onLoss, { once: true });
-    promise.then(
-      (value) => finish(() => resolve(value)),
-      (error: unknown) => finish(() => reject(error)),
-    );
+    void (async () => {
+      const result = await settle(promise);
+      if (result.ok) finish(() => resolve(result.value));
+      else finish(() => reject(result.error));
+    })();
   });
 }
 

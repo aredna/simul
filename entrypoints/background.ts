@@ -42,6 +42,7 @@ import {
   type PreferenceSafetyTicket,
 } from '../lib/preference-safety-coordinator';
 import { isWindowAuthorizationRequest } from '../lib/page-identity';
+import { settle } from '../lib/settle';
 import { ToolbarLauncher } from '../lib/toolbar-launch';
 import {
   PAGE_ONLY_REPLICA_READ_SCOPE,
@@ -114,27 +115,33 @@ export default defineBackground(() => {
   // generation persisted in session storage; the nonce keeps two lifecycles
   // that read the same generation apart. Resolved once, before the first
   // authorized-tab message is sent; allocation never rejects.
-  const toolbarLaunchEpoch = allocateCompanionLaunchGeneration({
-    read: async () => (await browser.storage.session.get(
-      COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
-    ))[COMPANION_LAUNCH_GENERATION_STORAGE_KEY],
-    write: async (generation) => {
-      await browser.storage.session.set({
-        [COMPANION_LAUNCH_GENERATION_STORAGE_KEY]: generation,
-      });
-    },
-  }).then((generation) => createCompanionLaunchEpoch(
-    generation,
+  const toolbarLaunchEpoch = (async () => createCompanionLaunchEpoch(
+    await allocateCompanionLaunchGeneration({
+      read: async () => (await browser.storage.session.get(
+        COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
+      ))[COMPANION_LAUNCH_GENERATION_STORAGE_KEY],
+      write: async (generation) => {
+        await browser.storage.session.set({
+          [COMPANION_LAUNCH_GENERATION_STORAGE_KEY]: generation,
+        });
+      },
+    }),
     crypto.randomUUID(),
-  ));
+  ))();
   // The action handler below must remain Chrome's authorization boundary.
   // Correct any behavior persisted by an older build as soon as the worker
   // starts so browser-owned side-panel routing cannot swallow action.onClicked.
   queueToolbarBehaviorSync();
 
   const loadRevision = launchPreferenceRevision;
-  const launchPreferencesReady = browser.storage.local.get(STORAGE_KEY).then(
-    async (stored) => {
+  const launchPreferencesReady = (async () => {
+    const read = await settle(browser.storage.local.get(STORAGE_KEY));
+    try {
+      if (!read.ok) {
+        queueToolbarBehaviorSync();
+        return;
+      }
+      const stored = read.value;
       // A failed hydration step (storage, reset epoch, safety journal) must
       // not poison every later toolbar click: clicks fall back to the
       // defaults this worker already holds until storage changes (O1).
@@ -169,19 +176,22 @@ export default defineBackground(() => {
       } finally {
         queueToolbarBehaviorSync();
       }
-    },
-    () => {
-      queueToolbarBehaviorSync();
-    },
-  ).finally(() => {
-    launchPreferencesHydrated = true;
-  });
+    } finally {
+      launchPreferencesHydrated = true;
+    }
+  })();
 
   function queueToolbarBehaviorSync(): void {
-    toolbarBehaviorQueue = toolbarBehaviorQueue.then(
-      () => browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }),
-      () => browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }),
-    ).catch(() => undefined);
+    // Runs after the previous sync whether it worked or not.
+    const previous = toolbarBehaviorQueue;
+    toolbarBehaviorQueue = (async () => {
+      await settle(previous);
+      try {
+        await browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+      } catch {
+        // The next sync tries again.
+      }
+    })();
   }
 
   // The launch itself is in lib/toolbar-launch.ts. sidePanel.open() needs a
@@ -245,18 +255,25 @@ export default defineBackground(() => {
     }
   }
 
+  // Only Simul's own pages and the service worker may talk to these
+  // handlers. Simul's scripts inside web pages send nothing here, so a
+  // message from one is refused rather than trusted.
   browser.runtime.onConnect.addListener((port) => {
     if (port.name !== PREFERENCE_SAFETY_PORT_NAME) return;
+    if (!isTrustedOffscreenMessageSender(port.sender, browser.runtime.id)) return;
     preferenceSafety.connect(port as PreferenceSafetyPort);
   });
 
   browser.runtime.onMessage.addListener(
     (message: unknown, sender, sendResponse) => {
+      const trusted = isTrustedOffscreenMessageSender(sender, browser.runtime.id);
       if (isWindowAuthorizationRequest(message)) {
         // A companion window that has just started asks for the toolbar
         // authorization it could not yet receive (D121).
         sendResponse(
-          toolbarLauncher.windowAuthorization(sender.tab?.windowId) ?? null,
+          trusted
+            ? toolbarLauncher.windowAuthorization(sender.tab?.windowId) ?? null
+            : null,
         );
         return;
       }
@@ -266,7 +283,7 @@ export default defineBackground(() => {
         // host; a content script also carries the extension id but reports
         // its page URL, and the popout is an extension page even though it
         // is tab-hosted (C9).
-        if (!isTrustedOffscreenMessageSender(sender, browser.runtime.id)) {
+        if (!trusted) {
           sendResponse({
             kind: 'simul:ocr-v1:host-ready',
             version: 1,
@@ -282,33 +299,30 @@ export default defineBackground(() => {
           });
           return;
         }
-        void offscreenManager.ensure(ensureHost.resetEpoch).then(
-          (ready) => sendResponse({
+        void (async () => {
+          const ready = await settle(offscreenManager.ensure(ensureHost.resetEpoch));
+          sendResponse({
             kind: 'simul:ocr-v1:host-ready',
             version: 1,
-            ready,
-          }),
-          () => sendResponse({
-            kind: 'simul:ocr-v1:host-ready',
-            version: 1,
-            ready: false,
-          }),
-        );
+            ready: ready.ok ? ready.value : false,
+          });
+        })();
         return true;
       }
       const command = readPreferenceCommand(message);
-      if (!command) return;
+      if (!command || !trusted) return;
 
       // Chrome 138 requires the callback + literal-true response pattern.
       // Native Promise-returning onMessage listeners arrived much later.
-      void runPreferenceCommand(coordinator, command, preferenceSafety).then(
-        (result) => sendResponse(result),
-        (error: unknown) =>
-          sendResponse({
-            type: 'simul:preferences:error',
-            message: readableError(error),
-          }),
-      );
+      void (async () => {
+        const outcome = await settle(
+          runPreferenceCommand(coordinator, command, preferenceSafety),
+        );
+        sendResponse(outcome.ok ? outcome.value : {
+          type: 'simul:preferences:error',
+          message: readableError(outcome.error),
+        });
+      })();
       return true;
     },
   );

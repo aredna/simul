@@ -69,8 +69,6 @@ export const UI_STRINGS = {
   ocrTitleOff: 'Image text translation is off. Click to turn it on.',
 
   // Toolbar: tab-follow aria/title (side panel and detached window alike).
-  tabFollowActiveAria: 'Pin the mirror to the tab it shows instead of following the active browser tab',
-  tabFollowCurrentAria: 'Follow the active browser tab instead of the pinned tab',
   tabFollowActiveTitle:
     'Following the active browser tab. Click to pin the mirror to the tab it shows.',
   tabFollowCurrentTitle:
@@ -193,6 +191,7 @@ export const UI_STRINGS = {
     'Chrome removed a saved automatic-access grant, so that scope was turned off.',
   statusReplicaNotPrepared:
     'The isolated replica could not be prepared. Retry the current page.',
+  statusReplicaTooLarge: 'This page is too large for Simul to mirror.',
 
   // PDF statuses (capture pipeline and PDF controller).
   statusPdfReading: 'Reading the PDF…',

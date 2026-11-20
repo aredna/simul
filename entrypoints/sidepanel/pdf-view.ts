@@ -19,6 +19,7 @@ import {
 import type { PdfFontFace } from '../../lib/pdf/pdf-overlay-style';
 import type { PdfSurfaceBlock, PdfTextSink } from '../../lib/pdf/pdf-text-surface';
 import { PDF_FIT_PASSES, PdfPageTextLayer, type PdfBlockMeasure } from './pdf-text-layer';
+import { settle } from '../../lib/settle';
 
 /** Padding around the column and the space between pages, in CSS pixels. */
 export const PDF_PAGE_GAP = 8;
@@ -586,16 +587,21 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     if (!layer.fontFacesRequested && document.fontFaces) {
       layer.fontFacesRequested = true;
       const blocks = page.blocks;
-      void document.fontFaces(index + 1, layer.fontIds).then((faces) => {
+      const reading = document.fontFaces(index + 1, layer.fontIds);
+      void (async () => {
+        const read = await settle(reading);
+        if (!read.ok) {
+          layer.fontFacesRequested = false;
+          return;
+        }
+        const faces = read.value;
         if (this.#document !== document) return;
         // Kept for a layer built again later, unless the page was read again.
         if (page.blocks === blocks && this.#pages[index] === page) page.fontFaces = faces;
         if (page.layer !== layer) return;
         layer.applyFontFaces(faces);
         this.#schedule();
-      }, () => {
-        layer.fontFacesRequested = false;
-      });
+      })();
     }
     this.#schedule();
   }
@@ -781,39 +787,41 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     const rendering: Rendering = { index, controller };
     this.#rendering = rendering;
     let placed = false;
-    void document.render(index + 1, canvas, scale, controller.signal)
-      .then(
-        (drawn) => {
-          if (
-            this.#rendering !== rendering ||
-            this.#document !== document ||
-            controller.signal.aborted
-          ) return;
-          // Built before the canvas is set, so it is decorated once, below.
-          this.#buildLayer(index);
-          if (page.canvas) discardCanvas(page.canvas);
-          page.element.prepend(canvas);
-          page.canvas = canvas;
-          // What the canvas holds, which a size cap may have made smaller
-          // than the scale asked for (the request is kept for redraws).
-          page.drawnScale = drawn;
-          page.requestedScale = scale;
-          placed = true;
-          // A new drawing is a new chance to read colours that failed.
-          if (page.layer) page.layer.colourReadFailed = false;
-          this.#decorate(index);
-        },
-        () => {
+    const rendered = document.render(index + 1, canvas, scale, controller.signal);
+    void (async () => {
+      try {
+        const result = await settle(rendered);
+        if (!result.ok) {
           // A page pdf.js cannot draw stays a blank placeholder.
           if (!controller.signal.aborted && this.#document === document) page.failed = true;
-        },
-      )
-      .finally(() => {
+          return;
+        }
+        if (
+          this.#rendering !== rendering ||
+          this.#document !== document ||
+          controller.signal.aborted
+        ) return;
+        // Built before the canvas is set, so it is decorated once, below.
+        this.#buildLayer(index);
+        if (page.canvas) discardCanvas(page.canvas);
+        page.element.prepend(canvas);
+        page.canvas = canvas;
+        // What the canvas holds, which a size cap may have made smaller
+        // than the scale asked for (the request is kept for redraws).
+        page.drawnScale = result.value;
+        page.requestedScale = scale;
+        placed = true;
+        // A new drawing is a new chance to read colours that failed.
+        if (page.layer) page.layer.colourReadFailed = false;
+        this.#decorate(index);
+      } finally {
         if (!placed) discardCanvas(canvas);
-        if (this.#rendering !== rendering) return;
-        this.#rendering = undefined;
-        this.#pump();
-      });
+        if (this.#rendering === rendering) {
+          this.#rendering = undefined;
+          this.#pump();
+        }
+      }
+    })();
   }
 
   #release(index: number): void {

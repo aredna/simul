@@ -1,3 +1,4 @@
+import { settle } from '../settle';
 export interface OcrOffscreenBrowser {
   getContexts(filter: {
     readonly contextTypes: readonly ['OFFSCREEN_DOCUMENT'];
@@ -26,10 +27,11 @@ export class OcrOffscreenDocumentManager {
       return Promise.resolve(false);
     }
     if (this.#closing) {
-      return this.#closing.then(
-        () => false,
-        () => false,
-      );
+      const closing = this.#closing;
+      return (async () => {
+        await settle(closing);
+        return false;
+      })();
     }
     if (this.#creating) return this.#creating;
     const generation = this.#generation;

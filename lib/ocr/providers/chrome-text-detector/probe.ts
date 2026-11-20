@@ -5,6 +5,7 @@ import {
   type TimeoutScheduler,
 } from '../../../browser-scheduling';
 import type { ImageTextProviderCapability } from '../../contracts';
+import { settle } from '../../../settle';
 
 export const CHROME_TEXT_DETECTOR_PROBE_TIMEOUT_MS = 2_000;
 /**
@@ -108,10 +109,11 @@ function withTimeout(
       operation.abort();
       finish(() => reject(new Error('TextDetectorProbeTimeout')));
     }, milliseconds);
-    promise.then(
-      () => finish(resolve),
-      (error: unknown) => finish(() => reject(error)),
-    );
+    void (async () => {
+      const result = await settle(promise);
+      if (result.ok) finish(resolve);
+      else finish(() => reject(result.error));
+    })();
   });
 }
 

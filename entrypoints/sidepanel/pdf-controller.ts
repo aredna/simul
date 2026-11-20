@@ -35,6 +35,7 @@ import type {
 } from './pdf-page-box-reader';
 import type { PdfViewSurface } from './pdf-view';
 import type { PdfViewerTarget } from './pdf-viewer-follower';
+import { settle } from '../../lib/settle';
 
 /** Content-free: stages, counts, sizes and times only. */
 export type PdfDiagnostic =
@@ -766,7 +767,7 @@ export class PdfController {
     const route = pdfPageBoxRoute(ocr.providerOrder());
     if (!route) return undefined;
     const pageCount = pages.sizes.length;
-    return pageBoxReader.locate({
+    const located = pageBoxReader.locate({
       tabId: target.tabId,
       doubt,
       pageCount,
@@ -779,7 +780,11 @@ export class PdfController {
         reading,
       ),
       signal,
-    }).then((page) => (this.#document === document ? page : undefined));
+    });
+    return (async () => {
+      const page = await located;
+      return this.#document === document ? page : undefined;
+    })();
   }
 
   /** Destroys the shown document and empties and hides the view. Idempotent. */
@@ -944,11 +949,12 @@ async function readPageSizes(
   for (let first = 1; first <= document.pageCount; first += PAGE_SIZE_BATCH) {
     const last = Math.min(document.pageCount, first + PAGE_SIZE_BATCH - 1);
     const batch = await untilAborted(Promise.all(
-      Array.from({ length: last - first + 1 }, (_, offset) =>
-        document.getPageSize(first + offset).then(
-          ({ width, height, transform }) => ({ size: { width, height }, transform }),
-          () => undefined,
-        )),
+      Array.from({ length: last - first + 1 }, async (_, offset) => {
+        const read = await settle(document.getPageSize(first + offset));
+        if (!read.ok) return undefined;
+        const { width, height, transform } = read.value;
+        return { size: { width, height }, transform };
+      }),
     ), signal);
     measured.push(...batch);
   }
@@ -969,7 +975,15 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(signal.reason);
     signal.addEventListener('abort', abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    void (async () => {
+      try {
+        resolve(await promise);
+      } catch (error) {
+        reject(error);
+      } finally {
+        signal.removeEventListener('abort', abort);
+      }
+    })();
   });
 }
 

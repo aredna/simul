@@ -11,6 +11,7 @@ import type {
 } from './pdf-controller';
 import type { PdfLocateResult } from './pdf-page-box-reader';
 import type { PdfViewerTarget } from './pdf-viewer-follower';
+import { settle } from '../../lib/settle';
 
 /** The part of the real controller this facade forwards. */
 export interface PdfControllerLike {
@@ -179,18 +180,15 @@ export class LazyPdfController implements PdfControllerLike {
   #loadController(): Promise<PdfControllerLike> {
     if (this.#controller) return Promise.resolve(this.#controller);
     if (!this.#loadPromise) {
-      const pending = this.#load().then(
-        (controller) => {
-          this.#loadPromise = undefined;
-          this.#controller = controller;
-          this.#applyPending(controller);
-          return controller;
-        },
-        (error: unknown) => {
-          this.#loadPromise = undefined;
-          throw error;
-        },
-      );
+      const loading = this.#load();
+      const pending = (async () => {
+        const loaded = await settle(loading);
+        this.#loadPromise = undefined;
+        if (!loaded.ok) throw loaded.error;
+        this.#controller = loaded.value;
+        this.#applyPending(loaded.value);
+        return loaded.value;
+      })();
       this.#loadPromise = pending;
     }
     return this.#loadPromise;

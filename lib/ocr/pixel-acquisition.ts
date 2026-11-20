@@ -16,6 +16,7 @@ import {
   type ImageFilePixelSource,
   type ImageFilePixels,
 } from './image-file-pixel-reader';
+import { settle } from '../settle';
 
 export const MAX_CAPTURE_RATE_PER_SECOND = 2;
 /** Stay below Chrome's documented two-captures-per-second ceiling. */
@@ -157,14 +158,17 @@ export class PixelAcquisitionCoordinator {
     signal?: AbortSignal,
   ): Promise<PixelAcquisitionResult> {
     const previous = this.#lane;
-    let release!: () => void;
-    this.#lane = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    return previous.then(
-      () => this.#acquire(descriptor, signal),
-      () => this.#acquire(descriptor, signal),
-    ).finally(release);
+    const { promise: lane, resolve: release } = Promise.withResolvers<void>();
+    this.#lane = lane;
+    return (async () => {
+      try {
+        // After the previous acquisition, whether it worked or not.
+        await settle(previous);
+        return await this.#acquire(descriptor, signal);
+      } finally {
+        release();
+      }
+    })();
   }
 
   async #acquire(
@@ -448,8 +452,13 @@ export function captureVisibleSourceTabPromptly(
   environment: SourceTabCaptureEnvironment = browserSourceTabCaptureEnvironment(),
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    captureInLane(sourceTabId, sourceWindowId, signal, environment, resolve)
-      .then(resolve, reject);
+    void (async () => {
+      try {
+        resolve(await captureInLane(sourceTabId, sourceWindowId, signal, environment, resolve));
+      } catch (error) {
+        reject(error);
+      }
+    })();
   });
 }
 

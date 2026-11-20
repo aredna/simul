@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Simul: the page you read (A) and its translation (文), side by side.
+       96x96 art in a 16px clear margin, per the Chrome Web Store icon
+       guidance. Rendered to public/icon/48.png and 128.png. -->
+  <defs>
+    <linearGradient id="tile" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="112">
+      <stop offset="0" stop-color="#1f8c60"/>
+      <stop offset="1" stop-color="#10553a"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="96" height="96" rx="24" fill="url(#tile)"/>
+  <!-- The page -->
+  <rect x="26" y="33" width="37" height="62" rx="7" fill="#ffffff"/>
+  <g fill="none" stroke="#176c4a" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M35.5 75L44.5 51L53.5 75"/>
+    <path d="M38.8 67h11.4"/>
+  </g>
+  <!-- Its translation -->
+  <rect x="65" y="33" width="37" height="62" rx="7" fill="#8fe4b9"/>
+  <g fill="none" stroke="#0e4d34" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M83.5 50.5v3.5"/>
+    <path d="M73.5 59h20"/>
+    <path d="M89.5 62.5C87 69.5 82.5 73.5 74.5 77"/>
+    <path d="M77.5 62.5C80 69.5 84.5 73.5 92.5 77"/>
+  </g>
+</svg>

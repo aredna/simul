@@ -8,6 +8,7 @@ import type { ImageTextResult } from '../../contracts';
 import type { OffscreenOcrProviderRunner } from '../../offscreen-host';
 import type { OffscreenOcrJob } from '../../offscreen-protocol';
 import { normalizeChromeTextDetection } from './normalize';
+import { settle } from '../../../settle';
 
 export const CHROME_TEXT_DETECTOR_JOB_TIMEOUT_MS = 10_000;
 export const CHROME_TEXT_DETECTOR_RUNTIME_MARKER =
@@ -211,10 +212,11 @@ function withDeadline<T>(
       finish(() => reject(new TextDetectorTimeoutError()));
     }, milliseconds);
     signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => finish(() => resolve(value)),
-      (error: unknown) => finish(() => reject(error)),
-    );
+    void (async () => {
+      const result = await settle(promise);
+      if (result.ok) finish(() => resolve(result.value));
+      else finish(() => reject(result.error));
+    })();
   });
 }
 

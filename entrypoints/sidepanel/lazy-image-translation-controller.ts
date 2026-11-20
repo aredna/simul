@@ -184,8 +184,10 @@ implements ImageTranslationControllerLike {
 
   #ensureLoaded(): void {
     if (this.#controller || this.#loadPromise || this.#disposed) return;
-    const pending = this.#load()
-      .then((controller) => {
+    const loading = this.#load();
+    const pending = (async () => {
+      try {
+        const controller = await loading;
         this.#loadPromise = undefined;
         if (this.#disposed) {
           controller.dispose();
@@ -193,11 +195,11 @@ implements ImageTranslationControllerLike {
         }
         this.#controller = controller;
         this.#applyPending(controller);
-      })
-      .catch((error: unknown) => {
+      } catch (error) {
         this.#loadPromise = undefined;
         this.#onLoadError?.(error);
-      });
+      }
+    })();
     this.#loadPromise = pending;
   }
 

@@ -52,7 +52,10 @@ interface LanguageModelSession {
 
 interface LanguageModelOptions {
   readonly expectedInputs: readonly { readonly type: 'text' | 'image' }[];
-  readonly expectedOutputs: readonly { readonly type: 'text' }[];
+  readonly expectedOutputs: readonly {
+    readonly type: 'text';
+    readonly languages?: readonly string[];
+  }[];
 }
 
 interface LanguageModelStatic {
@@ -82,16 +85,21 @@ export interface OnDeviceAiGlobals {
   readonly LanguageDetector?: LanguageDetectorStatic;
 }
 
+/** The answer is a JSON choice in English; Chrome asks for the output language. */
+const ENGLISH_TEXT_OUTPUT = Object.freeze({
+  type: 'text' as const,
+  languages: Object.freeze(['en']),
+});
 const IMAGE_OPTIONS: LanguageModelOptions = Object.freeze({
   expectedInputs: Object.freeze([
     Object.freeze({ type: 'text' as const }),
     Object.freeze({ type: 'image' as const }),
   ]),
-  expectedOutputs: Object.freeze([Object.freeze({ type: 'text' as const })]),
+  expectedOutputs: Object.freeze([ENGLISH_TEXT_OUTPUT]),
 });
 const TEXT_OPTIONS: LanguageModelOptions = Object.freeze({
   expectedInputs: Object.freeze([Object.freeze({ type: 'text' as const })]),
-  expectedOutputs: Object.freeze([Object.freeze({ type: 'text' as const })]),
+  expectedOutputs: Object.freeze([ENGLISH_TEXT_OUTPUT]),
 });
 const SYSTEM_PROMPT =
   'You compare two candidate texts for one picture on a web page and answer ' +
@@ -111,6 +119,11 @@ export const EVIDENCE_JUDGE_TIMEOUT_MS = 10_000;
 export const EVIDENCE_JUDGE_RECHECK_MS = 10 * 60_000;
 const LANGUAGE_CHECK_OCR_CONFIDENCE = 0.7;
 const LANGUAGE_CHECK_NOISE_CONFIDENCE = 0.3;
+/**
+ * Language detection is unreliable on a word or two (Language Detector
+ * guide), so shorter OCR text gets no verdict from it.
+ */
+export const LANGUAGE_CHECK_MINIMUM_LETTERS = 8;
 
 type Resolved =
   | { readonly kind: 'nano-image' | 'nano-text'; readonly session: LanguageModelSession }
@@ -190,24 +203,26 @@ export class OnDeviceEvidenceJudge {
     }
   }
 
-  #resolve(): Promise<Resolved> {
+  async #resolve(): Promise<Resolved> {
     const current = this.#resolved;
     if (current) {
-      return current.then((resolved) => {
-        if (
-          resolved.kind === 'none' &&
-          this.#now() - resolved.at >= EVIDENCE_JUDGE_RECHECK_MS
-        ) {
-          this.#resolved = undefined;
-          return this.#resolve();
-        }
-        return resolved;
-      });
+      const resolved = await current;
+      if (
+        resolved.kind === 'none' &&
+        this.#now() - resolved.at >= EVIDENCE_JUDGE_RECHECK_MS
+      ) {
+        this.#resolved = undefined;
+        return this.#resolve();
+      }
+      return resolved;
     }
-    const pending = this.#findModel().then((resolved) => {
+    // Kept at once, so a second question meanwhile waits for this search.
+    const finding = this.#findModel();
+    const pending = (async () => {
+      const resolved = await finding;
       this.#onResolved?.(resolved.kind);
       return resolved;
-    });
+    })();
     this.#resolved = pending;
     return pending;
   }
@@ -253,6 +268,9 @@ async function checkLanguage(
   ocrText: string,
   sourceLanguage: SupportedLanguage,
 ): Promise<EvidenceJudgeVerdict | undefined> {
+  if (ocrText.replace(/[^\p{L}]/gu, '').length < LANGUAGE_CHECK_MINIMUM_LETTERS) {
+    return undefined;
+  }
   const [top] = await detector.detect(ocrText);
   if (!top || !Number.isFinite(top.confidence)) return undefined;
   const sameLanguage = baseLanguage(top.detectedLanguage) === baseLanguage(sourceLanguage);

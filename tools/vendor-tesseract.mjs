@@ -62,6 +62,13 @@ const workerSource = await readFile(
 const worker = patchRemoteFallbacks(workerSource);
 await emit('worker/worker.min.js', Buffer.from(worker), 'worker',
   `npm:tesseract.js@${TESSERACT_VERSION}/dist/worker.min.js`);
+// Simul's worker entry: a Trusted Types policy, then worker.min.js (D161).
+await emit(
+  'worker/simul-worker.js',
+  await readFile(resolve(root, 'tools/tesseract-simul-worker.js')),
+  'worker-entry',
+  'repo:tools/tesseract-simul-worker.js',
+);
 
 for (const file of coreFiles) {
   await emit(

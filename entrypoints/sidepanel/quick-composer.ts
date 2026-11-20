@@ -134,6 +134,9 @@ export class QuickComposer {
     const pair = reverseTranslationPair(this.environment.selectedPair());
     elements.fromLanguage.textContent = localizedLanguageName(targetLanguage, targetLanguage);
     elements.fromLanguage.setAttribute('lang', targetLanguage);
+    // The draft is in the reader's own language; screen readers and spell
+    // checking follow lang (Translator guide: lang on translated content).
+    elements.input.setAttribute('lang', targetLanguage);
     if (!pair) {
       setUiText(elements.toLanguage, UI_STRINGS.composerWaitingLanguage);
       setUiText(elements.guidance, UI_STRINGS.composerDetecting);
@@ -180,7 +183,18 @@ export class QuickComposer {
               if (composerAvailability === 'unavailable') {
                 throw new Error(UI_STRINGS.composerReversePairUnavailable);
               }
-              session = await provider.createSession(pair, { signal: abortController.signal });
+              let shownPercent = -1;
+              session = await provider.createSession(pair, {
+                signal: abortController.signal,
+                // A reply pair Chrome has not installed downloads now, after
+                // the click; say so in steps of ten rather than every event.
+                onDownloadProgress: (progress) => {
+                  const percent = Math.floor(progress * 10) * 10;
+                  if (percent === shownPercent) return;
+                  shownPercent = percent;
+                  this.#setComposerStatus(UI_STRINGS.progressDownloadingPack, 'normal', [percent]);
+                },
+              });
             }
             return translateWithSession(session, core, abortController.signal);
           }));
@@ -195,6 +209,7 @@ export class QuickComposer {
         currentForwardPair.targetLanguage !== forwardPair.targetLanguage
       ) return;
       elements.output.value = translated;
+      elements.output.setAttribute('lang', pair.targetLanguage);
       elements.copyButton.disabled = elements.output.value.length === 0;
       this.#setComposerStatus(UI_STRINGS.composerReadyToCopy, 'success');
       setStatus(UI_STRINGS.composerReplyReadyToCopy, 'success');
@@ -236,6 +251,7 @@ export class QuickComposer {
   invalidate(): void {
     this.cancel();
     this.environment.elements.output.value = '';
+    this.environment.elements.output.removeAttribute('lang');
     this.environment.elements.copyButton.disabled = true;
     this.#setComposerStatus('');
     this.environment.onActivityChange();
