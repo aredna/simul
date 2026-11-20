@@ -8649,14 +8649,27 @@ describe('what is added beside body (D143)', () => {
       (message) => (message as { code?: string }).code === 'stream_overflow',
     )).toBe(false);
 
-    // A fifth, unanswered, is the stream running over, as before.
+    // A fifth waits for the panel instead of running the stream over, and
+    // goes out with the next ACK (D164).
     body.setAttribute('class', 'five');
     fixture.mutate(attributeRecord(body, 'class'));
     fixture.flushFrame();
     expect(fixture.patches()).toHaveLength(4);
     expect(fixture.port.posts.some(
       (message) => (message as { code?: string }).code === 'stream_overflow',
-    )).toBe(true);
+    )).toBe(false);
+    body.setAttribute('class', 'six');
+    fixture.mutate(attributeRecord(body, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(4);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(5);
+    expect(fixture.patches()[4]!.firstSequence).toBe(5);
+    expect(JSON.stringify(fixture.patches()[4])).toContain('six');
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
   });
 
   it('sends a child added to html alone as one patch, as before', () => {

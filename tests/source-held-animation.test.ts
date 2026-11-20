@@ -28,6 +28,7 @@ vi.mock('../lib/replica/source-held-animation', async (importOriginal) => {
 import {
   createHtmlMirrorAck,
   createHtmlMirrorCheckpointRequest,
+  MAX_HTML_MIRROR_UNACKED_BATCHES,
   createHtmlMirrorPortName,
   createHtmlMirrorStart,
   decodeHtmlMirrorWireMessage,
@@ -1369,18 +1370,24 @@ describe('what a script animation leaves an element at', () => {
     expect(sizes).toEqual([1_000, 1_000, 1_000, 1_000, 500]);
     expect(fixture.errors()).toEqual([]);
 
-    // A panel that does not keep up is sent a whole read instead, as for
-    // any stream it falls behind on: that read has every held value.
+    // A panel that does not keep up stops the stream at a full window of
+    // batches; what is left waits for its ACKs, then goes out, each held
+    // value once (D164; before, this was an overflow and a whole read).
     listed = elements.map((element) => new FakeAnimation(element, frames({ opacity: '0.5' })));
     fixture.tick();
     while (fixture.frames.length > 0) fixture.flushFrame();
-    expect(fixture.errors()).toEqual(['stream_overflow']);
-    const sequence = fixture.patches().length;
-    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, sequence));
-    const checkpoint = JSON.stringify(fixture.checkpoints().at(-1));
-    expect(checkpoint.match(/opacity:0\.5/gu)).toHaveLength(4_500);
-    // Nothing of what that read holds is sent again after it.
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, sequence + 1));
+    expect(fixture.errors()).toEqual([]);
+    const before = sizes.length;
+    expect(fixture.patches().length - before).toBe(MAX_HTML_MIRROR_UNACKED_BATCHES);
+    for (let rounds = 0; rounds < 20; rounds += 1) {
+      const sent = fixture.patches().length;
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, sent));
+      while (fixture.frames.length > 0) fixture.flushFrame();
+      if (fixture.patches().length === sent) break;
+    }
+    expect(fixture.errors()).toEqual([]);
+    const later = JSON.stringify(fixture.patches().slice(before));
+    expect(later.match(/opacity:0\.5/gu)).toHaveLength(4_500);
     expect(fixture.frames).toHaveLength(0);
   });
 

@@ -89,8 +89,11 @@ import {
   type SourceDocumentSecretScan,
 } from './semantic-source-session';
 import {
+  createPassShareLedger,
   createSliceClock,
+  LIVE_SLICE_BUDGET_MS,
   yieldToMain,
+  type PassShareLedger,
   type SliceClock,
 } from '../browser-scheduling';
 import {
@@ -112,9 +115,18 @@ import {
 } from './source-privacy-policy';
 import {
   SourceVisibilityBoundaryIndex,
+  type SourceVisibilityComparison,
   sourceElementLinks,
   type SourceVisibilityBoundaryRefresh,
 } from './source-visibility-boundary';
+import {
+  SourceStyleNameCensus,
+  createSourceStyleSheetCollection,
+  sourceVisibilityEventMaySkip,
+  sourceVisibilityMutationMaySkip,
+  type SourceStyleNames,
+  type SourceStyleSheetCollection,
+} from './source-style-names';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import { StableSignatureTracker } from './stable-signature-tracker';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
@@ -412,6 +424,11 @@ export function installHtmlMirrorSourceBridge(
     readonly trigger: Element;
     readonly panel: Element;
   }>();
+  const now = environment.now ?? (() => performance.now());
+  // The live whole-page passes, the semantic scan and the comparison of what
+  // the page paints, share one fifth of the tab's time, for the document
+  // (D164).
+  const passShare = createPassShareLedger({ now });
   runtime.onConnect.addListener((port) => {
     if (readHtmlMirrorPortSessionId(port.name)) {
       new HtmlMirrorSourceSession({
@@ -421,8 +438,9 @@ export function installHtmlMirrorSourceBridge(
         registry,
         secretClassifier: documentSecretClassifier,
         secretScan,
-        now: environment.now ?? (() => performance.now()),
+        now,
         yieldToMain: environment.yieldToMain ?? yieldToMain,
+        passShare,
         createMutationObserver: environment.createMutationObserver ??
           ((callback) => new MutationObserver(callback)),
         scheduleFrame: environment.scheduleFrame ??
@@ -466,6 +484,12 @@ export function installHtmlMirrorSourceBridge(
       getNodeId: (node) => registry.getId(node),
       createMutationObserver: environment.createMutationObserver,
       schedule: (callback) => queueMicrotask(callback),
+      // Read in slices with a turn for the page between them, and at most
+      // a fifth of the tab's time with the comparison (D164).
+      now,
+      yieldToMain: environment.yieldToMain ?? yieldToMain,
+      sliceBudgetMs: LIVE_SLICE_BUDGET_MS,
+      passShare,
     });
   });
 }
@@ -484,6 +508,12 @@ interface HtmlMirrorSourceSessionEnvironment {
    * `scheduler.yield()` by default.
    */
   readonly yieldToMain?: () => Promise<void>;
+  /**
+   * The share of the tab's time the live whole-page passes keep to, shared
+   * with the semantic scan (D164): the comparison of what the page paints
+   * waits for it. Without it a comparison never waits.
+   */
+  readonly passShare?: PassShareLedger;
   readonly createMutationObserver: (
     callback: MutationCallback,
   ) => Pick<MutationObserver, 'observe' | 'disconnect'>;
@@ -682,6 +712,23 @@ const VISIBILITY_INTERACTION_EVENTS = Object.freeze([
 ] as const);
 
 /**
+ * What a person does on purpose: a comparison it asks for starts at once,
+ * without waiting for the share of time the live passes keep to; it still
+ * runs in slices, one pass at a time, and its work counts against the
+ * share of the passes after it (D164, the owner's choice). Pointer moves,
+ * focus changes and key releases come too often to skip the wait.
+ */
+const USER_INPUT_EVENTS: ReadonlySet<string> = new Set([
+  'click',
+  'keydown',
+  'beforeinput',
+  'input',
+  'change',
+  'beforetoggle',
+  'toggle',
+]);
+
+/**
  * A page of this many elements or more is sent first as a preview (D163):
  * what is near the viewport, every other block a box of its height, while
  * the whole page is read in slices. Counted by `getElementsByTagName('*')`,
@@ -765,6 +812,43 @@ interface CheckpointReadSlices {
   readonly reading: { expired(): boolean };
   next(): Promise<void>;
 }
+
+/**
+ * A comparison of what the page paints that is running (D164). It took the
+ * requests that started it; what asks for one meanwhile waits for the next.
+ * A checkpoint, a recovery or the end of the session cancels it.
+ */
+interface ComparisonRun {
+  readonly generation: number;
+  readonly index: SourceVisibilityBoundaryIndex;
+  readonly comparison: SourceVisibilityComparison;
+  readonly clock: SliceClock;
+  /** Whether the slice has done its share: the clock, asked every few elements. */
+  readonly expired: () => boolean;
+  /** The work of its slices, not the time it waited between them. */
+  busyMs: number;
+  /** It has given the page a turn. */
+  yielded: boolean;
+  /**
+   * The size of what the resize observer watches, read before the first
+   * turn: the size the comparison of the whole page began at (D163's rule).
+   */
+  sizeAtStart: string | undefined;
+}
+
+/**
+ * Elements a comparison compares between two looks at its slice clock: a
+ * look is a call of `performance.now()`, and a comparison of 54,000
+ * elements took 200 ms, about 4 µs an element.
+ */
+const COMPARISON_CLOCK_EVERY = 32;
+
+/**
+ * How long changes wait for a panel a full window of batches behind
+ * (D164): a panel that has not answered by then is taken to have stopped,
+ * and the stream runs over as it did before D164, which a fresh copy ends.
+ */
+const ACK_HOLD_LIMIT_MS = 5_000;
 
 type ReconciliationDecision =
   | 'reconcile'
@@ -917,6 +1001,10 @@ export class HtmlMirrorSourceSession {
   #restatePanes = false;
   #sequence = 0;
   #acknowledged = 0;
+  /** A flush waited for the panel to acknowledge (D164). */
+  #heldForAck = false;
+  /** Ends a hold for the ACK that lasts `ACK_HOLD_LIMIT_MS`. */
+  #ackHoldTimer: unknown;
   #paused = false;
   #recoveryCheckpointSequence: number | undefined;
   #shadowReconciliationPending = false;
@@ -943,7 +1031,19 @@ export class HtmlMirrorSourceSession {
   #visibilityMutationRecords: MutationRecord[] = [];
   #visibilityMutationOverflow = false;
   #visibilityInteractionTargets = new Set<Element>();
+  /** A person's input asked for the next comparison: it skips the share (D164). */
+  #userInputPending = false;
   #visibilityFullRefreshPending = false;
+  /** The comparison of what the page paints that is running, if any (D164). */
+  #comparisonRun: ComparisonRun | undefined;
+  #comparisonGeneration = 0;
+  /** The comparison waits for its share of the tab's time (D164). */
+  #comparisonShareTimer: unknown;
+  /**
+   * The names the page's style sheets mention, as the style poll reads
+   * them: a change no rule names is not compared (D164).
+   */
+  readonly #styleNames = new SourceStyleNameCensus();
   /**
    * The layout changed and the frame that follows has not yet looked for
    * new roots and read the relationships of controlled content again: once
@@ -1118,11 +1218,19 @@ export class HtmlMirrorSourceSession {
     this.#styleDerivedPending = false;
     this.#controlledContentPolicy = undefined;
     this.#controlledLayoutSettlePending = false;
+    this.#cancelComparison();
+    if (this.#comparisonShareTimer !== undefined) {
+      this.environment.clearTimer(this.#comparisonShareTimer);
+    }
+    this.#comparisonShareTimer = undefined;
+    this.#releaseAckHold();
+    this.#styleNames.reset();
     this.#visibilityBoundaryIndex?.dispose();
     this.#visibilityBoundaryIndex = undefined;
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
+    this.#userInputPending = false;
     this.#visibilityFullRefreshPending = false;
     this.#layoutChangePending = false;
     this.#comparedAtSize = undefined;
@@ -1196,6 +1304,13 @@ export class HtmlMirrorSourceSession {
           this.#signalShadowReconciliation();
           return;
         }
+        this.#scheduleFlush();
+        return;
+      }
+      // Changes held while the panel was a full window of batches behind
+      // go out now (D164).
+      if (this.#heldForAck) {
+        this.#releaseAckHold();
         this.#scheduleFlush();
       }
       return;
@@ -1362,6 +1477,11 @@ export class HtmlMirrorSourceSession {
       held: new Set(),
     };
     this.#checkpointRead = read;
+    // A recovery or a fresh start: nothing waits for an older ACK (D164).
+    this.#releaseAckHold();
+    // The copy compares the whole page anew: a comparison running on the
+    // index it replaces is of no use (D164).
+    this.#cancelComparison();
     // Whatever was owed is read with the page. What is met from here on in
     // what was read already is kept for the copy that is sent.
     this.#lateShadowRoots = [];
@@ -2050,6 +2170,7 @@ export class HtmlMirrorSourceSession {
       adoptedStyleSignature(checkpoint.payload.adoptedStyleSheets),
     );
     this.#ordinaryStyleSignatures.reset();
+    this.#cancelComparison();
     this.#visibilityBoundaryIndex?.dispose();
     this.#visibilityBoundaryIndex = index;
     // The index has just compared the whole page. The resize observer can
@@ -2092,6 +2213,7 @@ export class HtmlMirrorSourceSession {
     this.#heldChanged = new Set(read.held);
     this.#heldLook = { every: 1, in: 1 };
     this.#checkpointRead = undefined;
+    this.#releaseAckHold();
     this.#post(checkpoint);
     // A pane scrolled before this mirror was built fires no event: the
     // scrolled ones were met while the page was sent, so the first report
@@ -2188,9 +2310,19 @@ export class HtmlMirrorSourceSession {
     if (records.length === 0) return;
     let accepted = false;
     let visibilityQueued = false;
+    // A `<style>` or `<link>` that changed: its owner's names are read
+    // again before they are believed (D164).
+    for (const record of records) this.#forgetStyleNamesOf(record);
+    // A change of an attribute no style sheet of the page names, and that
+    // has no effect of its own on what is painted, is sent and not compared
+    // (D164); the names are looked up once for the batch.
+    let names: SourceStyleNames | undefined | null = null;
+    const mentionedNames = (): SourceStyleNames | undefined =>
+      names === null ? (names = this.#mentionedStyleNames()) : names;
     const visibilityRecords = this.#visibilityBoundaryIndex
       ? records.filter((record) =>
-          belongsToSourceDocument(record.target, this.environment.document)
+          belongsToSourceDocument(record.target, this.environment.document) &&
+          !sourceVisibilityMutationMaySkip(record, mentionedNames)
         )
       : [];
     if (this.#visibilityBoundaryIndex && visibilityRecords.length > 0) {
@@ -2355,6 +2487,34 @@ export class HtmlMirrorSourceSession {
     this.#scheduleFlush();
   }
 
+  /**
+   * Holds what changed for the panel's ACK (D164). The first hold sets a
+   * timer: a panel that has not answered when it fires gets the overflow
+   * it got before D164, and asks for a fresh copy.
+   */
+  #holdForAck(): void {
+    if (this.#heldForAck) return;
+    this.#heldForAck = true;
+    this.#ackHoldTimer = this.environment.setTimer(() => {
+      this.#ackHoldTimer = undefined;
+      if (this.#disposed || !this.#heldForAck || !this.#identity) return;
+      this.#heldForAck = false;
+      this.#paused = true;
+      this.#post(createHtmlMirrorError(
+        this.#identityAt(this.#sequence),
+        'stream_overflow',
+      ));
+    }, ACK_HOLD_LIMIT_MS);
+  }
+
+  /** An ACK, a checkpoint or the end of the session ends the hold. */
+  #releaseAckHold(): void {
+    this.#heldForAck = false;
+    if (this.#ackHoldTimer === undefined) return;
+    this.environment.clearTimer(this.#ackHoldTimer);
+    this.#ackHoldTimer = undefined;
+  }
+
   #flush(): void {
     const fidelityPolicy = this.#fidelityPolicy;
     if (
@@ -2364,11 +2524,15 @@ export class HtmlMirrorSourceSession {
       this.#sequence - this.#acknowledged >=
       MAX_HTML_MIRROR_UNACKED_BATCHES
     ) {
-      this.#paused = true;
-      this.#post(createHtmlMirrorError(
-        this.#identityAt(this.#sequence),
-        'stream_overflow',
-      ));
+      // The panel is a full window of batches behind. What changed stays
+      // pending (a change of the same node joins it) and goes out with the
+      // next ACK. Before D164 this was an overflow and a fresh copy: once
+      // the comparison no longer took a few hundred milliseconds of every
+      // frame, a page changing every frame outran a panel that applies a
+      // patch to a mirror of 54,000 elements in 160-180 ms. A panel that
+      // stops answering still ends in the pending targets' overflow, or,
+      // when nothing more changes, in the overflow of a hold no ACK ends.
+      this.#holdForAck();
       return;
     }
     // Something happened on the page: the periodic look is half a second off.
@@ -2439,31 +2603,7 @@ export class HtmlMirrorSourceSession {
       if (this.#paused || this.#shadowReconciliationPending) return;
     }
     if (this.#visibilityBoundaryIndex) {
-      const mutationRecords = this.#visibilityMutationRecords;
-      const requiresFullRefresh = this.#visibilityFullRefreshPending ||
-        this.#visibilityMutationOverflow ||
-        this.#visibilityInteractionTargets.size > 0;
-      // Either of the first two compares the whole page, the elements whose
-      // held values changed with it.
-      const visibilityRefresh = requiresFullRefresh
-        ? this.#visibilityBoundaryIndex.refreshAll()
-        : mutationRecords.length > 0
-          ? this.#visibilityBoundaryIndex.refreshMutations(mutationRecords)
-          : this.#visibilityBoundaryIndex.refreshWithin(
-              [...this.#heldAnimationTargets],
-            );
-      this.#visibilityMutationRecords = [];
-      this.#visibilityMutationOverflow = false;
-      this.#visibilityFullRefreshPending = false;
-      this.#visibilityInteractionTargets.clear();
-      this.#heldAnimationTargets.clear();
-      this.#noteComparedSize();
-      // Chrome gives a pane that is shown again its old scroll offset, with
-      // no scroll event.
-      for (
-        const element of this.#visibilityBoundaryIndex.takeShownElements()
-      ) this.#meetPane(element);
-      this.#applyVisibilityBoundaryRefresh(visibilityRefresh);
+      this.#compareWhatIsPainted(this.#visibilityBoundaryIndex);
       if (this.#paused || this.#shadowReconciliationPending) return;
     }
     if (this.#styleDerivedPending) {
@@ -2492,6 +2632,269 @@ export class HtmlMirrorSourceSession {
     // where they were (D122).
     this.#takeMetPanes();
     if (this.#scrolledPanes.size > 0) this.#postScroll(true);
+  }
+
+  /**
+   * Compares what the page paints, as the flush asks (D164). A comparison
+   * that fits one slice runs, and is applied, in this flush, with no await
+   * on the way, as before. A longer one goes on in slices with a turn for
+   * the page between them; later flushes read and send the page's changes
+   * meanwhile and start no second comparison, and its end applies it and
+   * asks for a flush. The requests are taken when it starts: one that comes
+   * while it runs is kept for the next. With the semantic scan it keeps to
+   * a fifth of the tab's time, and waits for it.
+   */
+  #compareWhatIsPainted(index: SourceVisibilityBoundaryIndex): void {
+    // Running: its end applies it, and what asked since waits.
+    if (this.#comparisonRun) return;
+    const mutationRecords = this.#visibilityMutationRecords;
+    const requiresFullRefresh = this.#visibilityFullRefreshPending ||
+      this.#visibilityMutationOverflow ||
+      this.#visibilityInteractionTargets.size > 0;
+    if (!requiresFullRefresh && mutationRecords.length === 0) {
+      // Only what script animations hold changed: compared within the
+      // elements that hold it, in this task (a part, not the page).
+      const refresh = index.refreshWithin([...this.#heldAnimationTargets]);
+      this.#heldAnimationTargets.clear();
+      this.#applyComparison(index, refresh);
+      return;
+    }
+    if (this.#waitForComparisonShare(this.#userInputPending)) return;
+    this.#userInputPending = false;
+    this.#visibilityMutationRecords = [];
+    this.#visibilityMutationOverflow = false;
+    this.#visibilityFullRefreshPending = false;
+    this.#visibilityInteractionTargets.clear();
+    // Either of the first two compares the whole page, the elements whose
+    // held values changed with it.
+    this.#heldAnimationTargets.clear();
+    const comparison = requiresFullRefresh
+      ? index.beginRefreshAll()
+      : index.beginRefreshMutations(mutationRecords);
+    const now = this.environment.now;
+    const clock = createSliceClock({
+      now,
+      yield: this.environment.yieldToMain ?? yieldToMain,
+      budgetMs: LIVE_SLICE_BUDGET_MS,
+    });
+    let looks = 0;
+    const run: ComparisonRun = {
+      generation: (this.#comparisonGeneration += 1),
+      index,
+      comparison,
+      clock,
+      expired: () =>
+        (looks += 1) % COMPARISON_CLOCK_EVERY === 0 && clock.expired(),
+      busyMs: 0,
+      yielded: false,
+      sizeAtStart: undefined,
+    };
+    this.#comparisonRun = run;
+    // The semantic scan does not start while the comparison runs (D164).
+    this.environment.passShare?.begin(this);
+    this.#continueComparison(run, true);
+  }
+
+  /**
+   * Runs a slice of the comparison in this task (D164). Each slice touches
+   * the comparison's hold on the page: a long one keeps it.
+   */
+  #continueComparison(run: ComparisonRun, inFlush: boolean): void {
+    const now = this.environment.now;
+    this.environment.passShare?.touch(this);
+    const startedAt = now();
+    let refresh: SourceVisibilityBoundaryRefresh | undefined;
+    try {
+      refresh = run.comparison.step(run.expired);
+    } catch (error) {
+      run.busyMs += now() - startedAt;
+      if (this.#comparisonRun === run) {
+        this.#comparisonRun = undefined;
+        this.#endPassShare(run.busyMs);
+      }
+      throw error;
+    }
+    run.busyMs += now() - startedAt;
+    if (!this.#comparisonIsCurrent(run)) return;
+    if (!refresh) {
+      if (!run.yielded) {
+        run.yielded = true;
+        // Nothing of the page changed in this task: its size is the size
+        // the comparison began at.
+        if (run.comparison.whole) run.sizeAtStart = this.#readObservedSize();
+      }
+      void this.#continueComparisonAfterTurn(run);
+      return;
+    }
+    this.#finishComparison(run, refresh, inFlush);
+  }
+
+  async #continueComparisonAfterTurn(run: ComparisonRun): Promise<void> {
+    try {
+      await run.clock.next();
+    } catch {
+      // A turn that cannot be given: the comparison goes on now.
+    }
+    if (!this.#comparisonIsCurrent(run)) return;
+    if (this.#paused) {
+      // The stream stopped for a recovery, which reads the page whole.
+      this.#cancelComparison();
+      this.#visibilityFullRefreshPending = true;
+      return;
+    }
+    // A slice opens its own walk of the roots, as a flush does.
+    const rootWalk = beginSourceShadowRootWalk();
+    const secretWalk = beginSourceSecretAncestorWalk();
+    try {
+      this.#continueComparison(run, false);
+    } catch {
+      // What cannot be compared is read whole.
+      if (!this.#disposed && this.#identity && !this.#paused) {
+        this.#applyVisibilityBoundaryRefresh({
+          changedTargets: [],
+          overflow: true,
+        });
+      }
+    } finally {
+      secretWalk.end();
+      rootWalk.end();
+    }
+  }
+
+  #comparisonIsCurrent(run: ComparisonRun): boolean {
+    return !this.#disposed && this.#comparisonRun === run &&
+      run.generation === this.#comparisonGeneration &&
+      this.#visibilityBoundaryIndex === run.index;
+  }
+
+  /**
+   * The comparison ended: its busy time goes to the share, what it found
+   * is queued, and, when it ended after turns, a flush sends it. A
+   * comparison of the whole page in slices notes the size it ended at and
+   * asks for another when that is not the size it began at (D163's rule);
+   * one in a single task notes the size as before.
+   */
+  #finishComparison(
+    run: ComparisonRun,
+    refresh: SourceVisibilityBoundaryRefresh,
+    inFlush: boolean,
+  ): void {
+    this.#comparisonRun = undefined;
+    this.environment.passShare?.note(run.busyMs, this);
+    if (run.yielded && run.comparison.whole) {
+      this.#wholeComparisonsSeen = run.index.wholeComparisons;
+      this.#comparedAtSize = this.#readObservedSize();
+      if (this.#comparedAtSize !== run.sizeAtStart) {
+        this.#visibilityFullRefreshPending = true;
+      }
+      this.#applyComparison(run.index, refresh, false);
+    } else {
+      this.#applyComparison(run.index, refresh);
+    }
+    if (!inFlush) this.#scheduleFlush(true);
+  }
+
+  #applyComparison(
+    index: SourceVisibilityBoundaryIndex,
+    refresh: SourceVisibilityBoundaryRefresh,
+    noteSize = true,
+  ): void {
+    if (noteSize) this.#noteComparedSize();
+    // Chrome gives a pane that is shown again its old scroll offset, with
+    // no scroll event.
+    for (const element of index.takeShownElements()) this.#meetPane(element);
+    this.#applyVisibilityBoundaryRefresh(refresh);
+  }
+
+  #cancelComparison(): void {
+    const run = this.#comparisonRun;
+    if (!run) return;
+    this.#comparisonRun = undefined;
+    this.#comparisonGeneration += 1;
+    this.#endPassShare(run.busyMs);
+    run.comparison.cancel();
+  }
+
+  /**
+   * A comparison ended before its end (cancelled, or failed): the work it
+   * did goes to the share all the same, so a page that keeps cancelling
+   * comparisons still waits for its rest (D164). One that did none frees
+   * the page with no rest.
+   */
+  #endPassShare(busyMs: number): void {
+    const share = this.environment.passShare;
+    if (!share) return;
+    if (busyMs > 0) share.note(busyMs, this);
+    else share.release(this);
+  }
+
+  /**
+   * Whether the comparison must wait for its share of the tab's time
+   * (D164); if so, a timer asks for a flush when the wait is over, and the
+   * requests stay as they are.
+   */
+  #waitForComparisonShare(userInput: boolean): boolean {
+    const share = this.environment.passShare;
+    if (!share) return false;
+    // A person's input waits only for a pass that holds the page.
+    const wait = share.waitMs(this, userInput);
+    if (!(wait > 0)) return false;
+    if (this.#comparisonShareTimer === undefined) {
+      this.#comparisonShareTimer = this.environment.setTimer(() => {
+        this.#comparisonShareTimer = undefined;
+        this.#scheduleFlush(true);
+      }, wait);
+    }
+    return true;
+  }
+
+  /**
+   * Drops the names of an owner of sheets when the record's target is a
+   * `<style>` or `<link>` (or text inside a `<style>`), or one was added or
+   * removed (D164). That is all it sees: a sheet changed any other way (a
+   * rule inserted, a sheet adopted or disabled) is found by `stillAsRead`,
+   * whose look at the sheets and their rule counts turns the skip off
+   * until the poll reads the names again.
+   */
+  #forgetStyleNamesOf(record: MutationRecord): void {
+    const isSheetOwner = (node: Node | null | undefined): boolean => {
+      if (!node || node.nodeType !== 1) return false;
+      const tag = String((node as Element).localName).toLowerCase();
+      return tag === 'style' || tag === 'link';
+    };
+    let owner: Node | null | undefined;
+    if (record.type === 'characterData') {
+      if (isSheetOwner(record.target.parentNode)) owner = record.target;
+    } else if (isSheetOwner(record.target)) {
+      owner = record.target;
+    } else if (record.type === 'childList') {
+      for (const list of [record.addedNodes, record.removedNodes]) {
+        for (const node of list) {
+          if (isSheetOwner(node)) owner = record.target;
+        }
+      }
+    }
+    if (!owner) return;
+    try {
+      this.#styleNames.forget(owner.getRootNode());
+    } catch {
+      this.#styleNames.reset();
+    }
+  }
+
+  /**
+   * What the page's style sheets mention (D164), or undefined when every
+   * name counts: some owner of sheets is not read whole yet, a sheet is
+   * not as it was read, or the mirror does not know every root.
+   */
+  #mentionedStyleNames(): SourceStyleNames | undefined {
+    if (
+      this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS ||
+      this.#lateShadowRoots.length > 0 || this.#shadowReconciliationPending
+    ) return undefined;
+    const owners = this.#styleOwners();
+    if (!owners.includes(this.environment.document)) return undefined;
+    return this.#styleNames.names(owners);
   }
 
   /**
@@ -2989,7 +3392,7 @@ export class HtmlMirrorSourceSession {
       // A root found while the patch was read: the replica lacks it.
       if (this.#takeLateShadowRoots()) return undefined;
       if (operations.length === 0) {
-        this.#clearPending();
+        this.#clearPending(false);
         return undefined;
       }
       // Every patch of a frame carries the sequence of the frame's message.
@@ -3036,7 +3439,7 @@ export class HtmlMirrorSourceSession {
           }
         }
       }
-      this.#clearPending();
+      this.#clearPending(false);
       if (emittedDimensions) this.#lastDimensions = emittedDimensions;
       return batch;
     } catch (error) {
@@ -3105,7 +3508,12 @@ export class HtmlMirrorSourceSession {
     }
   }
 
-  #clearPending(): void {
+  /**
+   * `comparison` false: a patch was read. What asks for a comparison is
+   * kept, since a comparison running in slices meanwhile did not see it
+   * (D164); everything else that clears what is pending ends that one too.
+   */
+  #clearPending(comparison = true): void {
     this.#pendingChildren.clear();
     this.#pendingAttributes.clear();
     this.#pendingText.clear();
@@ -3115,9 +3523,12 @@ export class HtmlMirrorSourceSession {
     this.#pendingDimensions = false;
     this.#styleDerivedPending = false;
     this.#controlledLayoutSettlePending = false;
+    if (!comparison) return;
+    this.#cancelComparison();
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
+    this.#userInputPending = false;
     this.#visibilityFullRefreshPending = false;
   }
 
@@ -3194,7 +3605,12 @@ export class HtmlMirrorSourceSession {
       this.#layoutChanged(false);
       return;
     }
-    const compared = this.#comparedAtSize;
+    // While the whole page is compared in slices, the size it began at is
+    // the size compared at (D164).
+    const run = this.#comparisonRun;
+    const compared = run?.yielded && run.comparison.whole
+      ? run.sizeAtStart
+      : this.#comparedAtSize;
     this.#layoutChanged(
       compared === undefined || this.#readObservedSize() !== compared,
     );
@@ -3630,7 +4046,19 @@ export class HtmlMirrorSourceSession {
       (target as Node).nodeType !== 1 ||
       (!this.#visibilityBoundaryIndex && !this.#checkpointRead)
     ) return;
+    // A pointer, focus or key event no style sheet of the page reacts to
+    // changes nothing painted: not compared (D164). A click, an input or a
+    // toggle always is.
+    if (
+      !this.#checkpointRead &&
+      sourceVisibilityEventMaySkip(event.type, () => this.#mentionedStyleNames())
+    ) {
+      // As a flush would: the page is in use, its animations looked at soon.
+      this.#heldLook = { every: 1, in: 1 };
+      return;
+    }
     this.#visibilityInteractionTargets.add(target as Element);
+    if (USER_INPUT_EVENTS.has(event.type)) this.#userInputPending = true;
     this.#scheduleFlush();
   };
 
@@ -4478,6 +4906,7 @@ export class HtmlMirrorSourceSession {
     );
     if (!styles) return work.exhausted ? 'capacity' : 'unchanged';
     const signature = adoptedStyleSignature(styles);
+    this.#styleNames.noteAdopted(owner, signature);
     return this.#adoptedStyleSignatures.observe(owner, signature)
       ? 'changed'
       : 'unchanged';
@@ -4492,8 +4921,15 @@ export class HtmlMirrorSourceSession {
     owner: Document | ShadowRoot,
     work: HtmlMirrorStyleWorkBudget,
   ): StylePollResult {
-    const read = ordinaryStyleSignature(owner, work, budgetUnused(work));
+    const collection = createSourceStyleSheetCollection();
+    const read = ordinaryStyleSignature(
+      owner,
+      work,
+      budgetUnused(work),
+      collection,
+    );
     if (read.kind === 'capacity') return 'capacity';
+    this.#styleNames.noteOrdinary(owner, read.signature, collection);
     const signature = read.signature;
     if (signature === undefined) return 'unchanged';
     // The first look at an owner is what the mirror holds of it.
@@ -4554,7 +4990,16 @@ export class HtmlMirrorSourceSession {
       const index = (this.#stylePollingCursor + offset) % owners.length;
       const owner = owners[index]!;
       processed += 1;
-      const read = ordinaryStyleSignature(owner, work, budgetUnused(work));
+      const collection = createSourceStyleSheetCollection();
+      const read = ordinaryStyleSignature(
+        owner,
+        work,
+        budgetUnused(work),
+        collection,
+      );
+      if (read.kind === 'signature') {
+        this.#styleNames.noteOrdinary(owner, read.signature, collection);
+      }
       if (read.kind === 'signature' && read.signature !== undefined) {
         this.#ordinaryStyleSignatures.prime(owner, read.signature);
         this.#ordinaryStyleSheets.set(owner, read.sheets ?? []);
@@ -4919,6 +5364,7 @@ function ordinaryStyleSignature(
   owner: Document | ShadowRoot,
   work: HtmlMirrorStyleWorkBudget,
   shapeOnOverflow = false,
+  collection?: SourceStyleSheetCollection,
 ): OrdinaryStyleSignatureRead {
   let sheets: ArrayLike<CSSStyleSheet>;
   try {
@@ -4957,9 +5403,17 @@ function ordinaryStyleSignature(
     } catch {
       parts.push(`${index}:unreadable`);
       read.push(Object.freeze({ owner, signature: 'unreadable' }));
+      if (collection) collection.complete = false;
       continue;
     }
-    const rules = cssomRuleSignature(sheet, work, visited, 0, shapeOnOverflow);
+    const rules = cssomRuleSignature(
+      sheet,
+      work,
+      visited,
+      0,
+      shapeOnOverflow,
+      collection,
+    );
     if (rules.kind === 'capacity') return rules;
     const state = `${disabled ? 1 : 0}:${media}:${rules.signature}`;
     parts.push(`${index}:${state}`);
@@ -4978,43 +5432,58 @@ function cssomRuleSignature(
   visited: Set<object>,
   depth: number,
   shapeOnOverflow: boolean,
+  collection?: SourceStyleSheetCollection,
 ): OrdinaryStyleSignatureRead {
   if (depth > 8 || visited.has(sheet)) {
+    // Imported deeper than this: not read, so not every name is known.
+    if (depth > 8 && collection) collection.complete = false;
     return Object.freeze({ kind: 'signature', signature: 'cycle' });
   }
   visited.add(sheet);
+  // A sheet watched by its shape, or one that cannot be read, leaves the
+  // names the page mentions unknown (D164).
+  const incomplete = (
+    read: OrdinaryStyleSignatureRead,
+  ): OrdinaryStyleSignatureRead => {
+    if (collection) collection.complete = false;
+    return read;
+  };
   try {
     const rules = sheet.cssRules;
     const ruleCount = rules.length;
     if (
       !Number.isSafeInteger(ruleCount) ||
       ruleCount < 0
-    ) return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+    ) return incomplete(Object.freeze({ kind: 'signature', signature: 'unreadable' }));
     if (
       ruleCount > MAX_FULL_SIGNATURE_RULES_PER_SHEET ||
       SHAPE_SIGNATURE_SHEETS.has(sheet)
     ) {
       SHAPE_SIGNATURE_SHEETS.add(sheet);
-      return cssomShapeSignature(rules, ruleCount, work, shapeOnOverflow);
+      return incomplete(
+        cssomShapeSignature(rules, ruleCount, work, shapeOnOverflow),
+      );
     }
     if (work.rules + ruleCount > work.maxRules) {
       if (shapeOnOverflow) {
         SHAPE_SIGNATURE_SHEETS.add(sheet);
-        return cssomShapeSignature(rules, ruleCount, work, true);
+        return incomplete(cssomShapeSignature(rules, ruleCount, work, true));
       }
       work.exhausted = true;
       return Object.freeze({ kind: 'capacity' });
     }
+    collection?.ruleCounts.push([sheet, ruleCount]);
     const startRules = work.rules;
     const startCharacters = work.characters;
     const parts: string[] = [];
     for (let index = 0; index < ruleCount; index += 1) {
       const rule = rules[index] ?? rules.item(index);
       if (!rule || typeof rule.cssText !== 'string') {
-        return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+        return incomplete(Object.freeze({ kind: 'signature', signature: 'unreadable' }));
       }
+      const cssText = rule.cssText;
       if (
-        work.characters - startCharacters + rule.cssText.length >
+        work.characters - startCharacters + cssText.length >
           MAX_FULL_SIGNATURE_CHARACTERS_PER_SHEET
       ) {
         // Too large to reread each pass: watch its shape from now on, and
@@ -5022,25 +5491,28 @@ function cssomRuleSignature(
         SHAPE_SIGNATURE_SHEETS.add(sheet);
         work.rules = startRules;
         work.characters = startCharacters;
-        return cssomShapeSignature(rules, ruleCount, work, shapeOnOverflow);
+        return incomplete(
+          cssomShapeSignature(rules, ruleCount, work, shapeOnOverflow),
+        );
       }
-      if (work.characters + rule.cssText.length > work.maxCharacters) {
+      if (work.characters + cssText.length > work.maxCharacters) {
         if (shapeOnOverflow) {
           SHAPE_SIGNATURE_SHEETS.add(sheet);
           work.rules = startRules;
           work.characters = startCharacters;
-          return cssomShapeSignature(rules, ruleCount, work, true);
+          return incomplete(cssomShapeSignature(rules, ruleCount, work, true));
         }
         work.exhausted = true;
         return Object.freeze({ kind: 'capacity' });
       }
       work.rules += 1;
-      work.characters += rule.cssText.length;
+      work.characters += cssText.length;
+      collection?.texts.push(cssText);
       const imported = (rule as CSSRule & {
         readonly styleSheet?: CSSStyleSheet | null;
       }).styleSheet;
       if (!imported) {
-        parts.push(rule.cssText);
+        parts.push(cssText);
         continue;
       }
       const nested = cssomRuleSignature(
@@ -5049,16 +5521,17 @@ function cssomRuleSignature(
         visited,
         depth + 1,
         shapeOnOverflow,
+        collection,
       );
       if (nested.kind === 'capacity') return nested;
-      parts.push(`${rule.cssText}:${nested.signature ?? 'unavailable'}`);
+      parts.push(`${cssText}:${nested.signature ?? 'unavailable'}`);
     }
     return Object.freeze({
       kind: 'signature',
       signature: adoptedStyleSignature(parts),
     });
   } catch {
-    return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+    return incomplete(Object.freeze({ kind: 'signature', signature: 'unreadable' }));
   } finally {
     visited.delete(sheet);
   }

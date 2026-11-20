@@ -78,6 +78,13 @@ export function yieldToMain(): Promise<void> {
 export const DEFAULT_SLICE_BUDGET_MS = 35;
 
 /**
+ * A slice of the live whole-page passes (D164): less than the first read's,
+ * so that a slice that runs over by a unit and a garbage collection inside
+ * it still ends under 50 ms.
+ */
+export const LIVE_SLICE_BUDGET_MS = 30;
+
+/**
  * Times the slices of one long piece of page-side work (D163). The work asks
  * `expired()` between its units and, when it says so, awaits `next()`, which
  * gives the browser a turn and starts the next slice's budget. A slice that
@@ -121,6 +128,116 @@ export function createSliceClock(options: SliceClockOptions = {}): SliceClock {
       yields += 1;
       await yieldOnce();
       started = now();
+    },
+  };
+}
+
+/**
+ * The whole-page passes of the live mirror (the semantic scan and the
+ * comparison of what the page paints) together take at most one fifth of
+ * the tab's time (D164): after a pass that kept the tab busy for `t`, the
+ * next waits `4 t`, as `LISTING_SHARE` does for animations.
+ */
+export const LIVE_PASS_SHARE = 5;
+
+/**
+ * When the next live whole-page pass may start (D164). One ledger serves
+ * both passes of a page: each notes its busy time (the work of its slices,
+ * not the time it waited between them) when it ends, and asks before it
+ * starts. A pass asked to wait sets a timer for `waitMs()` and asks again.
+ * One pass runs at a time: a pass that has begun holds the page until it
+ * notes its end or is released, so two first slices never share a task. A
+ * pass touches its hold at the start of every slice: a long pass, turns
+ * and all, keeps it, and only a hold nobody touches runs out.
+ */
+export interface PassShareLedger {
+  /** The earliest time, on the ledger's clock, the next pass may start. */
+  readonly notBefore: number;
+  /**
+   * How long a pass that wants to start now waits: 0 when it may run at
+   * once. While another pass holds the page, a short wait to ask again.
+   * `ignoreShare` waits only for a pass that holds the page (the first scan
+   * after start).
+   */
+  waitMs(owner?: object, ignoreShare?: boolean): number;
+  /** A pass of `owner` begins: it holds the page until `note` or `release`. */
+  begin(owner: object): void;
+  /**
+   * A slice of `owner`'s pass starts: its hold, if it still holds the page,
+   * counts from now. Nothing for an owner that does not hold it.
+   */
+  touch(owner: object): void;
+  /**
+   * Notes a pass that kept the tab busy for `busyMs` and has just ended,
+   * or was cancelled after it had done work: a page that keeps cancelling
+   * its passes still pays for what they did.
+   */
+  note(busyMs: number, owner?: object): void;
+  /**
+   * A pass of `owner` ended without a share to note: cancelled before it
+   * did any work, or with its busy time unknown.
+   */
+  release(owner: object): void;
+}
+
+export interface PassShareLedgerOptions {
+  /** `performance.now` by default; tests pass a clock they move. */
+  readonly now?: () => number;
+  /** One pass in this many of the tab's time: `LIVE_PASS_SHARE` by default. */
+  readonly share?: number;
+}
+
+/** How soon a pass that found the page held asks again, in milliseconds (D164). */
+export const PASS_HELD_RECHECK_MS = 50;
+
+/**
+ * A hold not touched for longer than this is taken to be lost (a path that
+ * forgot to release it) and no longer holds the page (D164). A pass touches
+ * it at every slice, so a pass that runs longer, turns and all, keeps it.
+ */
+export const PASS_HOLD_LIMIT_MS = 10_000;
+
+export function createPassShareLedger(
+  options: PassShareLedgerOptions = {},
+): PassShareLedger {
+  const now = options.now ?? (() => globalThis.performance.now());
+  const rest = Math.max(0, (options.share ?? LIVE_PASS_SHARE) - 1);
+  let notBefore = Number.NEGATIVE_INFINITY;
+  let holder: object | undefined;
+  let heldSince = 0;
+  const heldByOther = (owner: object | undefined): boolean => {
+    if (!holder || holder === owner) return false;
+    if (now() - heldSince > PASS_HOLD_LIMIT_MS) {
+      holder = undefined;
+      return false;
+    }
+    return true;
+  };
+  return {
+    get notBefore() {
+      return notBefore;
+    },
+    waitMs: (owner, ignoreShare = false) => {
+      if (heldByOther(owner)) return PASS_HELD_RECHECK_MS;
+      return ignoreShare ? 0 : Math.max(0, notBefore - now());
+    },
+    begin: (owner) => {
+      holder = owner;
+      heldSince = now();
+    },
+    touch: (owner) => {
+      if (holder === owner) heldSince = now();
+    },
+    note: (busyMs, owner) => {
+      if (owner !== undefined && holder === owner) holder = undefined;
+      if (!Number.isFinite(busyMs) || busyMs <= 0) return;
+      // A pass that ended before the last one's rest was over ran beside it
+      // (the other pass, or the first scan, which does not wait): its rest
+      // comes on top, so two passes at once still keep to the share.
+      notBefore = Math.max(notBefore, now()) + rest * busyMs;
+    },
+    release: (owner) => {
+      if (holder === owner) holder = undefined;
     },
   };
 }

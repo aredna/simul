@@ -36,12 +36,63 @@ export interface SourceVisibilityBoundaryIndexBuild {
   finish(): SourceVisibilityBoundaryIndex;
 }
 
+/**
+ * A comparison of what the page paints that can run in slices (D164): each
+ * `step` compares until `expired()` says the slice has done its share, with
+ * a paint memo of its own, and returns the result in the step that ends it.
+ * What it read is put in place of what the index held only then; a
+ * comparison cancelled, or begun anew, leaves the index as it was.
+ */
+export interface SourceVisibilityComparison {
+  /** Whether it compares the whole page (counted when it ends). */
+  readonly whole: boolean;
+  /**
+   * Compares on in this task. `expired` is asked between elements, never
+   * before the first of a step, so each step makes progress. Undefined
+   * while there is more to compare, or once cancelled.
+   */
+  step(expired: () => boolean): SourceVisibilityBoundaryRefresh | undefined;
+  cancel(): void;
+}
+
 interface SourceVisibilityScanOptions {
   readonly includeSelf?: boolean;
   readonly stopAt?: ReadonlySet<Element>;
   /** Elements inspected before this scan, by the same bound. */
   readonly inspected?: number;
 }
+
+/**
+ * What a walk asks of the slice it runs in (D164). A walk in one task has a
+ * slice that never runs out and is never given a turn.
+ */
+interface SourceVisibilityWalkContext {
+  /** Fresh at every slice: nothing one slice read is believed in the next. */
+  paintCache: SourcePaintScanCache;
+  /** The slice has done its share: the walk gives the page a turn. */
+  expired: () => boolean;
+  /** The walk has had a turn: what it still holds may have left the page. */
+  yielded: boolean;
+}
+
+interface SourceVisibilityWalkResult {
+  /** Not yet narrowed to the outermost ones. */
+  readonly changedTargets: Element[];
+  readonly overflow: boolean;
+  readonly inspected: number;
+}
+
+/** A comparison in slices that has not ended (D164). */
+interface SourceVisibilityRunState {
+  readonly previous: ReadonlyMap<Element, SourceVisibilityState>;
+  /** What this comparison read; in place of `previous` once it ends. */
+  readonly next: Map<Element, SourceVisibilityState>;
+  readonly shown: Element[];
+  readonly context: SourceVisibilityWalkContext;
+  cancelled: boolean;
+}
+
+const NEVER_EXPIRED = (): boolean => false;
 
 /**
  * Content-free index of the visibility floor used by both source mirrors.
@@ -55,6 +106,8 @@ export class SourceVisibilityBoundaryIndex {
   /** Elements seen to get a box since `takeShownElements` last asked. */
   #shown: Element[] = [];
   #wholeComparisons = 0;
+  /** The comparison in slices that has not ended, if any (D164). */
+  #run: SourceVisibilityRunState | undefined;
 
   constructor(
     private readonly document: Document,
@@ -111,7 +164,7 @@ export class SourceVisibilityBoundaryIndex {
   }
 
   refreshAll(): SourceVisibilityBoundaryRefresh {
-    return this.#refreshAll(createSourcePaintScanCache());
+    return this.beginRefreshAll().step(NEVER_EXPIRED)!;
   }
 
   /**
@@ -123,30 +176,28 @@ export class SourceVisibilityBoundaryIndex {
     return this.#wholeComparisons;
   }
 
-  #refreshAll(
-    paintCache: SourcePaintScanCache,
-  ): SourceVisibilityBoundaryRefresh {
-    // What was read last is compared with and then let go of; it was
-    // copied, entry by entry, and each element of the copy then asked
-    // whether it was still in the page, to no end.
-    this.#wholeComparisons += 1;
-    const previous = this.#states;
-    this.#states = new Map();
-    const result = this.#scanRoots(
-      this.document.documentElement ? [this.document.documentElement] : [],
-      previous,
-      paintCache,
-    );
-    this.#complete = !result.overflow;
-    return Object.freeze({
-      changedTargets: result.changedTargets,
-      overflow: result.overflow,
-    });
+  /**
+   * The comparison of every element of the page, to run in slices (D164).
+   * What was read last is compared with and then let go of; it was copied,
+   * entry by entry, and each element of the copy then asked whether it was
+   * still in the page, to no end. A comparison begun before and not ended
+   * is cancelled.
+   */
+  beginRefreshAll(): SourceVisibilityComparison {
+    return this.#beginWholeComparison(false);
   }
 
   refreshMutations(
     records: readonly MutationRecord[],
   ): SourceVisibilityBoundaryRefresh {
+    return this.beginRefreshMutations(records).step(NEVER_EXPIRED)!;
+  }
+
+  /** `refreshMutations`, to run in slices (D164). */
+  beginRefreshMutations(
+    records: readonly MutationRecord[],
+  ): SourceVisibilityComparison {
+    this.#cancelRun();
     let global = false;
     let imageSelectorSurface = false;
     for (const record of records) {
@@ -177,23 +228,136 @@ export class SourceVisibilityBoundaryIndex {
       // index so a local marker can reveal a remote text subtree.
       global = true;
     }
-    if (global) {
-      const paintCache = createSourcePaintScanCache();
-      const result = this.#refreshAll(paintCache);
-      if (
-        !imageSelectorSurface || result.overflow ||
-        this.#documentPaintInputsAreReadable(paintCache)
-      ) return result;
-      return Object.freeze({
-        changedTargets: result.changedTargets,
-        overflow: true,
-      });
-    }
+    if (global) return this.#beginWholeComparison(imageSelectorSurface);
     // A batch that names no element (a stand-in's attribute record on a text
     // node) compares nothing: every real record makes the comparison global.
-    return Object.freeze({
-      changedTargets: Object.freeze([]),
+    const nothing = Object.freeze({
+      changedTargets: Object.freeze([]) as readonly Element[],
       overflow: !this.#complete,
+    });
+    return Object.freeze({
+      whole: false,
+      step: () => nothing,
+      cancel: () => undefined,
+    });
+  }
+
+  #beginWholeComparison(
+    imageSelectorSurface: boolean,
+  ): SourceVisibilityComparison {
+    this.#cancelRun();
+    const run: SourceVisibilityRunState = {
+      previous: this.#states,
+      next: new Map(),
+      shown: [],
+      context: {
+        paintCache: createSourcePaintScanCache(),
+        expired: NEVER_EXPIRED,
+        yielded: false,
+      },
+      cancelled: false,
+    };
+    this.#run = run;
+    const steps = this.#compareWhole(run, imageSelectorSurface);
+    let result: SourceVisibilityBoundaryRefresh | undefined;
+    return Object.freeze({
+      whole: true,
+      step: (expired: () => boolean) => {
+        if (result) return result;
+        if (run.cancelled) return undefined;
+        // Each slice reads with a memo of its own, and does at least one
+        // element before it asks whether its share is done.
+        let units = 0;
+        run.context.paintCache = createSourcePaintScanCache();
+        run.context.expired = () => units++ > 0 && expired();
+        let next: IteratorResult<void, SourceVisibilityBoundaryRefresh>;
+        try {
+          next = steps.next();
+        } catch (error) {
+          this.#cancel(run);
+          throw error;
+        }
+        if (next.done) {
+          result = next.value;
+          return result;
+        }
+        run.context.yielded = true;
+        return undefined;
+      },
+      cancel: () => {
+        if (run.cancelled || result) return;
+        this.#cancel(run);
+        steps.return(undefined as unknown as SourceVisibilityBoundaryRefresh);
+      },
+    });
+  }
+
+  #cancel(run: SourceVisibilityRunState): void {
+    run.cancelled = true;
+    if (this.#run === run) this.#run = undefined;
+  }
+
+  #cancelRun(): void {
+    if (this.#run) this.#cancel(this.#run);
+  }
+
+  /**
+   * Compares the whole page, through as many turns as it is given (D164),
+   * and puts what it read in place in the step that ends it. Given a turn,
+   * an element that left the page meanwhile is not read; one the page moved
+   * from what was not compared yet into what was keeps the state it had, as
+   * every element compared earlier and not met again does while it is still
+   * in the page: without a state, a change of it would not be one. Its move
+   * is a change of the page, which asks for another comparison. One read
+   * before the page took it away is dropped before the states are counted
+   * and put in place: kept, it made the count seem over the limit and
+   * stayed held by the index.
+   */
+  *#compareWhole(
+    run: SourceVisibilityRunState,
+    imageSelectorSurface: boolean,
+  ): Generator<void, SourceVisibilityBoundaryRefresh, void> {
+    const root = this.document.documentElement;
+    const walk = yield* this.#walk(
+      root ? [root] : [],
+      run.previous,
+      run.next,
+      run.shown,
+      run.context,
+    );
+    if (!walk.overflow && run.context.yielded) {
+      for (const [element, state] of run.previous) {
+        if (run.context.expired()) yield;
+        if (
+          !run.next.has(element) && element.isConnected &&
+          element.ownerDocument === this.document
+        ) run.next.set(element, state);
+      }
+    }
+    if (run.context.yielded) {
+      for (const element of run.next.keys()) {
+        if (run.context.expired()) yield;
+        if (!element.isConnected || element.ownerDocument !== this.document) {
+          run.next.delete(element);
+        }
+      }
+    }
+    let overflow = walk.overflow;
+    if (imageSelectorSurface && !overflow) {
+      overflow = !(yield* this.#paintInputsReadable(run.next, run.context));
+    }
+    // Put in place, in this one step.
+    this.#run = undefined;
+    this.#wholeComparisons += 1;
+    this.#states = run.next;
+    this.#complete = !walk.overflow;
+    for (const element of run.shown) {
+      if (this.#shown.length >= this.maximumNodes) break;
+      this.#shown.push(element);
+    }
+    return Object.freeze({
+      changedTargets: Object.freeze(minimizeVisibilityRoots(walk.changedTargets)),
+      overflow,
     });
   }
 
@@ -259,6 +423,7 @@ export class SourceVisibilityBoundaryIndex {
   }
 
   dispose(): void {
+    this.#cancelRun();
     this.#states.clear();
     this.#shown = [];
     this.#complete = false;
@@ -275,12 +440,45 @@ export class SourceVisibilityBoundaryIndex {
     this.#complete = !result.overflow;
   }
 
+  /** A walk in one task, as every walk was before D164. */
   #scanRoots(
     roots: readonly Element[],
     previous: ReadonlyMap<Element, SourceVisibilityState>,
     paintCache: SourcePaintScanCache,
     options: SourceVisibilityScanOptions = {},
   ): SourceVisibilityBoundaryRefresh & { readonly inspected: number } {
+    const walk = this.#walk(
+      roots,
+      previous,
+      this.#states,
+      this.#shown,
+      { paintCache, expired: NEVER_EXPIRED, yielded: false },
+      options,
+    ).next();
+    if (!walk.done) throw new Error('A walk in one task was given a turn.');
+    return Object.freeze({
+      changedTargets: Object.freeze(
+        minimizeVisibilityRoots(walk.value.changedTargets),
+      ),
+      overflow: walk.value.overflow,
+      inspected: walk.value.inspected,
+    });
+  }
+
+  /**
+   * Reads the state of every element under `roots` into `into`, comparing
+   * it with `previous`. Between elements it gives the page a turn when its
+   * slice is done (D164); after one, an element that left the page is not
+   * read (what it held was not put on the list yet, and is not either).
+   */
+  *#walk(
+    roots: readonly Element[],
+    previous: ReadonlyMap<Element, SourceVisibilityState>,
+    into: Map<Element, SourceVisibilityState>,
+    shown: Element[],
+    context: SourceVisibilityWalkContext,
+    options: SourceVisibilityScanOptions = {},
+  ): Generator<void, SourceVisibilityWalkResult, void> {
     const changedTargets: Element[] = [];
     let inspected = options.inspected ?? 0;
     let overflow = false;
@@ -315,6 +513,7 @@ export class SourceVisibilityBoundaryIndex {
         pendingChangedAncestor.push(false);
       }
       while (pending.length > 0) {
+        if (context.expired()) yield;
         if (++inspected > this.maximumNodes) {
           overflow = true;
           break;
@@ -322,10 +521,14 @@ export class SourceVisibilityBoundaryIndex {
         const element = pending.pop();
         const changedAncestor = pendingChangedAncestor.pop() === true;
         if (!element) break;
+        if (
+          context.yielded &&
+          (!element.isConnected || element.ownerDocument !== this.document)
+        ) continue;
         const paint = readSourceElementPathPaint(
           element,
           this.sourceWindow,
-          paintCache,
+          context.paintCache,
         );
         const state: SourceVisibilityState = paint.painted
           ? 'painted'
@@ -336,9 +539,9 @@ export class SourceVisibilityBoundaryIndex {
               : 'hidden';
         const prior = previous.get(element);
         const changed = prior !== undefined && prior !== state;
-        this.#states.set(element, state);
-        if (prior === 'hidden' && changed && this.#shown.length < this.maximumNodes) {
-          this.#shown.push(element);
+        into.set(element, state);
+        if (prior === 'hidden' && changed && shown.length < this.maximumNodes) {
+          shown.push(element);
         }
         let rematerializationBoundary = false;
         if (changed && !changedAncestor) {
@@ -369,11 +572,7 @@ export class SourceVisibilityBoundaryIndex {
       }
       if (overflow) break;
     }
-    return Object.freeze({
-      changedTargets: Object.freeze(minimizeVisibilityRoots(changedTargets)),
-      overflow,
-      inspected,
-    });
+    return { changedTargets, overflow, inspected };
   }
 
   #forgetSubtree(node: Node): void {
@@ -401,15 +600,27 @@ export class SourceVisibilityBoundaryIndex {
     if (pending.length > 0) this.#complete = false;
   }
 
-  #documentPaintInputsAreReadable(
-    paintCache: SourcePaintScanCache,
-  ): boolean {
-    if (!this.#complete || this.#states.size > this.maximumNodes) return false;
-    for (const element of this.#states.keys()) {
+  /**
+   * Whether every input of what each element of `states` paints can be
+   * read: the proof an image attribute's change asks for. In slices too
+   * (D164), each with its own memo; an element that left the page while the
+   * walk had a turn paints nothing, is not asked, and leaves `states`.
+   */
+  *#paintInputsReadable(
+    states: Map<Element, SourceVisibilityState>,
+    context: SourceVisibilityWalkContext,
+  ): Generator<void, boolean, void> {
+    if (states.size > this.maximumNodes) return false;
+    for (const element of states.keys()) {
+      if (context.expired()) yield;
+      if (context.yielded && !element.isConnected) {
+        states.delete(element);
+        continue;
+      }
       if (!sourceElementPaintInputsAreReadable(
         element,
         this.sourceWindow,
-        paintCache,
+        context.paintCache,
       )) {
         return false;
       }

@@ -43,14 +43,15 @@ import {
   type SourceEvidenceCategory,
 } from './source-secret-classifier';
 import {
+  beginSourceControlledContentPolicy,
   beginSourceSelectLabelWalk,
-  createSourceControlledContentPolicy,
   createSourceSecretAncestorMemo,
   hasSourceCredentialSecretAncestor,
   isSourceSelectLabelElementPublic,
   readSourceFlatTreeElementPath,
   readSourceFlatTreeParentElement,
   readSourceSelectLabel,
+  sourceControlledContentMutationsMayChange,
   sourceElementPathHoldsPaint,
   sourceElementPathIsPainted,
   sourceElementPathShowsWithoutBox,
@@ -63,7 +64,11 @@ import {
   readSourceHiddenRegionState,
 } from './html-mirror-sanitizer';
 import type { ReplicaReadScope } from './read-scope-policy';
-import type { SliceClock } from '../browser-scheduling';
+import {
+  createSliceClock,
+  type PassShareLedger,
+  type SliceClock,
+} from '../browser-scheduling';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 import {
@@ -134,6 +139,27 @@ export interface SemanticSourceSessionEnvironment {
     readonly takeRecords?: () => MutationRecord[];
   };
   readonly schedule?: (callback: () => void) => void;
+  /**
+   * The clock of the scan's slices and of its busy time (D164). Without it
+   * a scan is read in one task, as before slices; the bridge passes
+   * `performance.now`.
+   */
+  readonly now?: () => number;
+  /** Gives the page a turn between slices: `scheduler.yield()` by default. */
+  readonly yieldToMain?: () => Promise<void>;
+  /**
+   * A slice's budget: the bridge passes `LIVE_SLICE_BUDGET_MS`; without it,
+   * `DEFAULT_SLICE_BUDGET_MS`.
+   */
+  readonly sliceBudgetMs?: number;
+  /** Units between two looks at the slice clock: `SCAN_CLOCK_EVERY` unless a test says. */
+  readonly sliceClockEvery?: number;
+  /**
+   * The page's share of time for whole-page passes, shared with the
+   * comparison of what the page paints (D164). Without it a scan never
+   * waits for its turn.
+   */
+  readonly passShare?: PassShareLedger;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (timer: unknown) => void;
   readonly onDispose?: () => void;
@@ -152,8 +178,78 @@ interface RevisionState {
 interface SemanticSourceScan {
   readonly records: readonly SemanticSourceRecord[];
   readonly proofs: readonly SemanticSourceProof[];
-  /** The nodes whose record is new or changed in this scan. */
-  readonly changedNodes?: readonly Node[];
+}
+
+/**
+ * What a finished scan read, held until its batch is posted (D164): the
+ * revisions, the candidates and the menus it found are the session's only
+ * once the batch goes out, so a scan that is let go leaves no trace.
+ */
+interface StagedSemanticSourceScan {
+  /** Nothing was read (no scope or no page): only `askedWhatIsShown` counts. */
+  readonly empty?: boolean;
+  readonly records: readonly SemanticSourceRecord[];
+  /** The node of each record, in the same order. */
+  readonly recordNodes: readonly Node[];
+  readonly proofs: readonly SemanticSourceProof[];
+  /** Whether each record's revision is new in this scan, in the same order. */
+  readonly recordChanged: readonly boolean[];
+  readonly recordRevisions: ReadonlyMap<number, RevisionState>;
+  readonly proofRevisions: ReadonlyMap<string, RevisionState>;
+  /** The nodes the scan named by their bridge id, to seal the batch with. */
+  readonly nodesById: ReadonlyMap<number, Node>;
+  readonly askedWhatIsShown: boolean;
+  readonly structuralMenuWrites: ReadonlyMap<Element, {
+    readonly trigger: Element;
+    readonly panel: Element;
+  } | undefined>;
+  readonly pollCandidates: readonly Element[] | undefined;
+  readonly pollFingerprints: WeakMap<Element, string>;
+  readonly presentationCandidates: WeakSet<Element>;
+}
+
+/** Why a scan's steps stop before they are done. */
+type SemanticScanPause = 'turn' | 'restart';
+
+/** One read of the page, from its first step; a restart begins another. */
+interface SemanticScanAttempt {
+  steps: Generator<SemanticScanPause, StagedSemanticSourceScan, void>;
+  /** Units of work in the current slice; a slice always does one. */
+  units: number;
+  /** Panels the label walk of each slice reveals (see `reveal`). */
+  revealPanels: readonly Element[] | undefined;
+  /** Caches of one slice, emptied when the next begins. */
+  readonly sliceCaches: Array<{ clear(): void }>;
+  readonly nodesById: Map<number, Node>;
+  /**
+   * From the start of the policy's build to its last use: the records that
+   * come meanwhile are kept, to check it against.
+   */
+  watchingPolicy: boolean;
+  /** The policy of controlled content once built, while a later step asks it. */
+  policy: SourceControlledContentPolicy | undefined;
+  /** How far the run's records were checked against the policy. */
+  policyCheckedTo: number;
+}
+
+/**
+ * A scan that runs, over its slices and restarts (D164). One at a time;
+ * dispose or a newer generation stops it before it posts.
+ */
+interface SemanticScanRun {
+  readonly generation: number;
+  clock: SliceClock;
+  attempt: SemanticScanAttempt;
+  /** Mutation records that came while the policy was watched, to check it against. */
+  records: MutationRecord[];
+  recordsOverflow: boolean;
+  restarts: number;
+  /** The page was read again once for a root found above a changed node (D125). */
+  rootRestarted: boolean;
+  /** The work of the run's slices, without the turns between them. */
+  busyMs: number;
+  /** The page had a turn during the run: the batch is sealed before it goes. */
+  yielded: boolean;
 }
 
 interface ValidatedDisclosure {
@@ -205,6 +301,8 @@ const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
 const MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES = 1_024;
 const SEMANTIC_CONTROL_POLL_INTERVAL_MS = 500;
+/** How many units of the scan go by between two looks at the slice clock (D164). */
+const SCAN_CLOCK_EVERY = 16;
 const MAX_SEMANTIC_CONTROL_POLL_CANDIDATES = 1_024;
 const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
   'pointerdown',
@@ -246,6 +344,24 @@ const SEMANTIC_ROOT_MUTATION_OPTIONS = Object.freeze({
 // each end doubled the script time of a page that animates, and ends that
 // kept coming put the scan off for good.
 const SEMANTIC_SHOWN_AGAIN_SETTLE_MS = 750;
+/**
+ * A scan read anew this many times (its policy of controlled content went
+ * out of date, or a root turned up above what it would send) reads the page
+ * in one task the next time, as before slices (D164).
+ */
+const MAX_SEMANTIC_SCAN_RESTARTS = 2;
+/**
+ * Mutation records kept for the policy check while a scan runs. Past them
+ * the policy counts as out of date.
+ */
+const MAX_SEMANTIC_SCAN_RECORDS = 4_096;
+/** The clock of a session without one: a scan is one task (D164). */
+const ONE_TASK_SLICE_CLOCK: SliceClock = Object.freeze({
+  budgetMs: Number.POSITIVE_INFINITY,
+  yields: 0,
+  expired: () => false,
+  next: () => Promise.resolve(),
+});
 const SEMANTIC_CONTROL_ROLES = new Set([
   'button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'option', 'radio', 'switch', 'tab', 'treeitem',
@@ -302,10 +418,24 @@ export class SemanticSourceSession {
   readonly #classifier: StickySourceSecretClassifier;
   /** A start waits for the injection-time credential scan (D163). */
   #startPending = false;
-  /** Set only while one synchronous #scan runs; see SourceSecretAncestorMemo. */
+  /**
+   * Set only while one slice of a scan runs; see SourceSecretAncestorMemo.
+   * Each slice opens its own and closes it before the page has a turn
+   * (D164), with the label walk, the root walk and the nodes named below.
+   */
   #scanSecretAncestors: SourceSecretAncestorMemo | undefined;
-  /** The label walk of the #scan that is running, and of no other. */
+  /** The label walk of the slice of a scan that is running, and of no other. */
   #scanLabelWalk: SourceSelectLabelWalk | undefined;
+  #scanRootWalk: { end(): void } | undefined;
+  /** The nodes the running slice named by their bridge id (`#nodeId`). */
+  #scanNodes: Map<number, Node> | undefined;
+  /** The scan that is running, over its slices (D164); none runs beside it. */
+  #scanRun: SemanticScanRun | undefined;
+  /** Moves on with each scan begun and with dispose: an older scan stops. */
+  #scanGeneration = 0;
+  /** The first scan after start runs at once; later ones wait their share. */
+  #scannedOnce = false;
+  #shareTimer: unknown;
   readonly #revisions = new Map<number, RevisionState>();
   readonly #proofRevisions = new Map<string, RevisionState>();
   readonly #structuralMenus: WeakMap<Element, {
@@ -383,6 +513,19 @@ export class SemanticSourceSession {
     this.#cancelControlPoll();
     this.#cancelSelectActivationRefresh();
     this.#cancelShownAgainScan();
+    this.#cancelShareTimer();
+    // A scan that runs stops at its next step and posts nothing (D164).
+    // The work it did goes to the share all the same: a page that keeps
+    // ending its sessions mid-scan still pays for what they read.
+    const cancelled = this.#scanRun;
+    this.#scanGeneration += 1;
+    this.#scanRun = undefined;
+    if (cancelled && cancelled.busyMs > 0) {
+      this.environment.passShare?.note(cancelled.busyMs, this);
+    } else {
+      this.environment.passShare?.release(this);
+    }
+    this.#closeScanSlice();
     safelyRead(() => this.environment.window.removeEventListener?.(
       'resize',
       this.#onWindowResize,
@@ -549,6 +692,9 @@ export class SemanticSourceSession {
           this.environment.window,
           this.#classifier,
         );
+        // A scan that runs goes on; what changed meanwhile decides whether
+        // its policy is still good, and the batch is sealed (D164).
+        this.#noteScanRecords(records);
         if (!records.some(sourceMutationMayChangeCurrentValue)) return;
         this.refresh();
       });
@@ -583,7 +729,12 @@ export class SemanticSourceSession {
   }
 
   #scheduleScan(): void {
-    if (this.#scheduled || this.#inFlightSequence !== undefined || this.#disposed) {
+    // A change during a scan's slices does not start a second one: the
+    // running scan ends first, and the next follows its ACK (D164).
+    if (
+      this.#scheduled || this.#inFlightSequence !== undefined ||
+      this.#disposed || this.#scanRun
+    ) {
       return;
     }
     this.#scheduled = true;
@@ -691,6 +842,26 @@ export class SemanticSourceSession {
       this.#classifier,
       { freshRoots: true },
     );
+    // Taken records never reach the observer's callback, nor its refresh.
+    // Before a scan begins the scan reads what they changed; once it runs,
+    // part of the page was read before them, so another scan follows (D164):
+    // unless every record is a write of the value the node had, which the
+    // callback's refresh leaves out as well.
+    if (!this.#scanRun) return;
+    this.#noteScanRecords(records);
+    if (records.some(sourceMutationMayChangeCurrentValue)) this.#dirty = true;
+  }
+
+  #noteScanRecords(records: readonly MutationRecord[]): void {
+    const run = this.#scanRun;
+    if (!run || records.length === 0) return;
+    if (!run.attempt.watchingPolicy || run.recordsOverflow) return;
+    if (run.records.length + records.length > MAX_SEMANTIC_SCAN_RECORDS) {
+      run.recordsOverflow = true;
+      run.records = [];
+      return;
+    }
+    run.records.push(...records);
   }
 
   #scheduleControlPoll(): void {
@@ -793,56 +964,29 @@ export class SemanticSourceSession {
     if (changed) this.refresh();
   }
 
-  #replaceControlPollCandidates(
-    elements: readonly Element[],
-    complete: boolean,
+  /**
+   * The fields and dropdowns a finished scan found, with what each said
+   * (D164: worked out in the scan's slices, installed with its batch).
+   * None when the scan was not complete or the profile reads no field.
+   */
+  #installControlPollCandidates(
+    candidates: readonly Element[] | undefined,
+    fingerprints: WeakMap<Element, string>,
   ): void {
-    const scope = this.#scope;
-    if (!complete || !scope || (!scope.formValues && !scope.controlSemantics)) {
+    if (!candidates) {
       this.#cancelControlPoll();
       this.#controlPollCandidates = [];
       this.#controlPollFingerprints = new WeakMap<Element, string>();
       this.#controlPollCursor = 0;
       return;
     }
-    const candidates = elements.filter((element) => {
-      const tagName = element.localName.toLowerCase();
-      return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
-    });
-    const fingerprints = new WeakMap<Element, string>();
-    for (const element of candidates) {
-      const fingerprint = this.#controlPollFingerprint(element);
-      if (fingerprint !== undefined) fingerprints.set(element, fingerprint);
-    }
-    this.#controlPollCandidates = candidates;
+    this.#controlPollCandidates = [...candidates];
     this.#controlPollFingerprints = fingerprints;
     this.#controlPollCursor = candidates.length === 0
       ? 0
       : this.#controlPollCursor % candidates.length;
     if (candidates.length === 0) this.#cancelControlPoll();
     else this.#scheduleControlPoll();
-  }
-
-  #replacePresentationChangeCandidates(
-    elements: readonly Element[],
-    complete: boolean,
-  ): void {
-    const candidates = new WeakSet<Element>();
-    if (complete && this.#scope?.disclosureContent) {
-      for (const element of elements) {
-        if (!isDisclosureActivationController(element)) continue;
-        candidates.add(element);
-        // Structural hover menus commonly use a trigger and panel beneath one
-        // wrapper. Marking only that immediate neighborhood catches the panel
-        // transition without turning body-level pointer movement into scans.
-        const parent = safelyRead(() => element.parentElement);
-        const parentTagName = parent?.localName.toLowerCase();
-        if (parent && parentTagName !== 'body' && parentTagName !== 'html') {
-          candidates.add(parent);
-        }
-      }
-    }
-    this.#presentationChangeCandidates = candidates;
   }
 
   #presentationEventTouchesCandidate(event: Event): boolean {
@@ -963,51 +1107,271 @@ export class SemanticSourceSession {
     const policyFingerprint = this.#policyFingerprint;
     if (
       this.#disposed || !this.#dirty || this.#inFlightSequence !== undefined ||
-      !documentIdentity || !policyFingerprint
+      this.#scanRun || !documentIdentity || !policyFingerprint
     ) return;
+    // The scan and the comparison of what the page paints share a fifth of
+    // the tab's time; the first scan after start runs at once (D164).
+    if (this.#waitForShare(!this.#scannedOnce)) return;
     this.#dirty = false;
     // What the observer has queued comes before the page is read, and the
     // roots that left the page go before the roots still in it are watched
     // again (A2, A3).
     this.#rememberPendingMutationSecrets();
     this.#pruneSemanticRoots();
-    let scan: SemanticSourceScan;
-    const rootWalk = beginSourceShadowRootWalk();
-    const readPage = (): SemanticSourceScan => {
-      this.#scanSecretAncestors = createSourceSecretAncestorMemo();
-      const labelWalk = beginSourceSelectLabelWalk();
-      this.#scanLabelWalk = labelWalk;
-      try {
-        return this.#scan();
-      } finally {
-        this.#scanLabelWalk = undefined;
-        labelWalk.end();
-      }
+    this.#scanGeneration += 1;
+    const now = this.environment.now;
+    const run: SemanticScanRun = {
+      generation: this.#scanGeneration,
+      clock: now
+        ? createSliceClock({
+            now,
+            yield: this.environment.yieldToMain,
+            budgetMs: this.environment.sliceBudgetMs,
+          })
+        : ONE_TASK_SLICE_CLOCK,
+      attempt: undefined as unknown as SemanticScanAttempt,
+      records: [],
+      recordsOverflow: false,
+      restarts: 0,
+      rootRestarted: false,
+      busyMs: 0,
+      yielded: false,
     };
+    run.attempt = this.#beginScanAttempt(run);
+    this.#scanRun = run;
+    // The comparison does not start while the scan runs (D164).
+    this.environment.passShare?.begin(this);
+    this.#continueScan(run);
+  }
+
+  /**
+   * Whether a scan must wait for its share of the tab's time (D164); if so,
+   * a timer asks again when the wait is over.
+   */
+  #waitForShare(ignoreShare: boolean): boolean {
+    const share = this.environment.passShare;
+    if (!share) return false;
+    const wait = share.waitMs(this, ignoreShare);
+    if (!(wait > 0)) return false;
+    if (this.#shareTimer === undefined) {
+      const setTimer = this.environment.setTimer ?? ((callback, delayMs) =>
+        setTimeout(callback, delayMs));
+      this.#shareTimer = setTimer(() => {
+        this.#shareTimer = undefined;
+        this.#scheduleScan();
+      }, wait);
+    }
+    return true;
+  }
+
+  #cancelShareTimer(): void {
+    if (this.#shareTimer === undefined) return;
+    (this.environment.clearTimer ?? ((timer) => clearTimeout(
+      timer as ReturnType<typeof setTimeout>,
+    )))(this.#shareTimer);
+    this.#shareTimer = undefined;
+  }
+
+  #beginScanAttempt(run: SemanticScanRun): SemanticScanAttempt {
+    const attempt: SemanticScanAttempt = {
+      // Set below: the steps are given the attempt they belong to.
+      steps: undefined as unknown as SemanticScanAttempt['steps'],
+      units: 0,
+      revealPanels: undefined,
+      sliceCaches: [],
+      nodesById: new Map<number, Node>(),
+      watchingPolicy: false,
+      policy: undefined,
+      policyCheckedTo: 0,
+    };
+    attempt.steps = this.#scan(attempt, run);
+    return attempt;
+  }
+
+  /**
+   * Opens what one slice of a scan may hold (D164): a root walk, a memo of
+   * secret ancestors, a label walk with the panels it reveals, and the map
+   * of the nodes it names. None of them is kept across a turn of the page.
+   */
+  #openScanSlice(attempt: SemanticScanAttempt): void {
+    this.#scanRootWalk = beginSourceShadowRootWalk();
+    this.#scanSecretAncestors = createSourceSecretAncestorMemo();
+    const labelWalk = beginSourceSelectLabelWalk();
+    this.#scanLabelWalk = labelWalk;
+    if (attempt.revealPanels) {
+      labelWalk.reveal(
+        attempt.revealPanels,
+        (select) => !isSourceSelectHiddenByItself(select),
+      );
+    }
+    this.#scanNodes = attempt.nodesById;
+    for (const cache of attempt.sliceCaches) cache.clear();
+  }
+
+  #closeScanSlice(): void {
+    const labelWalk = this.#scanLabelWalk;
+    const rootWalk = this.#scanRootWalk;
+    this.#scanLabelWalk = undefined;
+    this.#scanRootWalk = undefined;
+    this.#scanSecretAncestors = undefined;
+    this.#scanNodes = undefined;
+    labelWalk?.end();
+    rootWalk?.end();
+  }
+
+  /**
+   * Runs a slice of the scan in this task. A scan that never runs out of
+   * its slice is read, sealed and posted here, with no await on the way:
+   * a small page is sent in the task that asked, as before (D164).
+   */
+  #continueScan(run: SemanticScanRun): void {
+    if (!this.#isCurrentScan(run)) return;
+    // Each slice touches the scan's hold on the page: a long one keeps it.
+    this.environment.passShare?.touch(this);
+    const now = this.environment.now;
+    const startedAt = now?.() ?? 0;
+    const attempt = run.attempt;
+    attempt.units = 0;
+    let step: IteratorResult<SemanticScanPause, StagedSemanticSourceScan>;
+    this.#openScanSlice(attempt);
     try {
-      scan = readPage();
+      step = attempt.steps.next();
+    } catch {
+      this.dispose(true);
+      return;
+    } finally {
+      this.#closeScanSlice();
+      if (now) run.busyMs += now() - startedAt;
+    }
+    if (!this.#isCurrentScan(run)) return;
+    if (step.done) {
+      this.#finishScan(run, step.value);
+      return;
+    }
+    if (step.value === 'restart') {
+      this.#restartScan(run);
+      this.#continueScan(run);
+      return;
+    }
+    run.yielded = true;
+    void this.#continueScanAfterTurn(run);
+  }
+
+  async #continueScanAfterTurn(run: SemanticScanRun): Promise<void> {
+    try {
+      await run.clock.next();
+    } catch {
+      // A turn that cannot be given: the page is read in one task instead.
+      run.clock = ONE_TASK_SLICE_CLOCK;
+    }
+    if (!this.#isCurrentScan(run)) return;
+    if (this.#scanPolicyIsStale(run)) this.#restartScan(run);
+    this.#continueScan(run);
+  }
+
+  #isCurrentScan(run: SemanticScanRun): boolean {
+    return !this.#disposed && this.#scanRun === run &&
+      run.generation === this.#scanGeneration;
+  }
+
+  /**
+   * Whether what changed since the policy of controlled content was begun
+   * may change it, while a step to come still asks it (tabs, and what the
+   * tab hides). The scan is then read anew: it goes on through any other
+   * change (D164).
+   */
+  #scanPolicyIsStale(run: SemanticScanRun): boolean {
+    const attempt = run.attempt;
+    const policy = attempt.policy;
+    if (!policy) return false;
+    if (run.recordsOverflow) return true;
+    const records = run.records.slice(attempt.policyCheckedTo);
+    attempt.policyCheckedTo = run.records.length;
+    return records.length > 0 &&
+      sourceControlledContentMutationsMayChange(records, policy);
+  }
+
+  /** Reads the page anew; after two restarts, in one task (D164). */
+  #restartScan(run: SemanticScanRun): void {
+    run.restarts += 1;
+    if (run.restarts >= MAX_SEMANTIC_SCAN_RESTARTS) run.clock = ONE_TASK_SLICE_CLOCK;
+    run.records = [];
+    run.recordsOverflow = false;
+    run.attempt = this.#beginScanAttempt(run);
+  }
+
+  /** The scan is over, posted or not; the next waits for its ACK, if any. */
+  #endScan(run: SemanticScanRun): void {
+    if (this.#scanRun !== run) return;
+    this.#scanRun = undefined;
+    this.#scannedOnce = true;
+    this.environment.passShare?.note(run.busyMs, this);
+    if (this.#dirty && this.#inFlightSequence === undefined) this.#scheduleScan();
+  }
+
+  /**
+   * Seals and posts a finished scan, in one task (D164). A scan that gave
+   * the page turns asks every node it would send about secrets once more:
+   * one that turned secret meanwhile is left out, and read as secret by the
+   * scan that follows. Then the roots above what changed are asked about
+   * (D125).
+   */
+  #finishScan(run: SemanticScanRun, staged: StagedSemanticSourceScan): void {
+    const documentIdentity = this.#documentIdentity;
+    const policyFingerprint = this.#policyFingerprint;
+    if (!documentIdentity || !policyFingerprint) {
+      this.#endScan(run);
+      return;
+    }
+    const now = this.environment.now;
+    const startedAt = now?.() ?? 0;
+    let scan: StagedSemanticSourceScan;
+    let foundRoots: boolean;
+    const rootWalk = beginSourceShadowRootWalk();
+    try {
+      scan = staged;
+      // Whenever the page had a turn: a node can turn secret with no
+      // record and no new verdict of the classifier (a rule of a sheet
+      // rewritten through the CSSOM masks a field), and the seal asks
+      // afresh.
+      if (run.yielded) {
+        this.#rememberPendingMutationSecrets();
+        scan = this.#sealScan(staged);
+      }
       // Before a new text or value is sent, every element above its node
       // is asked about its root again: one attached since it was last read
       // fires nothing and may wrap the node in a masking box. If one turns
       // up, the page is read again with it; if that read turns up another,
       // nothing is sent until the next change (D125).
-      if (this.#foundRootsAbove(scan.changedNodes ?? [])) {
-        scan = readPage();
-        if (this.#foundRootsAbove(scan.changedNodes ?? [])) return;
-      }
+      foundRoots = this.#foundRootsAbove(
+        scan.recordNodes.filter((_node, index) => scan.recordChanged[index]),
+      );
     } catch {
       this.dispose(true);
       return;
     } finally {
       rootWalk.end();
-      this.#scanSecretAncestors = undefined;
+      if (now) run.busyMs += now() - startedAt;
+    }
+    if (foundRoots) {
+      if (run.rootRestarted) {
+        this.#endScan(run);
+        return;
+      }
+      run.rootRestarted = true;
+      this.#restartScan(run);
+      this.#continueScan(run);
+      return;
     }
     const scanSignature = semanticSourceScanSignature(scan);
-    if (scanSignature === this.#lastEmittedScanSignature) return;
+    if (scanSignature === this.#lastEmittedScanSignature) {
+      this.#commitScan(scan);
+      this.#endScan(run);
+      return;
+    }
     const sequence = this.#sequence + 1;
-    let batch: SemanticSourceBatch;
     try {
-      batch = createSemanticSourceBatch(
+      const batch = createSemanticSourceBatch(
         documentIdentity,
         policyFingerprint,
         sequence,
@@ -1019,9 +1383,89 @@ export class SemanticSourceSession {
       this.dispose(false);
       return;
     }
+    this.#commitScan(scan);
     this.#lastEmittedScanSignature = scanSignature;
     this.#sequence = sequence;
     this.#inFlightSequence = sequence;
+    this.#endScan(run);
+  }
+
+  /**
+   * Leaves out every record and proof whose node is secret now: by the
+   * sticky ledger, or below a credential, asked afresh (D164).
+   */
+  #sealScan(staged: StagedSemanticSourceScan): StagedSemanticSourceScan {
+    const memo = createSourceSecretAncestorMemo();
+    const secretNow = (node: Node | undefined): boolean => !node ||
+      this.#classifier.isSecret(node) ||
+      hasSourceCredentialSecretAncestor(
+        node,
+        this.#classifier,
+        this.environment.window,
+        memo,
+      );
+    const records: SemanticSourceRecord[] = [];
+    const recordNodes: Node[] = [];
+    const recordChanged: boolean[] = [];
+    let dropped = false;
+    staged.records.forEach((record, index) => {
+      const node = staged.recordNodes[index];
+      if (secretNow(node)) {
+        dropped = true;
+        return;
+      }
+      records.push(record);
+      recordNodes.push(node!);
+      recordChanged.push(staged.recordChanged[index] === true);
+    });
+    const proofs = staged.proofs.filter((proof) => {
+      const nodes = semanticSourceProofNodeIds(proof)
+        .map((nodeId) => staged.nodesById.get(nodeId));
+      // A credential input carries the number of its dots (D91): it is a
+      // secret itself, and what is asked is what it sits in.
+      const asked = proof.kind === 'masked-length'
+        ? nodes.map((node) => node && safelyRead(
+            () => readSourceFlatTreeElementPath(node)?.[1],
+          ))
+        : nodes;
+      if (!asked.some((node) => secretNow(node))) return true;
+      dropped = true;
+      return false;
+    });
+    if (!dropped) return staged;
+    // What was left out is read as secret by the scan that follows.
+    this.#dirty = true;
+    return Object.freeze({
+      ...staged,
+      records: Object.freeze(records),
+      recordNodes: Object.freeze(recordNodes),
+      recordChanged: Object.freeze(recordChanged),
+      proofs: Object.freeze(proofs),
+    });
+  }
+
+  /** What a posted (or unchanged) scan read becomes the session's (D164). */
+  #commitScan(scan: StagedSemanticSourceScan): void {
+    this.#scanAskedWhatIsShown = scan.askedWhatIsShown;
+    if (scan.empty) return;
+    for (const [container, menu] of scan.structuralMenuWrites) {
+      if (menu) this.#structuralMenus.set(container, menu);
+      else this.#structuralMenus.delete(container);
+    }
+    const recordIds = new Set(scan.records.map((record) => record.recordId));
+    const proofIds = new Set(scan.proofs.map(semanticSourceProofIdentity));
+    for (const [recordId, revision] of scan.recordRevisions) {
+      if (recordIds.has(recordId)) this.#revisions.set(recordId, revision);
+    }
+    for (const [proofId, revision] of scan.proofRevisions) {
+      if (proofIds.has(proofId)) this.#proofRevisions.set(proofId, revision);
+    }
+    this.#retainCurrentRevisionHistory(recordIds, proofIds);
+    this.#installControlPollCandidates(
+      scan.pollCandidates,
+      scan.pollFingerprints,
+    );
+    this.#presentationChangeCandidates = scan.presentationCandidates;
   }
 
   #foundRootsAbove(nodes: readonly Node[]): boolean {
@@ -1033,14 +1477,58 @@ export class SemanticSourceSession {
     return found;
   }
 
-  #scan(): SemanticSourceScan {
-    this.#scanAskedWhatIsShown = false;
+  /**
+   * The scan's steps (D164). Each `yield` is a point where the page may
+   * have a turn: the driver closes the slice's walks and memo, and opens
+   * new ones before the next step. Between steps only what the scan has
+   * found so far is kept; the page may change meanwhile, which the seal
+   * and the next scan answer. Records and proofs are taken in the same
+   * order, under the same caps, as by the one-task scan.
+   */
+  *#scan(
+    attempt: SemanticScanAttempt,
+    run: SemanticScanRun,
+  ): Generator<SemanticScanPause, StagedSemanticSourceScan, void> {
+    let askedWhatIsShown = false;
     const scope = this.#scope;
     const root = this.environment.document.documentElement;
-    if (!scope || !root) return Object.freeze({
-      records: Object.freeze([]),
-      proofs: Object.freeze([]),
-    });
+    const recordRevisions = new Map<number, RevisionState>();
+    const proofRevisions = new Map<string, RevisionState>();
+    const structuralMenuWrites = new Map<Element, {
+      readonly trigger: Element;
+      readonly panel: Element;
+    } | undefined>();
+    if (!scope || !root) {
+      return Object.freeze({
+        empty: true,
+        records: Object.freeze([]),
+        recordNodes: Object.freeze([]),
+        proofs: Object.freeze([]),
+        recordChanged: Object.freeze([]),
+        recordRevisions,
+        proofRevisions,
+        nodesById: attempt.nodesById,
+        askedWhatIsShown,
+        structuralMenuWrites,
+        pollCandidates: undefined,
+        pollFingerprints: new WeakMap<Element, string>(),
+        presentationCandidates: new WeakSet<Element>(),
+      });
+    }
+    // Whether the slice has done its share: asked between units of work,
+    // never before the first of a slice, so every slice makes progress.
+    // The clock is read every 16th unit: read at each one it took a tenth
+    // of the scan on a page of 54,000 elements (D164).
+    const clockEvery = this.environment.sliceClockEvery ?? SCAN_CLOCK_EVERY;
+    const turn = (): boolean => {
+      if (
+        attempt.units > 0 && attempt.units % clockEvery === 0 &&
+        run.clock.expired()
+      ) return true;
+      attempt.units += 1;
+      return false;
+    };
+    const expired = (): boolean => run.clock.expired();
     const elements: Element[] = [];
     const classifications = new WeakMap<Element, ElementClassification>();
     const stack: Array<{ node: Node; secretAncestor: boolean }> = [
@@ -1048,6 +1536,7 @@ export class SemanticSourceSession {
     ];
     let visited = 0;
     while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
+      if (turn()) yield 'turn';
       const current = stack.pop();
       if (!current) break;
       visited += 1;
@@ -1074,40 +1563,74 @@ export class SemanticSourceSession {
       }
     }
 
-    const validatedDisclosures = scope.disclosureContent && stack.length === 0
-      ? this.#validatedDisclosures(elements, classifications)
-      : Object.freeze([]);
-    const validatedStructuralMenus = scope.disclosureContent && stack.length === 0
-      ? this.#validatedStructuralMenus(elements, classifications)
-      : Object.freeze([]);
+    const validatedDisclosures: ValidatedDisclosure[] = [];
+    const validatedStructuralMenus: ValidatedStructuralMenu[] = [];
+    if (scope.disclosureContent && stack.length === 0) {
+      yield* this.#validatedDisclosures(
+        elements,
+        classifications,
+        turn,
+        validatedDisclosures,
+      );
+      yield* this.#validatedStructuralMenus(
+        elements,
+        classifications,
+        turn,
+        structuralMenuWrites,
+        validatedStructuralMenus,
+      );
+    }
     // A dropdown in a menu's collapsed panel is read as the mirror shows it
     // once the reader opens the menu there. Its options had no labels until
     // the page itself showed the menu, and the mirror drew no dropdown.
     const collapsedMenuPanels = validatedStructuralMenus
       .filter((menu) => !menu.expanded).map((menu) => menu.panel);
     if (collapsedMenuPanels.length > 0) {
+      // Every later slice's label walk reveals them too (D164).
+      attempt.revealPanels = collapsedMenuPanels;
       this.#scanLabelWalk?.reveal(
         collapsedMenuPanels,
         (select) => !isSourceSelectHiddenByItself(select),
       );
     }
-    let validatedTabs: readonly ValidatedTab[] = Object.freeze([]);
+    const validatedTabs: ValidatedTab[] = [];
     // What the page collapses: tabs are proven against it, and editor text
     // is not sent from inside it (below).
     // Field values ask it too, to know which fields the tab does not show.
-    const controlledContent = scope.controlSemantics ||
-        scope.editableContent || scope.formValues
-      ? createSourceControlledContentPolicy(
-          this.environment.document,
-          this.environment.window,
-          MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
-        )
-      : undefined;
+    // Built in slices (D163); what the page changes while it is built or
+    // used is checked against it at each turn, and the page is read anew
+    // if that may change it (D164).
+    let controlledContent: SourceControlledContentPolicy | undefined;
+    if (scope.controlSemantics || scope.editableContent || scope.formValues) {
+      const builder = beginSourceControlledContentPolicy(
+        this.environment.document,
+        this.environment.window,
+        MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
+      );
+      // What changes from here on is kept until the last step that asks it.
+      attempt.watchingPolicy = true;
+      run.records = [];
+      run.recordsOverflow = false;
+      let policy = builder.step(expired);
+      while (!policy) {
+        yield 'turn';
+        policy = builder.step(expired);
+      }
+      controlledContent = policy;
+      attempt.policy = policy;
+      attempt.policyCheckedTo = 0;
+      if (this.#scanPolicyIsStale(run)) yield 'restart';
+    }
     if (
       controlledContent && scope.controlSemantics && stack.length === 0 &&
       !controlledContent.overflow
     ) {
-      validatedTabs = this.#validatedTabs(controlledContent, classifications);
+      yield* this.#validatedTabs(
+        controlledContent,
+        classifications,
+        turn,
+        validatedTabs,
+      );
     }
     const proofs: SemanticSourceProof[] = [];
     const proofIds = new Set<string>();
@@ -1130,7 +1653,8 @@ export class SemanticSourceSession {
       const proof = Object.freeze({ ...draft, revision }) as SemanticSourceProof;
       const proofBytes = semanticSourceBatchByteLength([], [proof]);
       if (batchBytes + proofBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
-      this.#proofRevisions.set(proofId, { signature, revision });
+      // Held until the batch is posted (D164).
+      proofRevisions.set(proofId, { signature, revision });
       proofIds.add(proofId);
       batchBytes += proofBytes;
       proofs.push(proof);
@@ -1143,6 +1667,7 @@ export class SemanticSourceSession {
         if (classification?.facts.tagName !== 'select' ||
           classification.category === 'secret' ||
           classification.category === 'withheld') continue;
+        if (turn()) yield 'turn';
         const currentClassification = this.#classifyElement(element, false, false);
         if (currentClassification.category === 'secret' ||
           currentClassification.category === 'withheld') continue;
@@ -1170,6 +1695,7 @@ export class SemanticSourceSession {
         if (classification?.facts.tagName !== 'select' ||
           classification.category === 'secret' ||
           classification.category === 'withheld') continue;
+        if (turn()) yield 'turn';
         const stateClassification = this.#classifyElement(element, false, true);
         if (stateClassification.category !== 'ordinary-form') continue;
         const state = this.#readSelectState(
@@ -1199,6 +1725,7 @@ export class SemanticSourceSession {
         if (classification?.facts.tagName !== 'input' ||
           (type !== 'checkbox' && type !== 'radio') ||
           classification.category !== 'public-semantic') continue;
+        if (turn()) yield 'turn';
         const currentClassification = this.#classifyElement(element, false, false);
         if (currentClassification.category !== 'public-semantic') continue;
         const input = element as HTMLInputElement;
@@ -1223,6 +1750,7 @@ export class SemanticSourceSession {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (!classification) continue;
+        if (turn()) yield 'turn';
         const length = this.#readMaskedCredentialLength(element, classification);
         const maskedNodeId = length === undefined ? undefined : this.#nodeId(element);
         if (length === undefined || !maskedNodeId) continue;
@@ -1244,6 +1772,7 @@ export class SemanticSourceSession {
         const role = normalizedToken(classification.facts.role);
         const states = semanticAriaStatesFor(classification.facts.tagName, role);
         if (states.length === 0) continue;
+        if (turn()) yield 'turn';
         let currentClassification: ElementClassification | undefined;
         for (const state of states) {
           const gate = semanticAriaStateGate(state);
@@ -1271,6 +1800,7 @@ export class SemanticSourceSession {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (classification?.category !== 'public-semantic') continue;
+        if (turn()) yield 'turn';
         const controlNodeId = this.#nodeId(element);
         if (!controlNodeId) continue;
         for (const relation of SEMANTIC_ARIA_RELATIONS) {
@@ -1361,7 +1891,8 @@ export class SemanticSourceSession {
     }
 
     const records: SemanticSourceRecord[] = [];
-    const changedNodes: Node[] = [];
+    const recordNodes: Node[] = [];
+    const recordChanged: boolean[] = [];
     const recordIds = new Set<number>();
     const add = (
       node: Node,
@@ -1409,11 +1940,13 @@ export class SemanticSourceSession {
       });
       const recordBytes = semanticSourceBatchByteLength([record]);
       if (batchBytes + recordBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return;
-      this.#revisions.set(recordId, { signature, revision: nodeRevision });
+      // Held until the batch is posted (D164).
+      recordRevisions.set(recordId, { signature, revision: nodeRevision });
       recordIds.add(recordId);
       batchBytes += recordBytes;
       records.push(record);
-      if (nodeRevision !== previous?.revision) changedNodes.push(node);
+      recordNodes.push(node);
+      recordChanged.push(nodeRevision !== previous?.revision);
       if (gate === 'disclosureContent' && presentation === 'text') {
         admittedDisclosureTextNodes.add(node);
       }
@@ -1432,6 +1965,7 @@ export class SemanticSourceSession {
     // The nearest editor around the slot counts, as the nearest does down
     // the page's own tree: it is the one the panel finds from the text.
     const slotEditors = new Map<Element, ElementClassification | null>();
+    attempt.sliceCaches.push(slotEditors);
     const editorAroundSlot = (child: Node): ElementClassification | undefined => {
       const slot = safelyRead(() => readSourceAssignedSlot(child));
       if (!slot) return undefined;
@@ -1472,11 +2006,13 @@ export class SemanticSourceSession {
       return state;
     };
     const hiddenRegions = new Map<Element, boolean>();
+    // What the tab hides is read again in each slice (D164).
+    attempt.sliceCaches.push(hiddenStates, hiddenRegions);
     /** Whether the tab does not show what `box` itself draws. */
     const boxIsHidden = (box: Element | undefined): boolean => {
       // The answer can change with no change of the DOM: see
       // `#scanSoonForWhatIsShown`.
-      this.#scanAskedWhatIsShown = true;
+      askedWhatIsShown = true;
       if (!box || hiddenState(box).visibilityHidden) return true;
       const asked: Element[] = [];
       let hidden: boolean | undefined;
@@ -1522,6 +2058,7 @@ export class SemanticSourceSession {
       secret: false,
     }];
     while (textStack.length > 0 && records.length < MAX_SEMANTIC_SOURCE_RECORDS) {
+      if (turn()) yield 'turn';
       const current = textStack.pop();
       if (!current) break;
       if (current.node.nodeType === TEXT_NODE) {
@@ -1599,6 +2136,7 @@ export class SemanticSourceSession {
       const classification = classifications.get(element);
       if (!classification || classification.category === 'secret' ||
         classification.category === 'withheld') continue;
+      if (turn()) yield 'turn';
       const tagName = classification.facts.tagName;
       const role = normalizedToken(classification.facts.role);
 
@@ -1678,8 +2216,14 @@ export class SemanticSourceSession {
       }
     }
 
+    // No step from here on asks the policy of controlled content.
+    attempt.watchingPolicy = false;
+    attempt.policy = undefined;
+    run.records = [];
+
     for (const { node, classification } of editableText) {
       if (records.length >= MAX_SEMANTIC_SOURCE_RECORDS) break;
+      if (turn()) yield 'turn';
       add(node, classification, 'editableContent', 'text', readTextNode(node));
     }
 
@@ -1701,6 +2245,8 @@ export class SemanticSourceSession {
         // refuses makes it refuse the whole batch (every link on a page did).
         const ariaDisableable = SEMANTIC_CONTROL_ROLES.has(role);
         if (!nativeDisableable && !ariaDisableable) continue;
+        // Before its state is read: every option of every dropdown is read.
+        if (turn()) yield 'turn';
         const disabled = nativeDisableable
           ? safelyRead(
               () => (element as HTMLButtonElement | HTMLFieldSetElement |
@@ -1739,6 +2285,8 @@ export class SemanticSourceSession {
 
     const structuralMenuRelationsWithText = new Set<string>();
     for (const node of admittedDisclosureTextNodes) {
+      // Up to a batch of text nodes, each walked to the root.
+      if (turn()) yield 'turn';
       const path = readSourceFlatTreeElementPath(node);
       if (!path) continue;
       for (const element of path) {
@@ -1764,6 +2312,8 @@ export class SemanticSourceSession {
         const classification = classifications.get(element);
         if (!classification || classification.category === 'secret' ||
           classification.category === 'withheld') continue;
+        // Before its attributes are read: this reads every element.
+        if (turn()) yield 'turn';
         const expanded = previewTriggers.has(element)
           ? undefined
           : readSemanticAriaStateValue(element, 'expanded', '');
@@ -1810,16 +2360,55 @@ export class SemanticSourceSession {
     const emittedProofs = proofs.filter((proof) =>
       proof.kind !== 'structural-menu' ||
       structuralMenuRelationsWithText.has(proof.relationId));
-    this.#retainCurrentRevisionHistory(
-      recordIds,
-      new Set(emittedProofs.map(semanticSourceProofIdentity)),
-    );
-    this.#replaceControlPollCandidates(elements, stack.length === 0);
-    this.#replacePresentationChangeCandidates(elements, stack.length === 0);
+
+    // The fields and dropdowns polled for changes no event tells of, with
+    // what they say now; they replace the last ones with the batch.
+    const complete = stack.length === 0;
+    let pollCandidates: Element[] | undefined;
+    const pollFingerprints = new WeakMap<Element, string>();
+    if (complete && (scope.formValues || scope.controlSemantics)) {
+      pollCandidates = [];
+      for (const element of elements) {
+        const tagName = element.localName.toLowerCase();
+        if (tagName !== 'input' && tagName !== 'textarea' && tagName !== 'select') {
+          continue;
+        }
+        if (turn()) yield 'turn';
+        pollCandidates.push(element);
+        const fingerprint = this.#controlPollFingerprint(element);
+        if (fingerprint !== undefined) pollFingerprints.set(element, fingerprint);
+      }
+    }
+    const presentationCandidates = new WeakSet<Element>();
+    if (complete && scope.disclosureContent) {
+      for (const element of elements) {
+        // Every element is asked: the walk gives the page its turns here too.
+        if (turn()) yield 'turn';
+        if (!isDisclosureActivationController(element)) continue;
+        presentationCandidates.add(element);
+        // Structural hover menus commonly use a trigger and panel beneath one
+        // wrapper. Marking only that immediate neighborhood catches the panel
+        // transition without turning body-level pointer movement into scans.
+        const parent = safelyRead(() => element.parentElement);
+        const parentTagName = parent?.localName.toLowerCase();
+        if (parent && parentTagName !== 'body' && parentTagName !== 'html') {
+          presentationCandidates.add(parent);
+        }
+      }
+    }
     return Object.freeze({
       records: Object.freeze(records),
+      recordNodes: Object.freeze(recordNodes),
       proofs: Object.freeze(emittedProofs),
-      changedNodes: Object.freeze(changedNodes),
+      recordChanged: Object.freeze(recordChanged),
+      recordRevisions,
+      proofRevisions,
+      nodesById: attempt.nodesById,
+      askedWhatIsShown,
+      structuralMenuWrites,
+      pollCandidates,
+      pollFingerprints,
+      presentationCandidates,
     });
   }
 
@@ -1835,14 +2424,16 @@ export class SemanticSourceSession {
     }
   }
 
-  #validatedDisclosures(
+  *#validatedDisclosures(
     elements: readonly Element[],
     classifications: WeakMap<Element, ElementClassification>,
-  ): readonly ValidatedDisclosure[] {
-    const disclosures: ValidatedDisclosure[] = [];
+    turn: () => boolean,
+    disclosures: ValidatedDisclosure[],
+  ): Generator<SemanticScanPause, void, void> {
     for (const trigger of elements) {
       const classification = classifications.get(trigger);
       if (classification?.category !== 'public-semantic') continue;
+      if (turn()) yield 'turn';
       let expanded: string | null;
       let controlled: string | null;
       try {
@@ -1887,15 +2478,24 @@ export class SemanticSourceSession {
         popupRole: disclosurePopupRole(trigger, panel),
       }));
     }
-    return Object.freeze(disclosures);
   }
 
-  #validatedStructuralMenus(
+  /**
+   * The menus are the session's only once the batch is posted (D164): what
+   * is learned or forgotten of each container goes to `writes` meanwhile.
+   */
+  *#validatedStructuralMenus(
     elements: readonly Element[],
     classifications: WeakMap<Element, ElementClassification>,
-  ): readonly ValidatedStructuralMenu[] {
-    const menus: ValidatedStructuralMenu[] = [];
+    turn: () => boolean,
+    writes: Map<Element, {
+      readonly trigger: Element;
+      readonly panel: Element;
+    } | undefined>,
+    menus: ValidatedStructuralMenu[],
+  ): Generator<SemanticScanPause, void, void> {
     for (const container of elements) {
+      if (turn()) yield 'turn';
       const retained = this.#structuralMenus.get(container);
       // The child count is the cheapest test, so it runs before the context
       // and painted-path walks that every list item would otherwise pay for:
@@ -1917,7 +2517,7 @@ export class SemanticSourceSession {
         // still shows what it holds.
         !sourceElementPathHoldsPaint(container, this.environment.window)
       ) {
-        this.#structuralMenus.delete(container);
+        writes.set(container, undefined);
         continue;
       }
       // While a real hover shows the panel it is painted text too; it, or
@@ -1958,7 +2558,7 @@ export class SemanticSourceSession {
           safelyRead(() => element.hasAttribute('aria-controls')) !== false ||
           !hasPlainStructuralMenuExpandedState(element))
       ) {
-        this.#structuralMenus.delete(container);
+        writes.set(container, undefined);
         continue;
       }
       const visible = this.#isVisibleDisclosureController(panel);
@@ -1976,10 +2576,10 @@ export class SemanticSourceSession {
         !isBoundedSafeMenuPanel(panel, classifications) ||
         !hasMenuSizedText(panel)
       ) {
-        this.#structuralMenus.delete(container);
+        writes.set(container, undefined);
         continue;
       }
-      this.#structuralMenus.set(container, { trigger, panel });
+      writes.set(container, { trigger, panel });
       menus.push(Object.freeze({
         container,
         trigger,
@@ -1990,15 +2590,16 @@ export class SemanticSourceSession {
         expanded: !collapsed,
       }));
     }
-    return Object.freeze(menus);
   }
 
-  #validatedTabs(
+  *#validatedTabs(
     controlledContent: SourceControlledContentPolicy,
     classifications: WeakMap<Element, ElementClassification>,
-  ): readonly ValidatedTab[] {
-    const tabs: ValidatedTab[] = [];
+    turn: () => boolean,
+    tabs: ValidatedTab[],
+  ): Generator<SemanticScanPause, void, void> {
     for (const relationship of controlledContent.tabs) {
+      if (turn()) yield 'turn';
       const triggerClassification = classifications.get(relationship.trigger);
       const panelClassification = classifications.get(relationship.panel);
       if (
@@ -2012,7 +2613,6 @@ export class SemanticSourceSession {
         selected: relationship.selected,
       }));
     }
-    return Object.freeze(tabs);
   }
 
   #isVisibleDisclosureController(trigger: Element): boolean {
@@ -2206,9 +2806,10 @@ export class SemanticSourceSession {
   #nodeId(node: Node): number | undefined {
     try {
       const nodeId = this.environment.getNodeId(node);
-      return Number.isSafeInteger(nodeId) && Number(nodeId) > 0
-        ? nodeId
-        : undefined;
+      if (!Number.isSafeInteger(nodeId) || Number(nodeId) <= 0) return undefined;
+      // A scan's seal asks the nodes it names again (D164).
+      this.#scanNodes?.set(nodeId!, node);
+      return nodeId;
     } catch {
       return undefined;
     }
@@ -3090,6 +3691,26 @@ function hasPlainStructuralMenuExpandedState(trigger: Element): boolean {
   if (expanded === null) return true;
   const token = normalizedToken(expanded);
   return token === 'true' || token === 'false';
+}
+
+/**
+ * Every node a proof names by its bridge id (D164: the seal asks each): each
+ * own field named `nodeId` or `…NodeId`, and each number of a `…NodeIds`
+ * list. Read by the protocol's naming, not from a list kept by hand, so a
+ * proof given another node is sealed without a change here.
+ */
+export function semanticSourceProofNodeIds(proof: SemanticSourceProof): number[] {
+  const nodeIds: number[] = [];
+  for (const [key, value] of Object.entries(proof)) {
+    if (key === 'nodeId' || key.endsWith('NodeId')) {
+      if (typeof value === 'number' && Number.isFinite(value)) nodeIds.push(value);
+    } else if (key.endsWith('NodeIds') && Array.isArray(value)) {
+      for (const nodeId of value) {
+        if (typeof nodeId === 'number' && Number.isFinite(nodeId)) nodeIds.push(nodeId);
+      }
+    }
+  }
+  return nodeIds;
 }
 
 function semanticSourceScanSignature(scan: SemanticSourceScan): string {
