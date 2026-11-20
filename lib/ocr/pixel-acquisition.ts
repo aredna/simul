@@ -24,6 +24,18 @@ export const MIN_CAPTURE_INTERVAL_MS = 550;
 export const MAX_OCR_INPUT_PIXELS = 4_000_000;
 export const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
 export const IMAGE_CAPTURE_LOCK_NAME = 'simul:ocr-visible-tab-capture-v1';
+/**
+ * How long an image the view cuts off, and that would fit in the view whole,
+ * has to stay where it is before its visible strip is captured (D165). The
+ * reader who scrolls on brings it into view whole, and only a whole read is
+ * kept for the next time it comes into view; the reader who stops with it
+ * half in view still gets that half read, a moment later. Measured on a page
+ * scrolled 300 px at a time with two seconds between steps: a one-second
+ * wait still read every strip first, and this one reads none of them.
+ */
+export const CLIPPED_IMAGE_QUIET_MS = 2_500;
+/** Images whose clipped position is remembered at once (oldest go first). */
+const MAX_CLIPPED_IMAGE_WAITS = 256;
 const MIN_OCR_BITMAP_AXIS_PX = 3;
 
 export interface AcquiredImagePixels {
@@ -54,11 +66,19 @@ export type PixelAcquisitionResult =
   | { readonly status: 'ready'; readonly pixels: AcquiredImagePixels }
   | {
       readonly status: 'deferred';
-      readonly reason: PixelAcquisitionDeferralReason;
+      readonly reason: Exclude<PixelAcquisitionDeferralReason, 'clipped'>;
+    }
+  | {
+      readonly status: 'deferred';
+      readonly reason: 'clipped';
+      /** When the image, still where it is, will have waited long enough. */
+      readonly retryAfterMs: number;
     };
 
 export type PixelAcquisitionDeferralReason =
   | 'hidden'
+  /** Cut off by the view, would fit whole, and not still for long (D165). */
+  | 'clipped'
   | 'unstable'
   | 'oversized'
   | 'too-small-visible'
@@ -127,11 +147,21 @@ export interface PixelAcquisitionEnvironment {
     descriptor: SourceImageDescriptor,
     signal?: AbortSignal,
   ) => Promise<ImageFilePixels | undefined>;
+  /**
+   * How long an image the view cuts off, and that would fit in it whole,
+   * must stay put before its strip is captured (D165). Absent or 0 captures
+   * the strip at once; the side panel's environment sets
+   * `CLIPPED_IMAGE_QUIET_MS`.
+   */
+  readonly clippedImageQuietMs?: number;
 }
 
-/** Screenshot deferrals that reading the image's own file can resolve. */
+/**
+ * Screenshot deferrals that reading the image's own file can resolve. A
+ * clipped image read from its file is read whole, at once (D165).
+ */
 const FILE_PIXEL_FALLBACK_REASONS: ReadonlySet<PixelAcquisitionDeferralReason> =
-  new Set(['hidden', 'unstable', 'too-small-visible', 'inactive']);
+  new Set(['hidden', 'unstable', 'too-small-visible', 'inactive', 'clipped']);
 
 export interface SourceTabCaptureEnvironment {
   readonly queryActiveTab: (windowId: number) => Promise<number | undefined>;
@@ -145,12 +175,20 @@ export interface SourceTabCaptureEnvironment {
 export class PixelAcquisitionCoordinator {
   readonly #now: () => number;
   readonly #delay: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  readonly #clippedImageQuietMs: number;
+  /** Where each clipped image was first measured, and when (D165). */
+  readonly #clippedWaits = new Map<string, {
+    readonly geometry: string;
+    readonly since: number;
+  }>();
   #lastCaptureAt = Number.NEGATIVE_INFINITY;
   #lane: Promise<void> = Promise.resolve();
 
   constructor(private readonly environment: PixelAcquisitionEnvironment) {
     this.#now = environment.now ?? (() => performance.now());
     this.#delay = environment.delay ?? abortableDelay;
+    const quiet = environment.clippedImageQuietMs ?? 0;
+    this.#clippedImageQuietMs = Number.isFinite(quiet) && quiet > 0 ? quiet : 0;
   }
 
   acquire(
@@ -220,6 +258,8 @@ export class PixelAcquisitionCoordinator {
     signal?.throwIfAborted();
     const before = await this.environment.source.measure(descriptor, signal);
     if (!before) return { status: 'deferred', reason: 'hidden' };
+    const clipped = this.#clippedWait(descriptor, before);
+    if (clipped) return clipped;
     const wait = MIN_CAPTURE_INTERVAL_MS - (this.#now() - this.#lastCaptureAt);
     if (wait > 0) await this.#delay(wait, signal);
     signal?.throwIfAborted();
@@ -265,6 +305,59 @@ export class PixelAcquisitionCoordinator {
         ...cropped.pixels,
         screenshotAgeMs: Math.max(0, this.#now() - askedAt),
       }),
+    };
+  }
+
+  /**
+   * D165. An image the view cuts off but could show whole is not captured
+   * until it has stayed where it is for `clippedImageQuietMs`. While the
+   * reader scrolls, the images wholly in view are read first and this one is
+   * read whole once the scroll brings it in; a strip read first would be
+   * read again then, since only a whole read is kept for the image. Its place
+   * is the measured rectangle, so any scroll, resize or zoom starts the wait
+   * again. An image larger than the view is never seen whole: its strip is
+   * all the reader sees, and it is captured at once as before.
+   */
+  #clippedWait(
+    descriptor: SourceImageDescriptor,
+    metrics: SourceImageCaptureMetrics,
+  ): PixelAcquisitionResult | undefined {
+    if (this.#clippedImageQuietMs <= 0) return undefined;
+    const key = clippedWaitKey(descriptor);
+    if (!clippedButFitsView(metrics)) {
+      this.#clippedWaits.delete(key);
+      return undefined;
+    }
+    const geometry = [
+      metrics.left,
+      metrics.top,
+      metrics.width,
+      metrics.height,
+      metrics.viewportWidth,
+      metrics.viewportHeight,
+      metrics.scrollX,
+      metrics.scrollY,
+      metrics.devicePixelRatio,
+    ].join(',');
+    const now = this.#now();
+    const known = this.#clippedWaits.get(key);
+    if (known?.geometry === geometry) {
+      const remaining = known.since + this.#clippedImageQuietMs - now;
+      // Kept after the wait: a capture that fails for another reason and is
+      // tried again at the same place does not wait a second time.
+      if (remaining <= 0) return undefined;
+      return { status: 'deferred', reason: 'clipped', retryAfterMs: remaining };
+    }
+    this.#clippedWaits.delete(key);
+    if (this.#clippedWaits.size >= MAX_CLIPPED_IMAGE_WAITS) {
+      const oldest = this.#clippedWaits.keys().next().value;
+      if (oldest !== undefined) this.#clippedWaits.delete(oldest);
+    }
+    this.#clippedWaits.set(key, { geometry, since: now });
+    return {
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: this.#clippedImageQuietMs,
     };
   }
 
@@ -430,6 +523,7 @@ export function createBrowserPixelAcquisitionEnvironment(
     decode: (blob) => createImageBitmap(blob),
     createSurface: (width, height) => new OffscreenCanvas(width, height),
     digest: (bytes) => crypto.subtle.digest('SHA-256', bytes),
+    clippedImageQuietMs: CLIPPED_IMAGE_QUIET_MS,
   };
 }
 
@@ -541,6 +635,36 @@ function browserSourceTabCaptureEnvironment(): SourceTabCaptureEnvironment {
       setTimeout(resolve, Math.max(0, milliseconds));
     }),
   };
+}
+
+function clippedWaitKey(descriptor: SourceImageDescriptor): string {
+  const document = descriptor.document;
+  return [
+    document.sessionId,
+    document.pageEpoch,
+    document.generation,
+    document.documentId,
+    document.frameId,
+    descriptor.nodeId,
+    descriptor.contentRevision,
+  ].join('|');
+}
+
+/**
+ * The view cuts part of the image off, by more than the half pixel a whole
+ * read allows, and the image is no larger than the view on either axis.
+ */
+function clippedButFitsView(metrics: SourceImageCaptureMetrics): boolean {
+  if (
+    metrics.width > metrics.viewportWidth ||
+    metrics.height > metrics.viewportHeight
+  ) return false;
+  const visible = visibleImageRect(metrics);
+  if (!visible) return false;
+  return visible.left - metrics.left > 0.5 ||
+    visible.top - metrics.top > 0.5 ||
+    metrics.width - (visible.right - visible.left) > 1 ||
+    metrics.height - (visible.bottom - visible.top) > 1;
 }
 
 function visibleImageRect(metrics: SourceImageCaptureMetrics): {

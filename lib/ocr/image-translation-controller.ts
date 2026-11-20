@@ -665,6 +665,10 @@ export class ImageTranslationController {
   readonly #confirmingLooks = new Map<number, {
     readonly timer: ReturnType<typeof setTimeout>;
   }>();
+  /** Clipped images to look at again once they have been still (D165). */
+  readonly #clippedLooks = new Map<number, {
+    readonly timer: ReturnType<typeof setTimeout>;
+  }>();
   /** Images being read once more over a kept "no text", with its key. */
   readonly #returnLooks = new Map<number, string>();
   readonly #rerankRequestedNodeIds = new Set<number>();
@@ -1686,6 +1690,9 @@ export class ImageTranslationController {
   ): Promise<void> {
     const pairEpoch = this.#pairEpoch;
     const pairKey = this.#pairKey;
+    // This job looks at the image again; a look owed to a clipped capture
+    // has nothing left to do (D165).
+    this.#forgetClippedLook(job.descriptor.nodeId);
     const anchor = this.environment.resolveAnchor(
       job.descriptor.document,
       job.descriptor.nodeId,
@@ -2026,8 +2033,13 @@ export class ImageTranslationController {
         }
         const canCompareWithLaterOcr = ocrEligibility.eligible &&
           steps.slice(methodIndex + 1).some(({ kind }) => kind === 'ocr');
+        // A clipped image is read again once it is still (D165): its label
+        // waits for that read as it does for a capture tried again.
         const awaitsEarlierOcrRetry = Boolean(
-          captureDeferral && isTransientCaptureReason(captureDeferral.reason),
+          captureDeferral && (
+            isTransientCaptureReason(captureDeferral.reason) ||
+            captureDeferral.reason === 'clipped'
+          ),
         );
         if (canCompareWithLaterOcr || awaitsEarlierOcrRetry) {
           heldSemantic = candidate;
@@ -2514,6 +2526,15 @@ export class ImageTranslationController {
     stagedOcrLanguageObservation = undefined;
     if (heldOcr && await commitHeldOcr()) return;
 
+    if (captureDeferral?.reason === 'clipped') {
+      // D165: the view cuts this image off and it would fit whole. It is
+      // looked at again when it has stayed where it is long enough; a scroll
+      // before then is a new observation, which queues it again at once and
+      // finds it whole, or clipped somewhere else and waiting again.
+      scheduler.defer(job);
+      this.#lookWhenStill(job.descriptor, captureDeferral.retryAfterMs);
+      return;
+    }
     if (captureDeferral) {
       const transient = isTransientCaptureReason(captureDeferral.reason);
       const retryAttempt = transient
@@ -4330,6 +4351,39 @@ export class ImageTranslationController {
     return true;
   }
 
+  /**
+   * Queues a clipped image again after the wait its capture asked for, unless
+   * it has been seen otherwise since (D165). Any job for the image clears the
+   * look: it has measured the image again and made its own decision.
+   */
+  #lookWhenStill(descriptor: SourceImageDescriptor, delay: number): void {
+    const nodeId = descriptor.nodeId;
+    this.#forgetClippedLook(nodeId);
+    const look = {
+      timer: this.#setTimer(() => {
+        if (this.#clippedLooks.get(nodeId) !== look) return;
+        this.#clippedLooks.delete(nodeId);
+        const current = this.#descriptors.get(nodeId);
+        if (
+          this.#disposed ||
+          !current ||
+          current.contentRevision !== descriptor.contentRevision ||
+          current.observationRevision !== descriptor.observationRevision ||
+          !this.#scheduler?.requeueCurrent(current)
+        ) return;
+        this.#kick();
+      }, Math.max(0, delay)),
+    };
+    this.#clippedLooks.set(nodeId, look);
+  }
+
+  #forgetClippedLook(nodeId: number): void {
+    const look = this.#clippedLooks.get(nodeId);
+    if (!look) return;
+    this.#clearTimer(look.timer);
+    this.#clippedLooks.delete(nodeId);
+  }
+
   #forgetLateLook(nodeId: number): void {
     const known = this.#lateLooks.get(nodeId);
     if (known?.timer !== undefined) this.#clearTimer(known.timer);
@@ -4345,6 +4399,10 @@ export class ImageTranslationController {
       this.#clearTimer(look.timer);
     }
     this.#confirmingLooks.clear();
+    for (const look of this.#clippedLooks.values()) {
+      this.#clearTimer(look.timer);
+    }
+    this.#clippedLooks.clear();
     this.#earlyCssPictureReads.clear();
     this.#returnLooks.clear();
   }

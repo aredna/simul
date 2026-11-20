@@ -1,4 +1,5 @@
 import { UI_STRINGS } from './companion-ui-strings';
+import type { UiText } from './ui-text';
 import type { CompanionLaunchStamp } from './companion-surface';
 import { settle } from './settle';
 
@@ -77,6 +78,27 @@ export const PAGE_CHANGED_GUIDANCE = UI_STRINGS.pageChangedGuidance;
 export const PAGE_TIMEOUT_GUIDANCE = UI_STRINGS.pageTimeoutGuidance;
 export const PAGE_ACCESS_LOST_GUIDANCE = UI_STRINGS.pageAccessLostGuidance;
 export const PAGE_LOCAL_FILE_GUIDANCE = UI_STRINGS.pageLocalFileGuidance;
+
+/**
+ * Whether a message tells the reader to select Simul's toolbar icon again
+ * for access, which access to all sites would make unneeded (D165): the
+ * panel offers that access under it. Restricted and browser pages are not
+ * among them, since no access reads those.
+ */
+export function asksForSiteAccess(message: UiText): boolean {
+  if (typeof message === 'string') {
+    return message === PAGE_ACCESS_LOST_GUIDANCE ||
+      message === PAGE_CHANGED_GUIDANCE;
+  }
+  if ('frame' in message) {
+    if (message.frame === UI_STRINGS.statusFollowNeedsAccess) return true;
+    return message.args.some((argument) =>
+      (typeof argument === 'string' || (typeof argument === 'object' &&
+        ('frame' in argument || 'compose' in argument))) &&
+      asksForSiteAccess(argument as UiText));
+  }
+  return false;
+}
 
 /**
  * Why Simul cannot read a tab: a `file:` page is a file on this computer,

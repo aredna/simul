@@ -15,7 +15,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20261119.6';
+const betaBuildSuffix = 'beta v.20261119.7';
 // `SIMUL_EDITION=dev` builds the owner's edition with every option; anything
 // else builds the public edition (lib/edition.ts).
 const simulEdition = parseSimulEdition(process.env.SIMUL_EDITION);

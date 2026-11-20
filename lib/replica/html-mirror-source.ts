@@ -382,7 +382,10 @@ export function installHtmlMirrorSourceBridge(
   // In slices with a turn for the page between them (D163): 185 ms in one
   // task on a page of 54,000 elements. A small page is scanned in this task.
   // The sessions below read nothing before it is done; meanwhile the
-  // observer above keeps what the page changes in the ledger.
+  // observer above keeps what the page changes in the ledger. The live
+  // passes' slice: the first one shares its task with the compiling of
+  // this script and the setup above, 50 ms in all with a slice of 35
+  // (D165).
   const secretScan = startSourceDocumentSecretScan(
     sourceDocument,
     sourceWindow,
@@ -390,6 +393,7 @@ export function installHtmlMirrorSourceBridge(
     createSliceClock({
       now: environment.now,
       yield: environment.yieldToMain ?? yieldToMain,
+      budgetMs: LIVE_SLICE_BUDGET_MS,
     }),
   );
   if (!secretObserver) {
@@ -1033,6 +1037,9 @@ export class HtmlMirrorSourceSession {
   #visibilityInteractionTargets = new Set<Element>();
   /** A person's input asked for the next comparison: it skips the share (D164). */
   #userInputPending = false;
+  /** The policy read again in slices after a change of layout (D165). */
+  #policyRefreshRunning = false;
+  #policyRefreshGeneration = 0;
   #visibilityFullRefreshPending = false;
   /** The comparison of what the page paints that is running, if any (D164). */
   #comparisonRun: ComparisonRun | undefined;
@@ -1217,6 +1224,7 @@ export class HtmlMirrorSourceSession {
     this.#declaredHiddenSent = new WeakMap<Element, boolean>();
     this.#styleDerivedPending = false;
     this.#controlledContentPolicy = undefined;
+    this.#cancelPolicyRefresh();
     this.#controlledLayoutSettlePending = false;
     this.#cancelComparison();
     if (this.#comparisonShareTimer !== undefined) {
@@ -2040,6 +2048,8 @@ export class HtmlMirrorSourceSession {
       [state.knownMirroredImageCandidates, this.#knownMirroredImageCandidates];
     [this.#selectedImageSources, state.selectedImageSources] =
       [state.selectedImageSources, this.#selectedImageSources];
+    // The copy brings its own policy: a read begun before it is dropped.
+    this.#cancelPolicyRefresh();
     [this.#controlledContentPolicy, state.controlledContentPolicy] =
       [state.controlledContentPolicy, this.#controlledContentPolicy];
     [this.#adoptedStyleSignatures, state.adoptedStyleSignatures] =
@@ -2594,13 +2604,15 @@ export class HtmlMirrorSourceSession {
   }
 
   #flushChanges(fidelityPolicy: SelectableReplicaFidelityPolicy): void {
-    if (
-      this.#controlledLayoutSettlePending ||
-      this.#readsInsidePanelWithControl()
-    ) {
+    if (this.#readsInsidePanelWithControl()) {
+      // What is read inside a panel is judged by the policy as it is now.
       this.#controlledLayoutSettlePending = false;
       this.#refreshControlledContentPolicy();
       if (this.#paused || this.#shadowReconciliationPending) return;
+    } else if (this.#controlledLayoutSettlePending) {
+      // The end of a transition or an animation: read in slices (D165).
+      this.#controlledLayoutSettlePending = false;
+      this.#beginPolicyRefresh();
     }
     if (this.#visibilityBoundaryIndex) {
       this.#compareWhatIsPainted(this.#visibilityBoundaryIndex);
@@ -3582,8 +3594,10 @@ export class HtmlMirrorSourceSession {
     ) return;
     this.#layoutChangePending = false;
     this.#lookForRootsAfterLayoutChange();
-    this.#refreshControlledContentPolicy();
-    // Read just now: the end of a transition in this frame asks no second.
+    // Read in slices from the next turn on (D165).
+    this.#beginPolicyRefresh();
+    // Asked for just now: the end of a transition in this frame asks no
+    // second.
     this.#controlledLayoutSettlePending = false;
   }
 
@@ -4370,11 +4384,89 @@ export class HtmlMirrorSourceSession {
   #refreshControlledContentPolicy(): boolean {
     const previous = this.#controlledContentPolicy;
     if (!previous) return false;
+    // Built whole in this task: one read in slices is not needed any more.
+    this.#cancelPolicyRefresh();
     const next = createSourceControlledContentPolicy(
       this.environment.document,
       this.environment.window,
       MAX_HTML_MIRROR_NODES,
     );
+    return this.#adoptControlledContentPolicy(previous, next);
+  }
+
+  /**
+   * Reads the policy again in slices, after a change of layout (D165): the
+   * panel opening beside the tab is one, and the whole read took 37–50 ms
+   * of one task on a page of 72,000 elements. The policy in force stays
+   * until the new one is read. A change of the page that may change the
+   * policy reads it whole at once, from the observer that is called
+   * between the slices, and this read is dropped: what it would adopt
+   * never mixes the page before such a change with the page after it.
+   */
+  #beginPolicyRefresh(): void {
+    if (!this.#controlledContentPolicy) return;
+    const generation = (this.#policyRefreshGeneration += 1);
+    this.#policyRefreshRunning = true;
+    const builder = beginSourceControlledContentPolicy(
+      this.environment.document,
+      this.environment.window,
+      MAX_HTML_MIRROR_NODES,
+    );
+    const clock = createSliceClock({
+      now: this.environment.now,
+      yield: this.environment.yieldToMain ?? yieldToMain,
+      budgetMs: LIVE_SLICE_BUDGET_MS,
+    });
+    void this.#continuePolicyRefresh(generation, builder, clock);
+  }
+
+  #cancelPolicyRefresh(): void {
+    if (!this.#policyRefreshRunning) return;
+    this.#policyRefreshRunning = false;
+    this.#policyRefreshGeneration += 1;
+  }
+
+  async #continuePolicyRefresh(
+    generation: number,
+    builder: ReturnType<typeof beginSourceControlledContentPolicy>,
+    clock: ReturnType<typeof createSliceClock>,
+  ): Promise<void> {
+    const current = (): boolean =>
+      this.#policyRefreshGeneration === generation && !this.#disposed &&
+      !!this.#identity && !this.#paused && !!this.#controlledContentPolicy;
+    for (;;) {
+      // The first slice too comes after a turn: the frame that asked for
+      // the read runs its flush on its own.
+      try {
+        await clock.next();
+      } catch {
+        // A turn that cannot be given: the read goes on now.
+      }
+      if (!current()) return;
+      let next: SourceControlledContentPolicy | undefined;
+      try {
+        next = builder.step(() => clock.expired());
+      } catch {
+        // What cannot be read in slices is read whole.
+        this.#policyRefreshRunning = false;
+        if (this.#refreshControlledContentPolicy()) this.#scheduleFlush();
+        return;
+      }
+      if (!next) continue;
+      this.#policyRefreshRunning = false;
+      this.#policyRefreshGeneration += 1;
+      if (this.#adoptControlledContentPolicy(this.#controlledContentPolicy!, next)) {
+        this.#scheduleFlush();
+      }
+      return;
+    }
+  }
+
+  /** Puts `next` in force, and queues what it changes against `previous`. */
+  #adoptControlledContentPolicy(
+    previous: SourceControlledContentPolicy,
+    next: SourceControlledContentPolicy,
+  ): boolean {
     this.#controlledContentPolicy = next;
     if (sourceControlledContentBoundaryChanged(previous, next)) {
       this.#shadowReconciliationPending = true;

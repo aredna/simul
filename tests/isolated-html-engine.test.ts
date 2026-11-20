@@ -24,6 +24,8 @@ import {
   canonicalSvgElementName,
   createMirrorElement,
   isTrustedIsolatedShellDocument,
+  isolatedAriaIndexMatchesReplica,
+  isolatedEngineTestSwitches,
   protectIsolatedOpaquePlaceholder,
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
@@ -9947,5 +9949,262 @@ describe('a large page shown first as a preview (D163)', () => {
     // Not even asked of the memory: the copy kept what the preview showed.
     expect(memory.snapshotStats().hits).toBe(0);
     expect(body(host).textContent).toBe('en:Holaen:Adiós');
+  });
+});
+
+describe('a live patch at the cost of what it changed (D165)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  const textNode = (
+    id: number,
+    value: string,
+  ): Extract<HtmlMirrorNode, { kind: 'text' }> => ({
+    kind: 'text', id, text: value, translatable: true,
+  });
+  const elementNode = (
+    id: number,
+    tagName: string,
+    attributes: readonly (readonly [string, string])[],
+    children: readonly HtmlMirrorNode[] = [],
+  ): Extract<HtmlMirrorNode, { kind: 'element' }> => ({
+    kind: 'element', id, namespace: 'html', tagName, attributes, children,
+  });
+
+  function checkpoint(): HtmlMirrorCheckpoint {
+    const made = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], [
+            // Relations come on the semantic channel: the presenter writes
+            // `aria-controls`, as the test does below.
+            elementNode(4, 'button', [['role', 'button']], [textNode(5, 'Menu')]),
+            elementNode(6, 'div', [['role', 'menu'], ['id', 'menu']], [
+              elementNode(7, 'p', [['id', 'item']], [textNode(8, 'Item')]),
+            ]),
+            elementNode(9, 'section', [['id', 'probe']], [
+              elementNode(10, 'img', [['alt', 'one']]),
+              elementNode(11, 'p', [], [textNode(12, 'Text')]),
+            ]),
+          ]),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    );
+    if (!made) throw new Error('D165 fixture checkpoint rejected.');
+    return made;
+  }
+
+  function batch(sequence: number, operations: HtmlMirrorPatchOperation[]) {
+    const made = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      sequence,
+      sequence,
+      operations,
+    );
+    if (!made) throw new Error('D165 fixture patch rejected.');
+    return made;
+  }
+
+  it('keeps the ARIA index and the diagnostics as a fresh read would make them', async () => {
+    const stream = new FakeHtmlStream(checkpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+    const check = (): void => {
+      expect(isolatedAriaIndexMatchesReplica(replica)).toBe(true);
+      const info = infos.at(-1)!;
+      expect(info.imageCount).toBe(replica.querySelectorAll('img').length);
+      expect(info.visuallyHiddenCount).toBe(
+        replica.querySelectorAll('[data-simul-visually-hidden="v1"]').length,
+      );
+      expect(info.textCount).toBe(engine.snapshot()!.records.length);
+    };
+    const patches: HtmlMirrorPatchOperation[][] = [
+      [{
+        kind: 'attributes', nodeId: 9, namespace: 'html', tagName: 'section',
+        attributes: [['id', 'renamed']],
+      }],
+      [{
+        kind: 'reconcile-children', nodeId: 3, children: [
+          { kind: 'retain', nodeId: 9 },
+          { kind: 'retain', nodeId: 4 },
+          { kind: 'retain', nodeId: 6 },
+          {
+            kind: 'graph',
+            node: elementNode(20, 'div', [['id', 'added']], [
+              elementNode(21, 'img', [['alt', 'two']]),
+              textNode(22, 'added'),
+            ]),
+          },
+        ],
+      }],
+      [{
+        kind: 'children', nodeId: 9,
+        children: [elementNode(30, 'p', [['id', 'item']], [textNode(31, 'twin')])],
+      }],
+      [{
+        kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'p',
+        attributes: [],
+      }],
+      [{
+        kind: 'text', nodeId: 22,
+        node: textNode(22, 'changed'),
+      }],
+      [{
+        kind: 'children', nodeId: 3,
+        children: [elementNode(40, 'p', [['id', 'menu']], [textNode(41, 'last')])],
+      }],
+    ];
+    for (const [index, operations] of patches.entries()) {
+      stream.observer?.onPatch(batch(index + 1, operations));
+      expect(stream.acknowledged).toContain(index + 1);
+      check();
+      // Simul writes relations outside patches too (the semantic
+      // presenter): the index follows them.
+      const element = replica.body.firstElementChild!;
+      element.setAttribute('id', `simul-${index}`);
+      if (index % 2 === 0) element.setAttribute('aria-controls', 'menu');
+      else element.removeAttribute('aria-controls');
+      expect(isolatedAriaIndexMatchesReplica(replica)).toBe(true);
+    }
+  });
+
+  it('makes the records of a text frame from what it changed as from all the text', async () => {
+    // Two engines take the same frames: one makes the records of a frame
+    // that changed text in place from that text, one from all the text.
+    const ids = Array.from({ length: 12 }, (_, index) => 100 + index * 2);
+    const made = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], ids.map((id, index) =>
+            elementNode(id, 'p', [], [{
+              kind: 'text', id: id + 1, text: `P${index}`,
+              translatable: index % 3 !== 0,
+            }]))),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const runs = [true, false].map((recordsFromChanges) => {
+      const stream = new FakeHtmlStream(made);
+      const commits: unknown[] = [];
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: new FakePresentationHost(),
+        openStream: async () => stream,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+        onSourceCommit: (commit) => commits.push(commit.changes.map((change) =>
+          change.kind === 'upsert'
+            ? ['upsert', change.record.nodeId, change.record.source,
+                change.record.revision]
+            : ['remove', change.nodeId, change.revision])),
+      });
+      return { recordsFromChanges, stream, engine, commits };
+    });
+    for (const run of runs) await run.engine.run(request);
+    let seed = 7;
+    const next = (): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const words = ['same', 'other', 'P1', 'P2'];
+    try {
+      for (let sequence = 1; sequence <= 60; sequence += 1) {
+        const parts = Array.from({ length: 1 + Math.floor(next() * 2) }, () => {
+          const operations: HtmlMirrorPatchOperation[] = [];
+          const used = new Set<number>();
+          const count = 1 + Math.floor(next() * 2);
+          for (let index = 0; index < count; index += 1) {
+            const id = ids[Math.floor(next() * ids.length)]!;
+            if (used.has(id)) continue;
+            used.add(id);
+            if (next() < 0.2) {
+              operations.push({
+                kind: 'attributes', nodeId: id, namespace: 'html', tagName: 'p',
+                attributes: [['class', `c${sequence}`]],
+              });
+            } else {
+              operations.push({
+                kind: 'text', nodeId: id + 1, node: {
+                  kind: 'text', id: id + 1,
+                  text: words[Math.floor(next() * words.length)]!,
+                  translatable: next() < 0.85,
+                },
+              });
+            }
+          }
+          return operations;
+        });
+        for (const run of runs) {
+          isolatedEngineTestSwitches.recordsFromChanges = run.recordsFromChanges;
+          run.stream.observer?.onPatch(createHtmlMirrorPatchFrame(
+            parts.map((operations) => batch(sequence, operations)),
+          )!);
+        }
+        const [fast, full] = runs;
+        expect(fast!.stream.acknowledged).toEqual(full!.stream.acknowledged);
+        expect(fast!.engine.snapshot()!.records).toEqual(full!.engine.snapshot()!.records);
+        expect(fast!.commits).toEqual(full!.commits);
+      }
+      expect(runs[0]!.stream.acknowledged.length).toBeGreaterThan(30);
+    } finally {
+      isolatedEngineTestSwitches.recordsFromChanges = true;
+    }
+  });
+
+  it('puts back a text a frame changed when a later patch of it is refused', async () => {
+    const stream = new FakeHtmlStream(checkpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+    const records = () => engine.snapshot()!.records.map(
+      ({ nodeId, source, revision }) => [nodeId, source, revision],
+    );
+    stream.observer?.onPatch(batch(1, [{
+      kind: 'text', nodeId: 12, node: textNode(12, 'first change'),
+    }]));
+    const before = records();
+    const paragraph = replica.querySelector('section p')!;
+    expect(paragraph.textContent).toBe('first change');
+
+    stream.observer?.onPatch(createHtmlMirrorPatchFrame([
+      batch(2, [{ kind: 'text', nodeId: 12, node: textNode(12, 'second change') }]),
+      batch(2, [{
+        kind: 'reconcile-children', nodeId: 9,
+        children: [{ kind: 'retain', nodeId: 999 }],
+      }]),
+    ])!);
+    expect(stream.requested).toEqual([1]);
+    expect(paragraph.textContent).toBe('first change');
+    expect(records()).toEqual(before);
+    expect(isolatedAriaIndexMatchesReplica(replica)).toBe(true);
   });
 });

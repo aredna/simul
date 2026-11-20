@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  asksForSiteAccess,
   PAGE_ACCESS_GUIDANCE,
   PAGE_ACCESS_LOST_GUIDANCE,
   PAGE_CHANGED_GUIDANCE,
@@ -399,5 +400,24 @@ describe('withPageTimeout', () => {
       undefined,
       controller.signal,
     )).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('asksForSiteAccess (D165)', () => {
+  it('names the messages that ask for the toolbar icon again, and no others', async () => {
+    const { UI_STRINGS } = await import('../lib/companion-ui-strings');
+    const { uiText } = await import('../lib/ui-text');
+    expect(asksForSiteAccess(UI_STRINGS.pageAccessLostGuidance)).toBe(true);
+    expect(asksForSiteAccess(UI_STRINGS.pageChangedGuidance)).toBe(true);
+    expect(asksForSiteAccess(
+      uiText(UI_STRINGS.statusFollowNeedsAccess, 'Some error.'),
+    )).toBe(true);
+    expect(asksForSiteAccess(
+      uiText(UI_STRINGS.statusFollowNeedsAccess, UI_STRINGS.pageAccessLostGuidance),
+    )).toBe(true);
+    // No access reads a browser page or a restricted one.
+    expect(asksForSiteAccess(UI_STRINGS.pageAccessGuidance)).toBe(false);
+    expect(asksForSiteAccess(UI_STRINGS.statusSourceRestricted)).toBe(false);
+    expect(asksForSiteAccess(UI_STRINGS.statusSourceClosed)).toBe(false);
   });
 });

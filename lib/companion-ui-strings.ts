@@ -347,6 +347,11 @@ export const UI_STRINGS = {
   pageTimeoutGuidance: 'The page took too long to respond. Retry the current page.',
   pageAccessLostGuidance:
     'The extension no longer has access to this page. Select its toolbar icon on the source page to authorize it again.',
+  // Offered under the access messages above while Simul may not read every
+  // site: Chrome then asks for Simul's toolbar icon on each new site (D165).
+  allSitesAccessHint:
+    'To follow every page you open without selecting the toolbar icon each time, let Simul read all sites. Chrome asks you once; Site access in Chrome’s extension settings changes it back.',
+  allowAllSitesAccess: 'Allow on all sites',
 
   // Preference client statuses.
   statusInvalidPreferenceResponse: 'The preference service returned an invalid response.',

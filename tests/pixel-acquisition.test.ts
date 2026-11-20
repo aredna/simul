@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { SourceImageDescriptor } from '../lib/ocr/contracts';
 import {
+  CLIPPED_IMAGE_QUIET_MS,
   MAX_OCR_INPUT_PIXELS,
   PixelAcquisitionCoordinator,
   SourceTabCaptureError,
@@ -664,6 +665,120 @@ describe('PixelAcquisitionCoordinator', () => {
       reason: 'quota',
     });
     expect(readFilePixels).toHaveBeenCalledOnce();
+  });
+
+  it('waits for a clipped image that would fit whole to stay put before capturing its strip (D165)', async () => {
+    // The view cuts 10 px off the image's left side; the image would fit in
+    // the view whole. A strip read now would be read again once the scroll
+    // brings the image in, since only a whole read is kept for it.
+    let now = 1_000;
+    const captureVisibleTab = vi.fn(async () => 'data:image/png;base64,AQID');
+    const moved = { ...metrics, top: 60, scrollY: 60 };
+    const measured = [metrics, metrics, metrics, metrics, metrics, moved];
+    const coordinator = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment({
+        measure: vi.fn(async () => measured.shift() ?? moved),
+        dispose: vi.fn(),
+      }, captureVisibleTab),
+      now: () => now,
+      clippedImageQuietMs: 1_000,
+    });
+
+    expect(await coordinator.acquire(descriptor)).toEqual({
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: 1_000,
+    });
+    now += 400;
+    expect(await coordinator.acquire(descriptor)).toEqual({
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: 600,
+    });
+    expect(captureVisibleTab).not.toHaveBeenCalled();
+
+    // Still where it was a second later: the reader stopped with the image
+    // half in view, and the half it sees is read.
+    now += 600;
+    expect(await coordinator.acquire(descriptor)).toMatchObject({
+      status: 'ready',
+      pixels: { cropOffsetXCss: 10, cropWidthCss: 190 },
+    });
+    expect(captureVisibleTab).toHaveBeenCalledOnce();
+
+    // Anywhere else in the view, clipped, it waits again.
+    expect(await coordinator.acquire(descriptor)).toEqual({
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: 1_000,
+    });
+    expect(captureVisibleTab).toHaveBeenCalledOnce();
+  });
+
+  it('captures at once an image wholly in view or larger than the view (D165)', async () => {
+    const whole = { ...metrics, left: 10 };
+    // 1,200 px wide in a 1,000 px view: never seen whole, so its strip is
+    // what the reader sees.
+    const wide = { ...metrics, left: -100, width: 1_200 };
+    for (const measured of [whole, wide]) {
+      const captureVisibleTab = vi.fn(async () => 'data:image/png;base64,AQID');
+      const coordinator = new PixelAcquisitionCoordinator({
+        ...fakeEnvironment(fakeSource([measured]), captureVisibleTab),
+        clippedImageQuietMs: 1_000,
+      });
+      expect(await coordinator.acquire(descriptor)).toMatchObject({
+        status: 'ready',
+      });
+      expect(captureVisibleTab).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('reads a clipped image whole from its file at once, and waits when the file cannot help (D165)', async () => {
+    const file: ImageFilePixels = {
+      source: 'mirror',
+      encoded: new Blob([new Uint8Array([4])], { type: 'image/png' }),
+      pixelHash: 'cd'.repeat(32),
+      bitmapWidth: 800,
+      bitmapHeight: 400,
+      preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 200,
+      cropHeightCss: 100,
+      renderedWidthCss: 200,
+      renderedHeightCss: 100,
+    };
+    const captureVisibleTab = vi.fn(async () => 'data:image/png;base64,AQID');
+    const withFile = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(fakeSource([metrics]), captureVisibleTab),
+      readFilePixels: vi.fn(async () => file),
+      clippedImageQuietMs: 1_000,
+    });
+    expect(await withFile.acquire(descriptor)).toMatchObject({
+      status: 'ready',
+      pixels: { pixelSource: 'mirror', cropWidthCss: 200, cropHeightCss: 100 },
+    });
+
+    const withoutFile = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(fakeSource([metrics]), captureVisibleTab),
+      readFilePixels: vi.fn(async () => undefined),
+      clippedImageQuietMs: 1_000,
+    });
+    expect(await withoutFile.acquire(descriptor)).toEqual({
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: 1_000,
+    });
+    expect(captureVisibleTab).not.toHaveBeenCalled();
+  });
+
+  it('gives the side panel\'s screenshots the clipped-image wait (D165)', () => {
+    const environment = createBrowserPixelAcquisitionEnvironment(
+      fakeSource([metrics]),
+      4,
+      3,
+    );
+    expect(environment.clippedImageQuietMs).toBe(CLIPPED_IMAGE_QUIET_MS);
   });
 
   it('propagates capture aborts instead of relabeling them as failures', async () => {

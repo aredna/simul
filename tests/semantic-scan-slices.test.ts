@@ -622,6 +622,41 @@ describe('semantic scan in slices (D164)', () => {
       .toContain('Grace');
     harness.session.dispose();
   });
+  it('reads what a person typed without waiting for the share (D165)', async () => {
+    const page = loadPage();
+    let time = 0;
+    const now = () => time;
+    const passShare = createPassShareLedger({ now });
+    const harness = createHarness(page, {
+      now,
+      budgetMs: 1_000_000,
+      passShare,
+      getComputedStyle: pageStyle(() => {
+        time += 1;
+      }),
+    });
+    harness.start();
+    expect(harness.port.messages).toHaveLength(1);
+    harness.ack();
+    expect(passShare.waitMs()).toBeGreaterThan(0);
+
+    const field = page.byId<HTMLInputElement>('name');
+    field.value = 'Margaret';
+    field.dispatchEvent(new (page.window as unknown as { Event: typeof Event }).Event('input', { bubbles: true }));
+    // Read in this task: no timer for the share.
+    expect(harness.port.messages).toHaveLength(2);
+    expect(harness.port.messages[1]!.records.map((record) => record.text))
+      .toContain('Margaret');
+    harness.ack();
+    // A change that is not a person's input waits as before.
+    const before = harness.timers.length;
+    field.value = 'Grace';
+    harness.session.refresh();
+    expect(harness.port.messages).toHaveLength(2);
+    expect(harness.timers).toHaveLength(before + 1);
+    harness.session.dispose();
+  });
+
   it('reads no second time for drained records that only wrote the value a node had', async () => {
     const plain = createHarness(loadPage(), { budgetMs: 3 });
     plain.start();

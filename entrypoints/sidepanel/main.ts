@@ -54,6 +54,7 @@ import {
   languageEndonym,
 } from '../../lib/language-options';
 import {
+  asksForSiteAccess,
   namesCompanionWindow,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
@@ -81,6 +82,7 @@ import type { ImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-c
 import {
   STORAGE_KEY,
   autoTranslationModeForPage,
+  ALL_SITES_PERMISSION_ORIGINS,
   configureDefaultTargetLanguage,
   isCompanionLaunchBehavior,
   isAutoTranslationMode,
@@ -1809,9 +1811,48 @@ function renderErrorState(message: UiText): void {
   openFile.className = 'empty-state__open-pdf';
   setUiText(openFile, UI_STRINGS.openPdfFile);
   openFile.addEventListener('click', () => pdfFileInput.click());
-  wrapper.append(text, fileHint, openFile);
+  wrapper.append(text);
+  if (asksForSiteAccess(message)) wrapper.append(...allSitesAccessOffer());
+  wrapper.append(fileHint, openFile);
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
+}
+
+/**
+ * Under a message that asks for the toolbar icon again: access to all
+ * sites, asked for from the reader's click, after which the panel follows
+ * the active tab (D165). Without it Chrome gives Simul a page only after a
+ * click on its icon, on every new site and new tab, and most readers do not
+ * know that the choice exists. Shown only while that access is missing.
+ */
+function allSitesAccessOffer(): HTMLElement[] {
+  const hint = document.createElement('p');
+  hint.className = 'empty-state__hint';
+  setUiText(hint, UI_STRINGS.allSitesAccessHint);
+  const allow = document.createElement('button');
+  allow.type = 'button';
+  allow.className = 'empty-state__open-pdf';
+  setUiText(allow, UI_STRINGS.allowAllSitesAccess);
+  hint.hidden = true;
+  allow.hidden = true;
+  void browser.permissions.contains({ origins: [...ALL_SITES_PERMISSION_ORIGINS] })
+    .then((granted) => {
+      hint.hidden = granted;
+      allow.hidden = granted;
+    })
+    .catch(() => undefined);
+  allow.addEventListener('click', () => {
+    // Asked in the click itself: Chrome grants a request only from a gesture.
+    void browser.permissions.request({ origins: [...ALL_SITES_PERMISSION_ORIGINS] })
+      .then((granted) => {
+        if (!granted) return;
+        hint.hidden = true;
+        allow.hidden = true;
+        void sourceFollower.followCurrentActiveSourceTab();
+      })
+      .catch(() => undefined);
+  });
+  return [hint, allow];
 }
 
 /** Files dropped on the panel or the mirror: the first PDF among them opens. */

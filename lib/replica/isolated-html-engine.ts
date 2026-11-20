@@ -110,6 +110,15 @@ import {
   semanticSelectionTextFor,
 } from './semantic-source-receiver';
 import { SemanticProofPresenter } from './semantic-proof-presenter';
+import {
+  ReplicaNodeMap,
+  ReplicaTextMap,
+  replicaTextBytes,
+} from './replica-state-maps';
+import {
+  RetainedReplicaLedger,
+  walkRetainedReplica,
+} from './retained-replica-ledger';
 import { isSourceSecretPlaceholderTagName } from './source-secret-classifier';
 import { hasStructuralPatchTargetConflict } from './structural-patch-conflict';
 import { canonicalSvgAttributeName } from './svg-attribute-names';
@@ -194,16 +203,23 @@ const ISOLATED_SELECT_HOSTS_BY_DOCUMENT = new WeakMap<Document, Set<HTMLElement>
 
 /**
  * The elements an ARIA disclosure can be built from: those with an `id` a
- * trigger might name, and those with `aria-controls`. Rebuilt from the
- * replica when attributes change behind it; otherwise kept in step with the
- * nodes a patch adds and removes (R3).
+ * trigger might name, and those with `aria-controls`. Kept in step with the
+ * nodes a patch adds and removes (R3); once the replica has a ledger, with
+ * every element the ledger saw added, removed, or given another `id` or
+ * `aria-controls`, by a patch or by Simul (D165). Without one, rebuilt from
+ * the replica when attributes change behind it.
  */
 interface IsolatedAriaIndex {
   readonly ids: Map<string, HTMLElement[]>;
+  /** The id each element is listed under, which its attribute may no
+   * longer say (D165). */
+  readonly listedIds: Map<Element, string>;
   readonly triggers: Set<HTMLElement>;
   dirty: boolean;
 }
 const ISOLATED_ARIA_INDEXES = new WeakMap<Document, IsolatedAriaIndex>();
+/** The ledger of each committed replica's document, once it has one (D165). */
+const RETAINED_LEDGERS = new WeakMap<Document, RetainedReplicaLedger>();
 let isolatedSelectHostSequence = 0;
 export const ISOLATED_HTML_SHELL = `<!doctype html>
 ${ISOLATED_HTML_SHELL_DOCUMENT}`;
@@ -352,9 +368,11 @@ interface HtmlMirrorDomState {
    * here so that reading the document's language is not a walk of every
    * mirrored node (R3). */
   readonly root: Element | undefined;
-  readonly nodes: Map<number, Node>;
-  readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
-  readonly controlMetadata: Map<number, HtmlMirrorControlText>;
+  /** By id, with each node's id kept beside it (D165). */
+  readonly nodes: ReplicaNodeMap;
+  /** With the bytes they count toward the budget kept as a total (D165). */
+  readonly textMetadata: ReplicaTextMap<Extract<HtmlMirrorNode, { kind: 'text' }>>;
+  readonly controlMetadata: ReplicaTextMap<HtmlMirrorControlText>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly paintedLabelHosts: Map<number, HTMLElement>;
   /**
@@ -376,6 +394,11 @@ interface HtmlMirrorDomState {
   readonly styleReadiness: ReplicaStyleReadiness;
   readonly cleanup: Set<() => void>;
   released: boolean;
+  /**
+   * What the panel keeps of this replica, counted as it changes (D165):
+   * made at the first live patch, from one walk of the replica.
+   */
+  ledger?: RetainedReplicaLedger;
 }
 
 type HtmlMirrorLiveDimensions = HtmlMirrorCheckpoint['payload'] & Readonly<{
@@ -856,9 +879,11 @@ export class IsolatedHtmlReplicaEngine
         throw new DOMException('Isolated iframe staging was cancelled.', 'AbortError');
       }
       if (!iframeDocument) throw new Error('Isolated iframe document unavailable.');
-      const nodes = new Map<number, Node>();
-      const textMetadata = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>();
-      const controlMetadata = new Map<number, HtmlMirrorControlText>();
+      const nodes = new ReplicaNodeMap();
+      const textMetadata = new ReplicaTextMap<
+        Extract<HtmlMirrorNode, { kind: 'text' }>
+      >();
+      const controlMetadata = new ReplicaTextMap<HtmlMirrorControlText>();
       const ownedAdoptedStyles = new Set<HTMLStyleElement>();
       const disposeDisclosureGuards = installIsolatedDisclosureGuards(
         iframeDocument,
@@ -1081,7 +1106,10 @@ export class IsolatedHtmlReplicaEngine
     const operations = frame.length === 1
       ? batch.operations
       : frame.flatMap((patch) => patch.operations);
-    const replacementMetrics = readPatchMetrics(state, operations);
+    // Read only by the diagnostics listener (D165).
+    const replacementMetrics = this.options.onInfo
+      ? readPatchMetrics(state, operations)
+      : EMPTY_PATCH_METRICS;
     const replicaDocument = state.iframe.contentDocument;
     const disclosureBindingsMayHaveChanged = operations.some(
       ({ kind }) => kind !== 'dimensions' && kind !== 'text',
@@ -1570,7 +1598,11 @@ export class IsolatedHtmlReplicaEngine
         );
       },
       afterApply: () => {
-        markIsolatedAriaIndexDirty(replicaDocument);
+        // The presenter writes relations (`id`, `aria-controls`): the
+        // ledger names the elements it changed, when there is one (D165).
+        if (!RETAINED_LEDGERS.has(replicaDocument)) {
+          markIsolatedAriaIndexDirty(replicaDocument);
+        }
         refreshIsolatedNativeSelectFacsimiles(replicaDocument);
         refreshIsolatedReplicaDisclosures(
           replicaDocument,
@@ -2921,7 +2953,12 @@ function registerIsolatedAriaIndexElement(
   element: Element,
 ): void {
   const id = element.getAttribute('id')?.trim();
+  const listed = index.listedIds.get(element);
+  if (listed !== undefined && listed !== id) {
+    unregisterIsolatedAriaIndexElement(index, element);
+  }
   if (id) {
+    index.listedIds.set(element, id);
     const existing = index.ids.get(id);
     if (!existing) index.ids.set(id, [element as HTMLElement]);
     else if (!existing.includes(element as HTMLElement)) {
@@ -2936,7 +2973,8 @@ function unregisterIsolatedAriaIndexElement(
   index: IsolatedAriaIndex,
   element: Element,
 ): void {
-  const id = element.getAttribute('id')?.trim();
+  const id = index.listedIds.get(element);
+  index.listedIds.delete(element);
   if (id) {
     const existing = index.ids.get(id);
     if (existing) {
@@ -2953,6 +2991,7 @@ function rebuildIsolatedAriaIndex(
   index: IsolatedAriaIndex,
 ): void {
   index.ids.clear();
+  index.listedIds.clear();
   index.triggers.clear();
   index.dirty = false;
   const root = document.documentElement;
@@ -2965,17 +3004,70 @@ function rebuildIsolatedAriaIndex(
 function isolatedAriaIndex(document: Document): IsolatedAriaIndex {
   let index = ISOLATED_ARIA_INDEXES.get(document);
   if (!index) {
-    index = { ids: new Map(), triggers: new Set(), dirty: true };
+    index = {
+      ids: new Map(),
+      listedIds: new Map(),
+      triggers: new Set(),
+      dirty: true,
+    };
     ISOLATED_ARIA_INDEXES.set(document, index);
+  }
+  // With a ledger, the elements added, removed, or whose `id` or
+  // `aria-controls` changed since the index was last read, by a patch or by
+  // Simul (the semantic presenter's relations), are listed again: the index
+  // was read from every element after every semantic batch (D165).
+  const ledger = RETAINED_LEDGERS.get(document);
+  if (ledger) {
+    const elements = ledger.takeAriaElements();
+    if (!elements) index.dirty = true;
+    else if (!index.dirty) {
+      for (const element of elements) {
+        unregisterIsolatedAriaIndexElement(index, element);
+        if (ledger.contains(element)) {
+          registerIsolatedAriaIndexElement(index, element);
+        }
+      }
+    }
   }
   if (index.dirty) rebuildIsolatedAriaIndex(document, index);
   return index;
 }
 
 /**
+ * Whether the index lists what a fresh read of the replica would list.
+ * For tests (D165).
+ */
+export function isolatedAriaIndexMatchesReplica(document: Document): boolean {
+  const index = isolatedAriaIndex(document);
+  const fresh: IsolatedAriaIndex = {
+    ids: new Map(),
+    listedIds: new Map(),
+    triggers: new Set(),
+    dirty: true,
+  };
+  rebuildIsolatedAriaIndex(document, fresh);
+  if (
+    fresh.ids.size !== index.ids.size ||
+    fresh.triggers.size !== index.triggers.size
+  ) return false;
+  for (const trigger of fresh.triggers) {
+    if (!index.triggers.has(trigger)) return false;
+  }
+  for (const [id, elements] of fresh.ids) {
+    const listed = index.ids.get(id);
+    if (
+      !listed || listed.length !== elements.length ||
+      !elements.every((element) => listed.includes(element))
+    ) return false;
+  }
+  return true;
+}
+
+/**
  * An attribute written outside a patch (the semantic presenter's own
  * `id`/`aria-controls`) or a rolled-back patch: the index no longer
- * describes the replica, so it is rebuilt from it on next use.
+ * describes the replica, so it is rebuilt from it on next use. With a
+ * ledger, the presenter's writes are followed instead (D165).
  */
 function markIsolatedAriaIndexDirty(document: Document | undefined): void {
   if (!document) return;
@@ -3629,6 +3721,15 @@ function buildRecords(
   for (const node of metadata.values()) {
     if (!node.translatable) continue;
     const old = previous?.get(node.id);
+    // A record that would be made again as it is stays the same object:
+    // after a patch, that is nearly every record of the mirror (D165).
+    if (
+      old?.nodeType === 3 && old.source === node.text &&
+      old.document === document
+    ) {
+      records.set(node.id, old);
+      continue;
+    }
     const revision = old?.source === node.text
       ? old.revision
       : nextRevision(revisions, node.id);
@@ -3644,6 +3745,10 @@ function buildRecords(
     const old = previous?.get(nodeId);
     const same = old?.nodeType === 1 &&
       old.controlTarget === control.kind && old.source === control.text;
+    if (same && old.document === document) {
+      records.set(nodeId, old);
+      continue;
+    }
     const revision = same
       ? old.revision
       : nextRevision(revisions, nodeId);
@@ -3717,32 +3822,16 @@ function applyPatchFrame(
     readonly insertedNodeCount: number;
   }
 
-  let indexedNodeIds: Map<Node, number> | undefined;
-  const currentNodeIds = (): Map<Node, number> => {
-    indexedNodeIds ??= new Map(
-      [...state.nodes].map(([id, node]) => [node, id]),
-    );
-    return indexedNodeIds;
-  };
+  // Each node's id is kept by the map of nodes as it changes; it was built
+  // from every node of the mirror for each frame (D165).
+  const currentNodeIds = (): ReadonlyMap<Node, number> => state.nodes.ids;
   const setCurrentNode = (id: number, node: Node): void => {
-    const previous = state.nodes.get(id);
-    if (previous) currentNodeIds().delete(previous);
     state.nodes.set(id, node);
-    currentNodeIds().set(node, id);
-  };
-  let indexedPresentationNodes: Set<Node> | undefined;
-  const currentPresentationNodes = (): ReadonlySet<Node> => {
-    if (indexedPresentationNodes) return indexedPresentationNodes;
-    indexedPresentationNodes = new Set();
-    for (const node of state.nodes.values()) {
-      indexedPresentationNodes.add(node);
-      indexedPresentationNodes.add(presentationNodeForMirrorNode(node));
-    }
-    return indexedPresentationNodes;
   };
 
   // What the frame started from, taken when its first patch is about to
-  // change the mirror.
+  // change the mirror. The records are not changed until the frame is
+  // applied, so the map itself is what the frame started from (D165).
   let previous: Map<number, ReplicaSourceTextRecord> | undefined;
   const forceUpserts = new Set<number>();
   const rollbacks: PatchRollbackSnapshot[] = [];
@@ -3753,6 +3842,14 @@ function applyPatchFrame(
   const undo = (): undefined => {
     for (let index = rollbacks.length - 1; index >= 0; index -= 1) {
       restorePatchRollback(state, rollbacks[index]!);
+    }
+    // The maps by id as the frame found them: from their journals (D165).
+    state.nodes.rollbackJournal();
+    state.textMetadata.rollbackJournal();
+    state.controlMetadata.rollbackJournal();
+    if (previous) {
+      (state as { records: Map<number, ReplicaSourceTextRecord> }).records =
+        previous;
     }
     markIsolatedAriaIndexDirty(state.iframe.contentDocument ?? undefined);
     return undefined;
@@ -3961,7 +4058,7 @@ function applyPatchFrame(
     for (const operation of structuralOperations) {
       const target = state.nodes.get(operation.nodeId) as Node;
       const mirrored = [...target.childNodes].filter(
-        (child) => currentPresentationNodes().has(child),
+        (child) => isMirrorPresentationNode(state.nodes, child),
       );
       oldChildren.set(operation.nodeId, mirrored);
       if (operation.kind === 'children') {
@@ -4041,34 +4138,30 @@ function applyPatchFrame(
       prospectiveNodeCount > MAX_HTML_MIRROR_NODES
     ) return false;
 
-    const prospectiveText = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>(
-      [...state.textMetadata].filter(([id]) => !allRemovedIds.has(id)),
-    );
-    const prospectiveControls = new Map<number, HtmlMirrorControlText>(
-      [...state.controlMetadata].filter(([id]) => !allRemovedIds.has(id)),
-    );
+    // The text the mirror would keep: what it keeps, less what the patch
+    // removes, with what it brings. Counted from the maps' running totals
+    // and the patch's own entries (D165; it was a copy of both maps).
+    const incomingText = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>();
+    const incomingControls = new Map<number, HtmlMirrorControlText>();
     for (const operation of childrenOperations) {
       for (const child of operation.children) {
-        collectGraphTextState(child, prospectiveText, prospectiveControls);
+        collectGraphTextState(child, incomingText, incomingControls);
       }
     }
     for (const operation of reconcileOperations) {
       for (const child of operation.children) {
         if (child.kind === 'graph') {
-          collectGraphTextState(child.node, prospectiveText, prospectiveControls);
+          collectGraphTextState(child.node, incomingText, incomingControls);
         }
       }
     }
-    for (const [id, node] of parsedText) prospectiveText.set(id, node);
-    let prospectiveTextBytes = 0;
-    for (const node of prospectiveText.values()) {
-      prospectiveTextBytes += node.text.length * 2 + 32;
-      if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return false;
-    }
-    for (const control of prospectiveControls.values()) {
-      prospectiveTextBytes += control.text.length * 2 + 32;
-      if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return false;
-    }
+    if (prospectiveMetadataBytes(
+      state,
+      allRemovedIds,
+      incomingText,
+      incomingControls,
+      parsedText,
+    ) > MAX_HTML_MIRROR_BYTES) return false;
 
     const childrenPlans = new Map<
       Extract<StructuralOperation, { kind: 'children' }>,
@@ -4207,24 +4300,28 @@ function applyPatchFrame(
     } catch {
       return false;
     }
-    previous ??= new Map(state.records);
+    if (!previous) {
+      previous = state.records;
+      state.nodes.beginJournal();
+      state.textMetadata.beginJournal();
+      state.controlMetadata.beginJournal();
+    }
     const rollback = capturePatchRollback(state, targetOperations, rollbacks[0]);
     rollbacks.push(rollback);
-    // Counted only for a patch that changes a list.
-    let knownBeforeFrame: Set<Node> | undefined;
-    const knownBefore = (): Set<Node> =>
-      (knownBeforeFrame ??= new Set(rollback.nodes.values()));
+    // A node the mirror held when the frame began.
+    const knownBefore = (node: Node): boolean =>
+      state.nodes.journalStartHasNode(node);
     for (const plan of childrenPlans.values()) {
       for (const child of plan.oldChildren) {
-        removedNodeCount += domMirrorNodeCount(child, knownBefore());
+        removedNodeCount += domMirrorNodeCount(child, knownBefore);
       }
     }
     for (const plan of reconcilePlans.values()) {
       for (const child of plan.oldChildren) {
         if (plan.retainedChildren.has(child)) {
-          retainedNodeCount += domMirrorNodeCount(child, knownBefore());
+          retainedNodeCount += domMirrorNodeCount(child, knownBefore);
         } else {
-          removedNodeCount += domMirrorNodeCount(child, knownBefore());
+          removedNodeCount += domMirrorNodeCount(child, knownBefore);
         }
       }
     }
@@ -4287,8 +4384,10 @@ function applyPatchFrame(
             operation.resolvedStyleSheetText,
           );
           if (
-            indexedBefore || operation.attributes.some(
-              ([name]) => name === 'id' || name === 'aria-controls',
+            !RETAINED_LEDGERS.has(element.ownerDocument) && (
+              indexedBefore || operation.attributes.some(
+                ([name]) => name === 'id' || name === 'aria-controls',
+              )
             )
           ) {
             markIsolatedAriaIndexDirty(
@@ -4297,6 +4396,7 @@ function applyPatchFrame(
           }
         }
         applyElementHints(element, operation);
+        state.nodes.reclassify(element);
         state.controlMetadata.delete(operation.nodeId);
         continue;
       }
@@ -4310,7 +4410,7 @@ function applyPatchFrame(
           (style) => style.parentNode === plan.target,
         );
         for (const child of plan.oldChildren) {
-          removeDomTree(state, child, currentNodeIds());
+          removeDomTree(state, child);
           child.parentNode?.removeChild(child);
         }
         plan.target.appendChild(plan.fragment);
@@ -4336,7 +4436,7 @@ function applyPatchFrame(
       if (!plan) throw new Error('Missing children reconciliation plan.');
       for (const child of plan.oldChildren) {
         if (plan.retainedChildren.has(child)) continue;
-        removeDomTree(state, child, currentNodeIds());
+        removeDomTree(state, child);
         child.parentNode?.removeChild(child);
       }
       for (const style of plan.ownedAdoptedStyles) {
@@ -4395,9 +4495,6 @@ function applyPatchFrame(
   if (!validFrameStyleSheetText(state, parts)) return undefined;
   try {
     for (const operations of parts) {
-      // Which nodes of the mirror are drawn is read afresh for each patch;
-      // the index of ids is kept in step as patches are applied.
-      indexedPresentationNodes = undefined;
       if (!applyPart(operations)) return undo();
     }
     // The frame is atomic but its parts are not: a later text part can
@@ -4408,6 +4505,21 @@ function applyPatchFrame(
     if (!previous) return undefined;
     if (!retainedReplicaStateFitsBudget(state)) {
       throw new Error('Replica retained-state budget exceeded.');
+    }
+    const replicaDocument = state.iframe.contentDocument;
+    const update = recordUpdateOfFrame(state, previous, forceUpserts);
+    if (update) {
+      if (replicaDocument) assignIsolatedManualSlots(replicaDocument, state.nodes);
+      // Last, when nothing can fail: the frame's records are the map the
+      // frame started from, with its changed records replaced in place.
+      for (const record of update.records) state.records.set(record.nodeId, record);
+      return Object.freeze({
+        changes: update.changes,
+        retainedNodeCount,
+        insertedNodeCount,
+        movedNodeCount,
+        removedNodeCount,
+      });
     }
     const next = buildRecords(
       state.document,
@@ -4434,7 +4546,6 @@ function applyPatchFrame(
         changes.push(Object.freeze({ kind: 'upsert', record }));
       }
     }
-    const replicaDocument = state.iframe.contentDocument;
     if (replicaDocument) assignIsolatedManualSlots(replicaDocument, state.nodes);
     return Object.freeze({
       changes: Object.freeze(changes),
@@ -4445,15 +4556,116 @@ function applyPatchFrame(
     });
   } catch {
     return undo();
+  } finally {
+    // Applied or put back, the frame's journals end with it.
+    state.nodes.endJournal();
+    state.textMetadata.endJournal();
+    state.controlMetadata.endJournal();
   }
+}
+
+/**
+ * For tests: off, every frame builds its records again from all the text,
+ * so a test can compare the two ways (D165).
+ */
+export const isolatedEngineTestSwitches = { recordsFromChanges: true };
+
+/**
+ * The records of a frame that changed text in place, read from what it
+ * changed instead of from every text of the mirror (D165). A frame that
+ * added or removed text, or changed whether a text is translated, changes
+ * the order of the records: for those, undefined, and the records are built
+ * again from all the text, as before. The changed records are made in the
+ * order `buildRecords` meets them (texts, then controls, each in its map's
+ * order), which numbers their revisions and orders the changes.
+ * `records`: what replaces the frame's records in place.
+ */
+function recordUpdateOfFrame(
+  state: HtmlMirrorDomState,
+  previous: ReadonlyMap<number, ReplicaSourceTextRecord>,
+  forceUpserts: ReadonlySet<number>,
+): {
+  readonly changes: readonly ReplicaSourceTextChange[];
+  readonly records: readonly ReplicaSourceTextRecord[];
+} | undefined {
+  if (!isolatedEngineTestSwitches.recordsFromChanges) return undefined;
+  const textIds = state.textMetadata.journalUpdatedKeys();
+  const controlIds = state.controlMetadata.journalUpdatedKeys();
+  if (!textIds || !controlIds) return undefined;
+  const touched = new Set([...textIds, ...controlIds]);
+  if (touched.size !== textIds.length + controlIds.length) return undefined;
+  for (const id of forceUpserts) if (!touched.has(id)) return undefined;
+  const changedTexts: number[] = [];
+  for (const id of textIds) {
+    if (state.controlMetadata.has(id)) return undefined;
+    const node = state.textMetadata.get(id)!;
+    const old = previous.get(id);
+    if (node.translatable !== (old !== undefined)) return undefined;
+    if (!old) continue;
+    const reused = old.nodeType === 3 && old.source === node.text &&
+      old.document === state.document;
+    if (!reused || forceUpserts.has(id)) changedTexts.push(id);
+  }
+  const changedControls: number[] = [];
+  for (const id of controlIds) {
+    if (state.textMetadata.has(id) || !previous.has(id)) return undefined;
+    const control = state.controlMetadata.get(id)!;
+    const old = previous.get(id)!;
+    const reused = old.nodeType === 1 && old.controlTarget === control.kind &&
+      old.source === control.text && old.document === state.document;
+    if (!reused || forceUpserts.has(id)) changedControls.push(id);
+  }
+  const byPlace = (map: ReplicaTextMap<{ readonly text: string }>) =>
+    (left: number, right: number): number =>
+      (map.placeOf(left) ?? 0) - (map.placeOf(right) ?? 0);
+  changedTexts.sort(byPlace(state.textMetadata));
+  changedControls.sort(byPlace(state.controlMetadata));
+  const changes: ReplicaSourceTextChange[] = [];
+  const records: ReplicaSourceTextRecord[] = [];
+  const settle = (old: ReplicaSourceTextRecord, record: ReplicaSourceTextRecord) => {
+    if (record !== old) records.push(record);
+    if (!sameReplicaTextRecord(old, record) || forceUpserts.has(record.nodeId)) {
+      changes.push(Object.freeze({ kind: 'upsert' as const, record }));
+    }
+  };
+  // As `buildRecords` makes each.
+  for (const id of changedTexts) {
+    const old = previous.get(id)!;
+    const text = state.textMetadata.get(id)!;
+    settle(old, old.nodeType === 3 && old.source === text.text &&
+        old.document === state.document
+      ? old
+      : Object.freeze({
+          document: state.document,
+          nodeId: id,
+          nodeType: 3 as const,
+          revision: old.source === text.text
+            ? old.revision
+            : nextRevision(state.revisions, id),
+          source: text.text,
+        }));
+  }
+  for (const id of changedControls) {
+    const old = previous.get(id)!;
+    const control = state.controlMetadata.get(id)!;
+    const same = old.nodeType === 1 && old.controlTarget === control.kind &&
+      old.source === control.text;
+    settle(old, same && old.document === state.document
+      ? old
+      : Object.freeze({
+          document: state.document,
+          nodeId: id,
+          nodeType: 1 as const,
+          controlTarget: control.kind,
+          revision: same ? old.revision : nextRevision(state.revisions, id),
+          source: control.text,
+        }));
+  }
+  return { changes: Object.freeze(changes), records };
 }
 
 interface PatchRollbackSnapshot {
   readonly dimensions: HtmlMirrorLiveDimensions;
-  readonly nodes: Map<number, Node>;
-  readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
-  readonly controlMetadata: Map<number, HtmlMirrorControlText>;
-  readonly records: Map<number, ReplicaSourceTextRecord>;
   readonly revisions: Map<number, number>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly childLists: ReadonlyMap<Node, readonly Node[]>;
@@ -4479,8 +4691,10 @@ interface PatchRollbackSnapshot {
 /**
  * What a patch is about to change, to put back if it fails. `first`: the
  * snapshot of the frame's first patch, when this is a later one. What the
- * mirror keeps by id is put back as the frame found it, so it is copied
- * once a frame.
+ * mirror keeps by id is put back as the frame found it: the nodes and the
+ * text by their journals, the records because the frame changes them only
+ * once it is applied (D165; the maps were copied whole for every frame).
+ * The revision counter and the adopted styles are small, and copied.
  */
 function capturePatchRollback(
   state: HtmlMirrorDomState,
@@ -4570,10 +4784,6 @@ function capturePatchRollback(
   }
   return {
     dimensions: first?.dimensions ?? state.dimensions,
-    nodes: first?.nodes ?? new Map(state.nodes),
-    textMetadata: first?.textMetadata ?? new Map(state.textMetadata),
-    controlMetadata: first?.controlMetadata ?? new Map(state.controlMetadata),
-    records: first?.records ?? new Map(state.records),
     revisions: first?.revisions ?? new Map(state.revisions),
     ownedAdoptedStyles: first?.ownedAdoptedStyles ??
       new Set(state.ownedAdoptedStyles),
@@ -4597,6 +4807,7 @@ function restorePatchRollback(
   }
   for (const [target, attributes] of snapshot.attributes) {
     restoreAttributeList(target, attributes);
+    state.nodes.reclassify(target);
   }
   for (const [target, values] of snapshot.controlValues) {
     try {
@@ -4637,13 +4848,8 @@ function restorePatchRollback(
     );
   }
   state.dimensions = snapshot.dimensions;
-  restoreMap(state.nodes, snapshot.nodes);
-  restoreMap(state.textMetadata, snapshot.textMetadata);
-  restoreMap(state.controlMetadata, snapshot.controlMetadata);
   restoreMap(state.revisions, snapshot.revisions);
   restoreSet(state.ownedAdoptedStyles, snapshot.ownedAdoptedStyles);
-  (state as { records: Map<number, ReplicaSourceTextRecord> }).records =
-    new Map(snapshot.records);
 }
 
 function restoreOptionalAttribute(
@@ -4721,11 +4927,7 @@ function restoreSet<Value>(target: Set<Value>, source: ReadonlySet<Value>): void
   for (const value of source) target.add(value);
 }
 
-function removeDomTree(
-  state: HtmlMirrorDomState,
-  node: Node,
-  nodeIds: Map<Node, number>,
-): void {
+function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
   const ariaIndex = ISOLATED_ARIA_INDEXES.get(
     state.iframe.contentDocument ?? state.iframe.ownerDocument,
   );
@@ -4735,24 +4937,91 @@ function removeDomTree(
     unregisterIsolatedAriaIndexElement(ariaIndex, node as Element);
   }
   for (const child of [...node.childNodes]) {
-    removeDomTree(state, child, nodeIds);
+    removeDomTree(state, child);
   }
   if (node.nodeType === Node.ELEMENT_NODE) {
     const shadow = (node as Element).shadowRoot;
-    if (shadow) removeDomTree(state, shadow, nodeIds);
+    if (shadow) removeDomTree(state, shadow);
   }
   if (state.ownedAdoptedStyles.has(node as HTMLStyleElement)) {
     state.ownedAdoptedStyles.delete(node as HTMLStyleElement);
   }
-  const id = nodeIds.get(node);
+  // The records are left as they are: the frame builds new ones from the
+  // text once it is applied, and keeps them as they were if it fails.
+  const id = state.nodes.idOf(node);
   if (id !== undefined) {
-    nodeIds.delete(node);
-    if (state.nodes.get(id) !== node) return;
     state.nodes.delete(id);
     state.textMetadata.delete(id);
     state.controlMetadata.delete(id);
-    state.records.delete(id);
   }
+}
+
+/**
+ * Whether a child is a node of the mirror, or the box Simul draws a
+ * mirrored dropdown in (`presentationNodeForMirrorNode`). Asked of the
+ * child, instead of a set of every node of the mirror (D165).
+ */
+function isMirrorPresentationNode(nodes: ReplicaNodeMap, child: Node): boolean {
+  if (nodes.hasNode(child)) return true;
+  if (
+    child.nodeType !== Node.ELEMENT_NODE ||
+    !ISOLATED_SELECT_HOSTS.has(child as Element)
+  ) return false;
+  const shadow = (child as Element).shadowRoot;
+  if (!shadow) return false;
+  // The selects of the box's own tree, not of a root inside it.
+  const pending: Node[] = [...shadow.childNodes];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    if (
+      (node as Element).localName.toLowerCase() === 'select' &&
+      nodes.hasNode(node)
+    ) return true;
+    for (const inner of node.childNodes) pending.push(inner);
+  }
+  return false;
+}
+
+/**
+ * The bytes of text the mirror would keep after a patch: the maps' totals,
+ * less the entries of the nodes it removes, with the entries it brings. The
+ * patch's new ids are checked above to be none the mirror keeps, so its
+ * entries only add to the totals; a text patch replaces an entry (D165).
+ */
+function prospectiveMetadataBytes(
+  state: HtmlMirrorDomState,
+  removedIds: ReadonlySet<number>,
+  incomingText: ReadonlyMap<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
+  incomingControls: ReadonlyMap<number, HtmlMirrorControlText>,
+  parsedText: ReadonlyMap<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
+): number {
+  let bytes = state.textMetadata.bytes + state.controlMetadata.bytes;
+  for (const id of removedIds) {
+    const text = state.textMetadata.get(id);
+    if (text) bytes -= replicaTextBytes(text);
+    const control = state.controlMetadata.get(id);
+    if (control) bytes -= replicaTextBytes(control);
+  }
+  const kept = (id: number): boolean => !removedIds.has(id);
+  for (const [id, text] of incomingText) {
+    const held = kept(id) ? state.textMetadata.get(id) : undefined;
+    if (held) bytes -= replicaTextBytes(held);
+    if (!parsedText.has(id)) bytes += replicaTextBytes(text);
+  }
+  for (const [id, control] of incomingControls) {
+    const held = kept(id) ? state.controlMetadata.get(id) : undefined;
+    if (held) bytes -= replicaTextBytes(held);
+    bytes += replicaTextBytes(control);
+  }
+  for (const [id, text] of parsedText) {
+    if (!incomingText.has(id)) {
+      const held = kept(id) ? state.textMetadata.get(id) : undefined;
+      if (held) bytes -= replicaTextBytes(held);
+    }
+    bytes += replicaTextBytes(text);
+  }
+  return bytes;
 }
 
 function collectTranslatableIds(node: HtmlMirrorNode, ids: Set<number>): void {
@@ -5495,72 +5764,67 @@ function readDocumentLanguage(state: HtmlMirrorDomState): string | undefined {
   return value && value.length <= 128 ? value : undefined;
 }
 
+/**
+ * The panel keeps the previous replica while it stages the next one, so
+ * the replica it keeps, Simul's own nodes with it, is held to four times
+ * the page budget, and its nodes to three times. Checked after every patch:
+ * the ledger counts what each change added and removed, and the full walk
+ * answers only when the replica is near a limit or every so often (D165;
+ * it was a walk of every node after every patch).
+ */
 function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
   try {
-    const root = state.iframe.contentDocument?.documentElement;
-    if (!root) return false;
-    // This runs after every patch and visits every node of the mirror, so
-    // it walks by the tree's own links and keeps no set of the nodes it saw
-    // (a tree meets each node once) and no copy of each child list: on a
-    // page of 9,000 paragraphs that is about a third less work, more than
-    // the language tags add to it.
-    const pending: Node[] = [root];
-    let visited = 0;
-    // The panel keeps the previous replica while it stages the next one.
-    const maxRetainedBytes = MAX_HTML_MIRROR_BYTES * 4;
-    // Every shadow root's copy of an adopted sheet is set from one string,
-    // which the browser shares; count that text once (D84).
-    const adoptedTexts = new Set<string>();
-    let bytes = 0;
-    while (pending.length > 0) {
-      const node = pending.pop()!;
-      visited += 1;
-      if (visited > MAX_HTML_MIRROR_NODES * 3 + 32) return false;
-      bytes += 48;
-      if (
-        node.nodeType === 3 &&
-        state.ownedAdoptedStyles.has(node.parentNode as HTMLStyleElement)
-      ) {
-        const text = node.nodeValue ?? '';
-        if (!adoptedTexts.has(text)) {
-          adoptedTexts.add(text);
-          bytes += text.length * 2;
-        }
-      } else if (node.nodeType === 3 || node.nodeType === 8) {
-        bytes += (node.nodeValue?.length ?? 0) * 2;
-      } else if (node.nodeType === 1) {
-        const element = node as Element;
-        bytes += element.localName.length * 2;
-        // By index: this runs after every patch, and a language tag is two
-        // more attributes on every element that shows a translation (D124).
-        const attributes = element.attributes;
-        for (let index = 0; index < attributes.length; index += 1) {
-          const { name, value } = attributes[index]!;
-          bytes += (name.length + value.length) * 2 + 16;
-          if (bytes > maxRetainedBytes) return false;
-        }
-        if (isNativeReplicaTextControl(element)) {
-          bytes += (element.value.length + element.placeholder.length) * 2;
-        }
-        const shadow = element.shadowRoot;
-        if (shadow) pending.push(shadow);
+    const document = state.iframe.contentDocument;
+    const root = document?.documentElement;
+    if (!document || !root) return false;
+    const maxBytes = MAX_HTML_MIRROR_BYTES * 4;
+    const maxNodes = MAX_HTML_MIRROR_NODES * 3 + 32;
+    const metadataBytes = state.textMetadata.bytes + state.controlMetadata.bytes;
+    let ledger = state.ledger;
+    if (ledger && ledger.root !== root) {
+      releaseRetainedLedger(state);
+      ledger = undefined;
+    }
+    if (!ledger) {
+      const Observer = document.defaultView?.MutationObserver ??
+        globalThis.MutationObserver;
+      if (!Observer) {
+        const walked = walkRetainedReplica(
+          root,
+          state.ownedAdoptedStyles,
+          maxBytes,
+          maxNodes,
+        );
+        return Boolean(walked) &&
+          walked!.bytes + metadataBytes <= maxBytes &&
+          state.revisions.size <= 1;
       }
-      for (let child = node.firstChild; child; child = child.nextSibling) {
-        pending.push(child);
-      }
-      if (bytes > maxRetainedBytes) return false;
+      ledger = new RetainedReplicaLedger({
+        root,
+        ownedAdoptedStyles: state.ownedAdoptedStyles,
+        MutationObserver: Observer,
+      });
+      state.ledger = ledger;
+      // The ARIA index follows the ledger from here. Until now it was kept
+      // in step by the patches, or marked to be read again, so it describes
+      // the replica the ledger starts from.
+      RETAINED_LEDGERS.set(document, ledger);
     }
-    for (const metadata of state.textMetadata.values()) {
-      bytes += metadata.text.length * 2 + 32;
-      if (bytes > maxRetainedBytes) return false;
-    }
-    for (const control of state.controlMetadata.values()) {
-      bytes += control.text.length * 2 + 32;
-      if (bytes > maxRetainedBytes) return false;
-    }
-    return state.revisions.size <= 1;
+    return ledger.fits(metadataBytes, maxBytes, maxNodes) &&
+      state.revisions.size <= 1;
   } catch {
     return false;
+  }
+}
+
+function releaseRetainedLedger(state: HtmlMirrorDomState): void {
+  const ledger = state.ledger;
+  if (!ledger) return;
+  state.ledger = undefined;
+  ledger.dispose();
+  const document = state.iframe.contentDocument;
+  if (document && RETAINED_LEDGERS.get(document) === ledger) {
+    RETAINED_LEDGERS.delete(document);
   }
 }
 
@@ -5988,6 +6252,7 @@ function releaseState(state: HtmlMirrorDomState | undefined): void {
     }
   }
   state.cleanup.clear();
+  releaseRetainedLedger(state);
   releaseIsolatedDocumentHosts(state.iframe.contentDocument ?? undefined);
   state.nodes.clear();
   state.textMetadata.clear();
@@ -6005,28 +6270,12 @@ function stateInfo(
   eventRepresentability: HtmlMirrorRepresentabilitySummary =
     state.representability,
 ): IsolatedMirrorInfo {
-  let imageCount = 0;
-  let openShadowRootCount = 0;
-  let visuallyHiddenCount = 0;
-  let selectedImageSourceCount = 0;
-  for (const node of state.nodes.values()) {
-    if (
-      node.nodeType === Node.ELEMENT_NODE &&
-      (node as Element).localName.toLowerCase() === 'img'
-    ) imageCount += 1;
-    if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in node) {
-      openShadowRootCount += 1;
-    }
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      const element = node as Element;
-      if (element.getAttribute('data-simul-visually-hidden') === 'v1') {
-        visuallyHiddenCount += 1;
-      }
-      if (element.getAttribute('data-simul-selected-image-source') === 'v1') {
-        selectedImageSourceCount += 1;
-      }
-    }
-  }
+  // Kept by the map of nodes as it changes: they were counted from every
+  // node after every patch (D165).
+  const imageCount = state.nodes.imageCount;
+  const openShadowRootCount = state.nodes.shadowRootCount;
+  const visuallyHiddenCount = state.nodes.visuallyHiddenCount;
+  const selectedImageSourceCount = state.nodes.selectedImageSourceCount;
   return Object.freeze({
     stage,
     ...(code ? { code } : {}),
@@ -6155,7 +6404,9 @@ function readPatchMetrics(
   let dimensionOperationCount = 0;
   let replacementNodeCount = 0;
   let largestReplacementNodeCount = 0;
-  const knownNodes = new Set(state.nodes.values());
+  // Looked up by the map's index of ids: a set of every node made each
+  // patch cost the whole mirror (D165).
+  const known = (node: Node): boolean => state.nodes.hasNode(node);
   for (const operation of operations) {
     if (operation.kind === 'text') textOperationCount += 1;
     else if (operation.kind === 'attributes') attributeOperationCount += 1;
@@ -6169,7 +6420,7 @@ function readPatchMetrics(
       const target = state.nodes.get(operation.nodeId);
       const outgoingCount = target
         ? [...target.childNodes].reduce(
-            (total, child) => total + domMirrorNodeCount(child, knownNodes),
+            (total, child) => total + domMirrorNodeCount(child, known),
             0,
           )
         : 0;
@@ -6213,14 +6464,17 @@ function htmlMirrorGraphNodeCount(node: HtmlMirrorNode): number {
   return count;
 }
 
-function domMirrorNodeCount(node: Node, knownNodes: ReadonlySet<Node>): number {
-  let count = knownNodes.has(node) ? 1 : 0;
+function domMirrorNodeCount(
+  node: Node,
+  known: (node: Node) => boolean,
+): number {
+  let count = known(node) ? 1 : 0;
   for (const child of [...node.childNodes]) {
-    count += domMirrorNodeCount(child, knownNodes);
+    count += domMirrorNodeCount(child, known);
   }
   if (node.nodeType === Node.ELEMENT_NODE) {
     const shadowRoot = (node as Element).shadowRoot;
-    if (shadowRoot) count += domMirrorNodeCount(shadowRoot, knownNodes);
+    if (shadowRoot) count += domMirrorNodeCount(shadowRoot, known);
   }
   return count;
 }

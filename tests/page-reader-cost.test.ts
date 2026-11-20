@@ -342,7 +342,7 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     });
   });
 
-  it('looks for roots and reads the relationships once a frame, however many events tell of a layout change', () => {
+  it('looks for roots and reads the relationships once a frame, however many events tell of a layout change', async () => {
     const fixture = sessionFixture('<main><p id="probe">text</p><img id="picture"></main>');
     fixture.start();
     fixture.settle();
@@ -357,10 +357,15 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     expect(fixture.relationshipReads()).toBe(before);
     expect(fixture.frames).toHaveLength(1);
     fixture.flushFrame();
+    // The frame starts the read; its slice comes a turn later (D165).
+    expect(fixture.relationshipReads()).toBe(before);
+    await aTurn();
+    expect(fixture.relationshipReads()).toBe(before + 1);
+    await aTurn();
     expect(fixture.relationshipReads()).toBe(before + 1);
   });
 
-  it('looks at once in a tab that is not shown, where no frame comes', () => {
+  it('looks at once in a tab that is not shown, where no frame comes', async () => {
     const fixture = sessionFixture('<main><p id="probe">text</p></main>');
     fixture.start();
     fixture.settle();
@@ -383,10 +388,11 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     resize();
     expect(fixture.relationshipReads()).toBe(shown);
     fixture.flushFrame();
+    await aTurn();
     expect(fixture.relationshipReads()).toBe(shown + 1);
   });
 
-  it('reads the relationships once in a frame that has a layout change and the end of a transition', () => {
+  it('reads the relationships once in a frame that has a layout change and the end of a transition', async () => {
     const fixture = sessionFixture(
       '<main><button id="tab" aria-controls="panel">tab</button><div id="panel">panel</div><p id="probe">text</p></main>',
     );
@@ -398,6 +404,35 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     );
     fixture.window.dispatchEvent(fixture.event('resize'));
     fixture.flushFrame();
+    await aTurn();
+    expect(fixture.relationshipReads()).toBe(before + 1);
+    await aTurn();
+    expect(fixture.relationshipReads()).toBe(before + 1);
+  });
+
+  it('drops the read in slices when a change of the page reads the relationships whole (D165)', async () => {
+    const fixture = sessionFixture(
+      '<main><button id="tab" aria-controls="panel">tab</button><div id="panel">panel</div><p id="probe">text</p></main>',
+    );
+    fixture.start();
+    fixture.settle();
+    const before = fixture.relationshipReads();
+    fixture.window.dispatchEvent(fixture.event('resize'));
+    fixture.flushFrame();
+    // Before the read's first slice, the page changes what a control
+    // controls: the observer reads the relationships whole, at once.
+    const tab = fixture.byId('tab');
+    tab.setAttribute('aria-controls', 'probe');
+    fixture.mutate({
+      type: 'attributes',
+      target: tab,
+      attributeName: 'aria-controls',
+      oldValue: 'panel',
+    });
+    expect(fixture.relationshipReads()).toBe(before + 1);
+    // The read in slices, begun before the change, reads nothing.
+    await aTurn();
+    await aTurn();
     expect(fixture.relationshipReads()).toBe(before + 1);
   });
 
@@ -803,6 +838,11 @@ function rectList(boxes: readonly Box[]): DOMRectList {
  * and its resize observer in the test's hands. `size` is what the page and
  * its body measure.
  */
+/** A turn of the event loop: a slice after `yieldToMain` has run. */
+function aTurn(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 5));
+}
+
 function sessionFixture(body: string, head = '') {
   const page = paintedPage(body, head);
   const { document, window } = page;

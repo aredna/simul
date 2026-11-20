@@ -742,8 +742,21 @@ describe('sidepanel UI structure', () => {
     expect(errorPanel).toContain('setUiText(openFile, UI_STRINGS.openPdfFile);');
     expect(errorPanel).toContain("openFile.addEventListener('click', () => pdfFileInput.click());");
     expect(errorPanel).toContain('setUiText(fileHint, UI_STRINGS.openPdfFileDropHint);');
-    // The hint introduces the button, after the reason the panel is empty.
-    expect(errorPanel).toContain('wrapper.append(text, fileHint, openFile);');
+    // The hint introduces the button, after the reason the panel is empty
+    // and, under a message that asks for the toolbar icon again, the offer
+    // of access to all sites (D165).
+    expect(errorPanel).toContain('wrapper.append(text);');
+    expect(errorPanel).toContain(
+      'if (asksForSiteAccess(message)) wrapper.append(...allSitesAccessOffer());',
+    );
+    expect(errorPanel).toContain('wrapper.append(fileHint, openFile);');
+    const offer = sliceBetween('function allSitesAccessOffer(', 'function openDroppedFiles(');
+    // Asked from the click, and only while the access is missing.
+    expect(offer).toContain(
+      "allow.addEventListener('click', () => {\n    // Asked in the click itself",
+    );
+    expect(offer).toContain('browser.permissions.contains({ origins: [...ALL_SITES_PERMISSION_ORIGINS] })');
+    expect(offer).toContain('void sourceFollower.followCurrentActiveSourceTab();');
 
     const fileWiring = sliceBetween(
       "pdfFileInput.addEventListener('change', () => {",

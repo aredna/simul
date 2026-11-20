@@ -436,6 +436,8 @@ export class SemanticSourceSession {
   /** The first scan after start runs at once; later ones wait their share. */
   #scannedOnce = false;
   #shareTimer: unknown;
+  /** A person's input asked for the next scan: it skips the share (D165). */
+  #userInputPending = false;
   readonly #revisions = new Map<number, RevisionState>();
   readonly #proofRevisions = new Map<string, RevisionState>();
   readonly #structuralMenus: WeakMap<Element, {
@@ -623,6 +625,9 @@ export class SemanticSourceSession {
     if (event.type === 'toggle' || event.type === 'beforetoggle') {
       this.#notePopoverToggle(event);
     }
+    // What a person typed or chose is read without waiting for the share
+    // of time (D165): the value is what they look at in the mirror.
+    this.#userInputPending = true;
     this.refresh();
   };
   readonly #onPresentationChange = (event: Event): void => {
@@ -651,6 +656,7 @@ export class SemanticSourceSession {
         ? candidate
         : safelyRead(() => candidate.closest('select'));
       if (select?.ownerDocument !== this.environment.document) continue;
+      this.#userInputPending = true;
       this.refresh();
       this.#scheduleSelectActivationRefresh();
       return;
@@ -1111,7 +1117,10 @@ export class SemanticSourceSession {
     ) return;
     // The scan and the comparison of what the page paints share a fifth of
     // the tab's time; the first scan after start runs at once (D164).
-    if (this.#waitForShare(!this.#scannedOnce)) return;
+    // The first scan, and one a person's input asked for, wait only for a
+    // pass that holds the page, not for the share (D164, D165).
+    if (this.#waitForShare(!this.#scannedOnce || this.#userInputPending)) return;
+    this.#userInputPending = false;
     this.#dirty = false;
     // What the observer has queued comes before the page is read, and the
     // roots that left the page go before the roots still in it are watched

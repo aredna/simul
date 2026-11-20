@@ -4125,6 +4125,143 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('reads a clipped image whole when the scroll brings it in, and its strip when the reader stops (D165)', async () => {
+    // Image 12 is cut off by the view while the reader scrolls on; image 13
+    // is cut off where the reader stops. The capture says when each, still
+    // where it is, will have waited long enough.
+    const { document } = parseHTML('<html><body><img id="a"><img id="b"></body></html>');
+    const images = new Map<number, HTMLImageElement>([
+      [12, document.getElementById('a') as unknown as HTMLImageElement],
+      [13, document.getElementById('b') as unknown as HTMLImageElement],
+    ]);
+    const at = (nodeId: number, revision: number): SourceImageDescriptor => ({
+      ...descriptor,
+      nodeId,
+      captureRevision: revision,
+      observationRevision: revision,
+      pictureRevision: 1,
+    });
+    // The top cut off by the view, by image and observation.
+    const cut = new Map<string, number>([['12:1', 60], ['13:1', 40]]);
+    const looks = new Map<string, number>();
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      const key = `${current.nodeId}:${current.observationRevision}`;
+      const top = cut.get(key) ?? 0;
+      const look = (looks.get(key) ?? 0) + 1;
+      looks.set(key, look);
+      if (top > 0 && look === 1) {
+        return { status: 'deferred' as const, reason: 'clipped' as const, retryAfterMs: 700 };
+      }
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(current, `${key}`.replace(':', 'a').padEnd(64, 'e')),
+          cropOffsetYCss: top,
+          cropHeightCss: current.renderedHeight - top,
+          nearestElementLanguage: 'en' as const,
+        },
+      };
+    });
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(`Headline ${pixels.descriptor.nodeId}`, 0.98),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const timers = lateLookTimers();
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: at(12, 1) }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const shown = (nodeId: number) => overlayText(
+      document.querySelector(`[data-simul-image-overlay="${nodeId}"]`),
+    );
+    const settle = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+    await settle();
+    // Not read yet, not settled: a look is arranged for when it is still.
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      stage: 'capture-deferred',
+      reason: 'clipped',
+    }));
+    expect(recognize).not.toHaveBeenCalled();
+    expect(timers.pending()).toEqual([700]);
+
+    // The scroll goes on and brings it in whole before then: one read, of
+    // the whole image, and the look arranged before has nothing to do.
+    emitChange?.({ kind: 'upsert', descriptor: at(12, 2) });
+    await vi.waitFor(() => expect(shown(12)).toBe('ja:Headline 12'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(recognize).toHaveBeenCalledOnce();
+    expect(recognize.mock.calls[0]?.[0]).toMatchObject({ cropOffsetYCss: 0 });
+    expect(timers.pending()).toEqual([]);
+
+    // The reader stops with image 13 half in view: it is read, its strip,
+    // once it has stayed there long enough.
+    emitChange?.({ kind: 'upsert', descriptor: at(13, 1) });
+    await vi.waitFor(() => expect(timers.pending()).toEqual([700]));
+    await settle();
+    expect(recognize).toHaveBeenCalledOnce();
+    timers.fire();
+    await vi.waitFor(() => expect(shown(13)).toBe('ja:Headline 13'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(4);
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(recognize.mock.calls[1]?.[0]).toMatchObject({ cropOffsetYCss: 40 });
+    expect(timers.pending()).toEqual([]);
+
+    // A look still waiting goes with the controller.
+    cut.set('13:3', 50);
+    emitChange?.({ kind: 'upsert', descriptor: { ...at(13, 3), contentRevision: 2 } });
+    await vi.waitFor(() => expect(timers.pending()).toEqual([700]));
+    controller.dispose();
+    expect(timers.pending()).toEqual([]);
+  });
+
   it('reads an image again when CSS alone swaps its picture, and keeps that picture\'s result under its number', async () => {
     // A class swaps the picture through `content: url()`: the image's
     // address, sizes and fit stay, so the first picture's words were reused.
