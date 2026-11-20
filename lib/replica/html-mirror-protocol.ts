@@ -8,11 +8,16 @@ import {
   MAX_HTML_MIRROR_STRING,
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
+  createHtmlMirrorShellLedger,
   htmlMirrorJsonBytes,
+  readHtmlMirrorAdoptedStyleSheets,
   readHtmlMirrorDocumentContent,
   readHtmlMirrorCanvasBackgroundColor,
+  readHtmlMirrorFillChildren,
   readHtmlMirrorNode,
   readHtmlMirrorRepresentability,
+  type HtmlMirrorCheckpointFill,
+  type HtmlMirrorDocumentContent,
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
   type HtmlMirrorDocumentMode,
@@ -59,7 +64,31 @@ export interface HtmlMirrorCheckpoint {
     readonly documentWidth: number;
     readonly documentHeight: number;
     readonly representability: HtmlMirrorRepresentabilitySummary;
+    /**
+     * How many `checkpoint-part` messages of the same sequence fill the
+     * root's `childrenFollow` nodes (D163). Absent or 0: the root is whole.
+     */
+    readonly partCount?: number;
+    /**
+     * A preview (D163): far boxes are `placeholder`s. It is shown until the
+     * full copy of a later sequence commits, and never patched.
+     */
+    readonly preview?: true;
   };
+}
+
+/**
+ * One part of a checkpoint read in slices (D163): what some of the
+ * checkpoint's `childrenFollow` nodes hold. Parts carry the checkpoint's
+ * sequence and may come in any order; each shell is filled exactly once.
+ */
+export interface HtmlMirrorCheckpointPart {
+  readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
+  readonly kind: 'simul:html-mirror-v2:checkpoint-part';
+  readonly identity: ReplicaDocumentIdentity;
+  readonly index: number;
+  readonly fills: readonly HtmlMirrorCheckpointFill[];
+  readonly byteLength: number;
 }
 
 export type HtmlMirrorReconcileChild =
@@ -252,6 +281,7 @@ export interface HtmlMirrorStreamError {
 
 export type HtmlMirrorSourceMessage =
   | HtmlMirrorCheckpoint
+  | HtmlMirrorCheckpointPart
   | HtmlMirrorPatchBatch
   | HtmlMirrorScrollUpdate
   | HtmlMirrorStreamError;
@@ -489,6 +519,16 @@ export function decodeHtmlMirrorWireMessage(input: unknown): unknown {
   return decode(input, 0) && used.size === texts.length ? input : undefined;
 }
 
+/** What a checkpoint holds besides its graph. */
+export type HtmlMirrorCheckpointValues = Omit<
+  HtmlMirrorCheckpoint['payload'],
+  | 'root' | 'adoptedStyleSheets' | 'byteLength' | 'representability'
+  | 'documentMode' | 'partCount' | 'preview'
+> & {
+  readonly documentMode?: HtmlMirrorDocumentMode;
+  readonly representability?: HtmlMirrorRepresentabilitySummary;
+};
+
 export function createHtmlMirrorCheckpoint(
   identity: ReplicaDocumentIdentity,
   input: Omit<
@@ -500,12 +540,53 @@ export function createHtmlMirrorCheckpoint(
   },
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): HtmlMirrorCheckpoint | undefined {
+  const shape = readCheckpointShape(input.partCount, input.preview);
+  if (!shape) return undefined;
+  // Shells only where the checkpoint says (D163): `childrenFollow` in one
+  // sent in parts, and it has at least one; `placeholder` in a preview.
+  const shells = createHtmlMirrorShellLedger({
+    childrenFollow: shape.partCount > 0,
+    placeholder: shape.preview,
+  });
   const content = readHtmlMirrorDocumentContent(
     input.root,
     input.adoptedStyleSheets,
     fidelityPolicy,
+    shells,
   );
-  if (!content) return undefined;
+  if (!content || (shape.partCount > 0 && shells.pending.size === 0)) {
+    return undefined;
+  }
+  return finishHtmlMirrorCheckpoint(identity, content, input, shape);
+}
+
+/** A checkpoint's `partCount` and `preview`: never both. */
+function readCheckpointShape(
+  partCount: unknown,
+  preview: unknown,
+): { readonly partCount: number; readonly preview: boolean } | undefined {
+  if (
+    (partCount !== undefined && (
+      !Number.isSafeInteger(partCount) || (partCount as number) < 0 ||
+      (partCount as number) > MAX_HTML_MIRROR_NODES
+    )) ||
+    (preview !== undefined && preview !== true)
+  ) return undefined;
+  const count = (partCount as number | undefined) ?? 0;
+  if (preview === true && count > 0) return undefined;
+  return { partCount: count, preview: preview === true };
+}
+
+/** The checkpoint of a graph already checked. */
+function finishHtmlMirrorCheckpoint(
+  identity: ReplicaDocumentIdentity,
+  content: HtmlMirrorDocumentContent,
+  input: HtmlMirrorCheckpointValues,
+  shape: { readonly partCount: number; readonly preview: boolean } = {
+    partCount: 0,
+    preview: false,
+  },
+): HtmlMirrorCheckpoint | undefined {
   const { root, adoptedStyleSheets } = content;
   const documentMode = input.documentMode === 'quirks' ||
       input.documentMode === 'limited-quirks'
@@ -545,7 +626,439 @@ export function createHtmlMirrorCheckpoint(
       captureMs: boundedDuration(input.captureMs),
       ...dimensions,
       representability: receiverRepresentability,
+      ...(shape.partCount > 0 ? { partCount: shape.partCount } : {}),
+      ...(shape.preview ? { preview: true as const } : {}),
     }),
+  });
+}
+
+/**
+ * Checks a checkpoint read in slices part by part (D163), every part in the
+ * context its shell was checked in and against one budget: the ids, nodes
+ * and bytes of the root and all its parts are counted as one graph's, as
+ * the whole checkpoint's are. The page runs it on what it sends, the panel
+ * on what it receives. Any failure fails the whole assembly.
+ */
+export class HtmlMirrorCheckpointAssembly {
+  readonly #fidelityPolicy: SelectableReplicaFidelityPolicy;
+  readonly #budget = createHtmlMirrorReadBudget();
+  readonly #shells = createHtmlMirrorShellLedger({ childrenFollow: true });
+  readonly #fills = new Map<number, readonly HtmlMirrorNode[]>();
+  #root: HtmlMirrorElementNode | undefined;
+  #adoptedStyleSheets: readonly string[] | undefined;
+  #failed = false;
+
+  constructor(fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative') {
+    this.#fidelityPolicy = fidelityPolicy;
+  }
+
+  /** Nodes and bytes counted so far, over the root and every fill. */
+  get nodes(): number {
+    return this.#budget.nodes;
+  }
+
+  get bytes(): number {
+    return this.#budget.bytes;
+  }
+
+  /** Shells checked and not filled yet. */
+  get pendingShells(): number {
+    return this.#shells.pending.size;
+  }
+
+  get failed(): boolean {
+    return this.#failed;
+  }
+
+  /** A shell waiting for its fill, if any, the first noted first. */
+  nextPendingShell(): number | undefined {
+    for (const nodeId of this.#shells.pending.keys()) return nodeId;
+    return undefined;
+  }
+
+  /** Checks the checkpoint's own root, once, before any fill. */
+  readRoot(input: unknown): HtmlMirrorElementNode | undefined {
+    if (this.#failed || this.#root) return this.#fail();
+    const root = readHtmlMirrorNode(
+      input,
+      this.#budget.ids,
+      0,
+      this.#budget,
+      false,
+      false,
+      false,
+      false,
+      false,
+      this.#fidelityPolicy,
+      false,
+      false,
+      this.#shells,
+    );
+    if (!root || root.kind !== 'element' || root.tagName !== 'html') {
+      return this.#fail();
+    }
+    this.#root = root;
+    return root;
+  }
+
+  /** Checks the document's adopted sheets, once. */
+  readAdoptedStyleSheets(input: unknown): readonly string[] | undefined {
+    if (this.#failed || this.#adoptedStyleSheets) return this.#fail();
+    const sheets = readHtmlMirrorAdoptedStyleSheets(
+      input,
+      this.#budget,
+      this.#fidelityPolicy,
+    );
+    if (!sheets) return this.#fail();
+    this.#adoptedStyleSheets = sheets;
+    return sheets;
+  }
+
+  /**
+   * Checks what one fill brings for a shell already checked. With `more`,
+   * the shell's further children come in later fills, appended in order,
+   * and it stays pending until one comes without (D163).
+   */
+  readFill(
+    nodeId: unknown,
+    children: unknown,
+    more = false,
+  ): readonly HtmlMirrorNode[] | undefined {
+    if (this.#failed || !this.#root || typeof more !== 'boolean') {
+      return this.#fail();
+    }
+    const parsed = readHtmlMirrorFillChildren(
+      nodeId,
+      children,
+      this.#budget,
+      this.#shells,
+      this.#fidelityPolicy,
+      more,
+    );
+    if (!parsed) return this.#fail();
+    const before = this.#fills.get(nodeId as number);
+    this.#fills.set(
+      nodeId as number,
+      before ? Object.freeze([...before, ...parsed]) : parsed,
+    );
+    return parsed;
+  }
+
+  /**
+   * The checkpoint as it is sent before its parts: the root with its shells,
+   * `partCount` parts to come (D163).
+   */
+  shellCheckpoint(
+    identity: ReplicaDocumentIdentity,
+    input: HtmlMirrorCheckpointValues,
+    partCount: number,
+  ): HtmlMirrorCheckpoint | undefined {
+    if (
+      this.#failed || !this.#root || !this.#adoptedStyleSheets ||
+      !Number.isSafeInteger(partCount) || partCount < 1 ||
+      partCount > MAX_HTML_MIRROR_NODES
+    ) return undefined;
+    return finishHtmlMirrorCheckpoint(
+      identity,
+      { root: this.#root, adoptedStyleSheets: this.#adoptedStyleSheets },
+      input,
+      { partCount, preview: false },
+    );
+  }
+
+  /** The root with every shell filled, once nothing is pending. */
+  finish(): HtmlMirrorDocumentContent | undefined {
+    if (
+      this.#failed || !this.#root || !this.#adoptedStyleSheets ||
+      this.#shells.pending.size > 0
+    ) return undefined;
+    const root = fillHtmlMirrorNode(this.#root, this.#fills);
+    if (root.kind !== 'element') return undefined;
+    return Object.freeze({ root, adoptedStyleSheets: this.#adoptedStyleSheets });
+  }
+
+  /** A plain checkpoint of the filled root: what a read in one task sends. */
+  assembledCheckpoint(
+    identity: ReplicaDocumentIdentity,
+    input: HtmlMirrorCheckpointValues,
+  ): HtmlMirrorCheckpoint | undefined {
+    const content = this.finish();
+    return content
+      ? finishHtmlMirrorCheckpoint(identity, content, input)
+      : undefined;
+  }
+
+  #fail(): undefined {
+    this.#failed = true;
+    return undefined;
+  }
+}
+
+/**
+ * Puts each fill into its shell, all the way down: a node without a shell
+ * below it is kept as it is. The shells' marks go.
+ */
+function fillHtmlMirrorNode(
+  node: HtmlMirrorNode,
+  fills: ReadonlyMap<number, readonly HtmlMirrorNode[]>,
+): HtmlMirrorNode {
+  if (node.kind === 'text') return node;
+  const ownChildren = node.childrenFollow
+    ? fills.get(node.id) ?? node.children
+    : node.children;
+  const children = fillHtmlMirrorChildren(ownChildren, fills);
+  // A node of the mirror's graph, not of the page.
+  const ownRoot = node.shadowRoot;
+  let shadowRoot = ownRoot;
+  if (shadowRoot) {
+    const shadowOwn = shadowRoot.childrenFollow
+      ? fills.get(shadowRoot.id) ?? shadowRoot.children
+      : shadowRoot.children;
+    const shadowChildren = fillHtmlMirrorChildren(shadowOwn, fills);
+    if (shadowChildren !== shadowRoot.children || shadowRoot.childrenFollow) {
+      const { childrenFollow: _follows, ...rest } = shadowRoot;
+      shadowRoot = Object.freeze({ ...rest, children: shadowChildren });
+    }
+  }
+  if (
+    children === node.children && shadowRoot === ownRoot &&
+    !node.childrenFollow
+  ) return node;
+  const { childrenFollow: _follows, ...rest } = node;
+  return Object.freeze({
+    ...rest,
+    children,
+    ...(shadowRoot ? { shadowRoot } : {}),
+  });
+}
+
+function fillHtmlMirrorChildren(
+  children: readonly HtmlMirrorNode[],
+  fills: ReadonlyMap<number, readonly HtmlMirrorNode[]>,
+): readonly HtmlMirrorNode[] {
+  let filled: HtmlMirrorNode[] | undefined;
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index]!;
+    const next = fillHtmlMirrorNode(child, fills);
+    if (next !== child) filled ??= children.slice(0, index);
+    filled?.push(next);
+  }
+  return filled ? Object.freeze(filled) : children;
+}
+
+/**
+ * Makes one part of a checkpoint (D163). With `assembly`, each fill is
+ * checked in its shell's context and counted with the rest of the
+ * checkpoint (what the page does with what it sends); without, on its own,
+ * as the panel checks a part that arrives: the shells are not known yet.
+ * A part holds one fill at least, under the page's node and byte limits.
+ */
+export function createHtmlMirrorCheckpointPart(
+  identity: ReplicaDocumentIdentity,
+  index: number,
+  fills: readonly HtmlMirrorCheckpointFill[],
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  assembly?: HtmlMirrorCheckpointAssembly,
+): HtmlMirrorCheckpointPart | undefined {
+  if (
+    !Number.isSafeInteger(index) || index < 0 ||
+    index >= MAX_HTML_MIRROR_NODES ||
+    !Array.isArray(fills) || fills.length < 1 ||
+    fills.length > MAX_HTML_MIRROR_NODES
+  ) return undefined;
+  const budget = createHtmlMirrorReadBudget();
+  const shells = createHtmlMirrorShellLedger({ childrenFollow: true });
+  const nodeIds = new Set<number>();
+  // Shells this part goes on filling: a fill with `more` before (D163).
+  const continued = new Set<number>();
+  // Shells this part holds and fills too.
+  const local = new Set<number>();
+  const parsed: HtmlMirrorCheckpointFill[] = [];
+  for (const fill of fills as readonly unknown[]) {
+    if (
+      !isRecord(fill) ||
+      !hasExactKeysWithOptional(fill, ['nodeId', 'children'], ['more']) ||
+      (fill.more !== undefined && fill.more !== true) ||
+      !isNodeId(fill.nodeId) ||
+      (nodeIds.has(fill.nodeId) && !continued.has(fill.nodeId)) ||
+      !Array.isArray(fill.children)
+    ) return undefined;
+    const more = fill.more === true;
+    nodeIds.add(fill.nodeId);
+    if (more) continued.add(fill.nodeId);
+    else continued.delete(fill.nodeId);
+    let children: readonly HtmlMirrorNode[] | undefined;
+    if (assembly) {
+      children = assembly.readFill(fill.nodeId, fill.children, more);
+    } else if (shells.pending.has(fill.nodeId)) {
+      // A shell of this part: the first children of a list a slice stopped
+      // in follow the fill that holds its node (D163).
+      local.add(fill.nodeId);
+      children = readHtmlMirrorFillChildren(
+        fill.nodeId,
+        fill.children,
+        budget,
+        shells,
+        fidelityPolicy,
+        more,
+      );
+    } else {
+      const own: HtmlMirrorNode[] = [];
+      for (const child of fill.children) {
+        const node = readHtmlMirrorNode(
+          child,
+          budget.ids,
+          1,
+          budget,
+          false,
+          false,
+          false,
+          false,
+          false,
+          fidelityPolicy,
+          false,
+          false,
+          shells,
+        );
+        if (!node) return undefined;
+        own.push(node);
+      }
+      children = Object.freeze(own);
+    }
+    if (!children) return undefined;
+    parsed.push(Object.freeze({
+      nodeId: fill.nodeId,
+      children,
+      ...(more ? { more: true as const } : {}),
+    }));
+  }
+  // A fill is for a node of another message; the same node in this one is a
+  // second copy of it.
+  for (const nodeId of nodeIds) {
+    if (budget.ids.has(nodeId) && !local.has(nodeId)) return undefined;
+  }
+  const frozenFills = Object.freeze(parsed);
+  const byteLength = htmlMirrorJsonBytes(encodeHtmlMirrorWireMessage({
+    fills: frozenFills,
+  }));
+  if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
+    return undefined;
+  }
+  return Object.freeze({
+    protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
+    kind: 'simul:html-mirror-v2:checkpoint-part',
+    identity,
+    index,
+    fills: frozenFills,
+    byteLength,
+  });
+}
+
+/**
+ * Extension-side check of a part as it arrives (D163): its shape, each
+ * fill's nodes on their own, and its limits. Where each fill goes, and in
+ * which context it is checked, is for `assembleHtmlMirrorCheckpoint`.
+ */
+export function readHtmlMirrorCheckpointPart(
+  input: unknown,
+  expectedIdentity: ReplicaDocumentIdentity,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+): HtmlMirrorCheckpointPart | undefined {
+  if (
+    !isRecord(input) ||
+    !hasExactKeys(input, [
+      'protocolVersion', 'kind', 'identity', 'index', 'fills', 'byteLength',
+    ]) ||
+    input.protocolVersion !== HTML_MIRROR_PROTOCOL_VERSION ||
+    input.kind !== 'simul:html-mirror-v2:checkpoint-part' ||
+    !Array.isArray(input.fills)
+  ) return undefined;
+  const identity = readReplicaIdentity(input.identity);
+  if (!identity || !sameDocument(identity, expectedIdentity)) return undefined;
+  const part = createHtmlMirrorCheckpointPart(
+    identity,
+    input.index as number,
+    input.fills as HtmlMirrorCheckpointFill[],
+    fidelityPolicy,
+  );
+  return part && part.byteLength === input.byteLength ? part : undefined;
+}
+
+/**
+ * The full checkpoint from a checkpoint sent in parts and its parts, in any
+ * order (D163): each `childrenFollow` node is filled by one fill, or by
+ * several taken in the order they were read (by part index, then within a
+ * part) of which all but the last say `more`; every fill is read in the
+ * context of its shell, and the whole counted against one node and byte
+ * budget. A missing or unknown fill, a fill after a shell's last, a shell
+ * whose fills all say `more`, a part of another sequence or a part too
+ * many, a repeated id, or totals over the limits give `undefined`. For a page that did not change while it was read, the
+ * result equals the checkpoint of the one-task read.
+ */
+export function assembleHtmlMirrorCheckpoint(
+  checkpoint: HtmlMirrorCheckpoint,
+  parts: readonly HtmlMirrorCheckpointPart[],
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+): HtmlMirrorCheckpoint | undefined {
+  const { payload } = checkpoint;
+  const partCount = payload.partCount ?? 0;
+  if (payload.preview || partCount < 1 || parts.length !== partCount) {
+    return undefined;
+  }
+  const indexes = new Set<number>();
+  for (const part of parts) {
+    if (
+      part.kind !== 'simul:html-mirror-v2:checkpoint-part' ||
+      !sameDocument(part.identity, checkpoint.identity) ||
+      part.identity.sequence !== checkpoint.identity.sequence ||
+      !Number.isSafeInteger(part.index) || part.index < 0 ||
+      part.index >= partCount || indexes.has(part.index)
+    ) return undefined;
+    indexes.add(part.index);
+  }
+  // Each shell's fills in the order the page read them: by part, then
+  // within a part. All but the last go on (`more`); the last ends (D163).
+  const fills = new Map<number, Array<{ children: unknown; more: boolean }>>();
+  const ended = new Set<number>();
+  for (const part of [...parts].sort((left, right) => left.index - right.index)) {
+    for (const fill of part.fills) {
+      if (ended.has(fill.nodeId)) return undefined;
+      const more = fill.more === true;
+      if (!more) ended.add(fill.nodeId);
+      const list = fills.get(fill.nodeId);
+      if (list) list.push({ children: fill.children, more });
+      else fills.set(fill.nodeId, [{ children: fill.children, more }]);
+    }
+  }
+  for (const nodeId of fills.keys()) {
+    if (!ended.has(nodeId)) return undefined;
+  }
+  const assembly = new HtmlMirrorCheckpointAssembly(fidelityPolicy);
+  if (
+    !assembly.readRoot(payload.root) ||
+    !assembly.readAdoptedStyleSheets(payload.adoptedStyleSheets)
+  ) return undefined;
+  for (
+    let nodeId = assembly.nextPendingShell();
+    nodeId !== undefined;
+    nodeId = assembly.nextPendingShell()
+  ) {
+    const list = fills.get(nodeId);
+    if (!list) return undefined;
+    fills.delete(nodeId);
+    for (const fill of list) {
+      if (!assembly.readFill(nodeId, fill.children, fill.more)) return undefined;
+    }
+  }
+  if (fills.size > 0) return undefined;
+  return assembly.assembledCheckpoint(checkpoint.identity, {
+    documentMode: payload.documentMode,
+    captureMs: payload.captureMs,
+    viewportWidth: payload.viewportWidth,
+    viewportHeight: payload.viewportHeight,
+    documentWidth: payload.documentWidth,
+    documentHeight: payload.documentHeight,
+    representability: payload.representability,
   });
 }
 
@@ -770,15 +1283,20 @@ export function readHtmlMirrorSourceMessage(
       input.scroll as unknown as HtmlMirrorScrollState,
     );
   }
+  if (input.kind === 'simul:html-mirror-v2:checkpoint-part') {
+    // Checked on its own as it arrives; in its shells' context when the
+    // checkpoint that closes the parts is assembled (D163).
+    return readHtmlMirrorCheckpointPart(input, expectedIdentity, fidelityPolicy);
+  }
   if (input.kind === 'simul:html-mirror-v2:checkpoint') {
     if (
       !hasExactKeys(input, ['protocolVersion', 'kind', 'identity', 'payload']) ||
       !isRecord(input.payload) ||
-      !hasExactKeys(input.payload, [
+      !hasExactKeysWithOptional(input.payload, [
         'root', 'adoptedStyleSheets', 'documentMode', 'byteLength', 'captureMs',
         'viewportWidth', 'viewportHeight', 'documentWidth', 'documentHeight',
         'representability',
-      ])
+      ], ['partCount', 'preview'])
     ) return undefined;
     const checkpoint = createHtmlMirrorCheckpoint(identity, {
       root: input.payload.root as HtmlMirrorElementNode,
@@ -790,6 +1308,12 @@ export function readHtmlMirrorSourceMessage(
       documentWidth: input.payload.documentWidth as number,
       documentHeight: input.payload.documentHeight as number,
       representability: input.payload.representability as HtmlMirrorRepresentabilitySummary,
+      ...(Object.hasOwn(input.payload, 'partCount')
+        ? { partCount: input.payload.partCount as number }
+        : {}),
+      ...(Object.hasOwn(input.payload, 'preview')
+        ? { preview: input.payload.preview as true }
+        : {}),
     }, fidelityPolicy);
     return checkpoint && checkpoint.payload.byteLength === input.payload.byteLength
       ? checkpoint

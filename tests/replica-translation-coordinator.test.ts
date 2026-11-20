@@ -1030,6 +1030,74 @@ describe('ReplicaTranslationCoordinator with a surface still reading', () => {
     await expect(run).resolves.toMatchObject({ total: 1, completed: 1 });
   });
 
+  it('goes on over the full copy of a preview, and sends no text twice (D163)', async () => {
+    const surface = new PreviewSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      return `en:${source}`;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const run = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    expect(translated).toEqual(['Uno']);
+    // The copy keeps the preview's text and brings the rest, at a new lease.
+    coordinator.handleSourceCommit(surface.swap([
+      record(1, 1, 'Uno'), record(2, 1, 'Dos'), record(3, 1, 'Tres'),
+    ]));
+
+    await expect(run).resolves.toMatchObject({
+      total: 3, completed: 3, failed: 0, stale: 0, skipped: 0, overflow: 0,
+      replayLease: surface.lease,
+    });
+    expect(translated).toEqual(['Uno', 'Dos', 'Tres']);
+    expect(surface.projections.filter((each) => each.replayLease === surface.lease)
+      .map((each) => each.translated)).toEqual(['en:Dos', 'en:Tres']);
+    expect(coordinator.isResultCurrent(await run)).toBe(true);
+  });
+
+  it('translates again on the copy a text the copy changed', async () => {
+    const surface = new PreviewSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const run = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    coordinator.handleSourceCommit(surface.swap([record(1, 2, 'Uno más')]));
+
+    await expect(run).resolves.toMatchObject({ total: 1, completed: 1 });
+    expect(translated).toEqual(['Uno', 'Uno más']);
+  });
+
+  it('translates in the background a copy its cancelled run never took', async () => {
+    const surface = new PreviewSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const translated: string[] = [];
+    let gate: (() => void) | undefined;
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      if (source === 'Uno') await new Promise<void>((resolve) => { gate = resolve; });
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+    const controller = new AbortController();
+
+    const run = coordinator.translateCurrent(pair, { signal: controller.signal });
+    await vi.waitFor(() => expect(gate).toBeDefined());
+    coordinator.handleSourceCommit(surface.swap([record(1, 1, 'Uno'), record(2, 1, 'Dos')]));
+    controller.abort();
+    gate!();
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(translated).toEqual(['Uno', 'Dos']));
+  });
+
   it('ends at once when the surface is not reading', async () => {
     const surface = new ReadingSurface([record(1, 1, 'Uno'), record(2, 1, 'Dos')]);
     const { provider } = fakeProvider(async (source) => source);
@@ -1084,6 +1152,30 @@ class ReadingSurface extends FakeSurface {
     const wakes = this.#wakes;
     this.#wakes = [];
     for (const wake of wakes) wake();
+  }
+}
+
+/** A mirror shown first as a preview, whose full copy comes at a new lease (D163). */
+class PreviewSurface extends ReadingSurface {
+  readonly #extended = new Set<number>();
+
+  extendsLease(replayLease: number): boolean {
+    return this.#extended.has(replayLease);
+  }
+
+  /** Commits the full copy: the commit the engine reports, and the wake. */
+  swap(records: ReplicaSourceTextRecord[]) {
+    this.#extended.add(this.lease);
+    this.lease += 1;
+    const commit = {
+      ...commitFor(this, []),
+      records,
+      changes: records.map((changed) => ({ kind: 'upsert' as const, record: changed })),
+      reason: 'recovery' as const,
+    };
+    this.records = records;
+    queueMicrotask(() => this.finish());
+    return commit;
   }
 }
 

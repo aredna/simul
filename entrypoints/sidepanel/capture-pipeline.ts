@@ -64,6 +64,12 @@ import type { Currency } from './currency';
 import type { PdfScannedPagesState } from './pdf-controller';
 import type { TranslationDriver } from './translation-driver';
 
+/**
+ * Below this many characters of text a preview of the page (D163) is not
+ * asked the page's language: with From = Auto the full copy is waited for.
+ */
+export const PREVIEW_LANGUAGE_SAMPLE_CHARACTERS = 200;
+
 /** The replica engine calls the pipeline makes. */
 export interface PipelineEngine {
   run(request: ReplicaCaptureRequest, signal?: AbortSignal): Promise<ReplicaRunResult>;
@@ -167,7 +173,12 @@ export interface CapturePipelineEnvironment {
     'decide' | 'markCommitted' | 'reset'
   >;
   readonly engine: PipelineEngine;
-  readonly surface: { snapshot(): ReplicaTranslationSnapshot | undefined };
+  readonly surface: {
+    snapshot(): ReplicaTranslationSnapshot | undefined;
+    /** A preview is shown and its full copy is coming (D163). */
+    isReading?(): boolean;
+    waitForText?(signal: AbortSignal): Promise<void>;
+  };
   readonly presentation: PipelinePresentation;
   readonly pdf: PipelinePdf;
   readonly coordinator: PipelineCoordinator;
@@ -492,6 +503,14 @@ export class CapturePipeline {
   handleReplicaLiveFailure(code: ReplicaDiagnosticCode): void {
     const state = this.#state;
     const { recoveryGate, presentation } = this.environment;
+    if (code === 'checkpoint_too_large') {
+      // Over the mirror's limits after its preview was shown (D163): a
+      // rebuild would overflow again.
+      recoveryGate.reset();
+      this.environment.setStatus(UI_STRINGS.statusReplicaTooLarge, 'error');
+      this.environment.updateControls();
+      return;
+    }
     const identity = state.followedOrCapturedIdentity;
     const action = identity
       ? recoveryGate.decide(presentation.hasCommittedReplica)
@@ -636,6 +655,8 @@ export class CapturePipeline {
         : identity;
       state.capturedPageIdentity = committedIdentity;
       state.followedPageIdentity = committedIdentity;
+      await this.#waitForTextToTellLanguage(work);
+      if (!captureCoordinator.isCurrent(work.generation)) return;
       await this.#prepareTranslation(work, committedIdentity.url, {
         sourceOnly: UI_STRINGS.statusLiveSourceKeepsUpdating,
         noText: () => [UI_STRINGS.statusMirrorLiveWaiting, 'warning'],
@@ -699,6 +720,40 @@ export class CapturePipeline {
    * pair and translate automatically when the rules say so. The statuses for
    * Live source only and for a page without text differ per surface.
    */
+  /**
+   * A large page is shown first as a preview (D163): what the reader sees,
+   * the rest as empty boxes. With From = Auto and no language the page
+   * declares, a preview with too little text to tell the language is not
+   * asked: its full copy is waited for, so the language is not settled on
+   * a few words. A preview with enough text goes on at once; the full copy
+   * looks at the language again when it is committed.
+   */
+  async #waitForTextToTellLanguage(
+    work: GenerationWork<CaptureRequest>,
+  ): Promise<void> {
+    const state = this.#state;
+    const { captureCoordinator, surface, translationDriver } = this.environment;
+    const signal = state.replicaShadowAbortController?.signal ??
+      new AbortController().signal;
+    while (
+      surface.isReading?.() && surface.waitForText &&
+      state.preferences.sourceLanguage === 'auto'
+    ) {
+      const context = translationDriver.currentReplicaLanguageContext();
+      if (
+        context?.documentLanguage ||
+        (context?.visibleText.length ?? 0) >= PREVIEW_LANGUAGE_SAMPLE_CHARACTERS
+      ) return;
+      try {
+        await surface.waitForText(signal);
+      } catch {
+        return;
+      }
+      if (!captureCoordinator.isCurrent(work.generation)) return;
+      state.snapshot = surface.snapshot();
+    }
+  }
+
   async #prepareTranslation(
     work: GenerationWork<CaptureRequest>,
     pageUrl: string | undefined,
@@ -804,7 +859,11 @@ export class CapturePipeline {
         this.environment.updateMirrorLayout();
         return;
       }
-      throw new PageAccessError(UI_STRINGS.statusReplicaNotPrepared);
+      throw new PageAccessError(
+        result.status === 'failed' && result.diagnostics.code === 'checkpoint_too_large'
+          ? UI_STRINGS.statusReplicaTooLarge
+          : UI_STRINGS.statusReplicaNotPrepared,
+      );
     } catch (error) {
       if (!activationDecisionSettled) {
         const reason = imageReplicaActivationFailureReason({

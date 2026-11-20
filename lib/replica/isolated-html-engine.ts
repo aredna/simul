@@ -29,8 +29,10 @@ import {
 import {
   MAX_HTML_MIRROR_BYTES,
   MAX_HTML_MIRROR_NODES,
+  MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT,
   PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE,
   PAGE_XML_LANGUAGE_ATTRIBUTE,
+  createHtmlMirrorShellLedger,
   hasPrivateHtmlMirrorAttribute,
   isAutonomousCustomElementName,
   readHtmlMirrorDocumentContent,
@@ -129,6 +131,7 @@ import {
   writePageXmlLanguage,
 } from './translated-language';
 import type { TextLayoutMode } from '../preferences';
+import { registerTrustedShells, trustedShellHtml } from '../trusted-types';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
 const ISOLATED_SECRET_PLACEHOLDER_CSS =
@@ -212,6 +215,12 @@ export const ISOLATED_HTML_LIMITED_QUIRKS_SHELL =
   `<!DOCTYPE html PUBLIC "${ISOLATED_HTML_LIMITED_QUIRKS_DOCTYPE_PUBLIC_ID}" ` +
   `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 ${ISOLATED_HTML_SHELL_DOCUMENT}`;
+// The only HTML Simul's pages write as a string (Trusted Types, D161).
+registerTrustedShells(
+  ISOLATED_HTML_SHELL,
+  ISOLATED_HTML_QUIRKS_SHELL,
+  ISOLATED_HTML_LIMITED_QUIRKS_SHELL,
+);
 
 export type IsolatedMirrorInfoStage =
   | 'connected'
@@ -333,6 +342,12 @@ interface HtmlMirrorDomState {
   readonly iframe: HTMLIFrameElement;
   readonly document: ReplicaSourceDocumentIdentity;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
+  /**
+   * A preview (D163): far boxes are empty boxes of their height. It is
+   * shown until the full copy of a later sequence replaces it, and never
+   * patched.
+   */
+  readonly preview: boolean;
   /** The replica's `<html>`, the document's own. Read on every commit; kept
    * here so that reading the document's language is not a walk of every
    * mirrored node (R3). */
@@ -398,6 +413,21 @@ export class IsolatedHtmlReplicaEngine
   #recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   #recoveryToken = 0;
   #bufferedRecoveryPatches: HtmlMirrorPatchBatch[] = [];
+  /** The sequence of the checkpoint the recovery task stages (D163). */
+  #stagingSequence: number | undefined;
+  /**
+   * A newer checkpoint that came while one was staged: the page answered a
+   * request that the copy in flight had already answered (D163). Staged
+   * once that one is committed.
+   */
+  #nextCheckpoint: HtmlMirrorCheckpoint | undefined;
+  /**
+   * The lease of the preview the committed copy replaced (D163): a
+   * translation run that began on the preview goes on over the copy.
+   */
+  #replacedPreviewLease: number | undefined;
+  /** Translation runs waiting for the full copy of a preview (D163). */
+  readonly #textWaiters = new Set<() => void>();
   #replayLease = 0;
   #activeFidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative';
   #projectionContext: ReplicaProjectionContext = {
@@ -491,6 +521,7 @@ export class IsolatedHtmlReplicaEngine
           runVersion,
           representability ?? EMPTY_REPRESENTABILITY,
         ),
+        onProgress: () => this.#onStreamProgress(request, runVersion),
       });
       // setObserver() synchronously drains anything queued after the initial
       // checkpoint. A queued terminal failure releases this stream, so never
@@ -509,12 +540,19 @@ export class IsolatedHtmlReplicaEngine
       if (!this.#isCurrent(runVersion, request, signal)) {
         return this.#skipped('stale_identity');
       }
-      const code = error instanceof HtmlMirrorClientError
+      const reported = error instanceof HtmlMirrorClientError
         ? error.code
         : error instanceof DOMException && error.name === 'AbortError'
           ? 'stale_identity'
           : 'replay_failed';
-      if (code === 'stale_identity') return this.#skipped(code);
+      if (reported === 'stale_identity') return this.#skipped(reported);
+      // The page could not be read whole because it is over the mirror's
+      // limits: say so, rather than a failure a retry could mend (D162).
+      const code: ReplicaDiagnosticCode = reported === 'stream_overflow' &&
+        error instanceof HtmlMirrorClientError &&
+        error.representability.capacityOmissionCount > 0
+        ? 'checkpoint_too_large'
+        : reported;
       this.options.onInfo?.(emptyInfo(
         'failed',
         code,
@@ -559,6 +597,45 @@ export class IsolatedHtmlReplicaEngine
     markIsolatedAriaIndexDirty(state.iframe.contentDocument ?? undefined);
     refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
     this.#refreshExtent(state);
+  }
+
+  /**
+   * A preview is shown and its full copy is coming (D163): a translation
+   * run waits for the copy's text instead of ending on the preview's.
+   */
+  isReading(): boolean {
+    const state = this.#committed;
+    return Boolean(state && !state.released && state.preview && this.#stream);
+  }
+
+  /**
+   * Resolves at the next commit, or when the full copy can no longer come
+   * (the stream failed, the mirror was released); rejects when `signal`
+   * aborts.
+   */
+  waitForText(signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      const abort = (): void => {
+        this.#textWaiters.delete(wake);
+        reject(signal.reason);
+      };
+      const wake = (): void => {
+        signal.removeEventListener('abort', abort);
+        resolve();
+      };
+      this.#textWaiters.add(wake);
+      signal.addEventListener('abort', abort, { once: true });
+    });
+  }
+
+  /** Whether the committed copy replaced the preview of lease `replayLease` (D163). */
+  extendsLease(replayLease: number): boolean {
+    return this.#committed !== undefined &&
+      replayLease === this.#replacedPreviewLease;
   }
 
   snapshot(): ReplicaTranslationSnapshot | undefined {
@@ -693,6 +770,7 @@ export class IsolatedHtmlReplicaEngine
     this.#releaseCandidate();
     releaseState(this.#committed);
     this.#committed = undefined;
+    this.#replacedPreviewLease = undefined;
     this.#projections.clear();
     this.#replayLease += 1;
     this.options.presentationHost.clearPresentation();
@@ -710,10 +788,14 @@ export class IsolatedHtmlReplicaEngine
     signal?: AbortSignal,
   ): Promise<HtmlMirrorDomState> {
     signal?.throwIfAborted();
+    const preview = checkpoint.payload.preview === true;
+    // A checkpoint read in parts reaches the engine assembled; only a
+    // preview's empty boxes are shells here (D163).
     const content = readHtmlMirrorDocumentContent(
       checkpoint.payload.root,
       checkpoint.payload.adoptedStyleSheets,
       fidelityPolicy,
+      createHtmlMirrorShellLedger({ placeholder: preview }),
     );
     const graph = content?.root;
     if (!content || !graph || graph.tagName !== 'html') {
@@ -747,7 +829,7 @@ export class IsolatedHtmlReplicaEngine
     try {
       let iframeDocument: Document;
       if (this.options.initializeIframe) {
-        iframe.srcdoc = iframeShell;
+        iframe.srcdoc = trustedShellHtml(iframeShell);
         lease.mount.append(iframe);
         iframeDocument = await this.options.initializeIframe(
           iframe,
@@ -824,6 +906,7 @@ export class IsolatedHtmlReplicaEngine
         iframe,
         document,
         fidelityPolicy,
+        preview,
         root: iframeDocument.documentElement,
         nodes,
         textMetadata,
@@ -894,9 +977,23 @@ export class IsolatedHtmlReplicaEngine
       ...semanticRemovals,
     ]);
     const documentLanguageChanged = readDocumentLanguage(state) !== previousLanguage;
+    // The full copy of a preview (D163): a run that began on the preview
+    // goes on over it.
+    const replacesPreview = Boolean(
+      previous && !previous.released && previous.preview && !state.preview &&
+        sameSourceDocument(previous.document, state.document),
+    );
+    if (replacesPreview) {
+      // A translation shown on the preview while the copy was staged.
+      this.#applyRetainedProjections(state);
+      this.#settlePaintedLabels(state);
+    }
     this.#candidate = undefined;
     this.#committed = state;
     this.#replayLease = state.replayLease;
+    this.#replacedPreviewLease = replacesPreview
+      ? previous!.replayLease
+      : undefined;
     this.#recoveryRequested = false;
     releaseState(previous);
     this.options.presentationHost.markLive(state.iframe);
@@ -906,8 +1003,19 @@ export class IsolatedHtmlReplicaEngine
       changes,
       documentLanguageChanged,
     );
-    this.#openSemanticSource(state, request, runVersion, signal);
+    // The page's semantic reader starts with a scan of the whole page: it
+    // waits for the full copy, which replaces the preview's boxes (D163).
+    if (!state.preview) {
+      this.#openSemanticSource(state, request, runVersion, signal);
+    }
     this.options.onLayoutChanged?.();
+    this.#wakeTextWaiters();
+  }
+
+  #wakeTextWaiters(): void {
+    const waiters = [...this.#textWaiters];
+    this.#textWaiters.clear();
+    for (const wake of waiters) wake();
   }
 
   #onPatch(
@@ -955,6 +1063,9 @@ export class IsolatedHtmlReplicaEngine
     const stream = this.#stream;
     if (!state || !stream || !this.#isCurrent(runVersion, request)) return;
     if (
+      // A preview is never patched: the page sends patches after the full
+      // copy's ACK, never its preview's (D163).
+      state.preview ||
       batch.firstSequence !== state.sequence + 1 ||
       batch.lastSequence !== batch.firstSequence
     ) {
@@ -1130,12 +1241,28 @@ export class IsolatedHtmlReplicaEngine
     request: ReplicaCaptureRequest,
     runVersion: number,
   ): void {
-    if (
-      !this.#isCurrent(runVersion, request) ||
-      !this.#recoveryRequested ||
-      this.#recoveryTask
-    ) return;
+    if (!this.#isCurrent(runVersion, request)) return;
+    if (checkpoint.payload.preview) {
+      // Only the stream's first checkpoint may be a preview (D163).
+      this.#failLive('stream_failed');
+      return;
+    }
     const committed = this.#committed;
+    if (this.#recoveryTask) {
+      if (
+        this.#stagingSequence !== undefined &&
+        checkpoint.identity.sequence > this.#stagingSequence
+      ) this.#nextCheckpoint = checkpoint;
+      return;
+    }
+    if (!this.#recoveryRequested) {
+      // Unasked for, only a copy newer than the mirror's replaces it: the
+      // full copy of a preview, or the page's answer to a request the copy
+      // in flight had already answered (D163). Anything else is ignored.
+      if (!committed || checkpoint.identity.sequence <= committed.sequence) return;
+      this.#recoveryAbort?.abort();
+      this.#recoveryAbort = new AbortController();
+    }
     if (
       committed &&
       checkpoint.identity.sequence < committed.sequence
@@ -1152,12 +1279,22 @@ export class IsolatedHtmlReplicaEngine
     const recoverySignal = this.#recoveryAbort?.signal;
     const fidelityPolicy = this.#committed?.fidelityPolicy ??
       this.options.getReplicaFidelityPolicy?.() ?? 'conservative';
-    this.#recoveryTask = this.#stageCheckpoint(
+    // A copy that replaces the mirror's, asked for or the full copy of a
+    // preview (D163): its text is new to the panel, as a live change's is,
+    // so the page's language is looked at again with all of it.
+    const requested = this.#recoveryRequested;
+    this.#stagingSequence = checkpoint.identity.sequence;
+    this.#nextCheckpoint = undefined;
+    const staging = this.#stageCheckpoint(
       checkpoint,
       fidelityPolicy,
       recoverySignal,
-    )
-      .then((state) => {
+    );
+    // Assigned before the first await below lets the finally block read it.
+    let task!: Promise<void>;
+    task = (async () => {
+      try {
+        const state = await staging;
         if (
           !this.#isCurrent(runVersion, request) ||
           token !== this.#recoveryToken ||
@@ -1178,23 +1315,62 @@ export class IsolatedHtmlReplicaEngine
         this.#stream?.acknowledge(checkpoint.identity.sequence);
         this.#finishRecoveryWatch(token);
         this.#recoveryTask = undefined;
-        this.options.onInfo?.(stateInfo('recovery', state, 0));
+        this.#stagingSequence = undefined;
+        this.options.onInfo?.(stateInfo(
+          requested ? 'recovery' : 'checkpoint',
+          state,
+          0,
+        ));
+        const next = this.#nextCheckpoint;
+        this.#nextCheckpoint = undefined;
+        if (next && next.identity.sequence > state.sequence) {
+          // Patches follow the newest copy only.
+          this.#onRecoveryCheckpoint(next, request, runVersion);
+          return;
+        }
         for (const batch of buffered) {
           const current = this.#committed;
           if (!current || batch.lastSequence <= current.sequence) continue;
           this.#applyLivePatch(batch, request, runVersion);
           if (this.#recoveryRequested || !this.#stream) break;
         }
-      })
-      .catch(() => {
+      } catch {
         if (
           token === this.#recoveryToken &&
           this.#isCurrent(runVersion, request)
         ) this.#failLive('stream_failed');
-      })
-      .finally(() => {
-        if (token === this.#recoveryToken) this.#recoveryTask = undefined;
-      });
+      } finally {
+        if (token === this.#recoveryToken && this.#recoveryTask === task) {
+          this.#recoveryTask = undefined;
+          this.#stagingSequence = undefined;
+        }
+      }
+    })();
+    this.#recoveryTask = task;
+  }
+
+  /**
+   * A part of a checkpoint arrived (D163): a recovery that waits for the
+   * page's checkpoint waits on while the page reads. A stall still times out.
+   */
+  #onStreamProgress(request: ReplicaCaptureRequest, runVersion: number): void {
+    if (
+      !this.#isCurrent(runVersion, request) ||
+      !this.#recoveryRequested || this.#recoveryTask ||
+      this.#recoveryTimer === undefined
+    ) return;
+    this.#armRecoveryTimer(this.#recoveryToken);
+  }
+
+  #armRecoveryTimer(token: number): void {
+    if (this.#recoveryTimer !== undefined) clearTimeout(this.#recoveryTimer);
+    this.#recoveryTimer = setTimeout(() => {
+      if (token !== this.#recoveryToken || !this.#recoveryRequested) return;
+      this.#recoveryAbort?.abort(
+        new Error('HTML mirror recovery checkpoint timed out.'),
+      );
+      this.#failLive('stream_failed');
+    }, HTML_MIRROR_RECOVERY_TIMEOUT_MS);
   }
 
   #onStreamFailure(
@@ -1204,6 +1380,18 @@ export class IsolatedHtmlReplicaEngine
     representability: HtmlMirrorRepresentabilitySummary,
   ): void {
     if (!this.#isCurrent(runVersion, request)) return;
+    const state = this.#committed;
+    if (
+      code === 'stream_overflow' &&
+      representability.capacityOmissionCount > 0 &&
+      state && !state.released && state.preview
+    ) {
+      // A preview is shown and the page is over the mirror's limits: its
+      // full copy cannot come, and a recovery would read the page whole
+      // again only to overflow again. Say so, as a first read would (D163).
+      this.#failLive('checkpoint_too_large', representability);
+      return;
+    }
     if (code === 'stream_failed') {
       this.#failLive(code, representability);
     } else {
@@ -1228,14 +1416,7 @@ export class IsolatedHtmlReplicaEngine
     const token = ++this.#recoveryToken;
     this.#recoveryAbort?.abort();
     this.#recoveryAbort = new AbortController();
-    if (this.#recoveryTimer !== undefined) clearTimeout(this.#recoveryTimer);
-    this.#recoveryTimer = setTimeout(() => {
-      if (token !== this.#recoveryToken || !this.#recoveryRequested) return;
-      this.#recoveryAbort?.abort(
-        new Error('HTML mirror recovery checkpoint timed out.'),
-      );
-      this.#failLive('stream_failed');
-    }, HTML_MIRROR_RECOVERY_TIMEOUT_MS);
+    this.#armRecoveryTimer(token);
     this.options.onInfo?.(stateInfo(
       'recovery',
       state,
@@ -1417,35 +1598,41 @@ export class IsolatedHtmlReplicaEngine
       this.#purgeSemantic(true);
       this.#scheduleSemanticReconnect(state, request, runVersion, signal);
     };
-    void open(request, 'isolated-html', scope, signal).then((lease) => {
-      if (
-        !this.#isCurrent(runVersion, request, signal) ||
-        this.#committed !== state || this.#semanticReceiver !== receiver
-      ) {
-        lease.dispose();
-        return;
+    const opening = open(request, 'isolated-html', scope, signal);
+    void (async () => {
+      try {
+        const lease = await opening;
+        if (
+          !this.#isCurrent(runVersion, request, signal) ||
+          this.#committed !== state || this.#semanticReceiver !== receiver
+        ) {
+          lease.dispose();
+          return;
+        }
+        this.#semanticStream = lease;
+        lease.setObserver({
+          onBatch: (batch) => {
+            if (
+              this.#committed !== state || this.#semanticReceiver !== receiver ||
+              !this.#isCurrent(runVersion, request, signal)
+            ) return false;
+            const changes = receiver.applyBatch(batch);
+            if (!changes) return false;
+            this.#semanticReconnectAttempt = 0;
+            for (const change of changes) {
+              this.#dropProjection(state, sourceChangeNodeId(change));
+            }
+            refreshIsolatedNativeSelectFacsimiles(replicaDocument);
+            this.#notifySourceCommit(state, 'batch', changes, false);
+            this.#refreshExtent(state);
+            return true;
+          },
+          onFailure: reconnect,
+        });
+      } catch {
+        reconnect();
       }
-      this.#semanticStream = lease;
-      lease.setObserver({
-        onBatch: (batch) => {
-          if (
-            this.#committed !== state || this.#semanticReceiver !== receiver ||
-            !this.#isCurrent(runVersion, request, signal)
-          ) return false;
-          const changes = receiver.applyBatch(batch);
-          if (!changes) return false;
-          this.#semanticReconnectAttempt = 0;
-          for (const change of changes) {
-            this.#dropProjection(state, sourceChangeNodeId(change));
-          }
-          refreshIsolatedNativeSelectFacsimiles(replicaDocument);
-          this.#notifySourceCommit(state, 'batch', changes, false);
-          this.#refreshExtent(state);
-          return true;
-        },
-        onFailure: reconnect,
-      });
-    }).catch(reconnect);
+    })();
   }
 
   #scheduleSemanticReconnect(
@@ -1639,6 +1826,9 @@ export class IsolatedHtmlReplicaEngine
     this.#stream = undefined;
     this.#recoveryRequested = false;
     this.#cancelRecoveryWatch();
+    // No full copy of a preview comes now: a run waiting for one goes on
+    // (D163).
+    this.#wakeTextWaiters();
   }
 
   #finishRecoveryWatch(token: number): void {
@@ -1655,6 +1845,8 @@ export class IsolatedHtmlReplicaEngine
     this.#recoveryAbort?.abort();
     this.#recoveryAbort = undefined;
     this.#recoveryTask = undefined;
+    this.#stagingSequence = undefined;
+    this.#nextCheckpoint = undefined;
     this.#bufferedRecoveryPatches = [];
   }
 
@@ -1924,6 +2116,7 @@ function buildNode(
   }
   setAttributes(node, input.attributes, input.resolvedStyleSheetText);
   applyElementHints(node, input);
+  if (input.placeholder) applyPlaceholderBox(node, input.placeholder.height);
   nodes.set(input.id, node);
   if (input.controlText) controlMetadata.set(input.id, input.controlText);
   for (const child of input.children) {
@@ -2415,6 +2608,24 @@ function applyElementHints(
   if (element.localName.toLowerCase() === 'select') {
     configureNativeSelectFacsimile(element);
   }
+}
+
+/**
+ * A preview's empty box (D163): the element keeps the page's border-box
+ * height whatever its rules say, and shows nothing past it, so the
+ * preview is as tall as the page and a scroll's share of the range lands
+ * where it does on the page. Simul-owned declarations, as the other hints:
+ * the page's own `style` was written before them and they outrank it.
+ */
+function applyPlaceholderBox(element: Element, height: number): void {
+  const styled = element as Element & { readonly style?: CSSStyleDeclaration };
+  if (!styled.style || !Number.isFinite(height)) return;
+  const pixels = `${Math.min(Math.max(0, height), MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT)}px`;
+  styled.style.setProperty('box-sizing', 'border-box', 'important');
+  styled.style.setProperty('height', pixels, 'important');
+  styled.style.setProperty('min-height', pixels, 'important');
+  styled.style.setProperty('max-height', pixels, 'important');
+  styled.style.setProperty('overflow', 'clip', 'important');
 }
 
 /**
@@ -5510,7 +5721,7 @@ function writeQuirksIframeDocument(
   const iframeDocument = iframe.contentDocument;
   if (!iframeDocument) throw new Error('Isolated iframe document unavailable.');
   iframeDocument.open();
-  iframeDocument.write(shell);
+  iframeDocument.write(trustedShellHtml(shell));
   iframeDocument.close();
   if (
     !isTrustedIsolatedShellDocument(
@@ -5565,7 +5776,7 @@ async function initializeIframeDocument(
     );
     iframe.addEventListener('load', onLoad);
     signal?.addEventListener('abort', onAbort, { once: true });
-    iframe.srcdoc = shell;
+    iframe.srcdoc = trustedShellHtml(shell);
     mount.append(iframe);
   });
   return iframeDocument;

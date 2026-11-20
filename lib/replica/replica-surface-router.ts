@@ -56,6 +56,10 @@ export class ReplicaSurfaceRouter
     return surface?.waitForText ? surface.waitForText(signal) : Promise.resolve();
   }
 
+  extendsLease(replayLease: number): boolean {
+    return this.#surface?.extendsLease?.(replayLease) ?? false;
+  }
+
   showsLineBreaks(nodeId: number): boolean {
     return this.#surface?.showsLineBreaks?.(nodeId) ?? false;
   }

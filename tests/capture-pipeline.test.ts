@@ -5,6 +5,7 @@ import type { PdfScannedPagesState } from '../entrypoints/sidepanel/pdf-controll
 
 import {
   CapturePipeline,
+  PREVIEW_LANGUAGE_SAMPLE_CHARACTERS,
   type SourceDocumentFacts,
 } from '../entrypoints/sidepanel/capture-pipeline';
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
@@ -46,6 +47,8 @@ function setup(options: {
   fieldCount?: number;
   accessRevoked?: boolean;
   maxRebuilds?: number;
+  /** The mirror shows a preview with this text until `finishCopy` (D163). */
+  previewText?: string;
 } = {}) {
   const state = new CompanionState({ isDetachedWindow: false });
   const currency = new Currency();
@@ -119,9 +122,20 @@ function setup(options: {
     activateReplica: vi.fn(() => true),
     notifyReplicaCommit: vi.fn(),
   };
+  let reading = options.previewText !== undefined;
+  const textWaiters: Array<() => void> = [];
+  const finishCopy = () => {
+    reading = false;
+    for (const wake of textWaiters.splice(0)) wake();
+  };
   const translationDriver = {
     resolveSelectedSourceLanguage: vi.fn(options.resolveLanguage ?? (async () => true)),
-    currentReplicaLanguageContext: vi.fn(() => undefined),
+    currentReplicaLanguageContext: vi.fn(() => options.previewText === undefined
+      ? undefined
+      : {
+          visibleText: reading ? options.previewText : 'The whole page, read.',
+          preserveOnUnknown: true,
+        }),
     currentTranslationFieldCount: vi.fn(() => options.fieldCount ?? 1),
     checkAvailability: vi.fn(async () => undefined),
     maybeTranslateAutomatically: vi.fn(async () => undefined),
@@ -142,7 +156,11 @@ function setup(options: {
     navigationRefreshGate: new NavigationRefreshGate(),
     recoveryGate,
     engine,
-    surface: { snapshot: () => (surfaceKind === 'pdf' ? pdfPublished : published) },
+    surface: {
+      snapshot: () => (surfaceKind === 'pdf' ? pdfPublished : published),
+      isReading: () => reading,
+      waitForText: () => new Promise<void>((resolve) => textWaiters.push(resolve)),
+    },
     presentation,
     pdf,
     coordinator,
@@ -178,6 +196,7 @@ function setup(options: {
   return {
     pipeline, state, currency, captureCoordinator, presentation, engine, coordinator,
     imageController, translationDriver, statuses, events, diagnostics, settled, pdf,
+    finishCopy, textWaiters,
     get published() {
       return published;
     },
@@ -203,6 +222,35 @@ describe('CapturePipeline capture', () => {
     expect(harness.translationDriver.maybeTranslateAutomatically).toHaveBeenCalledWith(1, IDENTITY.url);
     expect(harness.events).toContain('layout');
     expect(harness.diagnostics).toEqual([]);
+  });
+
+  it('asks a preview with too little text nothing of the language, and waits for its full copy (D163)', async () => {
+    const harness = setup({ previewText: 'Hi' });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(harness.textWaiters).toHaveLength(1));
+    expect(harness.state.capturedPageIdentity).toEqual(IDENTITY);
+    expect(harness.translationDriver.resolveSelectedSourceLanguage).not.toHaveBeenCalled();
+    harness.finishCopy();
+    await harness.settled();
+    expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledOnce();
+    expect(harness.translationDriver.maybeTranslateAutomatically).toHaveBeenCalledWith(1, IDENTITY.url);
+  });
+
+  it('asks a preview with enough text the language at once (D163)', async () => {
+    const harness = setup({ previewText: 'x'.repeat(PREVIEW_LANGUAGE_SAMPLE_CHARACTERS) });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.textWaiters).toHaveLength(0);
+    expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledOnce();
+  });
+
+  it('asks a thin preview the language at once when From names it (D163)', async () => {
+    const harness = setup({ previewText: 'Hi' });
+    harness.state.preferences = { ...harness.state.preferences, sourceLanguage: 'es' };
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.textWaiters).toHaveLength(0);
+    expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledOnce();
   });
 
   it('waits for page text and reports a revoked automatic grant', async () => {
@@ -232,6 +280,21 @@ describe('CapturePipeline capture', () => {
     ]);
     expect(harness.events.some((event) => event.startsWith('error:'))).toBe(true);
     expect(harness.diagnostics).toEqual([{ stage: 'replica-not-activated', reason: 'run-failed' }]);
+  });
+
+  it('says a page over the mirror limits is too large, not to retry (D162)', async () => {
+    const harness = setup({
+      run: async () => ({
+        status: 'failed',
+        diagnostics: { engine: 'isolated-html-v1', code: 'checkpoint_too_large' },
+      } as unknown as ReplicaRunResult),
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.statuses.at(-1)).toEqual([
+      'This page is too large for Simul to mirror.',
+      'error',
+    ]);
   });
 
   it('fails a page that hides its document boundary or takes too long', async () => {
@@ -333,6 +396,20 @@ describe('CapturePipeline commits and failures', () => {
       'The live replica disconnected again. The last good replica is preserved; choose Refresh to retry.',
       'error',
     ]);
+  });
+
+  it('says the page is too large, and rebuilds nothing, when it overflows after its preview (D163)', async () => {
+    const harness = setup({ maxRebuilds: 1 });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+
+    harness.pipeline.handleReplicaLiveFailure('checkpoint_too_large');
+    await harness.settled();
+    expect(harness.statuses.at(-1)).toEqual([
+      'This page is too large for Simul to mirror.',
+      'error',
+    ]);
+    expect(harness.engine.run).toHaveBeenCalledTimes(1);
   });
 
   it('invalidates the companion as one unit and marks a source navigation', async () => {

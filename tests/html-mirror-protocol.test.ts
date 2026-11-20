@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HTML_MIRROR_PROTOCOL_VERSION,
   MAX_HTML_MIRROR_SCROLL_PANES,
+  assembleHtmlMirrorCheckpoint,
   createHtmlMirrorCheckpoint,
+  createHtmlMirrorCheckpointPart,
+  HtmlMirrorCheckpointAssembly,
+  readHtmlMirrorCheckpointPart,
+  type HtmlMirrorCheckpointPart,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
   createHtmlMirrorPatchFrame,
@@ -5900,3 +5905,339 @@ function answerByNamespace(element: Element): void {
       (attribute.namespaceURI ?? null) === namespace &&
       attribute.localName === name);
 }
+
+describe('checkpoints in parts and previews (D163)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+    });
+  });
+
+  const identity = createReplicaIdentity({
+    sessionId: 'parts-session', pageEpoch: 1, generation: 1,
+    documentId: 'parts-document', frameId: 0, sequence: 4,
+  });
+  const values = {
+    adoptedStyleSheets: [] as string[],
+    captureMs: 1,
+    viewportWidth: 800,
+    viewportHeight: 600,
+    documentWidth: 800,
+    documentHeight: 2_000,
+  };
+  type Raw = Record<string, unknown>;
+  const text = (id: number, value: string): Raw => ({
+    kind: 'text', id, text: value, translatable: true,
+  });
+  const el = (
+    id: number,
+    tagName: string,
+    children: Raw[] = [],
+    extra: Raw = {},
+  ): Raw => ({
+    kind: 'element', id, namespace: 'html', tagName, attributes: [], children, ...extra,
+  });
+  /** A root with three shells: an element, a host and its root. */
+  const shellRoot = (): Raw => el(1, 'html', [el(2, 'body', [
+    el(3, 'section', [], { childrenFollow: true }),
+    el(4, 'div', [], {
+      childrenFollow: true,
+      shadowRoot: {
+        id: 5, mode: 'open', children: [], adoptedStyleSheets: [], childrenFollow: true,
+      },
+    }),
+  ])]);
+  const fills = {
+    section: { nodeId: 3, children: [el(6, 'p', [text(7, 'hello')])] },
+    host: { nodeId: 4, children: [el(8, 'span', [], { childrenFollow: true })] },
+    root: { nodeId: 5, children: [text(9, 'shadow')] },
+    deep: { nodeId: 8, children: [text(10, 'deep')] },
+  };
+  const fullRoot = (): Raw => el(1, 'html', [el(2, 'body', [
+    el(3, 'section', [el(6, 'p', [text(7, 'hello')])]),
+    el(4, 'div', [el(8, 'span', [text(10, 'deep')])], {
+      shadowRoot: { id: 5, mode: 'open', children: [text(9, 'shadow')], adoptedStyleSheets: [] },
+    }),
+  ])]);
+  const checkpoint = (root: Raw, extra: Raw = {}) => createHtmlMirrorCheckpoint(
+    identity,
+    { ...values, root: root as never, ...extra },
+  );
+  const part = (index: number, entries: readonly unknown[], at = identity) =>
+    createHtmlMirrorCheckpointPart(at, index, entries as never)!;
+
+  it('accepts shells only in a checkpoint that says parts follow', () => {
+    expect(checkpoint(shellRoot())).toBeUndefined();
+    expect(checkpoint(shellRoot(), { partCount: 0 })).toBeUndefined();
+    const shell = checkpoint(shellRoot(), { partCount: 2 })!;
+    expect(shell.payload.partCount).toBe(2);
+    expect(shell.payload.root.children[0]).toMatchObject({ kind: 'element' });
+    // Parts of a whole root have nothing to fill.
+    expect(checkpoint(fullRoot(), { partCount: 1 })).toBeUndefined();
+    expect(checkpoint(fullRoot(), { partCount: 0 })?.payload).not.toHaveProperty('partCount');
+    for (const partCount of [-1, 1.5, '2', Number.MAX_SAFE_INTEGER]) {
+      expect(checkpoint(shellRoot(), { partCount }), String(partCount)).toBeUndefined();
+    }
+    // Over the wire, with the optional keys and nothing else.
+    const wire = JSON.parse(JSON.stringify(shell));
+    expect(readHtmlMirrorSourceMessage(wire, identity)).toEqual(shell);
+    expect(readHtmlMirrorSourceMessage(
+      { ...wire, payload: { ...wire.payload, parts: 2 } },
+      identity,
+    )).toBeUndefined();
+  });
+
+  it('refuses a shell where the panel cannot put the content back', () => {
+    const inBody = (node: Raw) => checkpoint(
+      el(1, 'html', [el(2, 'body', [node])]),
+      { partCount: 1 },
+    );
+    expect(inBody(el(3, 'section', [], { childrenFollow: true }))).toBeDefined();
+    expect(inBody(el(3, 'section', [text(4, 'x')], { childrenFollow: true }))).toBeUndefined();
+    expect(inBody(el(3, 'section', [], { childrenFollow: false }))).toBeUndefined();
+    for (const tagName of ['select', 'style', 'option', 'optgroup', 'input', 'br']) {
+      expect(inBody(el(3, tagName, [], { childrenFollow: true })), tagName).toBeUndefined();
+    }
+    // Nothing inside a dropdown or a style sheet.
+    expect(inBody(el(3, 'select', [el(4, 'option', [], { childrenFollow: true })])))
+      .toBeUndefined();
+    expect(inBody(el(3, 'div', [], {
+      shadowRoot: {
+        id: 4, mode: 'open', children: [text(5, 'x')], adoptedStyleSheets: [],
+        childrenFollow: true,
+      },
+    }))).toBeUndefined();
+    expect(inBody(el(3, 'div', [], {
+      childrenFollow: true, placeholder: { height: 10 },
+    }))).toBeUndefined();
+  });
+
+  it('accepts a placeholder of a sane height only in a preview', () => {
+    const withBox = (placeholder: unknown, extra: Raw = {}) =>
+      el(1, 'html', [el(2, 'body', [el(3, 'section', [], { placeholder, ...extra })])]);
+    expect(checkpoint(withBox({ height: 120 }))).toBeUndefined();
+    const preview = checkpoint(withBox({ height: 120 }), { preview: true })!;
+    expect(preview.payload.preview).toBe(true);
+    expect(readHtmlMirrorSourceMessage(JSON.parse(JSON.stringify(preview)), identity))
+      .toEqual(preview);
+    expect(checkpoint(withBox({ height: 0 }), { preview: true })).toBeDefined();
+    for (const bad of [
+      { height: -1 }, { height: Number.NaN }, { height: 2_000_000 }, { height: '1' },
+      { height: 1, width: 2 }, {}, 12, null,
+    ]) {
+      expect(checkpoint(withBox(bad), { preview: true }), JSON.stringify(bad))
+        .toBeUndefined();
+    }
+    expect(checkpoint(withBox({ height: 1 }, {
+      children: [text(4, 'inside')],
+    }), { preview: true })).toBeUndefined();
+    expect(checkpoint(withBox({ height: 1 }, {
+      shadowRoot: { id: 4, mode: 'open', children: [], adoptedStyleSheets: [] },
+    }), { preview: true })).toBeUndefined();
+    expect(checkpoint(fullRoot(), { preview: 'yes' })).toBeUndefined();
+    // A preview is never sent in parts.
+    expect(checkpoint(shellRoot(), { preview: true, partCount: 2 })).toBeUndefined();
+  });
+
+  it('checks a part on its own as it arrives', () => {
+    const first = part(0, [fills.section, fills.host]);
+    expect(first).toBeDefined();
+    expect(first.kind).toBe('simul:html-mirror-v2:checkpoint-part');
+    const wire = decodeHtmlMirrorWireMessage(JSON.parse(JSON.stringify(
+      encodeHtmlMirrorWireMessage(first),
+    )));
+    expect(readHtmlMirrorCheckpointPart(wire, identity)).toEqual(first);
+    const raw = JSON.parse(JSON.stringify(first)) as Raw;
+    for (const forged of [
+      { ...raw, extra: 1 },
+      { ...raw, kind: 'simul:html-mirror-v2:checkpoint' },
+      { ...raw, byteLength: Number(raw.byteLength) + 1 },
+      { ...raw, index: -1 },
+      { ...raw, index: 1.5 },
+      { ...raw, fills: [] },
+      { ...raw, fills: 'none' },
+      { ...raw, fills: [{ ...fills.section, more: 1 }] },
+      { ...raw, fills: [{ nodeId: 0, children: [] }] },
+      { ...raw, fills: [{ nodeId: 3, children: 'x' }] },
+      { ...raw, fills: [fills.section, fills.section] },
+      // A node of its own fill is the shell itself a second time.
+      { ...raw, fills: [{ nodeId: 6, children: [el(6, 'p')] }] },
+      { ...raw, fills: [{ nodeId: 3, children: [el(11, 'script')] }] },
+      { ...raw, identity: { ...identity, documentId: 'other-document' } },
+    ]) {
+      expect(readHtmlMirrorCheckpointPart(forged, identity), JSON.stringify(forged).slice(0, 80))
+        .toBeUndefined();
+    }
+  });
+
+  it('assembles the parts in any order into the checkpoint of the whole graph', () => {
+    const shell = checkpoint(shellRoot(), { partCount: 2 })!;
+    const expected = checkpoint(fullRoot())!;
+    const first = part(0, [fills.section, fills.host]);
+    const second = part(1, [fills.root, fills.deep]);
+    expect(assembleHtmlMirrorCheckpoint(shell, [first, second])).toEqual(expected);
+    expect(assembleHtmlMirrorCheckpoint(shell, [second, first])).toEqual(expected);
+    // A fill can come before the part that holds its shell.
+    const early = part(0, [fills.deep, fills.root]);
+    const late = part(1, [fills.host, fills.section]);
+    expect(assembleHtmlMirrorCheckpoint(shell, [early, late])).toEqual(expected);
+  });
+
+  it('refuses a missing, unknown or second fill, a stray part, and a repeated id', () => {
+    const shell = checkpoint(shellRoot(), { partCount: 2 })!;
+    const first = part(0, [fills.section, fills.host]);
+    const second = part(1, [fills.root, fills.deep]);
+    const refused: Array<readonly HtmlMirrorCheckpointPart[]> = [
+      [first],
+      [first, second, part(2, [{ nodeId: 99, children: [] }])],
+      [first, part(1, [fills.root])],
+      [first, part(1, [fills.root, fills.deep, { nodeId: 99, children: [] }])],
+      [first, part(1, [fills.root, fills.deep, fills.section])],
+      [first, part(0, [fills.root, fills.deep])],
+      [first, part(1, [fills.root, fills.deep], { ...identity, sequence: 5 })],
+      [first, part(1, [{ nodeId: 5, children: [text(7, 'again')] }, fills.deep])],
+    ];
+    for (const parts of refused) {
+      expect(assembleHtmlMirrorCheckpoint(shell, parts)).toBeUndefined();
+    }
+    const preview = checkpoint(fullRoot(), { preview: true })!;
+    expect(assembleHtmlMirrorCheckpoint(preview, [first])).toBeUndefined();
+  });
+
+  it('checks each fill in the context of its shell', () => {
+    // A shell inside an edited region: the text it is filled with must be
+    // withheld as anywhere in that region. On its own the part passes.
+    const shell = checkpoint(el(1, 'html', [el(2, 'body', [
+      el(3, 'div', [el(4, 'section', [], { childrenFollow: true })], {
+        attributes: [['contenteditable', 'true']],
+      }),
+    ])]), { partCount: 1 })!;
+    expect(shell).toBeDefined();
+    const leaking = part(0, [{ nodeId: 4, children: [text(5, 'typed secret')] }]);
+    expect(leaking).toBeDefined();
+    expect(assembleHtmlMirrorCheckpoint(shell, [leaking])).toBeUndefined();
+    const withheld = part(0, [{
+      nodeId: 4, children: [{ kind: 'text', id: 5, text: '', translatable: false }],
+    }]);
+    expect(assembleHtmlMirrorCheckpoint(shell, [withheld])).toBeDefined();
+  });
+
+  it('takes a list in several fills, in the order the page read them', () => {
+    const p6 = el(6, 'p', [text(7, 'hello')]);
+    const p11 = el(11, 'p', [text(12, 'world')]);
+    const head = { nodeId: 3, children: [p6], more: true };
+    const tail = { nodeId: 3, children: [p11] };
+    const expected = checkpoint(el(1, 'html', [el(2, 'body', [
+      el(3, 'section', [p6, p11]),
+      el(4, 'div', [el(8, 'span', [text(10, 'deep')])], {
+        shadowRoot: { id: 5, mode: 'open', children: [text(9, 'shadow')], adoptedStyleSheets: [] },
+      }),
+    ])]))!;
+    const rest = [fills.host, fills.root, fills.deep];
+    // Across parts, whatever order they arrive in, and within one part.
+    const across = checkpoint(shellRoot(), { partCount: 2 })!;
+    const first = part(0, [head]);
+    const second = part(1, [tail, ...rest]);
+    expect(first.fills[0]).toEqual(head);
+    expect(assembleHtmlMirrorCheckpoint(across, [first, second])).toEqual(expected);
+    expect(assembleHtmlMirrorCheckpoint(across, [second, first])).toEqual(expected);
+    const one = checkpoint(shellRoot(), { partCount: 1 })!;
+    const both = part(0, [head, tail, ...rest]);
+    expect(assembleHtmlMirrorCheckpoint(one, [both])).toEqual(expected);
+    // Over the wire, `more` and all.
+    const wire = decodeHtmlMirrorWireMessage(JSON.parse(JSON.stringify(
+      encodeHtmlMirrorWireMessage(both),
+    )));
+    expect(readHtmlMirrorCheckpointPart(wire, identity)).toEqual(both);
+    // A shell and its first fill in one part: the part that holds the node.
+    const nested = checkpoint(shellRoot(), { partCount: 2 })!;
+    const withShell = part(0, [
+      fills.section,
+      { nodeId: 4, children: [el(8, 'span', [], { childrenFollow: true })] },
+      { nodeId: 8, children: [text(10, 'de')], more: true },
+    ]);
+    expect(withShell).toBeDefined();
+    const ended = part(1, [{ nodeId: 8, children: [text(13, 'ep')] }, fills.root]);
+    expect(assembleHtmlMirrorCheckpoint(nested, [ended, withShell])).toEqual(checkpoint(
+      el(1, 'html', [el(2, 'body', [
+        el(3, 'section', [p6]),
+        el(4, 'div', [el(8, 'span', [text(10, 'de'), text(13, 'ep')])], {
+          shadowRoot: {
+            id: 5, mode: 'open', children: [text(9, 'shadow')], adoptedStyleSheets: [],
+          },
+        }),
+      ])]),
+    ));
+    // The page's own check keeps the shell waiting until its last fill.
+    const assembly = new HtmlMirrorCheckpointAssembly();
+    expect(assembly.readRoot(shellRoot() as never)).toBeDefined();
+    expect(assembly.readFill(3, [p6], true)).toBeDefined();
+    expect(assembly.pendingShells).toBe(3);
+    expect(assembly.readFill(3, [p11])).toBeDefined();
+    expect(assembly.pendingShells).toBe(2);
+    expect(assembly.readFill(3, [el(14, 'p')])).toBeUndefined();
+  });
+
+  it('refuses a fill after the last, a list that never ends, and a bad more', () => {
+    const shell = checkpoint(shellRoot(), { partCount: 2 })!;
+    const head = { nodeId: 3, children: [el(6, 'p')], more: true };
+    const tail = { nodeId: 3, children: [el(11, 'p')] };
+    const rest = [fills.host, fills.root, fills.deep];
+    const refused: Array<readonly HtmlMirrorCheckpointPart[]> = [
+      // After the last fill, in the next part or the same one.
+      [part(0, [tail]), part(1, [head, ...rest])],
+      [part(0, [tail, ...rest]), part(1, [{ ...tail, children: [el(12, 'p')] }])],
+      // Every fill says more.
+      [part(0, [head]), part(1, [{ ...tail, more: true }, ...rest])],
+      [part(0, [head]), part(1, rest)],
+    ];
+    for (const parts of refused) {
+      expect(assembleHtmlMirrorCheckpoint(shell, parts)).toBeUndefined();
+    }
+    // Within one part: a fill after a last one, and a bad `more`.
+    for (const entries of [
+      [tail, head],
+      [tail, tail],
+      [{ ...head, more: false }],
+      [{ ...head, more: 'yes' }],
+    ]) {
+      expect(createHtmlMirrorCheckpointPart(identity, 0, entries as never), JSON.stringify(entries))
+        .toBeUndefined();
+    }
+    // The page's own check refuses them as they are made.
+    const assembly = new HtmlMirrorCheckpointAssembly();
+    expect(assembly.readRoot(shellRoot() as never)).toBeDefined();
+    expect(createHtmlMirrorCheckpointPart(
+      identity, 0, [tail, head] as never, 'conservative', assembly,
+    )).toBeUndefined();
+  });
+
+  it('counts every part against one node limit', () => {
+    const rows = (from: number, count: number): Raw[] =>
+      Array.from({ length: count }, (_, index) => text(from + index, 'row'));
+    applyHtmlMirrorLimitSettings({
+      itemMegabytes: 1, pageMegabytes: 1, maxElements: 1_000,
+    });
+    try {
+      const shell = checkpoint(el(1, 'html', [el(2, 'body', [
+        el(3, 'section', [], { childrenFollow: true }),
+        el(4, 'section', [], { childrenFollow: true }),
+      ])]), { partCount: 2 })!;
+      expect(shell).toBeDefined();
+      const first = part(0, [{ nodeId: 3, children: rows(10, 600) }]);
+      const second = part(1, [{ nodeId: 4, children: rows(1_000, 600) }]);
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
+      expect(assembleHtmlMirrorCheckpoint(shell, [first, second])).toBeUndefined();
+      expect(assembleHtmlMirrorCheckpoint(shell, [
+        first,
+        part(1, [{ nodeId: 4, children: rows(1_000, 300) }]),
+      ])).toBeDefined();
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
+  });
+});

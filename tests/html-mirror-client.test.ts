@@ -7,7 +7,9 @@ import {
 } from '../lib/replica/html-mirror-client';
 import {
   createHtmlMirrorCheckpoint,
+  createHtmlMirrorCheckpointPart,
   createHtmlMirrorError,
+  createHtmlMirrorPatch,
   createHtmlMirrorScrollUpdate,
 } from '../lib/replica/html-mirror-protocol';
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
@@ -377,6 +379,288 @@ describe('Chrome HTML mirror client', () => {
   });
 });
 
+describe('a checkpoint read in parts and a preview (D163)', () => {
+  it('assembles the parts into the checkpoint a read in one task sends', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(part(0, 0, [sectionFill('one')]));
+    port.emitMessage(part(0, 1, [asideFill('two')]));
+    port.emitMessage(shellCheckpoint(0, 2));
+
+    const received = await lease.initialCheckpoint;
+    expect(received).toEqual(wholeCheckpoint(0, 'one', 'two'));
+    expect(received.payload).not.toHaveProperty('partCount');
+    lease.dispose();
+  });
+
+  it('assembles parts that come in another order', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(part(0, 1, [asideFill('two')]));
+    port.emitMessage(part(0, 0, [sectionFill('one')]));
+    port.emitMessage(shellCheckpoint(0, 2));
+    await expect(lease.initialCheckpoint).resolves.toEqual(wholeCheckpoint(0, 'one', 'two'));
+    lease.dispose();
+  });
+
+  it('drops the parts of a read the page started again at a later sequence', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(part(0, 0, [sectionFill('stale')]));
+    port.emitMessage(part(1, 0, [sectionFill('one')]));
+    port.emitMessage(part(1, 1, [asideFill('two')]));
+    port.emitMessage(shellCheckpoint(1, 2));
+    await expect(lease.initialCheckpoint).resolves.toEqual(wholeCheckpoint(1, 'one', 'two'));
+    lease.dispose();
+  });
+
+  it.each([
+    ['a part that fails its own check', () => [
+      { ...part(0, 0, [sectionFill('one')]), byteLength: 1 },
+    ]],
+    ['a part of an earlier sequence than the parts kept', () => [
+      part(1, 0, [sectionFill('one')]),
+      part(0, 1, [asideFill('two')]),
+    ]],
+    ['a second part of an index', () => [
+      part(0, 0, [sectionFill('one')]),
+      part(0, 0, [asideFill('two')]),
+    ]],
+    ['a part missing', () => [
+      part(0, 0, [sectionFill('one')]),
+      shellCheckpoint(0, 2),
+    ]],
+    ['a part too many', () => [
+      part(0, 0, [sectionFill('one')]),
+      part(0, 1, [asideFill('two')]),
+      part(0, 2, [{ nodeId: 99, children: [] }]),
+      shellCheckpoint(0, 2),
+    ]],
+    ['a part that fills what no shell is', () => [
+      part(0, 0, [sectionFill('one')]),
+      part(0, 1, [{ nodeId: 99, children: [] }]),
+      shellCheckpoint(0, 2),
+    ]],
+    ['parts of another sequence than the checkpoint', () => [
+      part(0, 0, [sectionFill('one')]),
+      part(0, 1, [asideFill('two')]),
+      shellCheckpoint(1, 2),
+    ]],
+  ])('fails the stream at %s, as at a broken checkpoint', async (_, messages) => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    for (const message of messages()) port.emitMessage(message);
+    await expect(lease.initialCheckpoint).rejects.toThrow();
+    expect(port.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('fails the live stream at a broken part, as at a broken checkpoint', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    port.emitMessage(part(0, 0, [sectionFill('one')]));
+    port.emitMessage(shellCheckpoint(0, 2));
+    expect(observer.onCheckpoint).not.toHaveBeenCalled();
+    expect(observer.onFailure).toHaveBeenCalledWith('stream_failed', expect.anything());
+    expect(port.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('hands on a recovery checkpoint read in parts, and tells the observer of each part', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    // A recovery read at the sequence of the last checkpoint.
+    port.emitMessage(part(0, 0, [sectionFill('one')]));
+    port.emitMessage(part(0, 1, [asideFill('two')]));
+    expect(observer.onProgress).toHaveBeenCalledTimes(2);
+    port.emitMessage(shellCheckpoint(0, 2));
+    expect(observer.onCheckpoint).toHaveBeenCalledWith(wholeCheckpoint(0, 'one', 'two'));
+    expect(observer.onFailure).not.toHaveBeenCalled();
+  });
+
+  it('resolves with the preview, then hands on its full copy and the patches after it', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(previewCheckpoint(0));
+    port.emitMessage(scrollUpdate(40));
+    const preview = await lease.initialCheckpoint;
+    expect(preview.payload.preview).toBe(true);
+    // The copy's parts come while the panel builds the preview.
+    port.emitMessage(part(1, 0, [sectionFill('one')]));
+    port.emitMessage(part(1, 1, [asideFill('two')]));
+    port.emitMessage(shellCheckpoint(1, 2));
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    expect(observer.onCheckpoint).toHaveBeenCalledWith(wholeCheckpoint(1, 'one', 'two'));
+    port.emitMessage(textPatch(2));
+    expect(observer.onPatch).toHaveBeenCalledOnce();
+    expect(observer.onFailure).not.toHaveBeenCalled();
+    lease.dispose();
+  });
+
+  it('refuses a preview after the first checkpoint', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    port.emitMessage(previewCheckpoint(1));
+    expect(observer.onCheckpoint).not.toHaveBeenCalled();
+    expect(observer.onFailure).toHaveBeenCalledWith('stream_failed', expect.anything());
+  });
+
+  it('waits for a first checkpoint as long as parts come, and times out on a stall', async () => {
+    vi.useFakeTimers();
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    let rejected: unknown;
+    void (async () => {
+      try {
+        await lease.initialCheckpoint;
+      } catch (error) {
+        rejected = error;
+      }
+    })();
+    for (let index = 0; index < 3; index += 1) {
+      await vi.advanceTimersByTimeAsync(HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS - 100);
+      port.emitMessage(part(0, index, [index === 0 ? sectionFill('one') : asideFill(`n${index}`)]));
+    }
+    expect(rejected).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS);
+    expect(String(rejected)).toContain('initial checkpoint timed out');
+    expect(port.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('waits for a preview\'s full copy as long as parts come, and fails the stream on a stall', async () => {
+    vi.useFakeTimers();
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(previewCheckpoint(0));
+    await lease.initialCheckpoint;
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    await vi.advanceTimersByTimeAsync(HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS - 100);
+    port.emitMessage(part(1, 0, [sectionFill('one')]));
+    await vi.advanceTimersByTimeAsync(HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS - 100);
+    expect(observer.onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(observer.onFailure).toHaveBeenCalledWith('stream_failed', expect.anything());
+    expect(port.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('stops the full copy\'s deadline once the copy has come', async () => {
+    vi.useFakeTimers();
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(previewCheckpoint(0));
+    await lease.initialCheckpoint;
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    port.emitMessage(part(1, 0, [sectionFill('one')]));
+    port.emitMessage(part(1, 1, [asideFill('two')]));
+    port.emitMessage(shellCheckpoint(1, 2));
+    await vi.advanceTimersByTimeAsync(HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS * 3);
+    expect(observer.onFailure).not.toHaveBeenCalled();
+    expect(port.disconnect).not.toHaveBeenCalled();
+    lease.dispose();
+  });
+});
+
+type RawNode = Record<string, unknown>;
+
+const rawText = (id: number, text: string): RawNode => ({
+  kind: 'text', id, text, translatable: true,
+});
+
+const rawElement = (
+  id: number,
+  tagName: string,
+  children: RawNode[] = [],
+  extra: RawNode = {},
+): RawNode => ({
+  kind: 'element', id, namespace: 'html', tagName, attributes: [], children, ...extra,
+});
+
+const pageValues = {
+  adoptedStyleSheets: [] as string[],
+  captureMs: 1,
+  viewportWidth: 800,
+  viewportHeight: 600,
+  documentWidth: 800,
+  documentHeight: 2_000,
+};
+
+function at(sequence: number) {
+  return { ...identity, sequence };
+}
+
+/** The page's root with its section and aside left for parts. */
+function shellCheckpoint(sequence: number, partCount: number) {
+  return createHtmlMirrorCheckpoint(at(sequence), {
+    ...pageValues,
+    root: rawElement(1, 'html', [rawElement(2, 'head'), rawElement(3, 'body', [
+      rawElement(4, 'section', [], { childrenFollow: true }),
+      rawElement(5, 'aside', [], { childrenFollow: true }),
+    ])]) as never,
+    partCount,
+  })!;
+}
+
+function wholeCheckpoint(sequence: number, first: string, second: string) {
+  return createHtmlMirrorCheckpoint(at(sequence), {
+    ...pageValues,
+    root: rawElement(1, 'html', [rawElement(2, 'head'), rawElement(3, 'body', [
+      rawElement(4, 'section', [rawElement(6, 'p', [rawText(7, first)])]),
+      rawElement(5, 'aside', [rawText(8, second)]),
+    ])]) as never,
+  })!;
+}
+
+function previewCheckpoint(sequence: number) {
+  return createHtmlMirrorCheckpoint(at(sequence), {
+    ...pageValues,
+    root: rawElement(1, 'html', [rawElement(2, 'head'), rawElement(3, 'body', [
+      rawElement(4, 'section', [], { placeholder: { height: 900 } }),
+      rawElement(5, 'aside', [], { placeholder: { height: 400 } }),
+    ])]) as never,
+    preview: true,
+  })!;
+}
+
+const sectionFill = (text: string) => ({
+  nodeId: 4, children: [rawElement(6, 'p', [rawText(7, text)])],
+});
+
+const asideFill = (text: string) => ({ nodeId: 5, children: [rawText(8, text)] });
+
+function part(sequence: number, index: number, fills: readonly unknown[]) {
+  return createHtmlMirrorCheckpointPart(at(sequence), index, fills as never)!;
+}
+
+function textPatch(sequence: number) {
+  return createHtmlMirrorPatch(at(sequence), sequence, sequence, [{
+    kind: 'text', nodeId: 8, node: { kind: 'text', id: 8, text: 'later', translatable: true },
+  }])!;
+}
+
 const request: ReplicaCaptureRequest = {
   sessionId: 'client-session',
   pageEpoch: 1,
@@ -450,6 +734,7 @@ function fakeObserver() {
     onCheckpoint: vi.fn<HtmlMirrorStreamObserver['onCheckpoint']>(),
     onScroll: vi.fn<HtmlMirrorStreamObserver['onScroll']>(),
     onFailure: vi.fn<HtmlMirrorStreamObserver['onFailure']>(),
+    onProgress: vi.fn<NonNullable<HtmlMirrorStreamObserver['onProgress']>>(),
   };
 }
 

@@ -6,7 +6,9 @@ import {
   HTML_MIRROR_PORT_PREFIX,
   MAX_HTML_MIRROR_SCROLL_PANES,
   MAX_HTML_MIRROR_UNACKED_BATCHES,
+  HtmlMirrorCheckpointAssembly,
   createHtmlMirrorCheckpoint,
+  createHtmlMirrorCheckpointPart,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
   createHtmlMirrorPatchFrame,
@@ -15,6 +17,7 @@ import {
   encodeHtmlMirrorWireMessage,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
+  type HtmlMirrorCheckpoint,
   type HtmlMirrorPaneScroll,
   type HtmlMirrorPatchBatch,
   type HtmlMirrorReconcileChild,
@@ -29,6 +32,7 @@ import {
   readVisualViewportSnapshot,
 } from '../primary-scroll';
 import {
+  MAX_HTML_MIRROR_BYTES,
   MAX_HTML_MIRROR_STRING,
   MAX_HTML_MIRROR_NODES,
   MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
@@ -40,11 +44,13 @@ import {
   isSourceStructuralChildOf,
   readSourceSelectPresentationStyle,
   appendedStyleSheetText,
+  beginSourceDocumentRead,
   sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceAttributes,
   sanitizeSourceChildren,
   sanitizeSourceDocument,
   sanitizeSourceElementHints,
+  sanitizeSourcePreview,
   sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
   sourceDeclaredHiddenRegionIsWithheld,
@@ -53,12 +59,14 @@ import {
   sourceSlotReadingChanged,
   snapshotHtmlMirrorRepresentability,
   sourceStructuralChildNodes,
+  type HtmlMirrorCheckpointFill,
   type HtmlMirrorIdRegistry,
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
   type HtmlMirrorRepresentabilityCollector,
   type HtmlMirrorRepresentabilitySummary,
   type HtmlMirrorStyleWorkBudget,
+  boundedDimension,
 } from './html-mirror-sanitizer';
 import {
   MAX_HTML_MIRROR_NODES_SETTING,
@@ -75,15 +83,22 @@ import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
 import {
   SOURCE_EVIDENCE_ATTRIBUTE_FILTER,
   SemanticSourceSession,
-  eagerlyClassifySourceDocumentSecrets,
   eagerlyClassifySourceDocumentSubtree,
   rememberSourceMutationSecrets,
+  startSourceDocumentSecretScan,
+  type SourceDocumentSecretScan,
 } from './semantic-source-session';
+import {
+  createSliceClock,
+  yieldToMain,
+  type SliceClock,
+} from '../browser-scheduling';
 import {
   sourceDocumentSecretClassifier,
   type StickySourceSecretClassifier,
 } from './source-secret-classifier';
 import {
+  beginSourceControlledContentPolicy,
   createSourceControlledContentPolicy,
   beginSourceSecretAncestorWalk,
   hasSourceCredentialSecretAncestor,
@@ -188,6 +203,11 @@ export interface HtmlMirrorSourceBridgeEnvironment {
   readonly document?: Document;
   readonly window?: Window;
   readonly now?: () => number;
+  /**
+   * Gives the page a turn between slices of the page script's long work
+   * (D163): `scheduler.yield()` by default.
+   */
+  readonly yieldToMain?: () => Promise<void>;
   readonly createMutationObserver?: (
     callback: MutationCallback,
   ) => Pick<MutationObserver, 'observe' | 'disconnect'>;
@@ -347,10 +367,18 @@ export function installHtmlMirrorSourceBridge(
       watchRoot(shadow);
     });
   }
-  eagerlyClassifySourceDocumentSecrets(
+  // In slices with a turn for the page between them (D163): 185 ms in one
+  // task on a page of 54,000 elements. A small page is scanned in this task.
+  // The sessions below read nothing before it is done; meanwhile the
+  // observer above keeps what the page changes in the ledger.
+  const secretScan = startSourceDocumentSecretScan(
     sourceDocument,
     sourceWindow,
     documentSecretClassifier,
+    createSliceClock({
+      now: environment.now,
+      yield: environment.yieldToMain ?? yieldToMain,
+    }),
   );
   if (!secretObserver) {
     const root = sourceDocument.documentElement;
@@ -392,7 +420,9 @@ export function installHtmlMirrorSourceBridge(
         window: sourceWindow,
         registry,
         secretClassifier: documentSecretClassifier,
+        secretScan,
         now: environment.now ?? (() => performance.now()),
+        yieldToMain: environment.yieldToMain ?? yieldToMain,
         createMutationObserver: environment.createMutationObserver ??
           ((callback) => new MutationObserver(callback)),
         scheduleFrame: environment.scheduleFrame ??
@@ -420,6 +450,7 @@ export function installHtmlMirrorSourceBridge(
         createObserver: (observerEnvironment) =>
           new SourceImageObserver(observerEnvironment),
         secretClassifier: documentSecretClassifier,
+        secretScan,
       });
       return;
     }
@@ -430,6 +461,7 @@ export function installHtmlMirrorSourceBridge(
       window: sourceWindow,
       bridge: 'isolated-html',
       secretClassifier: documentSecretClassifier,
+      secretScan,
       structuralMenus,
       getNodeId: (node) => registry.getId(node),
       createMutationObserver: environment.createMutationObserver,
@@ -444,7 +476,14 @@ interface HtmlMirrorSourceSessionEnvironment {
   readonly window: Window;
   readonly registry: WeakNodeIdRegistry;
   readonly secretClassifier?: StickySourceSecretClassifier;
+  /** The injection-time credential scan; the first read waits for it (D163). */
+  readonly secretScan?: SourceDocumentSecretScan;
   readonly now: () => number;
+  /**
+   * Gives the page a turn between the slices of a checkpoint read (D163):
+   * `scheduler.yield()` by default.
+   */
+  readonly yieldToMain?: () => Promise<void>;
   readonly createMutationObserver: (
     callback: MutationCallback,
   ) => Pick<MutationObserver, 'observe' | 'disconnect'>;
@@ -642,6 +681,91 @@ const VISIBILITY_INTERACTION_EVENTS = Object.freeze([
   'toggle',
 ] as const);
 
+/**
+ * A page of this many elements or more is sent first as a preview (D163):
+ * what is near the viewport, every other block a box of its height, while
+ * the whole page is read in slices. Counted by `getElementsByTagName('*')`,
+ * which costs next to nothing.
+ */
+const HTML_MIRROR_PREVIEW_MIN_ELEMENTS = 4_000;
+/**
+ * The share of a slice the reader takes (D163). What it read is checked,
+ * marked and added to the index of what is painted in the same slice, and
+ * those take about as long as the reading: 375 ms of reading against 439 ms
+ * of the rest on a page of 54,000 elements (D162).
+ */
+const CHECKPOINT_READ_SHARE = 0.5;
+/**
+ * A read in slices that meets a node twice (the page moved it into what was
+ * not read yet) starts again; after this many the page is read in one task,
+ * as before (D163).
+ */
+const MAX_CHECKPOINT_READ_RESTARTS = 2;
+/**
+ * Mutation records kept while a checkpoint is read in slices, to be judged
+ * against the new copy once it is sent (D163). A page that changes more
+ * than this meanwhile is read again.
+ */
+const MAX_CHECKPOINT_READ_RECORDS = 20_000;
+/**
+ * Loaded images and style sheets kept the same way, and elements whose
+ * held animation values changed after they were read (D163).
+ */
+const MAX_CHECKPOINT_READ_LOADS = 4_000;
+
+/**
+ * What `#markMirroredGraph` writes and a checkpoint replaces: built for a
+ * read in slices beside what the mirror holds, and put in its place in the
+ * task that sends the checkpoint (D163).
+ */
+interface MirroredGraphState {
+  mirroredNodes: WeakSet<Node>;
+  mirroredOpaqueSecrets: WeakSet<Element>;
+  emittedChildren: WeakMap<Node, readonly Node[]>;
+  emittedParent: WeakMap<Node, Node>;
+  emittedNodeSignatures: WeakMap<Node, string>;
+  shadowHostCandidates: Element[];
+  knownShadowHostCandidates: WeakSet<Element>;
+  shadowDiscoveryCursor: number;
+  mirroredImageCandidates: Element[];
+  knownMirroredImageCandidates: WeakSet<Element>;
+  selectedImageSources: WeakMap<Element, string>;
+  controlledContentPolicy: SourceControlledContentPolicy | undefined;
+  adoptedStyleSignatures: StableSignatureTracker;
+}
+
+/**
+ * A checkpoint read that is running (D163). A newer one, or the end of the
+ * session, cancels it: each of its turns asks whether it is still the
+ * session's read before it does anything.
+ */
+interface CheckpointRead {
+  readonly generation: number;
+  /** What the page changed meanwhile, kept raw. */
+  records: MutationRecord[];
+  recordsOverflow: boolean;
+  /** The nodes those records name, which the copy's patches would read again. */
+  readonly recordTargets: Set<Node>;
+  /** Images and style sheets that loaded meanwhile. */
+  readonly loaded: Set<Element>;
+  /**
+   * Elements read already whose script animations came to hold other
+   * values meanwhile: the listing tells of each once, and the copy holds
+   * what was read before (D163).
+   */
+  readonly held: Set<Element>;
+  /** What a read in slices has marked so far. */
+  staged?: MirroredGraphState;
+}
+
+/** The slices of one checkpoint read (D163). */
+interface CheckpointReadSlices {
+  readonly clock: SliceClock;
+  /** The reader's share of the current slice is used. */
+  readonly reading: { expired(): boolean };
+  next(): Promise<void>;
+}
+
 type ReconciliationDecision =
   | 'reconcile'
   | 'missingReconciliationProofFallbackCount'
@@ -729,7 +853,7 @@ export class HtmlMirrorSourceSession {
   #stylePollingPhases = new WeakMap<object, StylePollChannel>();
   #styleCapacityChannels = new WeakMap<object, number>();
   #styleCapacityRetryPasses = new WeakMap<object, readonly [number, number]>();
-  readonly #adoptedStyleSignatures = new StableSignatureTracker(
+  #adoptedStyleSignatures = new StableSignatureTracker(
     STYLE_CHANGE_STABILITY_OBSERVATIONS,
   );
   readonly #ordinaryStyleSignatures = new StableSignatureTracker(
@@ -856,6 +980,21 @@ export class HtmlMirrorSourceSession {
    */
   #heldAnimationTargets = new Set<Element>();
   #disposed = false;
+  /** The checkpoint read that is running, if any: see `#postCheckpoint` (D163). */
+  #checkpointRead: CheckpointRead | undefined;
+  #checkpointReadGeneration = 0;
+  /** Only the session's first read may send a preview first (D163). */
+  #previewAllowed = true;
+  /**
+   * The sequence the last checkpoint part carried (D163): a later read in
+   * parts, or a checkpoint after them, takes the next, so that the panel
+   * can tell the parts of a cancelled read from the new ones.
+   */
+  #partsSequence: number | undefined;
+  /** The walk after a read met a root attached to a host read without one. */
+  #rootAttachedDuringRead = false;
+  /** The fresh walk of the current slice of a checkpoint read (D163). */
+  #sliceRootWalk: ReturnType<typeof beginSourceShadowRootWalk> | undefined;
 
   constructor(private readonly environment: HtmlMirrorSourceSessionEnvironment) {
     const sessionId = readHtmlMirrorPortSessionId(environment.port.name);
@@ -876,6 +1015,8 @@ export class HtmlMirrorSourceSession {
   dispose(disconnect = false): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    // A read in slices that is running stops at its next turn (D163).
+    this.#checkpointRead = undefined;
     this.environment.port.onMessage.removeListener(this.#onMessage);
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
     this.#stopListeningForShadowRoots?.();
@@ -1036,7 +1177,10 @@ export class HtmlMirrorSourceSession {
       this.#acknowledged = message.identity.sequence;
       if (
         this.#recoveryCheckpointSequence !== undefined &&
-        message.identity.sequence >= this.#recoveryCheckpointSequence
+        message.identity.sequence >= this.#recoveryCheckpointSequence &&
+        // Only the copy being read, once sent, is what the panel can
+        // acknowledge; a preview's sequence is older (D163).
+        !this.#checkpointRead
       ) {
         this.#recoveryCheckpointSequence = undefined;
         if (this.#pendingOverflow) {
@@ -1119,6 +1263,11 @@ export class HtmlMirrorSourceSession {
         this.environment.document,
         {
           changed: (element) => {
+            const read = this.#checkpointRead;
+            if (read?.staged?.mirroredNodes.has(element)) {
+              if (read.held.size < MAX_CHECKPOINT_READ_LOADS) read.held.add(element);
+              else read.recordsOverflow = true;
+            }
             this.#heldChanged.add(element);
           },
           // A frame, with nothing else to send: its pass lists them again.
@@ -1183,59 +1332,662 @@ export class HtmlMirrorSourceSession {
     }
   }
 
+  /**
+   * Reads the whole page for a checkpoint and sends it (D163). A page whose
+   * read fits one slice is read and sent in this task, as before. A larger
+   * one is read in slices with a turn for the page between them: first, on
+   * the session's first read of a page of `HTML_MIRROR_PREVIEW_MIN_ELEMENTS`
+   * elements or more, a preview; then the page in parts, each checked and
+   * sent as soon as it is read; then the checkpoint that closes them. What
+   * the mirror holds is built beside what it holds now and takes its place
+   * in the task that sends that checkpoint; what the page changed meanwhile
+   * is then judged against it. A checkpoint asked for while one is read
+   * cancels that read and starts anew.
+   *
+   * Sequences: a checkpoint sent whole carries the current sequence, as
+   * before. A preview carries the current sequence `S` and the copy that
+   * follows it `S + 1`, so that the preview's ACK resumes nothing. A read
+   * sent in parts carries a sequence no part has carried yet: the next one
+   * when the current one carried the parts of a read restarted or
+   * cancelled, and a checkpoint sent whole after such parts does the same.
+   * Patches follow the copy's sequence.
+   */
   #postCheckpoint(): void {
+    const read: CheckpointRead = {
+      generation: (this.#checkpointReadGeneration += 1),
+      records: [],
+      recordsOverflow: false,
+      recordTargets: new Set(),
+      loaded: new Set(),
+      held: new Set(),
+    };
+    this.#checkpointRead = read;
+    // Whatever was owed is read with the page. What is met from here on in
+    // what was read already is kept for the copy that is sent.
+    this.#lateShadowRoots = [];
+    this.#imageRefreshRequested = false;
+    void this.#readCheckpoint(read);
+  }
+
+  /** Whether `read` is still the session's read (D163). */
+  #readIsCurrent(read: CheckpointRead): boolean {
+    return !this.#disposed && this.#checkpointRead === read &&
+      this.#checkpointReadGeneration === read.generation;
+  }
+
+  async #readCheckpoint(read: CheckpointRead): Promise<void> {
+    try {
+      // Every node has met the injection-time credential scan first.
+      const secretScan = this.environment.secretScan;
+      if (secretScan && !secretScan.done) {
+        await secretScan.finished;
+        if (!this.#readIsCurrent(read)) return;
+      }
+      const slices = this.#checkpointReadSlices();
+      this.#openSliceRootWalk();
+      const expired = (): boolean => slices.clock.expired();
+      // Built in slices; a page whose policy fits the first is read on in
+      // this task (no await on that path: a small page is sent in it).
+      let builder = this.#beginControlledContentPolicy(read);
+      let policy = this.#withoutOwnLateRoots(() => builder.step(expired));
+      while (!policy) {
+        await slices.next();
+        if (!this.#readIsCurrent(read)) return;
+        policy = this.#withoutOwnLateRoots(() => builder.step(expired));
+      }
+      // Only the session's first read of a large page, and only its first
+      // attempt, offers a preview.
+      let offerPreview = this.#previewAllowed &&
+        this.#countSourceElements() >= HTML_MIRROR_PREVIEW_MIN_ELEMENTS;
+      this.#previewAllowed = false;
+      for (let restarts = 0; ; restarts += 1) {
+        if (restarts > MAX_CHECKPOINT_READ_RESTARTS) {
+          // The page keeps moving what was read into what was not: it is
+          // read in one task, as before.
+          this.#readAndPostCheckpoint(read);
+          return;
+        }
+        const outcome = await this.#readCheckpointInSlices(
+          read,
+          slices,
+          policy,
+          offerPreview,
+        );
+        offerPreview = false;
+        if (outcome !== 'restart' || !this.#readIsCurrent(read)) return;
+        await slices.next();
+        if (!this.#readIsCurrent(read)) return;
+        // What the policy was built from may have changed meanwhile.
+        if (
+          read.recordsOverflow ||
+          sourceControlledContentMutationsMayChange(read.records, policy)
+        ) {
+          builder = this.#beginControlledContentPolicy(read);
+          let rebuilt = this.#withoutOwnLateRoots(() => builder.step(expired));
+          while (!rebuilt) {
+            await slices.next();
+            if (!this.#readIsCurrent(read)) return;
+            rebuilt = this.#withoutOwnLateRoots(() => builder.step(expired));
+          }
+          policy = rebuilt;
+        }
+      }
+    } catch {
+      if (!this.#readIsCurrent(read)) return;
+      this.#checkpointRead = undefined;
+      this.#post(createHtmlMirrorError(
+        this.#identityAt(this.#sequence),
+        'privacy_rejected',
+      ));
+    } finally {
+      this.#closeSliceRootWalk();
+    }
+  }
+
+  /**
+   * A checkpoint asks about every element's root again instead of trusting
+   * an earlier "none": it holds every root attached so far, as it always did
+   * for open ones (D125). One fresh walk a slice serves all of the slice's
+   * reading (the policy, the read, the marks), so that each root is asked
+   * about once in it; it is closed before each turn the page is given
+   * (D163), and a read in one task is one slice.
+   */
+  #openSliceRootWalk(): void {
+    this.#sliceRootWalk ??= beginSourceShadowRootWalk({ fresh: true });
+  }
+
+  #closeSliceRootWalk(): void {
+    const walk = this.#sliceRootWalk;
+    this.#sliceRootWalk = undefined;
+    walk?.end();
+  }
+
+  /** The slices of one checkpoint read, on the session's clock (D163). */
+  #checkpointReadSlices(): CheckpointReadSlices {
+    const now = this.environment.now;
+    const clock = createSliceClock({
+      now,
+      yield: this.environment.yieldToMain ?? yieldToMain,
+    });
+    const readingBudget = clock.budgetMs * CHECKPOINT_READ_SHARE;
+    let startedAt = now();
+    return {
+      clock,
+      reading: { expired: () => now() - startedAt >= readingBudget },
+      next: async () => {
+        this.#closeSliceRootWalk();
+        await clock.next();
+        startedAt = now();
+        this.#openSliceRootWalk();
+      },
+    };
+  }
+
+  /**
+   * Starts the policy of the page's controlled content, to be built in
+   * slices (D163). What the page changes from here on is kept, and judged
+   * against the copy once it is sent, its relationships among it.
+   */
+  #beginControlledContentPolicy(
+    read: CheckpointRead,
+  ): ReturnType<typeof beginSourceControlledContentPolicy> {
+    // A read anew reads all of these as they are now.
+    read.records = [];
+    read.recordTargets.clear();
+    read.loaded.clear();
+    read.held.clear();
+    read.recordsOverflow = false;
+    return beginSourceControlledContentPolicy(
+      this.environment.document,
+      this.environment.window,
+      MAX_HTML_MIRROR_NODES,
+    );
+  }
+
+  /**
+   * Runs one slice of the read. A root its own fresh walk finds on an
+   * element read before without one is read with it: only roots that other
+   * readers find between the slices, in what was read already, are owed.
+   */
+  #withoutOwnLateRoots<T>(work: () => T): T {
+    const before = this.#lateShadowRoots.length;
+    try {
+      return work();
+    } finally {
+      if (this.#lateShadowRoots.length > before) {
+        this.#lateShadowRoots.length = before;
+      }
+    }
+  }
+
+  #countSourceElements(): number {
+    try {
+      const document = this.environment.document;
+      // Outside a browser (a test's DOM) `*` may name no element at all.
+      return document.getElementsByTagName('*').length ||
+        document.querySelectorAll('*').length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Sends the preview (D163) at the current sequence, with the document's
+   * place (the preview holds what is near it), and moves to the next
+   * sequence for the copy. False when the page gives none: the copy then
+   * comes without it. Offered only once the read has not fitted its first
+   * slice: a large page read that fast needs none.
+   */
+  #postPreview(policy: SourceControlledContentPolicy): boolean {
+    const fidelityPolicy = this.#fidelityPolicy;
+    if (!fidelityPolicy || !this.#identity) return false;
+    const { document, window, registry, now } = this.environment;
+    const startedAt = now();
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    let checkpoint: HtmlMirrorCheckpoint | undefined;
+    try {
+      const graph = this.#withoutOwnLateRoots(() => sanitizeSourcePreview(
+        document,
+        window,
+        registry,
+        {
+          representability,
+          fidelityPolicy,
+          controlledContent: policy,
+          now,
+        },
+      ));
+      checkpoint = graph && createHtmlMirrorCheckpoint(
+        this.#identityAt(this.#sequence),
+        {
+          root: graph.root,
+          adoptedStyleSheets: graph.adoptedStyleSheets,
+          documentMode: graph.documentMode,
+          captureMs: Math.max(0, now() - startedAt),
+          viewportWidth: graph.viewportWidth,
+          viewportHeight: graph.viewportHeight,
+          documentWidth: graph.documentWidth,
+          documentHeight: graph.documentHeight,
+          representability: snapshotHtmlMirrorRepresentability(representability),
+          preview: true,
+        },
+        fidelityPolicy,
+      );
+    } catch {
+      return false;
+    }
+    if (!checkpoint) return false;
+    this.#post(checkpoint);
+    // Only the document's place: no pane is the mirror's before the copy.
+    const documentScroll = readDocumentScrollSnapshot(document, window);
+    const scroll = createHtmlMirrorScrollUpdate(
+      this.#identityAt(this.#sequence),
+      {
+        scrollX: documentScroll.scrollX,
+        scrollY: documentScroll.scrollY,
+        maxScrollX: documentScroll.maxScrollX,
+        maxScrollY: documentScroll.maxScrollY,
+        ...readVisualViewportSnapshot(window),
+      },
+    );
+    if (scroll) this.#post(scroll);
+    this.#takeNextSequence();
+    return true;
+  }
+
+  /** Moves to the next sequence; only the copy sent at it resumes the stream. */
+  #takeNextSequence(): void {
+    this.#sequence += 1;
+    this.#recoveryCheckpointSequence = this.#sequence;
+  }
+
+  /** The sequence of a checkpoint sent whole: the current one, unless parts carried it. */
+  #wholeCheckpointSequence(): number {
+    if (this.#partsSequence === this.#sequence) this.#takeNextSequence();
+    return this.#sequence;
+  }
+
+  /** The sequence of a checkpoint sent in parts: one no part has carried yet. */
+  #partsCheckpointSequence(): number {
+    if (this.#partsSequence === this.#sequence) this.#takeNextSequence();
+    this.#partsSequence = this.#sequence;
+    return this.#sequence;
+  }
+
+  /**
+   * One attempt at reading the page in slices (D163). Each step's root and
+   * fills are checked with the checkpoint's other parts (one node and one
+   * byte budget for all), sent as a part, marked into fresh structures and
+   * added to the fresh index of what is painted, all in the step's task.
+   */
+  async #readCheckpointInSlices(
+    read: CheckpointRead,
+    slices: CheckpointReadSlices,
+    policy: SourceControlledContentPolicy,
+    offerPreview: boolean,
+  ): Promise<'restart' | 'ended'> {
+    const fidelityPolicy = this.#fidelityPolicy;
+    if (!fidelityPolicy || !this.#identity) return 'ended';
+    if (slices.clock.expired()) {
+      await slices.next();
+      if (!this.#readIsCurrent(read)) return 'ended';
+    }
+    if (read.recordsOverflow) return 'restart';
+    const { document, window, registry, now } = this.environment;
+    const startedAt = now();
+    const sizeAtStart = this.#readObservedSize();
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    const reader = beginSourceDocumentRead(document, window, registry, {
+      representability,
+      fidelityPolicy,
+      controlledContent: policy,
+      slotReadings: this.#slotReadings,
+      now,
+      freshRootWalk: false,
+    });
+    const staged = this.#createMirroredGraphState(policy);
+    read.staged = staged;
+    const index = SourceVisibilityBoundaryIndex.beginBuild(
+      document,
+      window,
+      MAX_HTML_MIRROR_NODES,
+    );
+    let assembly: HtmlMirrorCheckpointAssembly | undefined;
+    let sequence: number | undefined;
+    let partCount = 0;
+    let partBytes = 0;
+    // Checks and sends a step's fills as the next part; false when they
+    // cannot be sent (over a limit, or refused by the checks).
+    const sendPart = (
+      fills: readonly HtmlMirrorCheckpointFill[],
+      checked: HtmlMirrorCheckpointAssembly,
+    ): boolean => {
+      sequence ??= this.#partsCheckpointSequence();
+      const part = createHtmlMirrorCheckpointPart(
+        this.#identityAt(sequence),
+        partCount,
+        fills,
+        fidelityPolicy,
+        checked,
+      );
+      partBytes += part?.byteLength ?? 0;
+      if (!part || partBytes > MAX_HTML_MIRROR_BYTES) return false;
+      this.#post(part);
+      partCount += 1;
+      return true;
+    };
+    // The first step's fills, held until the preview is sent: the parts
+    // carry the sequence after the preview's.
+    let heldFills: readonly HtmlMirrorCheckpointFill[] | undefined;
+    // The children staged so far of each node whose list goes on in a
+    // later fill (`more`, D163).
+    const continued = new Map<number, Node[]>();
+    try {
+      for (;;) {
+        const step = this.#withoutOwnLateRoots(() => reader.step(slices.reading));
+        if (step.outcome === 'restart') return 'restart';
+        if (step.outcome === 'overflow' || step.outcome === 'failed') {
+          this.#failCheckpointRead(representability, step.outcome === 'overflow');
+          return 'ended';
+        }
+        const root = step.root;
+        if (step.outcome === 'done' && !assembly) {
+          // Read whole in one step: the checkpoint of before, in this task.
+          const values = step.document;
+          const checkpoint = root && values && createHtmlMirrorCheckpoint(
+            this.#identityAt(this.#wholeCheckpointSequence()),
+            {
+              root,
+              adoptedStyleSheets: values.adoptedStyleSheets,
+              documentMode: values.documentMode,
+              captureMs: Math.max(0, now() - startedAt),
+              viewportWidth: values.viewportWidth,
+              viewportHeight: values.viewportHeight,
+              documentWidth: values.documentWidth,
+              documentHeight: values.documentHeight,
+              representability: this.#summarizeRepresentability(representability),
+            },
+            fidelityPolicy,
+          );
+          if (!checkpoint) {
+            this.#failCheckpointRead(representability, Boolean(root));
+            return 'ended';
+          }
+          this.#stageReadStep(staged, index, step.fills, step, root, continued);
+          this.#installCheckpoint(read, checkpoint, staged, index.finish(), sizeAtStart);
+          return 'ended';
+        }
+        if (root) {
+          assembly = new HtmlMirrorCheckpointAssembly(fidelityPolicy);
+          if (!assembly.readRoot(root)) {
+            this.#failCheckpointRead(representability, true);
+            return 'ended';
+          }
+        }
+        if (!assembly) {
+          this.#failCheckpointRead(representability, false);
+          return 'ended';
+        }
+        // Marked and indexed in the task that read it: the index of what is
+        // painted must hold what was read, not what the page shows after a
+        // turn of its own.
+        this.#stageReadStep(staged, index, step.fills, step, root, continued);
+        // A step whose reading and staging used the slice sends its part
+        // in the next one (D163): the checks of the part are work too.
+        let yielded = false;
+        if (step.fills.length > 0 && !offerPreview && slices.clock.expired()) {
+          await slices.next();
+          if (!this.#readIsCurrent(read)) return 'ended';
+          if (read.recordsOverflow) return 'restart';
+          yielded = true;
+        }
+        if (step.fills.length > 0) {
+          if (offerPreview) {
+            heldFills = step.fills;
+          } else if (!sendPart(step.fills, assembly)) {
+            this.#failCheckpointRead(representability, true);
+            return 'ended';
+          }
+        }
+        if (step.outcome === 'done') {
+          const values = step.document;
+          const checkpoint = values && sequence !== undefined &&
+            assembly.readAdoptedStyleSheets(values.adoptedStyleSheets) &&
+            assembly.pendingShells === 0
+            ? assembly.shellCheckpoint(
+                this.#identityAt(sequence),
+                {
+                  documentMode: values.documentMode,
+                  captureMs: Math.max(0, now() - startedAt),
+                  viewportWidth: values.viewportWidth,
+                  viewportHeight: values.viewportHeight,
+                  documentWidth: values.documentWidth,
+                  documentHeight: values.documentHeight,
+                  representability: this.#summarizeRepresentability(
+                    representability,
+                  ),
+                },
+                partCount,
+              )
+            : undefined;
+          if (
+            !checkpoint ||
+            partBytes + checkpoint.payload.byteLength > MAX_HTML_MIRROR_BYTES
+          ) {
+            this.#failCheckpointRead(representability, true);
+            return 'ended';
+          }
+          this.#installCheckpoint(read, checkpoint, staged, index.finish(), sizeAtStart);
+          return 'ended';
+        }
+        if (!yielded || slices.clock.expired()) {
+          await slices.next();
+          if (!this.#readIsCurrent(read)) return 'ended';
+          if (read.recordsOverflow) return 'restart';
+        }
+        if (offerPreview) {
+          // The read does not fit one slice: the panel is shown a preview
+          // meanwhile, in a task of its own (D163).
+          offerPreview = false;
+          if (this.#postPreview(policy)) {
+            await slices.next();
+            if (!this.#readIsCurrent(read)) return 'ended';
+            if (read.recordsOverflow) return 'restart';
+          }
+          if (heldFills && !sendPart(heldFills, assembly)) {
+            this.#failCheckpointRead(representability, true);
+            return 'ended';
+          }
+          heldFills = undefined;
+          // The held part had this slice: the next step reads in its own.
+          if (slices.clock.expired()) {
+            await slices.next();
+            if (!this.#readIsCurrent(read)) return 'ended';
+            if (read.recordsOverflow) return 'restart';
+          }
+        }
+      }
+    } catch (error) {
+      if (!this.#readIsCurrent(read)) return 'ended';
+      if (
+        error instanceof HtmlMirrorCapacityError &&
+        !error.diagnosticRecorded
+      ) {
+        incrementSourceRepresentability(
+          representability,
+          'capacityOmissionCount',
+        );
+      }
+      this.#failCheckpointRead(representability, false);
+      return 'ended';
+    } finally {
+      // Nothing of a slice outlives it, whichever way the read ends here.
+      this.#closeSliceRootWalk();
+    }
+  }
+
+  /**
+   * Marks what a step read into the read's own structures, and adds it to
+   * the read's own index of what is painted (D163): the mirror's are left
+   * as they are until the checkpoint is sent.
+   */
+  #stageReadStep(
+    staged: MirroredGraphState,
+    index: ReturnType<typeof SourceVisibilityBoundaryIndex.beginBuild>,
+    fills: readonly HtmlMirrorCheckpointFill[],
+    step: {
+      readonly indexRoots: readonly { readonly element: Element; readonly includeSelf: boolean }[];
+      readonly deferred: ReadonlySet<Element>;
+    },
+    root: HtmlMirrorElementNode | undefined,
+    continued: Map<number, Node[]>,
+  ): void {
+    this.#exchangeMirroredGraphState(staged);
+    try {
+      if (root) this.#markMirroredGraph(root);
+      for (const fill of fills) {
+        const target = this.environment.registry.getNode(fill.nodeId);
+        for (const child of fill.children) this.#markMirroredGraph(child);
+        if (!target) continue;
+        // A list read over several fills is the node's children once its
+        // last fill is staged (D163).
+        const sources = continued.get(fill.nodeId) ?? [];
+        for (const child of fill.children) {
+          const source = this.environment.registry.getNode(child.id);
+          if (source) sources.push(source);
+        }
+        if (fill.more) {
+          continued.set(fill.nodeId, sources);
+        } else {
+          continued.delete(fill.nodeId);
+          this.#setEmittedSourceChildren(target, sources);
+        }
+      }
+    } finally {
+      this.#exchangeMirroredGraphState(staged);
+    }
+    for (const indexRoot of step.indexRoots) {
+      index.add(indexRoot.element, {
+        includeSelf: indexRoot.includeSelf,
+        stopAt: step.deferred,
+      });
+    }
+  }
+
+  #createMirroredGraphState(
+    policy: SourceControlledContentPolicy,
+  ): MirroredGraphState {
+    return {
+      mirroredNodes: new WeakSet<Node>(),
+      mirroredOpaqueSecrets: new WeakSet<Element>(),
+      emittedChildren: new WeakMap<Node, readonly Node[]>(),
+      emittedParent: new WeakMap<Node, Node>(),
+      emittedNodeSignatures: new WeakMap<Node, string>(),
+      shadowHostCandidates: [],
+      knownShadowHostCandidates: new WeakSet<Element>(),
+      shadowDiscoveryCursor: 0,
+      mirroredImageCandidates: [],
+      knownMirroredImageCandidates: new WeakSet<Element>(),
+      selectedImageSources: new WeakMap<Element, string>(),
+      controlledContentPolicy: policy,
+      adoptedStyleSignatures: new StableSignatureTracker(
+        STYLE_CHANGE_STABILITY_OBSERVATIONS,
+      ),
+    };
+  }
+
+  /** Swaps what the mirror holds with `state`: twice puts both back. */
+  #exchangeMirroredGraphState(state: MirroredGraphState): void {
+    [this.#mirroredNodes, state.mirroredNodes] =
+      [state.mirroredNodes, this.#mirroredNodes];
+    [this.#mirroredOpaqueSecrets, state.mirroredOpaqueSecrets] =
+      [state.mirroredOpaqueSecrets, this.#mirroredOpaqueSecrets];
+    [this.#emittedChildren, state.emittedChildren] =
+      [state.emittedChildren, this.#emittedChildren];
+    [this.#emittedParent, state.emittedParent] =
+      [state.emittedParent, this.#emittedParent];
+    [this.#emittedNodeSignatures, state.emittedNodeSignatures] =
+      [state.emittedNodeSignatures, this.#emittedNodeSignatures];
+    [this.#shadowHostCandidates, state.shadowHostCandidates] =
+      [state.shadowHostCandidates, this.#shadowHostCandidates];
+    [this.#knownShadowHostCandidates, state.knownShadowHostCandidates] =
+      [state.knownShadowHostCandidates, this.#knownShadowHostCandidates];
+    [this.#shadowDiscoveryCursor, state.shadowDiscoveryCursor] =
+      [state.shadowDiscoveryCursor, this.#shadowDiscoveryCursor];
+    [this.#mirroredImageCandidates, state.mirroredImageCandidates] =
+      [state.mirroredImageCandidates, this.#mirroredImageCandidates];
+    [this.#knownMirroredImageCandidates, state.knownMirroredImageCandidates] =
+      [state.knownMirroredImageCandidates, this.#knownMirroredImageCandidates];
+    [this.#selectedImageSources, state.selectedImageSources] =
+      [state.selectedImageSources, this.#selectedImageSources];
+    [this.#controlledContentPolicy, state.controlledContentPolicy] =
+      [state.controlledContentPolicy, this.#controlledContentPolicy];
+    [this.#adoptedStyleSignatures, state.adoptedStyleSignatures] =
+      [state.adoptedStyleSignatures, this.#adoptedStyleSignatures];
+  }
+
+  /** Today's answer to a read that cannot be sent: over a limit, or rejected. */
+  #failCheckpointRead(
+    representability: HtmlMirrorRepresentabilityCollector,
+    overLimit: boolean,
+  ): void {
+    if (overLimit && representability.capacityOmissionCount === 0) {
+      incrementSourceRepresentability(
+        representability,
+        'capacityOmissionCount',
+      );
+    }
+    this.#checkpointRead = undefined;
+    this.#post(createHtmlMirrorError(
+      this.#identityAt(this.#sequence),
+      representability.capacityOmissionCount > 0
+        ? 'stream_overflow'
+        : 'privacy_rejected',
+      snapshotHtmlMirrorRepresentability(representability),
+    ));
+  }
+
+  /**
+   * The page read in one task, as before D163: after a read in slices
+   * restarted `MAX_CHECKPOINT_READ_RESTARTS` times.
+   */
+  #readAndPostCheckpoint(read: CheckpointRead): void {
+    const fidelityPolicy = this.#fidelityPolicy;
+    if (!fidelityPolicy || !this.#identity || this.#disposed) return;
+    const { document, window, registry, now } = this.environment;
     // A checkpoint sends the whole page, so it asks about every element's
     // root again instead of trusting an earlier "none": it holds every root
     // attached so far, as it always did for open ones (D125).
     const rootWalk = beginSourceShadowRootWalk({ fresh: true });
     // The page's script animations are listed, tree by tree as the read
     // enters each, and what they hold is read with each element's style.
-    const heldPass = beginSourceHeldAnimationPass(
-      this.environment.document,
-      true,
-      this.environment.now,
-    );
-    try {
-      heldPass.list(this.environment.document);
-      this.#readAndPostCheckpoint();
-    } finally {
-      heldPass.end();
-      rootWalk.end();
-      this.#lateShadowRoots = [];
-      // The whole page was read: nothing of it is owed.
-      this.#heldChanged.clear();
-      this.#heldLook = { every: 1, in: 1 };
-    }
-  }
-
-  #readAndPostCheckpoint(): void {
-    const identity = this.#identity;
-    const fidelityPolicy = this.#fidelityPolicy;
-    if (!identity || !fidelityPolicy || this.#disposed) return;
-    const startedAt = this.environment.now();
+    const heldPass = beginSourceHeldAnimationPass(document, true, now);
+    const startedAt = now();
     const representability = createHtmlMirrorRepresentabilityCollector();
     try {
+      heldPass.list(document);
+      const sizeAtStart = this.#readObservedSize();
       const controlledContentPolicy = createSourceControlledContentPolicy(
-        this.environment.document,
-        this.environment.window,
+        document,
+        window,
         MAX_HTML_MIRROR_NODES,
       );
       const graph = sanitizeSourceDocument(
-        this.environment.document,
-        this.environment.window,
-        this.environment.registry,
+        document,
+        window,
+        registry,
         representability,
         fidelityPolicy,
         controlledContentPolicy,
         this.#slotReadings,
       );
       const checkpoint = graph && createHtmlMirrorCheckpoint(
-        this.#identityAt(this.#sequence),
+        this.#identityAt(this.#wholeCheckpointSequence()),
         {
           root: graph.root,
           adoptedStyleSheets: graph.adoptedStyleSheets,
           documentMode: graph.documentMode,
-          captureMs: Math.max(0, this.environment.now() - startedAt),
+          captureMs: Math.max(0, now() - startedAt),
           viewportWidth: graph.viewportWidth,
           viewportHeight: graph.viewportHeight,
           documentWidth: graph.documentWidth,
@@ -1245,77 +1997,22 @@ export class HtmlMirrorSourceSession {
         fidelityPolicy,
       );
       if (!checkpoint) {
-        if (graph && representability.capacityOmissionCount === 0) {
-          incrementSourceRepresentability(
-            representability,
-            'capacityOmissionCount',
-          );
-        }
-        this.#post(createHtmlMirrorError(
-          this.#identityAt(this.#sequence),
-          representability.capacityOmissionCount > 0
-            ? 'stream_overflow'
-            : 'privacy_rejected',
-          snapshotHtmlMirrorRepresentability(representability),
-        ));
+        this.#failCheckpointRead(representability, Boolean(graph));
         return;
       }
-      this.#mirroredNodes = new WeakSet<Node>();
-      this.#mirroredOpaqueSecrets = new WeakSet<Element>();
-      this.#emittedChildren = new WeakMap<Node, readonly Node[]>();
-      this.#emittedParent = new WeakMap<Node, Node>();
-      this.#emittedNodeSignatures = new WeakMap<Node, string>();
-      this.#shadowHostCandidates = [];
-      this.#knownShadowHostCandidates = new WeakSet<Element>();
-      this.#shadowDiscoveryCursor = 0;
-      this.#stylePollingCursor = 0;
-      this.#mirroredImageCandidates = [];
-      this.#knownMirroredImageCandidates = new WeakSet<Element>();
-      this.#selectedImageSources = new WeakMap<Element, string>();
-      this.#imageRefreshRequested = false;
-      this.#adoptedStyleSignatures.reset();
-      this.#adoptedStyleSignatures.prime(
-        this.environment.document,
-        adoptedStyleSignature(checkpoint.payload.adoptedStyleSheets),
-      );
-      this.#ordinaryStyleSignatures.reset();
-      this.#controlledContentPolicy = controlledContentPolicy;
-      this.#visibilityBoundaryIndex?.dispose();
-      this.#visibilityBoundaryIndex = new SourceVisibilityBoundaryIndex(
-        this.environment.document,
-        this.environment.window,
+      const staged = this.#createMirroredGraphState(controlledContentPolicy);
+      this.#exchangeMirroredGraphState(staged);
+      try {
+        this.#markMirroredGraph(checkpoint.payload.root);
+      } finally {
+        this.#exchangeMirroredGraphState(staged);
+      }
+      const index = new SourceVisibilityBoundaryIndex(
+        document,
+        window,
         MAX_HTML_MIRROR_NODES,
       );
-      // Read outside a frame: the resize observer's next report is news.
-      this.#comparedAtSize = undefined;
-      this.#wholeComparisonsSeen = 0;
-      this.#markMirroredGraph(checkpoint.payload.root);
-      this.#lastDimensions = Object.freeze({
-        viewportWidth: checkpoint.payload.viewportWidth,
-        viewportHeight: checkpoint.payload.viewportHeight,
-        documentWidth: checkpoint.payload.documentWidth,
-        documentHeight: checkpoint.payload.documentHeight,
-        ...(checkpoint.payload.root.canvasBackgroundColor
-          ? { canvasBackgroundColor: checkpoint.payload.root.canvasBackgroundColor }
-          : {}),
-      });
-      this.#unheldShadowRoots = new WeakSet<ShadowRoot>();
-      this.#notingUnheldShadowRoots = true;
-      try {
-        this.#observeShadowRoots(this.environment.document.documentElement);
-      } finally {
-        this.#notingUnheldShadowRoots = false;
-      }
-      this.#primeOrdinaryStyleSignatures();
-      this.#shadowReconciliationPending = false;
-      this.#post(checkpoint);
-      // A pane scrolled before this mirror was built fires no event: the
-      // scrolled ones were met while the page was sent, so the first report
-      // puts them at their place. The replica is built anew, so this report
-      // carries the whole pane list.
-      this.#takeMetPanes();
-      this.#postScroll(false, true);
-      this.#scheduleShadowDiscovery();
+      this.#installCheckpoint(read, checkpoint, staged, index, sizeAtStart);
     } catch (error) {
       if (
         error instanceof HtmlMirrorCapacityError &&
@@ -1326,14 +2023,88 @@ export class HtmlMirrorSourceSession {
           'capacityOmissionCount',
         );
       }
-      this.#post(createHtmlMirrorError(
-        this.#identityAt(this.#sequence),
-        representability.capacityOmissionCount > 0
-          ? 'stream_overflow'
-          : 'privacy_rejected',
-        snapshotHtmlMirrorRepresentability(representability),
-      ));
+      this.#failCheckpointRead(representability, false);
+    } finally {
+      heldPass.end();
+      rootWalk.end();
     }
+  }
+
+  /**
+   * Puts a read's structures in place of the mirror's and sends its
+   * checkpoint, in one task (D163); then reports the panes met while it
+   * was read, and judges what the page did meanwhile against the new copy.
+   */
+  #installCheckpoint(
+    read: CheckpointRead,
+    checkpoint: HtmlMirrorCheckpoint,
+    staged: MirroredGraphState,
+    index: SourceVisibilityBoundaryIndex,
+    sizeAtStart: string | undefined,
+  ): void {
+    const { document } = this.environment;
+    this.#exchangeMirroredGraphState(staged);
+    this.#stylePollingCursor = 0;
+    this.#adoptedStyleSignatures.prime(
+      document,
+      adoptedStyleSignature(checkpoint.payload.adoptedStyleSheets),
+    );
+    this.#ordinaryStyleSignatures.reset();
+    this.#visibilityBoundaryIndex?.dispose();
+    this.#visibilityBoundaryIndex = index;
+    // The index has just compared the whole page. The resize observer can
+    // tell only the size of <html> and <body>, and its first report comes
+    // after every read (its first observation): at the size read here it
+    // tells nothing new. Changes made since reach the index as at any other
+    // time (mutations, events, the style poll). Before, that report compared
+    // the whole page again, 200 ms of a page of 54,000 elements (D162).
+    this.#comparedAtSize = this.#readObservedSize();
+    // Read in slices, the index was built over several tasks: when the size
+    // changed meanwhile, what was read first may be painted otherwise now
+    // (D163). Read in one task, the two sizes are one.
+    if (this.#comparedAtSize !== sizeAtStart) {
+      this.#visibilityFullRefreshPending = true;
+    }
+    this.#wholeComparisonsSeen = 0;
+    this.#lastDimensions = Object.freeze({
+      viewportWidth: checkpoint.payload.viewportWidth,
+      viewportHeight: checkpoint.payload.viewportHeight,
+      documentWidth: checkpoint.payload.documentWidth,
+      documentHeight: checkpoint.payload.documentHeight,
+      ...(checkpoint.payload.root.canvasBackgroundColor
+        ? { canvasBackgroundColor: checkpoint.payload.root.canvasBackgroundColor }
+        : {}),
+    });
+    this.#unheldShadowRoots = new WeakSet<ShadowRoot>();
+    this.#rootAttachedDuringRead = false;
+    this.#notingUnheldShadowRoots = true;
+    try {
+      this.#observeShadowRoots(document.documentElement);
+    } finally {
+      this.#notingUnheldShadowRoots = false;
+    }
+    this.#primeOrdinaryStyleSignatures();
+    // A root attached between the slices to an element read without one is
+    // not in the copy: another checkpoint follows its ACK.
+    this.#shadowReconciliationPending = this.#rootAttachedDuringRead;
+    // The whole page was read: nothing of it is owed but what changed in
+    // its slices after it was read (D163).
+    this.#heldChanged = new Set(read.held);
+    this.#heldLook = { every: 1, in: 1 };
+    this.#checkpointRead = undefined;
+    this.#post(checkpoint);
+    // A pane scrolled before this mirror was built fires no event: the
+    // scrolled ones were met while the page was sent, so the first report
+    // puts them at their place. The replica is built anew, so this report
+    // carries the whole pane list.
+    this.#takeMetPanes();
+    this.#postScroll(false, true);
+    this.#scheduleShadowDiscovery();
+    // What the page changed while it was read in slices: each record is
+    // judged against the copy just sent, as any record after it is, and
+    // what changed in what was read already is patched after the ACK.
+    if (read.records.length > 0) this.#onMutations(read.records);
+    for (const target of read.loaded) this.#queueCapturedResourceRefresh(target);
   }
 
   #onMutations(records: MutationRecord[]): void {
@@ -1342,7 +2113,9 @@ export class HtmlMirrorSourceSession {
     // its element is inside a secret, and the elements above are shared.
     const secretWalk = beginSourceSecretAncestorWalk();
     try {
-      this.#queueMutationRecords(records);
+      const read = this.#checkpointRead;
+      if (read) this.#keepForCheckpointRead(read, records);
+      else this.#queueMutationRecords(records);
     } catch {
       // An exception here used to drop the whole batch silently, after which
       // the replica drifted with no diagnostic. Reuse the bounded checkpoint
@@ -1352,6 +2125,41 @@ export class HtmlMirrorSourceSession {
       this.#signalShadowReconciliation();
     } finally {
       secretWalk.end();
+    }
+  }
+
+  /**
+   * While a checkpoint is read in slices (D163): the records are kept raw,
+   * to be judged against the new copy once it is sent. The ledger of
+   * secrets is not kept waiting: a node secret at any moment since
+   * injection stays secret, and the slices read after see it so.
+   */
+  #keepForCheckpointRead(read: CheckpointRead, records: MutationRecord[]): void {
+    rememberSourceMutationSecrets(
+      records,
+      this.environment.window,
+      this.#secretClassifier(),
+    );
+    if (read.recordsOverflow) return;
+    if (read.records.length + records.length > MAX_CHECKPOINT_READ_RECORDS) {
+      // The page changed more than is worth judging piece by piece: the
+      // read starts again.
+      read.records = [];
+      read.recordTargets.clear();
+      read.recordsOverflow = true;
+      return;
+    }
+    for (const record of records) {
+      read.records.push(record);
+      read.recordTargets.add(record.target);
+    }
+    if (read.recordTargets.size > MAX_HTML_MIRROR_PENDING_TARGETS) {
+      // Replayed after the copy, these would overflow its first patch and
+      // have it read again, and again while the page goes on (D163): the
+      // read starts again, and after its restarts is read in one task.
+      read.records = [];
+      read.recordTargets.clear();
+      read.recordsOverflow = true;
     }
   }
 
@@ -2326,7 +3134,10 @@ export class HtmlMirrorSourceSession {
    */
   #layoutChanged(compare: boolean): void {
     if (this.#disposed || !this.#identity) return;
-    if (this.#documentIsHidden()) {
+    // While a checkpoint is read (D163) the look and the policy wait for
+    // the copy: the read sees what is there when its slice comes, and the
+    // frame after the ACK looks at the rest.
+    if (this.#documentIsHidden() && !this.#checkpointRead) {
       // No animation frame comes in a tab that is not shown (another tab
       // in front, with the mirror in its own window): the look and the
       // read are made here, as they were before D144, or a root attached
@@ -2376,6 +3187,13 @@ export class HtmlMirrorSourceSession {
    * layout asks for is done as before.
    */
   readonly #onObservedResize = (): void => {
+    // While a checkpoint is read in slices, its end compares the size it
+    // began at with the size then (D163): the observer's first report comes
+    // during the read and tells nothing more.
+    if (this.#checkpointRead) {
+      this.#layoutChanged(false);
+      return;
+    }
     const compared = this.#comparedAtSize;
     this.#layoutChanged(
       compared === undefined || this.#readObservedSize() !== compared,
@@ -2515,7 +3333,9 @@ export class HtmlMirrorSourceSession {
     wholeState = false,
     scrolledOnly = false,
   ): void {
-    if (this.#disposed || !this.#identity) return;
+    // While a checkpoint is read, nothing of the copy is the panel's yet:
+    // the checkpoint's own report carries the whole state (D163).
+    if (this.#disposed || !this.#identity || this.#checkpointRead) return;
     const documentScroll = readDocumentScrollSnapshot(
       this.environment.document,
       this.environment.window,
@@ -2789,7 +3609,11 @@ export class HtmlMirrorSourceSession {
         element,
         this.#controlledContentPolicy,
       );
-    if (!controlledMayChange && !this.#visibilityBoundaryIndex) return;
+    // While a checkpoint is read (D163), kept for the index being built.
+    if (
+      !controlledMayChange && !this.#visibilityBoundaryIndex &&
+      !this.#checkpointRead
+    ) return;
     // A final transition/animation style can reveal or withdraw a selected
     // panel without another mutation. Refresh admission inside the same one
     // post-paint frame used for the resulting patch; bursts remain coalesced.
@@ -2804,7 +3628,7 @@ export class HtmlMirrorSourceSession {
       this.#disposed || !this.#identity ||
       !target || typeof target !== 'object' ||
       (target as Node).nodeType !== 1 ||
-      !this.#visibilityBoundaryIndex
+      (!this.#visibilityBoundaryIndex && !this.#checkpointRead)
     ) return;
     this.#visibilityInteractionTargets.add(target as Element);
     this.#scheduleFlush();
@@ -2835,7 +3659,9 @@ export class HtmlMirrorSourceSession {
    */
   #slotsChanged(root: ShadowRoot): void {
     this.#slotChanges.add(root);
-    if (this.#visibilityBoundaryIndex) this.#visibilityFullRefreshPending = true;
+    if (this.#visibilityBoundaryIndex || this.#checkpointRead) {
+      this.#visibilityFullRefreshPending = true;
+    }
     this.#scheduleFlush();
   }
 
@@ -3489,8 +4315,20 @@ export class HtmlMirrorSourceSession {
    */
   #queueCapturedImageAttributeRefresh(event: Event): void {
     const target = event.target;
+    if (!(target instanceof Element)) return;
+    const read = this.#checkpointRead;
+    if (read) {
+      // Judged against the copy being read, once it is sent (D163); more
+      // than are kept, and the read starts again.
+      if (read.loaded.size < MAX_CHECKPOINT_READ_LOADS) read.loaded.add(target);
+      else read.recordsOverflow = true;
+      return;
+    }
+    this.#queueCapturedResourceRefresh(target);
+  }
+
+  #queueCapturedResourceRefresh(target: Element): void {
     if (
-      !(target instanceof Element) ||
       !CAPTURED_RESOURCE_ELEMENTS.has(target.localName.toLowerCase()) ||
       !belongsToSourceDocument(target, this.environment.document) ||
       !target.isConnected ||
@@ -3922,6 +4760,13 @@ export class HtmlMirrorSourceSession {
     }
     if (this.#mirroredNodes.has(shadow)) return;
     if (this.#notingUnheldShadowRoots) {
+      // Attached, between the slices of the read, to a host the read met
+      // without one (D163): not a root the copy cannot hold, but one it
+      // missed. Read in one task, no root comes in between.
+      if (this.#knownShadowHostCandidates.has(shadow.host)) {
+        this.#rootAttachedDuringRead = true;
+        return;
+      }
       this.#unheldShadowRoots.add(shadow);
       return;
     }
@@ -4594,24 +5439,24 @@ function readSourceDimensions(document: Document, window: Window): {
 } {
   const html = document.documentElement;
   const body = document.body;
-  const viewportWidth = Math.max(1, Math.round(window.innerWidth || html?.clientWidth || 1));
-  const viewportHeight = Math.max(1, Math.round(window.innerHeight || html?.clientHeight || 1));
+  const viewportWidth = boundedDimension(window.innerWidth || html?.clientWidth || 1);
+  const viewportHeight = boundedDimension(window.innerHeight || html?.clientHeight || 1);
   const canvasBackgroundColor = html
     ? sanitizeSourceElementHints(html, document.baseURI).canvasBackgroundColor
     : undefined;
   return {
     viewportWidth,
     viewportHeight,
-    documentWidth: Math.max(
+    documentWidth: boundedDimension(Math.max(
       viewportWidth,
       html?.scrollWidth ?? 0,
       body?.scrollWidth ?? 0,
-    ),
-    documentHeight: Math.max(
+    )),
+    documentHeight: boundedDimension(Math.max(
       viewportHeight,
       html?.scrollHeight ?? 0,
       body?.scrollHeight ?? 0,
-    ),
+    )),
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
   };
 }

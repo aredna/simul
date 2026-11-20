@@ -74,6 +74,9 @@ import {
   applySourcePrivacyFiltersOff,
 } from '../lib/replica/source-privacy-mode';
 import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
+import { ReplicaTranslationCoordinator } from '../lib/translation/replica-translation-coordinator';
+import { TranslationMemory } from '../lib/translation/translation-memory';
+import type { TranslationProvider } from '../lib/translation-provider';
 import type {
   ReplayPresentationHost,
   VisibleReplayCandidateLease,
@@ -2566,15 +2569,35 @@ describe('IsolatedHtmlReplicaEngine', () => {
       onInfo: (info) => infos.push(info),
     });
 
+    // Over the mirror's limits: reported as too large, not as a failure a
+    // retry could mend (D162).
     await expect(engine.run(request)).resolves.toMatchObject({
       status: 'failed',
-      diagnostics: { code: 'stream_overflow' },
+      diagnostics: { code: 'checkpoint_too_large' },
     });
     expect(infos.at(-1)).toMatchObject({
       stage: 'failed',
-      code: 'stream_overflow',
+      code: 'checkpoint_too_large',
       capacityOmissionCount: 0,
       eventRepresentability: { capacityOmissionCount: 2 },
+    });
+  });
+
+  it('keeps an overflow that is not about size an overflow (D162)', async () => {
+    const stream: HtmlMirrorStreamLease = {
+      initialCheckpoint: Promise.reject(new HtmlMirrorClientError('stream_overflow')),
+      setObserver: vi.fn(),
+      acknowledge: vi.fn(),
+      requestCheckpoint: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: new FakePresentationHost(),
+      openStream: async () => stream,
+    });
+    await expect(engine.run(request)).resolves.toMatchObject({
+      status: 'failed',
+      diagnostics: { code: 'stream_overflow' },
     });
   });
 
@@ -9519,3 +9542,410 @@ function makeEngine(
     ...(scheduleLayoutRefresh ? { scheduleLayoutRefresh } : {}),
   });
 }
+
+describe('a large page shown first as a preview (D163)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  /** The page: a heading in view, and a far section the preview leaves as a box. */
+  function previewCheckpoint(sequence = 0, near = 'Hola'): HtmlMirrorCheckpoint {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+              { kind: 'element', id: 4, namespace: 'html', tagName: 'h1', attributes: [], children: [
+                { kind: 'text', id: 5, text: near, translatable: true },
+              ] },
+              {
+                kind: 'element', id: 6, namespace: 'html', tagName: 'section',
+                attributes: [['style', 'height:10px;min-height:5px']],
+                children: [],
+                placeholder: { height: 900 },
+              },
+            ] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1600,
+        preview: true,
+      },
+    );
+    if (!checkpoint) throw new Error('Preview fixture rejected.');
+    return checkpoint;
+  }
+
+  function fullCheckpoint(sequence = 1, far = 'Adiós', near = 'Hola'): HtmlMirrorCheckpoint {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+              { kind: 'element', id: 4, namespace: 'html', tagName: 'h1', attributes: [], children: [
+                { kind: 'text', id: 5, text: near, translatable: true },
+              ] },
+              {
+                kind: 'element', id: 6, namespace: 'html', tagName: 'section',
+                attributes: [['style', 'height:10px;min-height:5px']],
+                children: [
+                  { kind: 'element', id: 7, namespace: 'html', tagName: 'p', attributes: [], children: [
+                    { kind: 'text', id: 8, text: far, translatable: true },
+                  ] },
+                ],
+              },
+            ] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1600,
+      },
+    );
+    if (!checkpoint) throw new Error('Full fixture rejected.');
+    return checkpoint;
+  }
+
+  function textPatch(sequence: number, text: string) {
+    return createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      sequence,
+      sequence,
+      [{ kind: 'text', nodeId: 5, node: { kind: 'text', id: 5, text, translatable: true } }],
+    )!;
+  }
+
+  const body = (host: FakePresentationHost) => host.iframe!.contentDocument!.body;
+
+  it('shows the preview with its far boxes at their height, and swaps the full copy in at the next sequence', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const section = body(host).querySelector('section') as HTMLElement;
+    expect(section.childNodes).toHaveLength(0);
+    // The box keeps the page's height whatever the page's rules say.
+    expect(section.style.getPropertyValue('height')).toBe('900px');
+    expect(section.style.getPropertyValue('min-height')).toBe('900px');
+    expect(section.style.getPropertyValue('max-height')).toBe('900px');
+    expect(section.style.getPropertyValue('box-sizing')).toBe('border-box');
+    expect(section.style.getPropertyValue('overflow')).toBe('clip');
+    expect(stream.acknowledged).toEqual([0]);
+    expect(engine.isReading()).toBe(true);
+    const previewLease = engine.snapshot()!.replayLease;
+    const waiting = engine.waitForText(new AbortController().signal);
+
+    stream.observer!.onCheckpoint(fullCheckpoint(1));
+    await waiting;
+    expect(body(host).textContent).toBe('HolaAdiós');
+    const swapped = body(host).querySelector('section') as HTMLElement;
+    // The page's own style again: no box is held at a height.
+    expect(swapped.style.getPropertyValue('height')).toBe('10px');
+    expect(stream.acknowledged).toEqual([0, 1]);
+    expect(stream.requested).toEqual([]);
+    expect(engine.isReading()).toBe(false);
+    expect(engine.extendsLease(previewLease)).toBe(true);
+    expect(engine.snapshot()!.replayLease).not.toBe(previewLease);
+
+    // Patches follow the copy's sequence.
+    stream.observer!.onPatch(textPatch(2, 'Hola de nuevo'));
+    expect(body(host).textContent).toBe('Hola de nuevoAdiós');
+    expect(stream.acknowledged).toEqual([0, 1, 2]);
+    expect(stream.requested).toEqual([]);
+  });
+
+  it('never patches a preview: a patch while it is shown asks for a checkpoint', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    stream.observer!.onPatch(textPatch(1, 'Changed'));
+    expect(body(host).textContent).toBe('Hola');
+    expect(stream.requested).toEqual([0]);
+    // The page answers with the full copy; it replaces the preview.
+    stream.observer!.onCheckpoint(fullCheckpoint(2));
+    await vi.waitFor(() => expect(body(host).textContent).toBe('HolaAdiós'));
+    expect(stream.acknowledged).toEqual([0, 2]);
+    expect(engine.isReading()).toBe(false);
+  });
+
+  it('refuses a preview after the first checkpoint', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('whole', 0));
+    const host = new FakePresentationHost();
+    const failures: string[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onLiveFailure: (code) => failures.push(code),
+    });
+    await engine.run(request);
+
+    stream.observer!.onCheckpoint(previewCheckpoint(1));
+    expect(failures).toEqual(['stream_failed']);
+    expect(stream.dispose).toHaveBeenCalled();
+    expect(body(host).textContent).toBe('whole');
+  });
+
+  it('says the page is too large when it overflows after its preview, and asks for no recovery', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const failures: string[] = [];
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onInfo: (info) => infos.push(info),
+      onLiveFailure: (code) => failures.push(code),
+    });
+    await engine.run(request);
+    const waiting = engine.waitForText(new AbortController().signal);
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    representability.capacityOmissionCount = 1;
+
+    stream.observer!.onFailure('stream_overflow', representability);
+
+    expect(failures).toEqual(['checkpoint_too_large']);
+    expect(stream.requested).toEqual([]);
+    expect(stream.dispose).toHaveBeenCalled();
+    expect(infos.findLast(({ stage }) => stage === 'failed')).toMatchObject({
+      code: 'checkpoint_too_large',
+    });
+    // A run waiting for the full copy goes on: none comes.
+    await waiting;
+    expect(engine.isReading()).toBe(false);
+  });
+
+  it('still recovers a preview from a failure that is not over the limits', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    stream.observer!.onFailure('stream_overflow');
+
+    expect(stream.requested).toEqual([0]);
+  });
+
+  it('takes the page\'s later answer too when the copy in flight answered a request first', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    stream.observer!.onPatch(textPatch(1, 'Changed'));
+    expect(stream.requested).toEqual([0]);
+
+    // The copy the page had sent before it read the request, then its answer.
+    stream.observer!.onCheckpoint(fullCheckpoint(1));
+    stream.observer!.onCheckpoint(fullCheckpoint(2, 'Adiós otra vez'));
+    await vi.waitFor(() => expect(body(host).textContent).toBe('HolaAdiós otra vez'));
+    expect(stream.acknowledged).toEqual([0, 1, 2]);
+    stream.observer!.onPatch(textPatch(3, 'Hola de nuevo'));
+    expect(body(host).textContent).toBe('Hola de nuevoAdiós otra vez');
+  });
+
+  it('waits for a recovery while the page sends parts, and gives up on a stall', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('last good', 0));
+    const host = new FakePresentationHost();
+    const failures: string[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onLiveFailure: (code) => failures.push(code),
+    });
+    await engine.run(request);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      stream.observer!.onFailure('stream_gap');
+      expect(stream.requested).toEqual([0]);
+      for (let part = 0; part < 4; part += 1) {
+        await vi.advanceTimersByTimeAsync(4_000);
+        stream.observer!.onProgress!();
+      }
+      expect(failures).toEqual([]);
+      await vi.advanceTimersByTimeAsync(4_900);
+      expect(failures).toEqual([]);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(failures).toEqual(['stream_failed']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ends a wait for text when the full copy can no longer come', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const waiting = engine.waitForText(new AbortController().signal);
+
+    stream.observer!.onFailure('stream_failed');
+    await waiting;
+    expect(engine.isReading()).toBe(false);
+    const controller = new AbortController();
+    const aborted = engine.waitForText(controller.signal);
+    controller.abort(new DOMException('Stopped.', 'AbortError'));
+    await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('opens the page\'s semantic reader for the full copy, not for the preview', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint());
+    const host = new FakePresentationHost();
+    const semantic = new FakeSemanticStream();
+    const opened: number[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      openSemanticStream: async () => {
+        opened.push(engine.snapshot()!.replayLease);
+        return semantic;
+      },
+      getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await engine.run(request);
+    await Promise.resolve();
+    expect(opened).toEqual([]);
+    stream.observer!.onCheckpoint(fullCheckpoint(1));
+    await vi.waitFor(() => expect(opened).toHaveLength(1));
+  });
+
+  it('runs one translation over the preview and its full copy, and sends each text to the translator once', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint(0, 'Hola'));
+    const host = new FakePresentationHost();
+    let coordinator!: ReplicaTranslationCoordinator;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onSourceCommit: (commit) => coordinator?.handleSourceCommit(commit),
+    });
+    const sent: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const provider: TranslationProvider = {
+      availability: async () => 'available',
+      createSession: async () => ({
+        translate: async (text: string) => {
+          sent.push(text);
+          // The full copy is committed while the preview's text translates.
+          if (text === 'Hola') await firstGate;
+          return `en:${text}`;
+        },
+        destroy: () => {},
+      }),
+    };
+    coordinator = new ReplicaTranslationCoordinator(provider, engine);
+    await engine.run(request);
+    expect(engine.isReading()).toBe(true);
+    const progress: Array<[number, number]> = [];
+    let settled = false;
+    const run = coordinator.translateCurrent(
+      { sourceLanguage: 'es', targetLanguage: 'en' },
+      { onProgress: (completed, total) => progress.push([completed, total]) },
+    );
+    void (async () => {
+      try {
+        await run;
+      } finally {
+        settled = true;
+      }
+    })();
+    await vi.waitFor(() => expect(sent).toEqual(['Hola']));
+
+    stream.observer!.onCheckpoint(fullCheckpoint(1, 'Adiós', 'Hola'));
+    await vi.waitFor(() => expect(engine.isReading()).toBe(false));
+    expect(settled).toBe(false);
+    releaseFirst();
+
+    await expect(run).resolves.toMatchObject({
+      total: 2, completed: 2, failed: 0, stale: 0, skipped: 0, overflow: 0,
+    });
+    expect(sent).toEqual(['Hola', 'Adiós']);
+    expect(body(host).textContent).toBe('en:Holaen:Adiós');
+    expect(progress.at(-1)).toEqual([2, 2]);
+  });
+
+  it('keeps on the copy what the preview showed translated, and translates only the rest', async () => {
+    const stream = new FakeHtmlStream(previewCheckpoint(0, 'Hola'));
+    const host = new FakePresentationHost();
+    let coordinator!: ReplicaTranslationCoordinator;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onSourceCommit: (commit) => coordinator?.handleSourceCommit(commit),
+    });
+    const sent: string[] = [];
+    const provider: TranslationProvider = {
+      availability: async () => 'available',
+      createSession: async () => ({
+        translate: async (text: string) => {
+          sent.push(text);
+          return `en:${text}`;
+        },
+        destroy: () => {},
+      }),
+    };
+    const memory = new TranslationMemory();
+    coordinator = new ReplicaTranslationCoordinator(provider, engine, { memory });
+    await engine.run(request);
+    const run = coordinator.translateCurrent({ sourceLanguage: 'es', targetLanguage: 'en' });
+    // The preview's text is shown translated, and the run waits for more.
+    await vi.waitFor(() => expect(body(host).textContent).toBe('en:Hola'));
+
+    stream.observer!.onCheckpoint(fullCheckpoint(1, 'Adiós', 'Hola'));
+    await expect(run).resolves.toMatchObject({ total: 2, completed: 2, stale: 0 });
+    expect(sent).toEqual(['Hola', 'Adiós']);
+    // Not even asked of the memory: the copy kept what the preview showed.
+    expect(memory.snapshotStats().hits).toBe(0);
+    expect(body(host).textContent).toBe('en:Holaen:Adiós');
+  });
+});

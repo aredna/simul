@@ -43,6 +43,7 @@ import {
   type StickySourceSecretClassifier,
 } from '../replica/source-secret-classifier';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
+import type { SourceDocumentSecretScan } from '../replica/semantic-source-session';
 import { readVisualViewportSnapshot } from '../primary-scroll';
 import { canonicalizeLanguageTag } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
@@ -92,6 +93,11 @@ export interface ImageSourceSessionEnvironment {
   readonly getNodeId: (image: HTMLImageElement) => number | undefined;
   /** Share one sticky classifier for the lifetime of the source document. */
   readonly secretClassifier?: StickySourceSecretClassifier;
+  /**
+   * The injection-time scan for that classifier. Images are looked at only
+   * once it is done; the start answers in its own task when it is (D163).
+   */
+  readonly secretScan?: SourceDocumentSecretScan;
   /**
    * Draws a region of a loaded image and returns it as a PNG data URL, or
    * undefined when the page may not read it (a cross-origin image without
@@ -158,6 +164,8 @@ export class ImageSourceSession {
   readonly #paintTimers = new Set<number>();
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
+  /** A start waits for the injection-time credential scan (D163). */
+  #startPending = false;
 
   constructor(private readonly environment: ImageSourceSessionEnvironment) {
     const sessionId = readImageSourcePortSessionId(environment.port.name);
@@ -268,8 +276,19 @@ export class ImageSourceSession {
       return;
     }
     if (message.kind === 'simul:image-source-v2:start') {
-      if (this.#documentIdentity) {
+      if (this.#documentIdentity || this.#startPending) {
         this.dispose(true);
+        return;
+      }
+      const secretScan = this.environment.secretScan;
+      if (secretScan && !secretScan.done) {
+        void this.#startAfterSecretScan(
+          secretScan,
+          message.document,
+          message.policyFingerprint,
+          message.controlImages === true,
+          message.accessibilityTextEnabled === true,
+        );
         return;
       }
       this.#start(
@@ -525,6 +544,30 @@ export class ImageSourceSession {
     if (this.#disposed) return;
     this.#observer?.refreshVisiblePictures();
   };
+
+  /**
+   * No image is looked at before the injection-time credential scan has met
+   * every node (D163). A request that comes meanwhile ends the session, as
+   * one before a start does; the panel asks for nothing before `ready`.
+   */
+  async #startAfterSecretScan(
+    secretScan: SourceDocumentSecretScan,
+    documentIdentity: ReplicaSourceDocumentIdentity,
+    policyFingerprint: string | undefined,
+    controlImages: boolean,
+    accessibilityTextEnabled: boolean,
+  ): Promise<void> {
+    this.#startPending = true;
+    await secretScan.finished;
+    this.#startPending = false;
+    if (this.#disposed) return;
+    this.#start(
+      documentIdentity,
+      policyFingerprint,
+      controlImages,
+      accessibilityTextEnabled,
+    );
+  }
 
   #start(
     documentIdentity: ReplicaSourceDocumentIdentity,

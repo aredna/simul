@@ -15,6 +15,14 @@ import type {
   TranslationSession,
 } from '../translation-provider';
 import { TranslationMemory } from './translation-memory';
+import { yieldToMain } from '../browser-scheduling';
+import { settle } from '../settle';
+
+/**
+ * Translations already in memory resolve without giving the browser a turn,
+ * so a drain of known strings would otherwise run as one long task.
+ */
+const DRAIN_YIELD_INTERVAL_MS = 50;
 
 export interface ReplicaSourceCommit {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -87,6 +95,13 @@ export interface ReplicaTranslationSurface {
   /** Resolves at the surface's next text change; rejects when `signal` aborts. */
   waitForText?(signal: AbortSignal): Promise<void>;
   /**
+   * Whether the surface's current text replaced what lease `replayLease`
+   * showed with a fuller copy of the same document (an HTML preview's full
+   * copy, D163). A run that reads on goes on over the copy instead of
+   * ending at the new lease.
+   */
+  extendsLease?(replayLease: number): boolean;
+  /**
    * Whether the node's line breaks show (pre-wrap text, a textarea): its
    * lines are then translated one by one so the breaks survive. Without
    * it, a node's text is translated as one passage.
@@ -125,6 +140,18 @@ interface PendingJob {
   readonly pairKey: string;
   readonly pairSignal: AbortSignal;
   readonly signal?: AbortSignal;
+  /** The job's translation was shown. */
+  readonly onProjected?: () => void;
+}
+
+/** A run over a surface that reads on (see `#translateWhileReading`). */
+interface ReadingRun {
+  readonly document: ReplicaSourceDocumentIdentity;
+  /**
+   * A copy that extends the run's lease was committed and left to the run
+   * to queue (D163); cleared when the run takes it.
+   */
+  deferred: boolean;
 }
 
 interface CurrentReplicaRecordIndex {
@@ -166,6 +193,7 @@ export class ReplicaTranslationCoordinator {
   #pendingOverflow = 0;
   #drainTask: Promise<ReplicaTranslationRunResult> | undefined;
   #currentRecords: CurrentReplicaRecordIndex | undefined;
+  #readingRun: ReadingRun | undefined;
   #disposed = false;
   readonly #maxPendingJobs: number;
   readonly #maxPendingCharacters: number;
@@ -294,9 +322,13 @@ export class ReplicaTranslationCoordinator {
     // The run's own pair: a pair change ends the run, never re-targets it.
     const pairSignal = this.#pairController.signal;
     const queued = new Set<number>();
+    /** What the run showed, by node: a fuller copy keeps what is unchanged. */
+    const shown = new Map<number, ReplicaSourceTextRecord>();
     const counts = { total: 0, completed: 0, failed: 0, stale: 0, skipped: 0, overflow: 0 };
     let result: ReplicaTranslationRunResult | undefined;
     let snapshot = first;
+    const run: ReadingRun = { document: first.document, deferred: false };
+    this.#readingRun = run;
     const enqueueNew = (): number => {
       let added = 0;
       for (const record of this.#ordered(snapshot.records)) {
@@ -310,65 +342,115 @@ export class ReplicaTranslationCoordinator {
           pairKey,
           pairSignal,
           ...(options.signal ? { signal: options.signal } : {}),
+          onProjected: () => shown.set(record.nodeId, record),
         }, false);
       }
       return added;
     };
-    let added = enqueueNew();
-    while (true) {
-      if (added > 0 || !result) {
-        const processedBefore = counts.completed + counts.failed + counts.stale +
-          counts.skipped + counts.overflow;
-        const onProgress = options.onProgress;
-        const drained = await this.#drain(
-          onProgress
-            ? (completed, total) => onProgress(processedBefore + completed, processedBefore + total)
-            : undefined,
-          added,
-        );
-        result = drained;
-        counts.total += drained.total;
-        counts.completed += drained.completed;
-        counts.failed += drained.failed;
-        counts.stale += drained.stale;
-        counts.skipped += drained.skipped;
-        counts.overflow += drained.overflow;
+    try {
+      let added = enqueueNew();
+      while (true) {
+        if (added > 0 || !result) {
+          const processedBefore = counts.completed + counts.failed + counts.stale +
+            counts.skipped + counts.overflow;
+          const onProgress = options.onProgress;
+          const drained = await this.#drain(
+            onProgress
+              ? (completed, total) => onProgress(processedBefore + completed, processedBefore + total)
+              : undefined,
+            added,
+          );
+          result = drained;
+          counts.total += drained.total;
+          counts.completed += drained.completed;
+          counts.failed += drained.failed;
+          counts.stale += drained.stale;
+          counts.skipped += drained.skipped;
+          counts.overflow += drained.overflow;
+          this.#assertRunCurrent(pair, requestedEpoch, options.signal);
+        }
+        // What the surface read meanwhile goes first; only nothing new waits.
+        const latest = this.surface.snapshot();
+        if (!latest || !sameSourceDocument(latest.document, snapshot.document)) break;
+        if (latest.replayLease !== snapshot.replayLease) {
+          if (!this.surface.extendsLease?.(snapshot.replayLease)) break;
+          // A fuller copy replaced what the run read (an HTML preview's full
+          // copy, D163): the run is over the copy now. A text whose
+          // translation was shown and that the copy holds unchanged keeps it
+          // (the surface carried it over); the rest is queued again, and what
+          // was translated already comes from memory, so no text is sent to
+          // the translator twice. The counts are the copy's.
+          queued.clear();
+          let kept = 0;
+          for (const record of latest.records) {
+            const before = shown.get(record.nodeId);
+            if (!before || !sameTextRecord(before, record)) continue;
+            queued.add(record.nodeId);
+            if (isTranslatableRecord(record)) kept += 1;
+          }
+          shown.clear();
+          Object.assign(counts, {
+            total: kept, completed: kept, failed: 0, stale: 0, skipped: 0, overflow: 0,
+          });
+          snapshot = latest;
+          this.#replaceCurrentRecords(snapshot);
+          run.deferred = false;
+          result = undefined;
+          added = enqueueNew();
+          continue;
+        }
+        if (latest !== snapshot) {
+          snapshot = latest;
+          this.#replaceCurrentRecords(snapshot);
+        }
+        added = enqueueNew();
+        if (added > 0) continue;
+        if (!(this.surface.isReading?.() ?? false)) break;
+        // No await between the checks above and registering the wait, so no
+        // page can be read in between unnoticed.
+        const combined = combineAbortSignals(pairSignal, options.signal);
+        try {
+          const waiting = this.surface.waitForText!(combined.signal);
+          try {
+            options.onWaitForText?.();
+          } catch {
+            // Progress is shown on the side; the run goes on.
+          }
+          await waiting;
+        } catch (error) {
+          if (options.signal?.aborted) throw abortReason(options.signal, error);
+          throw error;
+        } finally {
+          combined.dispose();
+        }
         this.#assertRunCurrent(pair, requestedEpoch, options.signal);
       }
-      // What the surface read meanwhile goes first; only nothing new waits.
-      const latest = this.surface.snapshot();
-      if (
-        !latest ||
-        latest.replayLease !== snapshot.replayLease ||
-        !sameSourceDocument(latest.document, snapshot.document)
-      ) break;
-      if (latest !== snapshot) {
-        snapshot = latest;
-        this.#replaceCurrentRecords(snapshot);
-      }
-      added = enqueueNew();
-      if (added > 0) continue;
-      if (!(this.surface.isReading?.() ?? false)) break;
-      // No await between the checks above and registering the wait, so no
-      // page can be read in between unnoticed.
-      const combined = combineAbortSignals(pairSignal, options.signal);
-      try {
-        const waiting = this.surface.waitForText!(combined.signal);
-        try {
-          options.onWaitForText?.();
-        } catch {
-          // Progress is shown on the side; the run goes on.
-        }
-        await waiting;
-      } catch (error) {
-        if (options.signal?.aborted) throw abortReason(options.signal, error);
-        throw error;
-      } finally {
-        combined.dispose();
-      }
-      this.#assertRunCurrent(pair, requestedEpoch, options.signal);
+      return { ...(result ?? this.#emptyResult()), ...counts };
+    } finally {
+      if (this.#readingRun === run) this.#readingRun = undefined;
+      // A copy left to the run that the run never took (it was cancelled or
+      // failed): translated in the background, as any copy is.
+      if (run.deferred) this.#queueCurrentRecordsInBackground();
     }
-    return { ...(result ?? this.#emptyResult()), ...counts };
+  }
+
+  /** Queues every text of the current records as background work. */
+  #queueCurrentRecordsInBackground(): void {
+    const current = this.#currentRecords;
+    const pairKey = this.#pairKey;
+    if (this.#disposed || !this.#session || !current || !pairKey) return;
+    let queued = false;
+    for (const record of current.records.values()) {
+      if (!isTranslatableRecord(record)) continue;
+      queued = this.#enqueue({
+        record,
+        replayLease: current.replayLease,
+        translationEpoch: this.#translationEpoch,
+        pairKey,
+        pairSignal: this.#pairController.signal,
+      }, true) || queued;
+    }
+    if (queued) this.#startBackgroundDrain();
   }
 
   handleSourceCommit(commit: ReplicaSourceCommit): void {
@@ -396,6 +478,20 @@ export class ReplicaTranslationCoordinator {
       this.#pendingCharacters = 0;
       this.#pendingSkipped = 0;
       this.#pendingOverflow = 0;
+      const run = this.#readingRun;
+      const before = this.#currentRecords;
+      if (
+        run && before &&
+        sameSourceDocument(run.document, commit.document) &&
+        sameSourceDocument(before.document, commit.document) &&
+        this.surface.extendsLease?.(before.replayLease)
+      ) {
+        // The full copy of what a running run reads (D163): the run queues
+        // it, with its own signal and counts, when it next looks.
+        this.#applySourceCommitToCurrentRecords(commit);
+        run.deferred = true;
+        return;
+      }
     }
     this.#applySourceCommitToCurrentRecords(commit);
     const pairKey = this.#pairKey!;
@@ -496,26 +592,32 @@ export class ReplicaTranslationCoordinator {
       this.#pairController.signal,
       options.signal,
     );
-    const task = this.provider.createSession(pair, {
+    const creating = this.provider.createSession(pair, {
       signal: combined.signal,
       ...(options.onDownloadProgress
         ? { onDownloadProgress: options.onDownloadProgress }
         : {}),
-    }).then((session) => {
-      if (
-        this.#disposed ||
-        epoch !== this.#translationEpoch ||
-        !samePair(this.#pair, pair)
-      ) {
-        session.destroy();
-        throw new DOMException('Translation pair changed.', 'AbortError');
-      }
-      this.#session = session;
-      return session;
-    }).finally(() => {
-      combined.dispose();
-      if (this.#sessionTask === task) this.#sessionTask = undefined;
     });
+    // Assigned before the first await below lets the finally block read it.
+    let task!: Promise<TranslationSession>;
+    task = (async () => {
+      try {
+        const session = await creating;
+        if (
+          this.#disposed ||
+          epoch !== this.#translationEpoch ||
+          !samePair(this.#pair, pair)
+        ) {
+          session.destroy();
+          throw new DOMException('Translation pair changed.', 'AbortError');
+        }
+        this.#session = session;
+        return session;
+      } finally {
+        combined.dispose();
+        if (this.#sessionTask === task) this.#sessionTask = undefined;
+      }
+    })();
     this.#sessionTask = task;
     return task;
   }
@@ -573,6 +675,7 @@ export class ReplicaTranslationCoordinator {
     let skipped = this.#takePendingSkipped();
     let overflow = this.#takePendingOverflow();
     const task = (async (): Promise<ReplicaTranslationRunResult> => {
+      let yieldAt = performance.now() + DRAIN_YIELD_INTERVAL_MS;
       while (this.#pending.size > 0) {
         if (!sameResultContext(context, this.#resultContext())) break;
         const next = this.#pending.entries().next().value as
@@ -647,8 +750,10 @@ export class ReplicaTranslationCoordinator {
               }
             : { ...projectionBase, nodeType: 3 };
           const projected = this.surface.project(projection);
-          if (projected) completed += 1;
-          else stale += 1;
+          if (projected) {
+            completed += 1;
+            job.onProjected?.();
+          } else stale += 1;
         } catch (error) {
           if (job.signal?.aborted) {
             this.#dropJobsForSignal(job.signal);
@@ -665,6 +770,10 @@ export class ReplicaTranslationCoordinator {
           requestedTotal,
           this.#pending.size + this.#pendingSkipped + this.#pendingOverflow,
         );
+        if (performance.now() >= yieldAt) {
+          await yieldToMain();
+          yieldAt = performance.now() + DRAIN_YIELD_INTERVAL_MS;
+        }
       }
       skipped += this.#takePendingSkipped();
       overflow += this.#takePendingOverflow();
@@ -697,19 +806,22 @@ export class ReplicaTranslationCoordinator {
   #startBackgroundDrain(): void {
     if (this.#drainTask || this.#disposed) return;
     const task = this.#drain();
-    void task.then((result) => {
-      if (this.isResultCurrent(result)) this.#onBackgroundResult?.(result);
-    }).catch(() => {
-      // Background jobs carry only the pair signal and normally settle stale
-      // on invalidation. A defensive rejection must not become unhandled.
-    }).finally(() => {
-      if (
-        !this.#disposed &&
-        (this.#pending.size > 0 ||
-          this.#pendingSkipped > 0 ||
-          this.#pendingOverflow > 0)
-      ) this.#startBackgroundDrain();
-    });
+    void (async () => {
+      try {
+        const result = await task;
+        if (this.isResultCurrent(result)) this.#onBackgroundResult?.(result);
+      } catch {
+        // Background jobs carry only the pair signal and normally settle stale
+        // on invalidation. A defensive rejection must not become unhandled.
+      } finally {
+        if (
+          !this.#disposed &&
+          (this.#pending.size > 0 ||
+            this.#pendingSkipped > 0 ||
+            this.#pendingOverflow > 0)
+        ) this.#startBackgroundDrain();
+      }
+    })();
   }
 
   async #waitForActiveDrain(signal?: AbortSignal): Promise<void> {
@@ -920,6 +1032,17 @@ function samePendingJob(left: PendingJob, right: PendingJob): boolean {
   );
 }
 
+function sameTextRecord(
+  left: ReplicaSourceTextRecord,
+  right: ReplicaSourceTextRecord,
+): boolean {
+  return left.nodeType === right.nodeType &&
+    (left.nodeType !== 1 ||
+      (right.nodeType === 1 && left.controlTarget === right.controlTarget)) &&
+    left.revision === right.revision &&
+    left.source === right.source;
+}
+
 function sameResultContext(
   left: Pick<
     ReplicaTranslationRunResult,
@@ -1015,16 +1138,12 @@ function waitForPromise<T>(
     };
     const cleanup = (): void => signal.removeEventListener('abort', onAbort);
     signal.addEventListener('abort', onAbort, { once: true });
-    void task.then(
-      (value) => {
-        cleanup();
-        resolve(value);
-      },
-      (error: unknown) => {
-        cleanup();
-        reject(error);
-      },
-    );
+    void (async () => {
+      const result = await settle(task);
+      cleanup();
+      if (result.ok) resolve(result.value);
+      else reject(result.error);
+    })();
   });
 }
 

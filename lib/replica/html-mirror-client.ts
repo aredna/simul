@@ -1,5 +1,6 @@
 import type { ReplicaCaptureRequest, ReplicaDiagnosticCode } from './contracts';
 import {
+  assembleHtmlMirrorCheckpoint,
   createHtmlMirrorAck,
   createHtmlMirrorCheckpointRequest,
   createHtmlMirrorPortName,
@@ -8,6 +9,7 @@ import {
   HtmlMirrorScrollPaneLedger,
   readHtmlMirrorSourceMessage,
   type HtmlMirrorCheckpoint,
+  type HtmlMirrorCheckpointPart,
   type HtmlMirrorPatchBatch,
   type HtmlMirrorScrollUpdate,
 } from './html-mirror-protocol';
@@ -18,6 +20,8 @@ import {
 } from './html-mirror-sanitizer';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_NODES,
   type HtmlMirrorLimitSettings,
 } from './html-mirror-limits';
 import { createReplicaIdentity } from './replica-identity';
@@ -31,6 +35,11 @@ export interface HtmlMirrorStreamObserver {
     ReplicaDiagnosticCode,
     'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'
   >, representability?: HtmlMirrorRepresentabilitySummary): void;
+  /**
+   * A part of a checkpoint read in slices arrived and checked (D163): the
+   * page is still reading, so a wait for its checkpoint goes on.
+   */
+  onProgress?(): void;
 }
 
 export interface HtmlMirrorStreamLease {
@@ -41,6 +50,12 @@ export interface HtmlMirrorStreamLease {
   dispose(): void;
 }
 
+/**
+ * How long the page may send nothing towards the first checkpoint: the
+ * deadline restarts at each part, and after a preview runs on until its
+ * full copy arrives (D163). A read that goes on never times out; one that
+ * stalls does.
+ */
 export const HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS = 5_000;
 export const MAX_HTML_MIRROR_PREOBSERVER_MESSAGES = 8;
 
@@ -124,6 +139,20 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   #disposed = false;
   #explicitlyDisposed = false;
   #initialTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The parts of the checkpoint being read, each checked as it came (D163).
+   * Only one read's: parts of a later sequence drop them.
+   */
+  #parts: {
+    readonly sequence: number;
+    readonly list: HtmlMirrorCheckpointPart[];
+    readonly indexes: Set<number>;
+    bytes: number;
+  } | undefined;
+  /** The sequence of the last checkpoint handed on; parts of before are stale. */
+  #checkpointSequence: number | undefined;
+  /** A preview was handed on and its full copy has not come yet (D163). */
+  #copyPending = false;
 
   constructor(
     private readonly port: Browser.runtime.Port,
@@ -134,20 +163,14 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     showEverything: boolean,
     private readonly signal?: AbortSignal,
   ) {
-    let resolveInitial!: (checkpoint: HtmlMirrorCheckpoint) => void;
-    let rejectInitial!: (error: unknown) => void;
-    this.initialCheckpoint = new Promise((resolve, reject) => {
-      resolveInitial = resolve;
-      rejectInitial = reject;
-    });
-    this.#resolveInitial = resolveInitial;
-    this.#rejectInitial = rejectInitial;
+    const initial = Promise.withResolvers<HtmlMirrorCheckpoint>();
+    this.initialCheckpoint = initial.promise;
+    this.#resolveInitial = initial.resolve;
+    this.#rejectInitial = initial.reject;
     port.onMessage.addListener(this.#onMessage);
     port.onDisconnect.addListener(this.#onDisconnect);
     signal?.addEventListener('abort', this.#onAbort, { once: true });
-    this.#initialTimer = setTimeout(() => {
-      this.#fail(new Error('HTML mirror initial checkpoint timed out.'));
-    }, HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS);
+    this.#armTimer();
     try {
       port.postMessage(createHtmlMirrorStart(
         identity,
@@ -206,6 +229,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     if (this.#explicitlyDisposed) return;
     this.#explicitlyDisposed = true;
     this.#queue.splice(0);
+    this.#parts = undefined;
     if (this.#disposed) return;
     this.#disposed = true;
     this.#clearInitialTimer();
@@ -239,7 +263,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     }
     // The page names the panes that moved; every scroll update handed on
     // carries the whole list, so a later one can stand alone.
-    const message = received.kind === 'simul:html-mirror-v2:scroll'
+    let message = received.kind === 'simul:html-mirror-v2:scroll'
       ? this.#panes.complete(received)
       : received;
     if (message.kind === 'simul:html-mirror-v2:error') {
@@ -256,6 +280,30 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       }
       return;
     }
+    if (message.kind === 'simul:html-mirror-v2:checkpoint-part') {
+      if (!this.#bufferPart(message)) {
+        this.#fail(new Error('Invalid HTML mirror checkpoint part.'));
+        return;
+      }
+      // The page is reading: whatever waits for its checkpoint waits on.
+      if (!this.#initialSettled || this.#copyPending) this.#armTimer();
+      if (this.#initialSettled) {
+        try {
+          this.#observer?.onProgress?.();
+        } catch {
+          this.#fail(new Error('HTML mirror observer failed.'));
+        }
+      }
+      return;
+    }
+    if (message.kind === 'simul:html-mirror-v2:checkpoint') {
+      const whole = this.#takeCheckpoint(message);
+      if (!whole) {
+        this.#fail(new Error('Invalid HTML mirror checkpoint parts.'));
+        return;
+      }
+      message = whole;
+    }
     if (!this.#initialSettled) {
       if (message.kind === 'simul:html-mirror-v2:scroll') {
         this.#queueLatestScroll(message);
@@ -267,6 +315,9 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       }
       this.#initialSettled = true;
       this.#clearInitialTimer();
+      // A preview is shown at once; its full copy is waited for as the
+      // first checkpoint was (D163).
+      if (this.#copyPending) this.#armTimer();
       this.#resolveInitial(message);
       return;
     }
@@ -356,6 +407,85 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     if (terminal) this.#closeTransport(true);
   }
 
+  /**
+   * Keeps a part, checked on its own, for the checkpoint that closes its
+   * read (D163). A part of a later sequence starts a new read and drops the
+   * parts of the one before (cancelled or restarted on the page). A part of
+   * a sequence before the parts kept or the last checkpoint, a second part
+   * of an index, or parts over the page's node or byte limits are refused.
+   */
+  #bufferPart(part: HtmlMirrorCheckpointPart): boolean {
+    const sequence = part.identity.sequence;
+    if (
+      (this.#checkpointSequence !== undefined &&
+        sequence < this.#checkpointSequence) ||
+      (this.#parts !== undefined && sequence < this.#parts.sequence)
+    ) return false;
+    if (!this.#parts || sequence > this.#parts.sequence) {
+      this.#parts = { sequence, list: [], indexes: new Set(), bytes: 0 };
+    }
+    const parts = this.#parts;
+    parts.bytes += part.byteLength;
+    if (
+      parts.indexes.has(part.index) ||
+      parts.list.length >= MAX_HTML_MIRROR_NODES ||
+      parts.bytes > MAX_HTML_MIRROR_BYTES
+    ) {
+      this.#parts = undefined;
+      return false;
+    }
+    parts.indexes.add(part.index);
+    parts.list.push(part);
+    return true;
+  }
+
+  /**
+   * The checkpoint to hand on (D163): one sent whole as it is, one that
+   * closes parts assembled from them, each shell filled once and the whole
+   * checked again as one graph. Only the stream's first checkpoint may be a
+   * preview. Undefined when the parts do not make the checkpoint.
+   */
+  #takeCheckpoint(
+    checkpoint: HtmlMirrorCheckpoint,
+  ): HtmlMirrorCheckpoint | undefined {
+    const sequence = checkpoint.identity.sequence;
+    const partCount = checkpoint.payload.partCount ?? 0;
+    const parts = this.#parts;
+    this.#parts = undefined;
+    if (checkpoint.payload.preview && this.#checkpointSequence !== undefined) {
+      return undefined;
+    }
+    let whole: HtmlMirrorCheckpoint | undefined = checkpoint;
+    if (partCount === 0) {
+      // Parts of an older read are dropped; a newer one's cannot come first.
+      if (parts && parts.sequence > sequence) return undefined;
+    } else {
+      whole = parts?.sequence === sequence &&
+          parts.list.length === partCount &&
+          parts.bytes + checkpoint.payload.byteLength <= MAX_HTML_MIRROR_BYTES
+        ? assembleHtmlMirrorCheckpoint(checkpoint, parts.list, this.fidelityPolicy)
+        : undefined;
+    }
+    if (!whole) return undefined;
+    this.#checkpointSequence = sequence;
+    if (whole.payload.preview) {
+      this.#copyPending = true;
+    } else if (this.#copyPending) {
+      this.#copyPending = false;
+      this.#clearInitialTimer();
+    }
+    return whole;
+  }
+
+  #armTimer(): void {
+    this.#clearInitialTimer();
+    this.#initialTimer = setTimeout(() => {
+      this.#fail(new Error(this.#initialSettled
+        ? 'HTML mirror full copy timed out.'
+        : 'HTML mirror initial checkpoint timed out.'));
+    }, HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS);
+  }
+
   #queueLatestScroll(message: HtmlMirrorScrollUpdate): void {
     const previousIndex = this.#queue.findIndex(
       ({ kind }) => kind === 'simul:html-mirror-v2:scroll',
@@ -377,6 +507,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   #closeTransport(disconnect: boolean): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#parts = undefined;
     this.#clearInitialTimer();
     this.port.onMessage.removeListener(this.#onMessage);
     this.port.onDisconnect.removeListener(this.#onDisconnect);

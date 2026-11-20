@@ -26,6 +26,11 @@ import { MAX_HTML_MIRROR_NODES } from '../lib/replica/html-mirror-sanitizer';
 import { applyHtmlMirrorLimitSettings } from '../lib/replica/html-mirror-limits';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { sourceDocumentIdentity } from '../lib/replica/source-identity';
+import { FULL_VISIBLE_REPLICA_READ_SCOPE } from '../lib/replica/read-scope-policy';
+import {
+  createSemanticSourcePortName,
+  createSemanticSourceStart,
+} from '../lib/replica/semantic-source-protocol';
 import {
   createSourceControlledContentPolicy,
   sourceControlledContentMutationsMayChange,
@@ -212,6 +217,92 @@ describe('HtmlMirrorSourceSession', () => {
         }),
       }));
       expect(JSON.stringify(imagePort.posts)).not.toContain('news.gif');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('starts every reader only once the injection-time credential scan is done (D163)', async () => {
+    const canary = 'sliced-scan-late-password';
+    const { document, window } = parseHTML(
+      '<html><body><p>public</p><img id="announcement" src="news.gif" alt="x">' +
+      `<input id="turn" type="text" value="${canary}"></body></html>`,
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/',
+    });
+    setBridgeImageFacts(document.querySelector<HTMLImageElement>('#announcement')!);
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    // The clock runs while the scan does, so each of its slices ends after
+    // one node, and stands still once the readers start.
+    let time = 0;
+    let running = true;
+    const turns: Array<() => void> = [];
+    vi.stubGlobal('IntersectionObserver', ImmediateIntersectionObserver);
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    vi.stubGlobal('MutationObserver', NoopBridgeMutationObserver);
+    try {
+      installHtmlMirrorSourceBridge({
+        global: {} as typeof globalThis,
+        runtime: { onConnect } as unknown as
+          HtmlMirrorSourceBridgeEnvironment['runtime'],
+        document,
+        window: window as unknown as Window,
+        now: () => (running ? (time += 100) : time),
+        yieldToMain: () => new Promise<void>((resolve) => turns.push(resolve)),
+        createMutationObserver: () => new NoopBridgeMutationObserver(),
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+        setTimer: () => 1,
+        clearTimer: () => undefined,
+        createResizeObserver: () => new NoopResizeObserver(),
+      });
+      expect(turns).toHaveLength(1);
+
+      const mirrorPort = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+      onConnect.emit(mirrorPort as unknown as Browser.runtime.Port);
+      mirrorPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+      const imagePort = new FakePort(
+        createImageSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      onConnect.emit(imagePort as unknown as Browser.runtime.Port);
+      imagePort.emitMessage({
+        kind: 'simul:image-source-v2:start',
+        document: sourceDocumentIdentity(identity),
+      });
+      const semanticPort = new FakePort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      onConnect.emit(semanticPort as unknown as Browser.runtime.Port);
+      semanticPort.emitMessage(createSemanticSourceStart(
+        'isolated-html',
+        sourceDocumentIdentity(identity),
+        FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(mirrorPort.posts).toEqual([]);
+      expect(imagePort.posts).toEqual([]);
+      expect(semanticPort.posts).toEqual([]);
+
+      // The page makes a field a password before the scan reaches it.
+      document.querySelector('#turn')!.setAttribute('type', 'password');
+      running = false;
+      turns.shift()!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(turns).toHaveLength(0);
+      expect(mirrorPort.posts).toContainEqual(expect.objectContaining({
+        kind: 'simul:html-mirror-v2:checkpoint',
+      }));
+      expect(imagePort.posts).toContainEqual(expect.objectContaining({
+        kind: 'simul:image-source-v2:ready',
+      }));
+      expect(semanticPort.posts.length).toBeGreaterThan(0);
+      for (const port of [mirrorPort, imagePort, semanticPort]) {
+        expect(JSON.stringify(port.posts)).not.toContain(canary);
+        expect(port.disconnect).not.toHaveBeenCalled();
+      }
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1219,6 +1310,43 @@ describe('HtmlMirrorSourceSession', () => {
       documentWidth: 1,
       documentHeight: 1,
     });
+  });
+
+  it('caps the size of a very tall page in live updates as in the first copy (D162)', () => {
+    const fixture = sourceFixture('<main>a very long page</main>');
+    const root = fixture.document.documentElement;
+    let height = 1_250_000;
+    // linkedom's windows share what is defined on them: undone afterwards.
+    Object.defineProperties(fixture.window, {
+      innerWidth: { configurable: true, value: 800 },
+      innerHeight: { configurable: true, value: 600 },
+    });
+    onTestFinished(() => {
+      delete (fixture.window as { innerWidth?: number }).innerWidth;
+      delete (fixture.window as { innerHeight?: number }).innerHeight;
+    });
+    Object.defineProperties(root, {
+      scrollWidth: { configurable: true, value: 800 },
+      scrollHeight: { configurable: true, get: () => height },
+    });
+
+    fixture.start();
+    expect(fixture.checkpoints()[0]?.payload.documentHeight).toBe(1_000_000);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // Taller still: before, the update carried the raw height, the protocol
+    // refused it, and the whole page was read again.
+    height = 1_300_000;
+    const body = fixture.document.body;
+    body.className = 'grown';
+    fixture.mutate(attributeRecord(body, 'class'));
+    fixture.flushFrame();
+    expect(fixture.port.posts.some(
+      (message) => (message as { kind?: string }).kind === 'simul:html-mirror-v2:error',
+    )).toBe(false);
+    // Still the cap, so no size change to send: only the attribute.
+    expect(fixture.patches().at(-1)?.operations.map(({ kind }) => kind))
+      .toEqual(['attributes']);
   });
 
   it('reads the document\'s language again whenever Chrome may have read a pragma', () => {

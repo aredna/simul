@@ -13,6 +13,37 @@ export interface SourceVisibilityBoundaryRefresh {
 }
 
 /**
+ * An index built a piece at a time, in the slices of a read (D163); see
+ * `SourceVisibilityBoundaryIndex.beginBuild`.
+ */
+export interface SourceVisibilityBoundaryIndexBuild {
+  /**
+   * Adds `root`'s subtree (through roots, as the whole build walks it), each
+   * call with a paint memo of its own. `includeSelf: false` leaves `root`
+   * out (added by an earlier call); each element of `stopAt` is added
+   * without what it holds, which a later call adds.
+   */
+  add(
+    root: Element,
+    options?: {
+      readonly includeSelf?: boolean;
+      readonly stopAt?: ReadonlySet<Element>;
+    },
+  ): void;
+  /** Every element added so far, or over the node bound. */
+  readonly overflow: boolean;
+  /** The index; nothing can be added after. */
+  finish(): SourceVisibilityBoundaryIndex;
+}
+
+interface SourceVisibilityScanOptions {
+  readonly includeSelf?: boolean;
+  readonly stopAt?: ReadonlySet<Element>;
+  /** Elements inspected before this scan, by the same bound. */
+  readonly inspected?: number;
+}
+
+/**
  * Content-free index of the visibility floor used by both source mirrors.
  * It reads structural attributes and computed presentation only; authored
  * text and values are never touched. A changed boundary tells a serializer to
@@ -29,8 +60,54 @@ export class SourceVisibilityBoundaryIndex {
     private readonly document: Document,
     private readonly sourceWindow: Window | null | undefined,
     private readonly maximumNodes: number,
+    empty = false,
   ) {
-    this.#replaceAll();
+    if (!empty) this.#replaceAll();
+  }
+
+  /**
+   * Builds the index in pieces (D163): the read in slices adds what each
+   * slice read, in that slice, with a paint memo of its own, so that nothing
+   * of one slice's reading is believed in the next. For a page that did not
+   * change in between, the finished index is the one the constructor builds
+   * in one go: the same state for every element, one node bound for all.
+   */
+  static beginBuild(
+    document: Document,
+    sourceWindow: Window | null | undefined,
+    maximumNodes: number,
+  ): SourceVisibilityBoundaryIndexBuild {
+    const index = new SourceVisibilityBoundaryIndex(
+      document,
+      sourceWindow,
+      maximumNodes,
+      true,
+    );
+    const nothingBefore = new Map<Element, SourceVisibilityState>();
+    let inspected = 0;
+    let overflow = false;
+    let finished = false;
+    return {
+      add: (root, options = {}) => {
+        if (finished || overflow) return;
+        const result = index.#scanRoots(
+          [root],
+          nothingBefore,
+          createSourcePaintScanCache(),
+          { ...options, inspected },
+        );
+        inspected = result.inspected;
+        overflow = result.overflow;
+      },
+      get overflow() {
+        return overflow;
+      },
+      finish: () => {
+        finished = true;
+        index.#complete = !overflow;
+        return index;
+      },
+    };
   }
 
   refreshAll(): SourceVisibilityBoundaryRefresh {
@@ -166,6 +243,21 @@ export class SourceVisibilityBoundaryIndex {
     return shown;
   }
 
+  /**
+   * Whether `other` holds the same state for every element and is as
+   * complete: the check that a build in pieces gave the whole build (D163).
+   */
+  hasSameStatesAs(other: SourceVisibilityBoundaryIndex): boolean {
+    if (
+      this.#complete !== other.#complete ||
+      this.#states.size !== other.#states.size
+    ) return false;
+    for (const [element, state] of this.#states) {
+      if (other.#states.get(element) !== state) return false;
+    }
+    return true;
+  }
+
   dispose(): void {
     this.#states.clear();
     this.#shown = [];
@@ -187,9 +279,10 @@ export class SourceVisibilityBoundaryIndex {
     roots: readonly Element[],
     previous: ReadonlyMap<Element, SourceVisibilityState>,
     paintCache: SourcePaintScanCache,
-  ): SourceVisibilityBoundaryRefresh {
+    options: SourceVisibilityScanOptions = {},
+  ): SourceVisibilityBoundaryRefresh & { readonly inspected: number } {
     const changedTargets: Element[] = [];
-    let inspected = 0;
+    let inspected = options.inspected ?? 0;
     let overflow = false;
     for (const root of roots) {
       if (
@@ -203,8 +296,24 @@ export class SourceVisibilityBoundaryIndex {
       // Two lists side by side, an element and whether something above it
       // changed: one pair for every element of the page at every
       // comparison, which as objects was work for the garbage collector.
-      const pending: Element[] = [root];
-      const pendingChangedAncestor: boolean[] = [false];
+      const pending: Element[] = [];
+      const pendingChangedAncestor: boolean[] = [];
+      if (options.includeSelf === false) {
+        // A piece of a build: the root was added with the piece above it.
+        if (!pushSourceVisibilityChildren(
+          root,
+          false,
+          pending,
+          pendingChangedAncestor,
+          links,
+        )) {
+          overflow = true;
+          break;
+        }
+      } else {
+        pending.push(root);
+        pendingChangedAncestor.push(false);
+      }
       while (pending.length > 0) {
         if (++inspected > this.maximumNodes) {
           overflow = true;
@@ -245,6 +354,8 @@ export class SourceVisibilityBoundaryIndex {
           rematerializationBoundary = textProof.mayContainText;
           if (rematerializationBoundary) changedTargets.push(element);
         }
+        // What it holds is a later piece's (a build in pieces).
+        if (options.stopAt?.has(element)) continue;
         if (!pushSourceVisibilityChildren(
           element,
           changedAncestor || (changed && rematerializationBoundary),
@@ -261,6 +372,7 @@ export class SourceVisibilityBoundaryIndex {
     return Object.freeze({
       changedTargets: Object.freeze(minimizeVisibilityRoots(changedTargets)),
       overflow,
+      inspected,
     });
   }
 

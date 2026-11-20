@@ -692,6 +692,7 @@ describe('one way to a shadow root (D125)', () => {
       'if (!node.shadowRoot) return;',
       'for (const cssText of node.shadowRoot.adoptedStyleSheets) {',
       'for (const child of node.shadowRoot.children) {',
+      'const ownRoot = node.shadowRoot;',
     ],
     'lib/replica/html-mirror-source.ts': [
       'if (node.shadowRoot) {',
@@ -717,6 +718,7 @@ describe('one way to a shadow root (D125)', () => {
       'for (const child of input.shadowRoot.children) {',
       'input.shadowRoot.adoptedStyleSheets,',
       'id: input.shadowRoot.id,',
+      'const transportedShadow: Record<string, unknown> = input.shadowRoot;',
     ],
   };
   const reach = new RegExp([

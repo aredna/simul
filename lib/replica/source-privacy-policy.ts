@@ -251,153 +251,191 @@ export function createSourceControlledContentPolicy(
   sourceWindow: Window | null | undefined = sourceDocument?.defaultView,
   maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
 ): SourceControlledContentPolicy {
-  const targets = new Map<Element, SourceControlledTargetState>();
-  const tabs: SourceControlledTabRelationship[] = [];
-  const controllers = new Set<Element>();
-  const referencedIds = new Set<string>();
-  const idElements = new Set<Element>();
-  const unindexableIdTargets = new Set<Element>();
-  const withheldIdRoots = new Set<Node>();
-  const root = sourceDocument?.documentElement;
-  if (!root || !Number.isSafeInteger(maximumNodes) || maximumNodes < 1) {
-    return finishSourceControlledContentPolicy(
-      targets,
-      tabs,
-      controllers,
-      referencedIds,
-      idElements,
-      unindexableIdTargets,
-      withheldIdRoots,
-      Boolean(root),
-      Boolean(root),
-    );
+  return beginSourceControlledContentPolicy(
+    sourceDocument,
+    sourceWindow,
+    maximumNodes,
+  ).step() as SourceControlledContentPolicy;
+}
+
+/** `createSourceControlledContentPolicy`, built a slice at a time (D163). */
+export interface SourceControlledContentPolicyBuilder {
+  /**
+   * Builds on until the policy is done, or until `expired` says the slice is
+   * over; it is asked after each unit of work (an element of the walk, a
+   * controller, a panel), so every call makes progress. Returns the policy
+   * once it is built, and the same policy on every later call.
+   */
+  step(expired?: () => boolean): SourceControlledContentPolicy | undefined;
+}
+
+/**
+ * Starts `createSourceControlledContentPolicy` without doing any of it
+ * (D163). For a page that does not change between the calls, the policy is
+ * the one the one-shot function gives: the same walk order, the same budgets
+ * and the same decisions. Each call to `step` opens its own paint cache and
+ * drops it on return, so no layout read is trusted across a yield; between
+ * calls only the walk's cursor and what it indexed are kept, and the
+ * looking-through stage's own budget and answers. A page that changes
+ * between the calls is the caller's to notice
+ * (`sourceControlledContentMutationsMayChange`), as for any policy.
+ */
+export function beginSourceControlledContentPolicy(
+  sourceDocument: Document | null | undefined,
+  sourceWindow: Window | null | undefined = sourceDocument?.defaultView,
+  maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
+): SourceControlledContentPolicyBuilder {
+  return new SlicedSourceControlledContentPolicy(
+    sourceDocument,
+    sourceWindow,
+    maximumNodes,
+  );
+}
+
+class SlicedSourceControlledContentPolicy
+implements SourceControlledContentPolicyBuilder {
+  readonly #sourceWindow: Window | null | undefined;
+  readonly #maximumNodes: number;
+  readonly #root: Element | null | undefined;
+  readonly #targets = new Map<Element, SourceControlledTargetState>();
+  readonly #tabs: SourceControlledTabRelationship[] = [];
+  readonly #controllers = new Set<Element>();
+  readonly #referencedIds = new Set<string>();
+  readonly #idElements = new Set<Element>();
+  readonly #unindexableIdTargets = new Set<Element>();
+  readonly #withheldIdRoots = new Set<Node>();
+  readonly #idsByRoot = new Map<Node, Map<string, Element[]>>();
+  readonly #idsAcrossRoots = new Map<string, Element[]>();
+  readonly #pending: Node[] = [];
+  #visited = 0;
+  #indexedIdBytes = 0;
+  #stage: 'walk' | 'relations' | 'tabs' | 'painted' | 'boxless' = 'walk';
+  readonly #relations = new Map<Element, Array<{
+    readonly trigger: Element;
+    readonly structurallyUnique: boolean;
+  }>>();
+  #referencedIdBytes = 0;
+  #unresolved = false;
+  /** The stage's work list (controllers, then panels), and how far it got. */
+  #units: Element[] = [];
+  #unit = 0;
+  readonly #lookThrough: (
+    panel: Element,
+    paintCache: SourcePaintScanCache,
+  ) => void;
+  #policy: SourceControlledContentPolicy | undefined;
+
+  constructor(
+    sourceDocument: Document | null | undefined,
+    sourceWindow: Window | null | undefined,
+    maximumNodes: number,
+  ) {
+    this.#sourceWindow = sourceWindow;
+    this.#maximumNodes = maximumNodes;
+    this.#lookThrough = sourceControlledLookThrough(this.#targets, sourceWindow);
+    const root = sourceDocument?.documentElement;
+    this.#root = root;
+    if (!root || !Number.isSafeInteger(maximumNodes) || maximumNodes < 1) {
+      this.#policy = this.#finish(
+        this.#withheldIdRoots,
+        Boolean(root),
+        Boolean(root),
+      );
+      return;
+    }
+    this.#pending.push(root);
   }
-  try {
+
+  step(expired?: () => boolean): SourceControlledContentPolicy | undefined {
+    if (this.#policy) return this.#policy;
+    let first = true;
+    const goOn = (): boolean => {
+      if (first) {
+        first = false;
+        return true;
+      }
+      return !expired?.();
+    };
     const paintCache = createSourcePaintScanCache();
-    const idsByRoot = new Map<Node, Map<string, Element[]>>();
-    const idsAcrossRoots = new Map<string, Element[]>();
-    const pending: Node[] = [root];
-    let visited = 0;
-    let indexedIdBytes = 0;
-    while (pending.length > 0 && visited < maximumNodes) {
-      const node = pending.pop();
-      if (!node) break;
-      visited += 1;
-      if (node.nodeType === 11) {
-        pending.push(...node.childNodes);
-        continue;
-      }
-      if (node.nodeType !== 1) continue;
-      const element = node as Element;
-      const scope = element.getRootNode();
-      const id = safelyReadSourceAttribute(element, 'id');
-      if (id) {
-        idElements.add(element);
-        const byteLength = sourceControlledStringByteLength(id);
-        if (
-          id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
-          !Number.isFinite(byteLength) ||
-          indexedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES
-        ) {
-          unindexableIdTargets.add(element);
-        } else {
-          indexedIdBytes += byteLength;
-          let rootIds = idsByRoot.get(scope);
-          if (!rootIds) idsByRoot.set(scope, rootIds = new Map());
-          appendSourceControlledId(rootIds, id, element);
-          appendSourceControlledId(idsAcrossRoots, id, element);
-        }
-      }
-      if (safelyHasSourceAttribute(element, 'aria-controls')) {
-        controllers.add(element);
-      }
-      pending.push(...element.childNodes);
-      const shadowRoot = safelyReadSourceShadowRoot(element);
-      if (shadowRoot) pending.push(shadowRoot);
-    }
-    if (
-      pending.length > 0 ||
-      controllers.size > MAX_SOURCE_CONTROLLED_RELATIONSHIPS
-    ) {
-      markResolvedSourceControlledTargets(
-        [...controllers].slice(0, MAX_SOURCE_CONTROLLED_RELATIONSHIPS),
-        idsByRoot,
-        idsAcrossRoots,
-        targets,
-      );
-      return finishSourceControlledContentPolicy(
-        targets,
-        tabs,
-        controllers,
-        referencedIds,
-        idElements,
-        unindexableIdTargets,
-        controllerOverflowRoots(controllers),
+    try {
+      this.#policy = this.#build(goOn, paintCache);
+    } catch {
+      this.#policy = this.#finish(
+        new Set<Node>([(this.#root as Element).getRootNode()]),
         true,
-        pending.length > 0,
+        true,
       );
     }
+    return this.#policy;
+  }
 
-    const relations = new Map<Element, Array<{
-      readonly trigger: Element;
-      readonly structurallyUnique: boolean;
-    }>>();
-    let referencedIdBytes = 0;
-    let unresolved = false;
-    for (const trigger of controllers) {
-      const rawControls = safelyReadSourceAttribute(trigger, 'aria-controls');
+  /** Works through the stages; undefined when the slice ran out first. */
+  #build(
+    goOn: () => boolean,
+    paintCache: SourcePaintScanCache,
+  ): SourceControlledContentPolicy | undefined {
+    const sourceWindow = this.#sourceWindow;
+    const targets = this.#targets;
+    if (this.#stage === 'walk') {
+      const pending = this.#pending;
+      while (pending.length > 0 && this.#visited < this.#maximumNodes) {
+        if (!goOn()) return undefined;
+        const node = pending.pop();
+        if (!node) break;
+        this.#index(node);
+      }
       if (
-        rawControls === undefined || rawControls === null ||
-        rawControls.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH
+        pending.length > 0 ||
+        this.#controllers.size > MAX_SOURCE_CONTROLLED_RELATIONSHIPS
       ) {
-        withheldIdRoots.add(trigger.getRootNode());
-        unresolved = true;
-        continue;
+        markResolvedSourceControlledTargets(
+          [...this.#controllers].slice(0, MAX_SOURCE_CONTROLLED_RELATIONSHIPS),
+          this.#idsByRoot,
+          this.#idsAcrossRoots,
+          targets,
+        );
+        return this.#finish(
+          controllerOverflowRoots(this.#controllers),
+          true,
+          pending.length > 0,
+        );
       }
-      const rawIds = (rawControls ?? '').trim().split(/\s+/u).filter(Boolean);
-      for (const id of rawIds) {
-        const byteLength = sourceControlledStringByteLength(id);
-        if (id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
-          !Number.isFinite(byteLength)) continue;
-        if (referencedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES) {
-          withheldIdRoots.add(trigger.getRootNode());
-          unresolved = true;
-          break;
-        }
-        referencedIdBytes += byteLength;
-        referencedIds.add(id);
-        const sameRoot = idsByRoot.get(trigger.getRootNode())?.get(id) ?? [];
-        const candidates = sameRoot.length > 0
-          ? sameRoot
-          : idsAcrossRoots.get(id) ?? [];
-        for (const panel of candidates) {
-          targets.set(panel, 'withheld');
-          const entries = relations.get(panel) ?? [];
-          entries.push(Object.freeze({
-            trigger,
-            structurallyUnique: rawIds.length === 1 &&
-              isSafeSourceControlledId(id) &&
-              sameRoot.length === 1 && sameRoot[0] === panel,
-          }));
-          relations.set(panel, entries);
-        }
+      this.#stage = 'relations';
+      this.#units = [...this.#controllers];
+      this.#unit = 0;
+    }
+    if (this.#stage === 'relations') {
+      while (this.#unit < this.#units.length) {
+        if (!goOn()) return undefined;
+        this.#relate(this.#units[this.#unit] as Element);
+        this.#unit += 1;
       }
+      this.#stage = 'tabs';
+      this.#units = [...this.#relations.keys()];
+      this.#unit = 0;
     }
-
-    for (const [panel, entries] of relations) {
-      if (entries.length !== 1 || !entries[0]?.structurallyUnique) continue;
-      const trigger = entries[0].trigger;
-      const selected = readSourceControlledTabSelection(
-        trigger,
-        panel,
-        sourceWindow,
-        paintCache,
-      );
-      if (selected === undefined) continue;
-      if (selected) targets.set(panel, 'open-tab');
-      tabs.push(Object.freeze({ trigger, panel, selected }));
+    if (this.#stage === 'tabs') {
+      while (this.#unit < this.#units.length) {
+        if (!goOn()) return undefined;
+        const panel = this.#units[this.#unit] as Element;
+        this.#unit += 1;
+        const entries = this.#relations.get(panel) ?? [];
+        if (entries.length !== 1 || !entries[0]?.structurallyUnique) continue;
+        const trigger = entries[0].trigger;
+        const selected = readSourceControlledTabSelection(
+          trigger,
+          panel,
+          sourceWindow,
+          paintCache,
+        );
+        if (selected === undefined) continue;
+        if (selected) targets.set(panel, 'open-tab');
+        this.#tabs.push(Object.freeze({ trigger, panel, selected }));
+      }
+      withholdContradictoryTablists(this.#tabs, targets);
+      this.#stage = 'painted';
+      this.#unit = 0;
     }
-    withholdContradictoryTablists(tabs, targets);
     // A controlled region the page actually paints is ordinary page content,
     // whatever state its controls carry (D75): a carousel slide whose dots
     // are tabs, an accordion panel that is open. Until D75 only regions whose
@@ -405,40 +443,120 @@ export function createSourceControlledContentPolicy(
     // were not painted lost every slide's text. A panel collapsed to zero
     // height, faded out or clipped away (bug-hunt P2) stays withheld until a
     // layout change proves it painted.
-    for (const panel of relations.keys()) {
-      if (
-        targets.get(panel) === 'withheld' &&
-        sourceElementBoxIsPainted(panel, sourceWindow, paintCache)
-      ) targets.set(panel, 'controlled-region');
+    if (this.#stage === 'painted') {
+      while (this.#unit < this.#units.length) {
+        if (!goOn()) return undefined;
+        const panel = this.#units[this.#unit] as Element;
+        this.#unit += 1;
+        if (
+          targets.get(panel) === 'withheld' &&
+          sourceElementBoxIsPainted(panel, sourceWindow, paintCache)
+        ) targets.set(panel, 'controlled-region');
+      }
+      this.#stage = 'boxless';
+      this.#unit = 0;
     }
-    lookThroughBoxlessSourceControlledTargets(
-      relations.keys(),
-      targets,
-      sourceWindow,
-      paintCache,
-    );
+    while (this.#unit < this.#units.length) {
+      if (!goOn()) return undefined;
+      this.#lookThrough(this.#units[this.#unit] as Element, paintCache);
+      this.#unit += 1;
+    }
+    return this.#finish(this.#withheldIdRoots, this.#unresolved, false);
+  }
+
+  /** One node of the walk: its id and `aria-controls`, and what it holds. */
+  #index(node: Node): void {
+    const pending = this.#pending;
+    this.#visited += 1;
+    if (node.nodeType === 11) {
+      pending.push(...node.childNodes);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const element = node as Element;
+    const scope = element.getRootNode();
+    const id = safelyReadSourceAttribute(element, 'id');
+    if (id) {
+      this.#idElements.add(element);
+      const byteLength = sourceControlledStringByteLength(id);
+      if (
+        id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
+        !Number.isFinite(byteLength) ||
+        this.#indexedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES
+      ) {
+        this.#unindexableIdTargets.add(element);
+      } else {
+        this.#indexedIdBytes += byteLength;
+        let rootIds = this.#idsByRoot.get(scope);
+        if (!rootIds) this.#idsByRoot.set(scope, rootIds = new Map());
+        appendSourceControlledId(rootIds, id, element);
+        appendSourceControlledId(this.#idsAcrossRoots, id, element);
+      }
+    }
+    if (safelyHasSourceAttribute(element, 'aria-controls')) {
+      this.#controllers.add(element);
+    }
+    pending.push(...element.childNodes);
+    const shadowRoot = safelyReadSourceShadowRoot(element);
+    if (shadowRoot) pending.push(shadowRoot);
+  }
+
+  /** The panels one controller names, and how. */
+  #relate(trigger: Element): void {
+    const rawControls = safelyReadSourceAttribute(trigger, 'aria-controls');
+    if (
+      rawControls === undefined || rawControls === null ||
+      rawControls.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH
+    ) {
+      this.#withheldIdRoots.add(trigger.getRootNode());
+      this.#unresolved = true;
+      return;
+    }
+    const rawIds = (rawControls ?? '').trim().split(/\s+/u).filter(Boolean);
+    for (const id of rawIds) {
+      const byteLength = sourceControlledStringByteLength(id);
+      if (id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
+        !Number.isFinite(byteLength)) continue;
+      if (this.#referencedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES) {
+        this.#withheldIdRoots.add(trigger.getRootNode());
+        this.#unresolved = true;
+        break;
+      }
+      this.#referencedIdBytes += byteLength;
+      this.#referencedIds.add(id);
+      const sameRoot = this.#idsByRoot.get(trigger.getRootNode())?.get(id) ?? [];
+      const candidates = sameRoot.length > 0
+        ? sameRoot
+        : this.#idsAcrossRoots.get(id) ?? [];
+      for (const panel of candidates) {
+        this.#targets.set(panel, 'withheld');
+        const entries = this.#relations.get(panel) ?? [];
+        entries.push(Object.freeze({
+          trigger,
+          structurallyUnique: rawIds.length === 1 &&
+            isSafeSourceControlledId(id) &&
+            sameRoot.length === 1 && sameRoot[0] === panel,
+        }));
+        this.#relations.set(panel, entries);
+      }
+    }
+  }
+
+  #finish(
+    withheldIdRoots: ReadonlySet<Node>,
+    overflow: boolean,
+    incomplete: boolean,
+  ): SourceControlledContentPolicy {
     return finishSourceControlledContentPolicy(
-      targets,
-      tabs,
-      controllers,
-      referencedIds,
-      idElements,
-      unindexableIdTargets,
+      this.#targets,
+      this.#tabs,
+      this.#controllers,
+      this.#referencedIds,
+      this.#idElements,
+      this.#unindexableIdTargets,
       withheldIdRoots,
-      unresolved,
-      false,
-    );
-  } catch {
-    return finishSourceControlledContentPolicy(
-      targets,
-      tabs,
-      controllers,
-      referencedIds,
-      idElements,
-      unindexableIdTargets,
-      new Set<Node>([root.getRootNode()]),
-      true,
-      true,
+      overflow,
+      incomplete,
     );
   }
 }
@@ -1144,15 +1262,19 @@ function rectsSurviveClip(
  * same way, a few levels deep. A target that holds text of its own, which no
  * box could vouch for, or nothing that passes, stays withheld whole.
  */
-function lookThroughBoxlessSourceControlledTargets(
-  panels: Iterable<Element>,
+function sourceControlledLookThrough(
   targets: Map<Element, SourceControlledTargetState>,
   sourceWindow: Window | null | undefined,
-  paintCache: SourcePaintScanCache,
-): void {
+): (panel: Element, paintCache: SourcePaintScanCache) => void {
+  // One budget and one set of answers for a policy's targets, whatever
+  // slices it is built in (D163); the paint cache is the slice's.
   const budget = { left: MAX_SOURCE_CONTROLLED_LOOKED_THROUGH_ELEMENTS };
   const looked = new Map<Element, boolean>();
-  const lookThrough = (element: Element, depth: number): boolean => {
+  const lookThrough = (
+    element: Element,
+    depth: number,
+    paintCache: SourcePaintScanCache,
+  ): boolean => {
     const known = looked.get(element);
     if (known !== undefined) return known;
     looked.set(element, false);
@@ -1167,8 +1289,8 @@ function lookThroughBoxlessSourceControlledTargets(
       return own === undefined
         ? (sourceElementBoxIsPainted(child, sourceWindow, paintCache) &&
           !sourceElementBoxIsOffPage(child, sourceWindow, paintCache)) ||
-          lookThrough(child, depth + 1)
-        : (own !== 'withheld' || lookThrough(child, 0)) &&
+          lookThrough(child, depth + 1, paintCache)
+        : (own !== 'withheld' || lookThrough(child, 0, paintCache)) &&
           !sourceElementBoxIsOffPage(child, sourceWindow, paintCache);
     });
     // Nothing it holds is painted: it stays the boundary it was.
@@ -1182,11 +1304,11 @@ function lookThroughBoxlessSourceControlledTargets(
     looked.set(element, true);
     return true;
   };
-  for (const panel of panels) {
-    if (targets.get(panel) === 'withheld' && lookThrough(panel, 0)) {
+  return (panel, paintCache) => {
+    if (targets.get(panel) === 'withheld' && lookThrough(panel, 0, paintCache)) {
       targets.set(panel, 'controlled-region');
     }
-  }
+  };
 }
 
 /**

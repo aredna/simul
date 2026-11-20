@@ -5,13 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-Bn7NgnFl.js"></script>
+    <script type="module" crossorigin src="/chunks/sidepanel-DpSHaMJ6.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/rolldown-runtime-BCiCTKAo.js">
-    <link rel="modulepreload" crossorigin href="/chunks/provider-status-protocol-DUHzhmWT.js">
-    <link rel="stylesheet" crossorigin href="/assets/sidepanel-C-vca1kd.css">
+    <link rel="modulepreload" crossorigin href="/chunks/settle-Ru5p8R9i.js">
+    <link rel="modulepreload" crossorigin href="/chunks/trusted-types-t3VkbdE2.js">
+    <link rel="stylesheet" crossorigin href="/assets/sidepanel-COJTI7Gd.css">
   </head>
   <body>
-    <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
+    <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
       <span id="toolbar-progress" class="toolbar-progress" role="progressbar" aria-label="Companion processing" aria-valuemin="0" aria-valuemax="100" hidden>
         <span id="toolbar-progress-fill" class="toolbar-progress-fill"></span>
       </span>
@@ -36,10 +37,10 @@
       <button id="toolbar-size-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Change mirror size" title="Change mirror size">
         <span id="toolbar-size-label" data-ui-label="Fit">Fit</span>
       </button>
-      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Toggle image text translation" data-ui-aria-label="Toggle image text translation" aria-pressed="false" title="Image text translation is off">
+      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="OCR image text translation" data-ui-aria-label="OCR image text translation" aria-pressed="false" title="Image text translation is off">
         <span id="toolbar-ocr-label" data-ui-label="OCR Off">OCR Off</span>
       </button>
-      <button id="toolbar-tab-follow" class="toolbar-button toolbar-text-button" type="button" aria-label="Pin the mirror to the tab it shows instead of following the active browser tab" aria-pressed="true" title="Following the active browser tab. Click to pin the mirror to the tab it shows.">
+      <button id="toolbar-tab-follow" class="toolbar-button toolbar-text-button" type="button" aria-label="Follow active tab" data-ui-aria-label="Follow active tab" aria-pressed="true" title="Following the active browser tab. Click to pin the mirror to the tab it shows.">
         <span id="toolbar-tab-follow-label" data-ui-label="Follow">Follow</span>
       </button>
       <button id="toggle-quick-translate" class="toolbar-button toolbar-button--translate" type="button" aria-label="Open quick translation" data-ui-aria-label="Open quick translation" aria-expanded="false" aria-controls="quick-translator" title="Quick translation" data-ui-title="Quick translation">
@@ -53,7 +54,8 @@
         ↗
       </button>
       <span id="replica-mode-badge" class="replica-state-label" role="status" aria-live="polite" hidden></span>
-    </nav>
+    </header>
+    <p id="status-announcer" class="visually-hidden" role="status" aria-live="polite"></p>
 
     <!--
       data-edition="dev" / "public": only that edition keeps the element.
@@ -76,7 +78,7 @@
     <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options" data-ui-aria-label="Translation options">
       <div class="overlay-heading">
         <div class="overlay-title">
-          <strong data-ui-label="Options">Options</strong>
+          <h2 class="overlay-title-text" data-ui-label="Options">Options</h2>
           <span id="build-version" class="build-version"></span>
         </div>
         <button id="close-settings" class="quiet-button" type="button" aria-label="Close options" data-ui-aria-label="Close options">×</button>
@@ -192,7 +194,7 @@
 
     <section id="quick-translator" class="quick-translator" role="dialog" aria-labelledby="quick-translator-title" hidden>
       <div class="overlay-heading">
-        <strong id="quick-translator-title" data-ui-label="Quick translation">Quick translation</strong>
+        <h2 id="quick-translator-title" class="overlay-title-text" data-ui-label="Quick translation">Quick translation</h2>
         <button id="close-quick-translate" class="quiet-button" type="button" aria-label="Close quick translation" data-ui-aria-label="Close quick translation">×</button>
       </div>
       <div class="quick-language-row" aria-label="Quick translation direction" data-ui-aria-label="Quick translation direction">
@@ -209,7 +211,7 @@
       <p id="composer-guidance" class="microcopy"></p>
       <label class="composer-label" for="composer-input" data-ui-label="Input">Input</label>
       <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…" data-ui-placeholder="Type here…" aria-describedby="composer-guidance composer-character-count" aria-keyshortcuts="Control+Enter Meta+Enter"></textarea>
-      <output id="composer-character-count" class="composer-character-count" for="composer-input" aria-label="0 of 5,000 characters used">0 / 5,000</output>
+      <output id="composer-character-count" class="composer-character-count" for="composer-input" aria-live="off" aria-label="0 of 5,000 characters used">0 / 5,000</output>
       <div class="composer-actions">
         <button id="translate-composer" class="primary" type="button" data-ui-label="Translate" title="Translate (Ctrl/Command+Enter)" data-ui-title="Translate (Ctrl/Command+Enter)">Translate</button>
         <button id="copy-composer" type="button" disabled data-ui-label="Copy result">Copy result</button>

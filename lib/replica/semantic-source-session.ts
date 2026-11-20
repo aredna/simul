@@ -63,6 +63,7 @@ import {
   readSourceHiddenRegionState,
 } from './html-mirror-sanitizer';
 import type { ReplicaReadScope } from './read-scope-policy';
+import type { SliceClock } from '../browser-scheduling';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 import {
@@ -109,6 +110,11 @@ export interface SemanticSourceSessionEnvironment {
   readonly getNodeId: (node: Node) => number | undefined;
   /** Shared by every reconnect for this bridge's source-document lifetime. */
   readonly secretClassifier?: StickySourceSecretClassifier;
+  /**
+   * The injection-time scan for that classifier. The first read waits for
+   * it, and starts in the task of the start message when it is done (D163).
+   */
+  readonly secretScan?: SourceDocumentSecretScan;
   /**
    * The site menus read so far, by container: shared the same way, so that
    * a menu the page has open is still known for one when the mirror is
@@ -294,6 +300,8 @@ const SEMANTIC_POPUP_ROLES = new Set([
 export class SemanticSourceSession {
   readonly #portIdentity: SemanticSourcePortIdentity;
   readonly #classifier: StickySourceSecretClassifier;
+  /** A start waits for the injection-time credential scan (D163). */
+  #startPending = false;
   /** Set only while one synchronous #scan runs; see SourceSecretAncestorMemo. */
   #scanSecretAncestors: SourceSecretAncestorMemo | undefined;
   /** The label walk of the #scan that is running, and of no other. */
@@ -429,8 +437,18 @@ export class SemanticSourceSession {
       return;
     }
     if (message.kind === 'simul:semantic-source-v2:start') {
-      if (this.#documentIdentity) {
+      if (this.#documentIdentity || this.#startPending) {
         this.dispose(true);
+        return;
+      }
+      const secretScan = this.environment.secretScan;
+      if (secretScan && !secretScan.done) {
+        void this.#startAfterSecretScan(
+          secretScan,
+          message.document,
+          message.scope,
+          message.policyFingerprint,
+        );
         return;
       }
       this.#start(
@@ -495,6 +513,24 @@ export class SemanticSourceSession {
       return;
     }
   };
+
+  /**
+   * Nothing is read before the injection-time credential scan has met every
+   * node (D163). Meanwhile the session has no document: a change asks for
+   * no scan, and a second start ends the session as it would after one.
+   */
+  async #startAfterSecretScan(
+    secretScan: SourceDocumentSecretScan,
+    documentIdentity: ReplicaSourceDocumentIdentity,
+    scope: ReplicaReadScope,
+    policyFingerprint: string,
+  ): Promise<void> {
+    this.#startPending = true;
+    await secretScan.finished;
+    this.#startPending = false;
+    if (this.#disposed) return;
+    this.#start(documentIdentity, scope, policyFingerprint);
+  }
 
   #start(
     documentIdentity: ReplicaSourceDocumentIdentity,
@@ -2230,17 +2266,126 @@ export function eagerlyClassifySourceDocumentSecrets(
 ): void {
   const root = sourceDocument.documentElement;
   if (!root) return;
-  const stack: Array<{ readonly node: Node; readonly secretAncestor: boolean }> = [
-    { node: root, secretAncestor: false },
-  ];
-  let visited = 0;
+  classifySourceSecretScanSlice(
+    createSourceSecretScanCursor(root),
+    sourceWindow,
+    classifier,
+  );
+}
+
+/**
+ * The injection-time scan of the document for the credential ledger, in
+ * slices (D163). It goes on after the injection task when the page is too
+ * large for one slice; `done` is set, and `finished` resolves, once every
+ * node was classified or the whole document was marked secret. Readers
+ * that send something wait for it.
+ */
+export interface SourceDocumentSecretScan {
+  readonly done: boolean;
+  /** Never rejects. */
+  readonly finished: Promise<void>;
+}
+
+const FINISHED_SOURCE_DOCUMENT_SECRET_SCAN: SourceDocumentSecretScan =
+  Object.freeze({ done: true, finished: Promise.resolve() });
+
+/**
+ * `eagerlyClassifySourceDocumentSecrets` in slices (D163). The first slice
+ * runs before this returns: a page that fits it is scanned in the caller's
+ * task, as before, and the scan it returns is done already.
+ *
+ * Between slices only the cursor is kept, the nodes still to visit and
+ * whether each lies below a secret. Every slice opens its own walk and
+ * secret-ancestor memo and closes them before it yields. What the page does
+ * meanwhile is the lifetime observer's (`rememberSourceMutationSecrets`):
+ * an added or moved node is classified there, through its subtree; an
+ * attribute's old credential value is remembered; and what leaves a secret
+ * ancestor is remembered secret. A node removed after it was put on the
+ * stack is still classified, where its ancestry now places it; one whose
+ * inherited secrecy no longer holds is marked anyway, which only hides
+ * more. Over the node budget, or on a throw, the whole document is secret,
+ * as in the one-task scan.
+ */
+export function startSourceDocumentSecretScan(
+  sourceDocument: Document,
+  sourceWindow: Window,
+  classifier: StickySourceSecretClassifier,
+  clock: SliceClock,
+): SourceDocumentSecretScan {
+  const root = sourceDocument.documentElement;
+  if (!root) return FINISHED_SOURCE_DOCUMENT_SECRET_SCAN;
+  const cursor = createSourceSecretScanCursor(root);
+  const expired = (): boolean => clock.expired();
+  if (classifySourceSecretScanSlice(cursor, sourceWindow, classifier, { expired })) {
+    return FINISHED_SOURCE_DOCUMENT_SECRET_SCAN;
+  }
+  let done = false;
+  const finished = (async (): Promise<void> => {
+    try {
+      do {
+        await clock.next();
+      } while (!classifySourceSecretScanSlice(
+        cursor,
+        sourceWindow,
+        classifier,
+        { expired },
+      ));
+    } catch {
+      // A turn that cannot be given leaves the scan unfinished: the whole
+      // document is secret, as on overflow.
+      rememberSourceNodeSecret(root, classifier);
+    }
+    done = true;
+  })();
+  return {
+    get done() {
+      return done;
+    },
+    finished,
+  };
+}
+
+/** Where a credential scan stands: what is left to visit, and below what. */
+interface SourceSecretScanCursor {
+  /** Marked secret, with all it holds, when the scan cannot finish. */
+  readonly root: Node;
+  readonly stack: Array<{
+    readonly node: Node;
+    readonly secretAncestor: boolean;
+  }>;
+  visited: number;
+}
+
+function createSourceSecretScanCursor(root: Node): SourceSecretScanCursor {
+  return { root, stack: [{ node: root, secretAncestor: false }], visited: 0 };
+}
+
+/**
+ * Classifies nodes from the cursor until none is left, or `expired` says
+ * the slice is over (asked after each node, so a slice always visits one).
+ * True when the scan is over: complete, or past the node budget or broken,
+ * in which case its root was marked secret.
+ */
+function classifySourceSecretScanSlice(
+  cursor: SourceSecretScanCursor,
+  sourceWindow: Window,
+  classifier: StickySourceSecretClassifier,
+  options: {
+    readonly freshRoots?: boolean;
+    readonly expired?: () => boolean;
+  } = {},
+): boolean {
+  const { stack } = cursor;
   const secretAncestors = createSourceSecretAncestorMemo();
-  const rootWalk = beginSourceShadowRootWalk();
+  const rootWalk = beginSourceShadowRootWalk({ fresh: options.freshRoots });
   try {
-    while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
+    let first = true;
+    while (stack.length > 0 && cursor.visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
+      if (!first && options.expired?.()) return false;
+      first = false;
       const current = stack.pop();
       if (!current) break;
-      visited += 1;
+      cursor.visited += 1;
       // Do not short-circuit on inherited secrecy: every visited identity
       // must become sticky before a later move can detach it from the secret
       // ancestor. Flat-tree ancestry and conservative DOM traversal context
@@ -2265,12 +2410,13 @@ export function eagerlyClassifySourceDocumentSecrets(
       }
     }
   } catch {
-    rememberSourceNodeSecret(root, classifier);
-    return;
+    rememberSourceNodeSecret(cursor.root, classifier);
+    return true;
   } finally {
     rootWalk.end();
   }
-  if (stack.length > 0) rememberSourceNodeSecret(root, classifier);
+  if (stack.length > 0) rememberSourceNodeSecret(cursor.root, classifier);
+  return true;
 }
 
 /**
@@ -2480,44 +2626,12 @@ export function eagerlyClassifySourceDocumentSubtree(
   classifier: StickySourceSecretClassifier,
   options: { readonly freshRoots?: boolean } = {},
 ): void {
-  const stack: Array<{
-    readonly node: Node;
-    readonly secretAncestor: boolean;
-  }> = [{ node: root, secretAncestor: false }];
-  let visited = 0;
-  const secretAncestors = createSourceSecretAncestorMemo();
-  const rootWalk = beginSourceShadowRootWalk({ fresh: options.freshRoots });
-  try {
-    while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
-      const current = stack.pop();
-      if (!current) break;
-      visited += 1;
-      const flatTreeSecret = hasSourceCredentialSecretAncestor(
-        current.node,
-        classifier,
-        sourceWindow,
-        secretAncestors,
-      );
-      if (current.secretAncestor && !flatTreeSecret) {
-        rememberSourceNodeSecret(current.node, classifier);
-      }
-      const secret = current.secretAncestor || flatTreeSecret;
-      const children = [...current.node.childNodes];
-      if (current.node.nodeType === ELEMENT_NODE) {
-        const shadowRoot = safelyReadShadowRoot(current.node as Element);
-        if (shadowRoot) children.push(...[...shadowRoot.childNodes]);
-      }
-      for (let index = children.length - 1; index >= 0; index -= 1) {
-        stack.push({ node: children[index]!, secretAncestor: secret });
-      }
-    }
-  } catch {
-    rememberSourceNodeSecret(root, classifier);
-    return;
-  } finally {
-    rootWalk.end();
-  }
-  if (stack.length > 0) rememberSourceNodeSecret(root, classifier);
+  classifySourceSecretScanSlice(
+    createSourceSecretScanCursor(root),
+    sourceWindow,
+    classifier,
+    { freshRoots: options.freshRoots },
+  );
 }
 
 function oldStyleUsedTextSecurity(value: string): boolean {

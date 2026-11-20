@@ -41,10 +41,12 @@ import {
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 import {
+  beginSourceHeldAnimationPass,
   listSourceHeldAnimations,
   readSourceHeldAnimationStyle,
 } from './source-held-animation';
 import {
+  beginSourceShadowRootWalk,
   readSourceAssignedSlot,
   readSourceShadowRoot,
 } from './source-shadow-root';
@@ -108,6 +110,40 @@ export interface HtmlMirrorElementNode {
   readonly shadowRoot?: HtmlMirrorShadowRoot;
   /** Canonical extension-owned shell replacing one hard-secret source root. */
   readonly opaquePlaceholder?: true;
+  /**
+   * The element's children (and its root's, which then says so too) come
+   * in a part of the same checkpoint (D163): a read in slices stopped here.
+   * It has none of its own until the part fills it.
+   */
+  readonly childrenFollow?: true;
+  /**
+   * Only in a preview (D163): the element is a box of this border-box
+   * height, in CSS pixels, and nothing of what it holds was read.
+   */
+  readonly placeholder?: HtmlMirrorPlaceholder;
+}
+
+/** What a preview keeps of an element far from the viewport: its height (D163). */
+export interface HtmlMirrorPlaceholder {
+  readonly height: number;
+}
+
+/** The tallest box a placeholder may stand for, as the page's own size. */
+export const MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT = 1_000_000;
+
+/**
+ * What a part of a checkpoint brings for one node marked `childrenFollow`
+ * (D163): an element's children or a shadow root's.
+ */
+export interface HtmlMirrorCheckpointFill {
+  readonly nodeId: number;
+  readonly children: readonly HtmlMirrorNode[];
+  /**
+   * More of the node's children follow in a later fill, appended in order
+   * (D163): a slice ran out in the middle of a long list. The node stays
+   * waiting until a fill without it.
+   */
+  readonly more?: true;
 }
 
 export interface HtmlMirrorElementHints {
@@ -151,6 +187,8 @@ export interface HtmlMirrorShadowRoot {
    * builds the root; see `HtmlMirrorElementHints.assignedNodeIds`.
    */
   readonly slotAssignment?: 'manual';
+  /** Its children come in a part of the checkpoint; see the element's. */
+  readonly childrenFollow?: true;
 }
 
 export interface HtmlMirrorTextNode {
@@ -446,6 +484,67 @@ interface SerializeContext {
   readonly slotRegions: Map<Element, SourceSlotRegion>;
   /** The note of the reader this read is for; see `SourceSlotReadings`. */
   readonly slotReadings: SourceSlotReadings | undefined;
+  /** A read in slices, or a preview, may leave content for later (D163). */
+  readonly cut?: SourceReadCut;
+}
+
+/**
+ * How a read leaves an element's content out (D163). The sliced read
+ * (`beginSourceDocumentRead`) stops descending once its slice has run out
+ * and queues what it left; the preview (`sanitizeSourcePreview`) stands a
+ * box of the element's size in for what it holds.
+ */
+interface SourceReadCut {
+  /** The sliced read: the slice has run out. */
+  readonly expired?: () => boolean;
+  /** The sliced read: an element whose content follows in a unit. */
+  readonly defer?: (unit: SourceReadUnit) => void;
+  /**
+   * The sliced read: the first children of an element (or of its root)
+   * whose list a slice stopped in, and the elements among them, which the
+   * index of what is painted adds with this step.
+   */
+  readonly prefill?: (
+    fill: HtmlMirrorCheckpointFill,
+    elements: readonly Element[],
+  ) => void;
+  /** The preview: the height to keep instead of the content, if any. */
+  readonly placeholder?: (
+    element: Element,
+    tagName: string,
+    budget: HtmlMirrorReadBudget,
+  ) => number | undefined;
+  /** A node was met a second time in this read: it moved while read. */
+  metTwice: boolean;
+}
+
+/**
+ * An element whose content a slice left (D163): its children, and its
+ * root's when it hosts one, are read later as one unit, in what the element
+ * gave them when it was cut. What its ancestors say then is added to that.
+ */
+interface SourceReadUnit {
+  readonly element: Element;
+  /** Its parent when it was cut: a unit that moved since is not read. */
+  readonly parent: Node | null;
+  readonly nodeId: number;
+  readonly shadow: ShadowRoot | undefined;
+  readonly shadowId: number | undefined;
+  /**
+   * Which list the unit reads from: the element's own children, then its
+   * root's (D135 order); and the node of that list it goes on from, when a
+   * slice stopped in the middle of the list. Undefined: from the start.
+   */
+  readonly phase: 'light' | 'shadow';
+  readonly cursor: Node | undefined;
+  /** The depth its children are read at. */
+  readonly depth: number;
+  readonly privateRegion: boolean;
+  readonly privacyRegion: boolean;
+  readonly privateAttributeRegion: boolean;
+  readonly activationRegion: boolean;
+  readonly nonContentRegion: boolean;
+  readonly visibilityHidden: boolean;
 }
 
 /** What the boxes around a slot do to the nodes drawn in that slot. */
@@ -460,7 +559,7 @@ interface SourceSlotRegion {
   readonly visibilityHidden: boolean;
 }
 
-type NativeSelectParentContext = false | 'select' | 'optgroup' | 'option';
+export type NativeSelectParentContext = false | 'select' | 'optgroup' | 'option';
 
 const UNSAFE_ELEMENTS = new Set([
   'animate',
@@ -1432,6 +1531,114 @@ export function sanitizeSourceDocument(
   });
 }
 
+/**
+ * The context a shell's children are checked in (D163): what the graph
+ * above the shell says, as `readHtmlMirrorNode` passes it down.
+ */
+export interface HtmlMirrorShellContext {
+  readonly depth: number;
+  readonly privateRegion: boolean;
+  readonly nonContentRegion: boolean;
+  readonly styleRegion: boolean;
+  readonly privateAttributeRegion: boolean;
+  readonly activationRegion: boolean;
+  readonly nativeSelectParent: NativeSelectParentContext;
+}
+
+/**
+ * Which shells a graph being checked may hold, and the ones it held (D163):
+ * `childrenFollow` only in a checkpoint sent in parts and in its parts,
+ * `placeholder` only in a preview. Each `childrenFollow` node checked is
+ * noted with the context its children are to be checked in, by its id;
+ * `readHtmlMirrorFillChildren` takes it off.
+ */
+export interface HtmlMirrorShellLedger {
+  readonly childrenFollow: boolean;
+  readonly placeholder: boolean;
+  readonly pending: Map<number, HtmlMirrorShellContext>;
+}
+
+export function createHtmlMirrorShellLedger(
+  allowed: { readonly childrenFollow?: boolean; readonly placeholder?: boolean },
+): HtmlMirrorShellLedger {
+  return {
+    childrenFollow: allowed.childrenFollow === true,
+    placeholder: allowed.placeholder === true,
+    pending: new Map(),
+  };
+}
+
+/**
+ * Checks what a part brings for one shell, in the context the shell was
+ * checked in, against the budget the shell's graph was checked with: the
+ * ids, nodes and bytes of every part are counted as one graph's. The fill
+ * may hold shells of its own. Undefined for a node that is no pending shell
+ * (unknown, or filled already) and for children that do not pass.
+ */
+export function readHtmlMirrorFillChildren(
+  nodeId: unknown,
+  input: unknown,
+  budget: HtmlMirrorReadBudget,
+  ledger: HtmlMirrorShellLedger,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  /** More of the shell's children follow (D163): it stays pending. */
+  more = false,
+): readonly HtmlMirrorNode[] | undefined {
+  if (!isNodeId(nodeId) || !Array.isArray(input)) return undefined;
+  const context = ledger.pending.get(nodeId);
+  if (!context) return undefined;
+  if (!more) ledger.pending.delete(nodeId);
+  const children: HtmlMirrorNode[] = [];
+  for (const child of input) {
+    const parsed = readHtmlMirrorNode(
+      child,
+      budget.ids,
+      context.depth,
+      budget,
+      context.privateRegion,
+      context.nonContentRegion,
+      context.styleRegion,
+      context.privateAttributeRegion,
+      context.activationRegion,
+      fidelityPolicy,
+      context.nativeSelectParent,
+      false,
+      ledger,
+    );
+    if (!parsed) return undefined;
+    children.push(parsed);
+  }
+  return Object.freeze(children);
+}
+
+/**
+ * Whether a node may stand without its content (D163): not a dropdown or
+ * anything in one, not a style sheet or anything in one, nothing void, and
+ * not a secret root's shell, which holds nothing anyway.
+ */
+function isValidTransportedShell(
+  tagName: string,
+  styleRegion: boolean,
+  nativeSelectParent: NativeSelectParentContext,
+  opaquePlaceholder: boolean,
+  childCount: number,
+): boolean {
+  return childCount === 0 && !opaquePlaceholder && !styleRegion &&
+    nativeSelectParent === false && tagName !== 'style' &&
+    !isNativeSelectSemanticTag(tagName) && !isVoidElement(tagName);
+}
+
+function readTransportedPlaceholder(
+  input: unknown,
+): HtmlMirrorPlaceholder | undefined {
+  if (
+    !isRecord(input) || !hasExactKeys(input, ['height']) ||
+    typeof input.height !== 'number' || !Number.isFinite(input.height) ||
+    input.height < 0 || input.height > MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT
+  ) return undefined;
+  return Object.freeze({ height: input.height });
+}
+
 /** Revalidates a transported graph and returns an immutable safe copy. */
 export function readHtmlMirrorNode(
   input: unknown,
@@ -1446,6 +1653,7 @@ export function readHtmlMirrorNode(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   nativeSelectParent: NativeSelectParentContext = false,
   attributeSentinel = false,
+  shells?: HtmlMirrorShellLedger,
 ): HtmlMirrorNode | undefined {
   if (!isRecord(input) || depth > MAX_HTML_MIRROR_DEPTH) return undefined;
   budget.nodes += 1;
@@ -1487,7 +1695,7 @@ export function readHtmlMirrorNode(
       'selectPickerOpen', 'selectPresentationStyle', 'controlText',
       'canvasBackgroundColor', 'resolvedStyleSheetText',
       'customElementDefined', 'assignedNodeIds', 'shadowRoot',
-      'opaquePlaceholder',
+      'opaquePlaceholder', 'childrenFollow', 'placeholder',
     ]) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
@@ -1519,6 +1727,38 @@ export function readHtmlMirrorNode(
       )
       : isSourceSecretPlaceholderTagName(input.tagName))
   ) return undefined;
+  // A shell (D163): allowed only where the ledger says, and only where the
+  // panel can put the content back in.
+  const childrenFollow = input.childrenFollow !== undefined;
+  const placeholder = input.placeholder !== undefined
+    ? readTransportedPlaceholder(input.placeholder)
+    : undefined;
+  if (
+    (childrenFollow && (
+      input.childrenFollow !== true || !shells?.childrenFollow ||
+      input.placeholder !== undefined ||
+      !isValidTransportedShell(
+        input.tagName,
+        styleRegion,
+        nativeSelectParent,
+        opaquePlaceholder,
+        input.children.length,
+      )
+    )) ||
+    (input.placeholder !== undefined && (
+      !placeholder || !shells?.placeholder ||
+      !isValidTransportedShell(
+        input.tagName,
+        styleRegion,
+        nativeSelectParent,
+        opaquePlaceholder,
+        input.children.length,
+      ) ||
+      // Nothing of a placeholder's root travels either.
+      input.shadowRoot !== undefined
+    ))
+  ) return undefined;
+  if (placeholder) budget.bytes += 24;
   const assignedNodeIds = readHtmlMirrorAssignedNodeIds(
     input.assignedNodeIds,
     input.namespace,
@@ -1701,6 +1941,8 @@ export function readHtmlMirrorNode(
       transportedActivationRegion,
       fidelityPolicy,
       transportedNativeSelectParent,
+      false,
+      shells,
     );
     if (!parsed) return undefined;
     children.push(parsed);
@@ -1724,7 +1966,7 @@ export function readHtmlMirrorNode(
       !isRecord(input.shadowRoot) ||
       !hasExactKeysWithOptional(input.shadowRoot, [
         'id', 'mode', 'children', 'adoptedStyleSheets',
-      ], ['slotAssignment']) ||
+      ], ['slotAssignment', 'childrenFollow']) ||
       !isNodeId(input.shadowRoot.id) ||
       input.shadowRoot.mode !== 'open' ||
       (input.shadowRoot.slotAssignment !== undefined &&
@@ -1732,6 +1974,13 @@ export function readHtmlMirrorNode(
       !Array.isArray(input.shadowRoot.children) ||
       budget.ids.has(input.shadowRoot.id)
     ) return undefined;
+    // A root whose children follow in a part of the checkpoint (D163).
+    const transportedShadow: Record<string, unknown> = input.shadowRoot;
+    const shadowFollows = transportedShadow.childrenFollow !== undefined;
+    if (shadowFollows && (
+      transportedShadow.childrenFollow !== true || !shells?.childrenFollow ||
+      (transportedShadow.children as readonly unknown[]).length !== 0
+    )) return undefined;
     budget.nodes += 1;
     budget.bytes += 32;
     budget.ids.add(input.shadowRoot.id);
@@ -1753,6 +2002,8 @@ export function readHtmlMirrorNode(
         transportedActivationRegion,
         fidelityPolicy,
         transportedNativeSelectParent,
+        false,
+        shells,
       );
       if (!parsed) return undefined;
       shadowChildren.push(parsed);
@@ -1763,6 +2014,17 @@ export function readHtmlMirrorNode(
       fidelityPolicy,
     );
     if (!adoptedStyleSheets) return undefined;
+    if (shadowFollows) {
+      shells!.pending.set(transportedShadow.id as number, Object.freeze({
+        depth: depth + 1,
+        privateRegion: transportedPrivateRegion,
+        nonContentRegion: transportedNonContentRegion,
+        styleRegion: transportedStyleRegion,
+        privateAttributeRegion: transportedPrivateAttributeRegion,
+        activationRegion: transportedActivationRegion,
+        nativeSelectParent: transportedNativeSelectParent,
+      }));
+    }
     shadowRoot = Object.freeze({
       id: input.shadowRoot.id,
       mode: 'open',
@@ -1771,7 +2033,19 @@ export function readHtmlMirrorNode(
       ...(input.shadowRoot.slotAssignment === 'manual'
         ? { slotAssignment: 'manual' as const }
         : {}),
+      ...(shadowFollows ? { childrenFollow: true as const } : {}),
     });
+  }
+  if (childrenFollow) {
+    shells!.pending.set(input.id, Object.freeze({
+      depth: depth + 1,
+      privateRegion: transportedPrivateRegion,
+      nonContentRegion: transportedNonContentRegion,
+      styleRegion: transportedStyleRegion,
+      privateAttributeRegion: transportedPrivateAttributeRegion,
+      activationRegion: transportedActivationRegion,
+      nativeSelectParent: transportedNativeSelectParent,
+    }));
   }
   return Object.freeze({
     kind: 'element',
@@ -1798,6 +2072,8 @@ export function readHtmlMirrorNode(
       : {}),
     ...(shadowRoot ? { shadowRoot } : {}),
     ...(opaquePlaceholder ? { opaquePlaceholder: true as const } : {}),
+    ...(childrenFollow ? { childrenFollow: true as const } : {}),
+    ...(placeholder ? { placeholder } : {}),
   });
 }
 
@@ -1829,9 +2105,10 @@ export function readHtmlMirrorDocumentContent(
   rootInput: unknown,
   adoptedStyleSheetsInput: unknown,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  shells?: HtmlMirrorShellLedger,
+  budget: HtmlMirrorReadBudget = createHtmlMirrorReadBudget(),
 ): HtmlMirrorDocumentContent | undefined {
-  const ids = new Set<number>();
-  const budget = createHtmlMirrorReadBudget(ids);
+  const ids = budget.ids;
   const root = readHtmlMirrorNode(
     rootInput,
     ids,
@@ -1843,6 +2120,9 @@ export function readHtmlMirrorDocumentContent(
     false,
     false,
     fidelityPolicy,
+    false,
+    false,
+    shells,
   );
   if (!root || root.kind !== 'element' || root.tagName !== 'html') {
     return undefined;
@@ -1854,6 +2134,18 @@ export function readHtmlMirrorDocumentContent(
   );
   if (!adoptedStyleSheets) return undefined;
   return Object.freeze({ root, adoptedStyleSheets });
+}
+
+/**
+ * Revalidates the adopted sheets of a document (or of anything read with
+ * `budget`): each distinct text is checked and counted once per budget.
+ */
+export function readHtmlMirrorAdoptedStyleSheets(
+  input: unknown,
+  budget: HtmlMirrorReadBudget,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+): readonly string[] | undefined {
+  return readTransportedAdoptedStyleSheets(input, budget, fidelityPolicy);
 }
 
 export function htmlMirrorJsonBytes(value: unknown): number {
@@ -1938,7 +2230,13 @@ function serializeNode(
     return undefined;
   }
   const id = context.registry.getId(live);
-  if (!isNodeId(id) || context.budget.ids.has(id)) return undefined;
+  if (!isNodeId(id)) return undefined;
+  if (context.budget.ids.has(id)) {
+    // Met before in this read. A read in slices meets a node twice only when
+    // the page moved it from what was read into what was not (D163).
+    if (context.cut) context.cut.metTwice = true;
+    return undefined;
+  }
   // Directly slotted Text can render inside a credential boundary that is
   // absent from its DOM-parent chain. Apply the shared Node-aware boundary
   // before evaluating nodeValue, and before an inherited hard-secret context
@@ -2183,6 +2481,35 @@ function serializeNode(
   // Open or closed (D125). Read before the element's own children: they are
   // drawn where this root slots them, not where they sit in the page (D135).
   const sourceShadow = readSourceShadowRoot(liveElement);
+  const cutFacts: SourceCutFacts | undefined = context.cut &&
+    isSourceCutCandidate(liveElement, tagName, styleRegion, sourceShadow)
+    ? {
+      liveElement,
+      id,
+      namespace,
+      tagName,
+      attributes,
+      hints,
+      sourceShadow,
+      customElementHost,
+      depth: context.depth + 1,
+      privateRegion,
+      privacyRegion,
+      privateAttributeRegion,
+      activationRegion,
+      nonContentRegion,
+      visibilityHidden,
+    }
+    : undefined;
+  if (cutFacts) {
+    const cut = cutSourceElement(context, context.cut!, cutFacts);
+    if (cut !== false) return cut;
+  }
+  // A read in slices may stop in the middle of this element's list, or its
+  // root's, once it has read a child of it (D163): what follows comes in a
+  // later fill, appended. The elements read are kept for the index.
+  const split = cutFacts && context.cut?.defer ? context.cut : undefined;
+  const lightElements: Element[] | undefined = split ? [] : undefined;
   // What its elements' ended script animations hold is worked out for the
   // root as one, before any of them is read.
   if (sourceShadow) listSourceHeldAnimations(sourceShadow);
@@ -2195,7 +2522,20 @@ function serializeNode(
     const childFidelityPolicy = tagName === 'style' && context.styleWork.exhausted
       ? 'conservative'
       : context.fidelityPolicy;
+    let lightRead = 0;
     for (const liveChild of sourceStructuralChildNodes(liveElement)) {
+      if (split && lightElements && lightRead > 0 && split.expired?.() === true) {
+        const resumed = cutSourceElement(context, split, cutFacts!, {
+          cursor: liveChild,
+          read: children,
+          elements: lightElements,
+        });
+        return resumed === false ? undefined : resumed;
+      }
+      lightRead += 1;
+      if (lightElements && liveChild.nodeType === Node.ELEMENT_NODE) {
+        lightElements.push(liveChild as Element);
+      }
       const slotRegion = sourceShadow
         ? readSourceSlotRegion(
             liveChild,
@@ -2290,7 +2630,23 @@ function serializeNode(
     if (!isNodeId(shadowId) || context.budget.ids.has(shadowId)) return undefined;
     admitNode(context.budget, shadowId, 32, context.representability);
     const shadowChildren: HtmlMirrorNode[] = [];
+    const shadowElements: Element[] | undefined = split ? [] : undefined;
+    let shadowRead = 0;
     for (const childNode of sourceShadow.childNodes) {
+      if (split && shadowElements && shadowRead > 0 && split.expired?.() === true) {
+        return splitSourceShadowContent(context, split, cutFacts!, {
+          shadow: sourceShadow,
+          shadowId,
+          cursor: childNode,
+          read: shadowChildren,
+          elements: [...lightElements ?? [], ...shadowElements],
+          children,
+        });
+      }
+      shadowRead += 1;
+      if (shadowElements && childNode.nodeType === Node.ELEMENT_NODE) {
+        shadowElements.push(childNode as Element);
+      }
       const child = serializeNode(childNode, {
         ...context,
         privateRegion,
@@ -2333,6 +2689,957 @@ function serializeNode(
     ...hints,
     ...(shadowRoot ? { shadowRoot } : {}),
   });
+}
+
+/**
+ * Whether a read may leave this element's content for later (D163). Never a
+ * dropdown or anything in one (the panel takes a dropdown whole, and its
+ * chosen entries are counted against its options), never a style sheet or
+ * anything in one (its text is checked as one sheet), and only an element
+ * that holds something: children or a root.
+ */
+function isSourceCutCandidate(
+  element: Element,
+  tagName: string,
+  styleRegion: boolean,
+  sourceShadow: ShadowRoot | undefined,
+): boolean {
+  if (
+    styleRegion ||
+    isNativeSelectSemanticTag(tagName) ||
+    // The whole read reads nothing of these.
+    isVoidElement(tagName) ||
+    isSourceNativeTextControlTagName(tagName)
+  ) return false;
+  return sourceShadow !== undefined || element.childNodes.length > 0;
+}
+
+/** What `serializeNode` knows of an element when a read may cut it. */
+interface SourceCutFacts {
+  readonly liveElement: Element;
+  readonly id: number;
+  readonly namespace: HtmlMirrorNamespace;
+  readonly tagName: string;
+  readonly attributes: readonly (readonly [string, string])[];
+  readonly hints: HtmlMirrorElementHints;
+  readonly sourceShadow: ShadowRoot | undefined;
+  readonly customElementHost: boolean;
+  readonly depth: number;
+  readonly privateRegion: boolean;
+  readonly privacyRegion: boolean;
+  readonly privateAttributeRegion: boolean;
+  readonly activationRegion: boolean;
+  readonly nonContentRegion: boolean;
+  readonly visibilityHidden: boolean;
+}
+
+/**
+ * Emits an element without its content when the read leaves it (D163):
+ * `false` when the content is read now, as always. The element itself was
+ * admitted and decided as in any read; only what it holds is left.
+ */
+function cutSourceElement(
+  context: SerializeContext,
+  cut: SourceReadCut,
+  facts: SourceCutFacts,
+  /**
+   * The slice stopped in the element's own list (D163): the children read
+   * go as the first fill, with `more`, and the unit goes on from `cursor`.
+   */
+  resume?: {
+    readonly cursor: Node;
+    readonly read: readonly HtmlMirrorNode[];
+    readonly elements: readonly Element[];
+  },
+): HtmlMirrorNode | undefined | false {
+  const shell = {
+    kind: 'element' as const,
+    id: facts.id,
+    namespace: facts.namespace,
+    tagName: facts.tagName,
+    attributes: facts.attributes,
+    children: Object.freeze([]) as readonly HtmlMirrorNode[],
+    ...facts.hints,
+  };
+  if (cut.placeholder && !resume) {
+    const height = cut.placeholder(facts.liveElement, facts.tagName, context.budget);
+    if (height === undefined) return false;
+    context.budget.bytes += 24;
+    if (context.budget.bytes > MAX_HTML_MIRROR_BYTES) {
+      incrementRepresentability(context.representability, 'capacityOmissionCount');
+      throw new HtmlMirrorCapacityError(true);
+    }
+    return Object.freeze({
+      ...shell,
+      placeholder: Object.freeze({ height }),
+    });
+  }
+  if (!cut.defer || (!resume && cut.expired?.() !== true)) return false;
+  // Counted as the whole read counts them, so that the counts of a read in
+  // slices are the one-task read's.
+  if (facts.customElementHost && !facts.sourceShadow) {
+    incrementRepresentability(
+      context.representability,
+      'customElementHostWithoutAccessibleOpenRootCount',
+    );
+  }
+  let shadowRoot: HtmlMirrorShadowRoot | undefined;
+  let shadowId: number | undefined;
+  if (facts.sourceShadow) {
+    incrementRepresentability(
+      context.representability,
+      'accessibleOpenShadowRootCount',
+    );
+    shadowId = context.registry.getId(facts.sourceShadow);
+    if (!isNodeId(shadowId)) return undefined;
+    if (context.budget.ids.has(shadowId)) {
+      cut.metTwice = true;
+      return undefined;
+    }
+    admitNode(context.budget, shadowId, 32, context.representability);
+    // The root's adopted sheets are read with the shell, before its content
+    // (the whole read reads them after it): the shell carries them. Only
+    // which sheet runs into a style limit first can differ.
+    const adoptedStyleSheets = captureAdoptedStyleSheets(
+      facts.sourceShadow,
+      context.baseUrl,
+      context.budget,
+      context.styleWork,
+      context.representability,
+      context.fidelityPolicy,
+    );
+    if (!adoptedStyleSheets) return undefined;
+    shadowRoot = Object.freeze({
+      id: shadowId,
+      mode: 'open',
+      children: Object.freeze([]),
+      adoptedStyleSheets,
+      ...((facts.sourceShadow as Partial<ShadowRoot>).slotAssignment === 'manual'
+        ? { slotAssignment: 'manual' as const }
+        : {}),
+      childrenFollow: true as const,
+    });
+  }
+  if (resume) {
+    cut.prefill?.(Object.freeze({
+      nodeId: facts.id,
+      children: Object.freeze([...resume.read]),
+      more: true as const,
+    }), resume.elements);
+  }
+  cut.defer({
+    element: facts.liveElement,
+    parent: facts.liveElement.parentNode,
+    nodeId: facts.id,
+    shadow: facts.sourceShadow,
+    shadowId,
+    phase: 'light',
+    cursor: resume?.cursor,
+    depth: facts.depth,
+    privateRegion: facts.privateRegion,
+    privacyRegion: facts.privacyRegion,
+    privateAttributeRegion: facts.privateAttributeRegion,
+    activationRegion: facts.activationRegion,
+    nonContentRegion: facts.nonContentRegion,
+    visibilityHidden: facts.visibilityHidden,
+  });
+  return Object.freeze({
+    ...shell,
+    ...(shadowRoot ? { shadowRoot } : {}),
+    childrenFollow: true as const,
+  });
+}
+
+/**
+ * The slice stopped in the list of an element's root, after the element's
+ * own children were read whole (D163): the element goes with its children,
+ * its root as a shell carrying its adopted sheets, the root's children read
+ * so far as the root's first fill (`more`), and the unit goes on from
+ * `cursor` in the root's list.
+ */
+function splitSourceShadowContent(
+  context: SerializeContext,
+  cut: SourceReadCut,
+  facts: SourceCutFacts,
+  split: {
+    readonly shadow: ShadowRoot;
+    readonly shadowId: number;
+    readonly cursor: Node;
+    readonly read: readonly HtmlMirrorNode[];
+    readonly elements: readonly Element[];
+    readonly children: readonly HtmlMirrorNode[];
+  },
+): HtmlMirrorNode | undefined {
+  const adoptedStyleSheets = captureAdoptedStyleSheets(
+    split.shadow,
+    context.baseUrl,
+    context.budget,
+    context.styleWork,
+    context.representability,
+    context.fidelityPolicy,
+  );
+  if (!adoptedStyleSheets) return undefined;
+  cut.prefill?.(Object.freeze({
+    nodeId: split.shadowId,
+    children: Object.freeze([...split.read]),
+    more: true as const,
+  }), split.elements);
+  cut.defer?.({
+    element: facts.liveElement,
+    parent: facts.liveElement.parentNode,
+    nodeId: facts.id,
+    shadow: split.shadow,
+    shadowId: split.shadowId,
+    phase: 'shadow',
+    cursor: split.cursor,
+    depth: facts.depth,
+    privateRegion: facts.privateRegion,
+    privacyRegion: facts.privacyRegion,
+    privateAttributeRegion: facts.privateAttributeRegion,
+    activationRegion: facts.activationRegion,
+    nonContentRegion: facts.nonContentRegion,
+    visibilityHidden: facts.visibilityHidden,
+  });
+  return Object.freeze({
+    kind: 'element',
+    id: facts.id,
+    namespace: facts.namespace,
+    tagName: facts.tagName,
+    attributes: facts.attributes,
+    children: Object.freeze([...split.children]),
+    ...facts.hints,
+    shadowRoot: Object.freeze({
+      id: split.shadowId,
+      mode: 'open',
+      children: Object.freeze([]),
+      adoptedStyleSheets,
+      ...((split.shadow as Partial<ShadowRoot>).slotAssignment === 'manual'
+        ? { slotAssignment: 'manual' as const }
+        : {}),
+      childrenFollow: true as const,
+    }),
+  });
+}
+
+/** What every slice of one read shares (D163). */
+interface SourceReadShared {
+  readonly registry: HtmlMirrorIdRegistry;
+  readonly baseUrl: string;
+  readonly budget: HtmlMirrorReadBudget;
+  readonly styleWork: HtmlMirrorStyleWorkBudget;
+  readonly representability: HtmlMirrorRepresentabilityCollector;
+  readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
+  readonly controlledContent: SourceControlledContentPolicy;
+  readonly slotReadings: SourceSlotReadings | undefined;
+}
+
+/** What one run of a unit read (D163). */
+type SourceReadUnitRun =
+  | {
+      readonly fills: readonly HtmlMirrorCheckpointFill[];
+      /** The elements of the lists it read, for the index of what is painted. */
+      readonly elements: readonly Element[];
+      /** The rest of the unit, when the slice ran out in the middle of it. */
+      readonly rest?: SourceReadUnit;
+    }
+  /** The element left the page or its parent: the live path's to patch. */
+  | 'skipped'
+  /** The child it was to go on from is no child of it any more. */
+  | 'restart';
+
+/**
+ * Reads one unit, or as much of it as the slice allows: what an element
+ * that a slice left holds, its root's content after its own children as the
+ * whole read has them (D135). It reads one child at least; when the slice
+ * runs out after that, what it read goes as a fill with `more`, and the
+ * rest of the unit goes on from the next child in a later step. Each run
+ * takes the element's context from what it gave its content when it was
+ * cut, and adds what its ancestors in the page say now, as a children read
+ * of the live path rebuilds it: an ancestor hidden, edited or made secret
+ * since is honoured, and nothing is let through that the cut withheld.
+ *
+ * A run that goes on in a list checks that the child it goes on from is
+ * still a child of the element (or its root); if not, the read starts
+ * again. Children put in before that child, or taken out of the part
+ * already read, are not looked for: the element is mirrored, and the
+ * childList record of that change is replayed by the live path after the
+ * copy is acknowledged.
+ */
+function readSourceReadUnit(
+  unit: SourceReadUnit,
+  shared: SourceReadShared,
+  secretAncestors: SourceSecretAncestorMemo,
+  slotRegions: Map<Element, SourceSlotRegion>,
+  cut: SourceReadCut,
+): SourceReadUnitRun {
+  const element = unit.element;
+  if (
+    !element.isConnected ||
+    element.parentNode !== unit.parent ||
+    readSourceShadowRoot(element) !== unit.shadow
+  ) return 'skipped';
+  const { controlledContent } = shared;
+  const context: SerializeContext = {
+    registry: shared.registry,
+    baseUrl: shared.baseUrl,
+    budget: shared.budget,
+    styleWork: shared.styleWork,
+    privateRegion: unit.privateRegion ||
+      hasSourceBaseWithheldAncestor(element, controlledContent),
+    privacyRegion: unit.privacyRegion ||
+      hasSourcePrivacyWithheldAncestor(element),
+    privateAttributeRegion: unit.privateAttributeRegion ||
+      hasSourcePrivateAttributeElementAncestor(element),
+    activationRegion: unit.activationRegion ||
+      hasSourceActivationElementAncestor(element),
+    nonContentRegion: unit.nonContentRegion || hasNonContentAncestor(element),
+    styleRegion: Boolean(element.closest('style')),
+    hardSecretRegion: hasSourceCredentialSecretAncestor(
+      element,
+      undefined,
+      undefined,
+      secretAncestors,
+    ),
+    visibilityHidden: unit.visibilityHidden ||
+      readSourceHiddenRegionState(element, controlledContent).visibilityHidden,
+    depth: unit.depth,
+    representability: shared.representability,
+    fidelityPolicy: shared.fidelityPolicy,
+    controlledContent,
+    secretAncestors,
+    slotRegions,
+    slotReadings: shared.slotReadings,
+    cut,
+  };
+  // Each run is a step of its own, whose pass has not listed the root.
+  if (unit.shadow) listSourceHeldAnimations(unit.shadow);
+  const fills: HtmlMirrorCheckpointFill[] = [];
+  const elements: Element[] = [];
+  let read = 0;
+  // Where a run may stop: after one child at least, once the slice is out.
+  const stops = (): boolean => read > 0 && cut.expired?.() === true;
+  /** The list from the run's own place in it; undefined when that is lost. */
+  const listFrom = (
+    list: Iterable<Node>,
+    cursor: Node | undefined,
+  ): readonly Node[] | undefined => {
+    const nodes = Array.from(list);
+    if (!cursor) return nodes;
+    const at = nodes.indexOf(cursor);
+    return at < 0 ? undefined : nodes.slice(at);
+  };
+  if (unit.phase === 'light') {
+    const nodes = listFrom(sourceStructuralChildNodes(element), unit.cursor);
+    if (!nodes) return 'restart';
+    const children: HtmlMirrorNode[] = [];
+    for (const liveChild of nodes) {
+      if (stops()) {
+        fills.push(Object.freeze({
+          nodeId: unit.nodeId,
+          children: Object.freeze(children),
+          more: true as const,
+        }));
+        return { fills, elements, rest: { ...unit, cursor: liveChild } };
+      }
+      read += 1;
+      if (liveChild.nodeType === Node.ELEMENT_NODE) elements.push(liveChild as Element);
+      const slotRegion = unit.shadow
+        ? readSourceSlotRegion(
+            liveChild,
+            controlledContent,
+            slotRegions,
+            secretAncestors,
+          )
+        : undefined;
+      if (unit.shadow) {
+        noteSourceSlotReading(
+          shared.slotReadings,
+          liveChild,
+          slotRegion,
+          context.visibilityHidden,
+        );
+      }
+      const child = serializeNode(liveChild, {
+        ...context,
+        privateRegion: context.privateRegion || slotRegion?.withheld === true ||
+          slotRegion?.privacy === true,
+        privacyRegion: context.privacyRegion || slotRegion?.privacy === true,
+        activationRegion: context.activationRegion ||
+          slotRegion?.activation === true,
+        visibilityHidden: slotRegion && liveChild.nodeType === Node.TEXT_NODE
+          ? slotRegion.visibilityHidden
+          : context.visibilityHidden,
+      });
+      if (child) children.push(child);
+    }
+    fills.push(Object.freeze({
+      nodeId: unit.nodeId,
+      children: Object.freeze(children),
+    }));
+    if (!unit.shadow || unit.shadowId === undefined) return { fills, elements };
+    if (stops()) {
+      return {
+        fills,
+        elements,
+        rest: { ...unit, phase: 'shadow', cursor: undefined },
+      };
+    }
+  }
+  const shadow = unit.shadow!;
+  const shadowId = unit.shadowId!;
+  const nodes = listFrom(shadow.childNodes, unit.phase === 'shadow' ? unit.cursor : undefined);
+  if (!nodes) return 'restart';
+  const shadowChildren: HtmlMirrorNode[] = [];
+  for (const childNode of nodes) {
+    if (stops()) {
+      fills.push(Object.freeze({
+        nodeId: shadowId,
+        children: Object.freeze(shadowChildren),
+        more: true as const,
+      }));
+      return {
+        fills,
+        elements,
+        rest: { ...unit, phase: 'shadow', cursor: childNode },
+      };
+    }
+    read += 1;
+    if (childNode.nodeType === Node.ELEMENT_NODE) elements.push(childNode as Element);
+    const child = serializeNode(childNode, context);
+    if (child) shadowChildren.push(child);
+  }
+  fills.push(Object.freeze({
+    nodeId: shadowId,
+    children: Object.freeze(shadowChildren),
+  }));
+  return { fills, elements };
+}
+
+/**
+ * Where a step left the index of what is painted to be built (D163): the
+ * document's root at the first step, and each element of a list a step read
+ * (with what it holds, down to the step's `deferred` elements).
+ */
+export interface SourceDocumentReadIndexRoot {
+  readonly element: Element;
+  /** The element itself was read in this step too. */
+  readonly includeSelf: boolean;
+}
+
+/** The whole-document values a read takes at its end, as fresh as can be. */
+export interface SourceDocumentReadValues {
+  readonly adoptedStyleSheets: readonly string[];
+  readonly documentMode: HtmlMirrorDocumentMode;
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly documentWidth: number;
+  readonly documentHeight: number;
+}
+
+export type SourceDocumentReadStep =
+  | {
+      /** `done`: nothing is left, and `document` holds the end's values. */
+      readonly outcome: 'continue' | 'done';
+      /** The first step only: the document's root, with shells. */
+      readonly root?: HtmlMirrorElementNode;
+      /** What this step read for the shells, in order. */
+      readonly fills: readonly HtmlMirrorCheckpointFill[];
+      /** The subtrees this step read, for `SourceVisibilityBoundaryIndex.beginBuild`. */
+      readonly indexRoots: readonly SourceDocumentReadIndexRoot[];
+      /** The elements this step left as shells: an index walk stops at each. */
+      readonly deferred: ReadonlySet<Element>;
+      /** Units not read: the element left the page or its parent. */
+      readonly skippedUnits: number;
+      readonly document?: SourceDocumentReadValues;
+    }
+  /** A node was met twice: the page moved it into what was not read yet. */
+  | { readonly outcome: 'restart' }
+  /** Over a limit: today's capacity omission (`stream_overflow`). */
+  | { readonly outcome: 'overflow' }
+  /** The document has no `<html>` root that the mirror can hold. */
+  | { readonly outcome: 'failed' };
+
+export interface SourceDocumentReadOptions {
+  readonly representability?: HtmlMirrorRepresentabilityCollector;
+  readonly fidelityPolicy?: SelectableReplicaFidelityPolicy;
+  /**
+   * The policy of the whole page (built in slices before the read starts).
+   * Without one, one is built whole here.
+   */
+  readonly controlledContent?: SourceControlledContentPolicy;
+  readonly slotReadings?: SourceSlotReadings;
+  /** The clock of each step's held-animation pass. */
+  readonly now?: () => number;
+  /**
+   * `false`: the caller opens a fresh shadow-root walk around each step and
+   * what it reads beside it in the same task (the controlled-content
+   * policy, the marks), so that each element's root is asked about once in
+   * that task, as in the one-task read. Each step then walks inside it.
+   */
+  readonly freshRootWalk?: boolean;
+}
+
+/** A read of the whole document in slices; see `beginSourceDocumentRead`. */
+export interface SourceDocumentRead {
+  readonly representability: HtmlMirrorRepresentabilityCollector;
+  /** Nodes admitted and bytes counted so far, over every step. */
+  readonly budget: Readonly<Pick<HtmlMirrorReadBudget, 'nodes' | 'bytes' | 'inspectedNodes'>>;
+  /** Units queued and not read yet. */
+  readonly pendingUnits: number;
+  /** No further step: done, restarted, over a limit or failed. */
+  readonly finished: boolean;
+  /**
+   * Reads until `clock` runs out, and at least one unit (the root, at the
+   * first step). Every cache of one walk (the secret-ancestor memo, the slot
+   * boxes, the shadow-root walk, the held-animation pass) is opened and
+   * closed within the step: nothing is kept across the caller's yield.
+   */
+  step(clock: { expired(): boolean }): SourceDocumentReadStep;
+}
+
+/**
+ * Reads the document as `sanitizeSourceDocument` does, in steps (D163).
+ * When a step's clock runs out, every element it has not descended into yet
+ * is emitted as a shell (`childrenFollow`, no children) and queued; a later
+ * step reads what it holds as a unit and returns it as fills. For a page
+ * that does not change in between, the root filled with every fill is the
+ * one-task read's graph (with the same registry), and the counts are its
+ * counts: one node budget, one byte counter, one style budget and one
+ * adopted-sheet table count every step. A step on a page that changed reads
+ * each unit as it is then: every node is classified for secrets as it is
+ * read, as always. A node met a second time (moved from what was read into
+ * what was not) ends the read with `restart`; a unit whose element left is
+ * skipped and filled empty, for the live path to patch.
+ *
+ * The first step lists the document's script animations; each step lists
+ * the roots it enters, as the whole read does.
+ */
+export function beginSourceDocumentRead(
+  sourceDocument: Document,
+  sourceWindow: Window,
+  registry: HtmlMirrorIdRegistry,
+  options: SourceDocumentReadOptions = {},
+): SourceDocumentRead {
+  const representability = options.representability ??
+    createHtmlMirrorRepresentabilityCollector();
+  const budget = createHtmlMirrorReadBudget();
+  const queue: SourceReadUnit[] = [];
+  let queueHead = 0;
+  let started = false;
+  let finished = false;
+  let root: HtmlMirrorElementNode | undefined;
+  let shared: SourceReadShared | undefined;
+  const end = (outcome: 'restart' | 'overflow' | 'failed'): SourceDocumentReadStep => {
+    finished = true;
+    queue.length = 0;
+    queueHead = 0;
+    return Object.freeze({ outcome });
+  };
+  const step = (clock: { expired(): boolean }): SourceDocumentReadStep => {
+    if (finished) return Object.freeze({ outcome: 'failed' as const });
+    const documentElement = sourceDocument.documentElement;
+    if (!documentElement) return end('failed');
+    if (!shared) {
+      const controlledContent = options.controlledContent ??
+        createSourceControlledContentPolicy(
+          sourceDocument,
+          sourceWindow,
+          MAX_HTML_MIRROR_NODES,
+        );
+      if (controlledContent.incomplete) {
+        incrementRepresentability(representability, 'capacityOmissionCount');
+        return end('overflow');
+      }
+      shared = {
+        registry,
+        baseUrl: sourceDocument.baseURI,
+        budget,
+        styleWork: createHtmlMirrorStyleWorkBudget(),
+        representability,
+        fidelityPolicy: options.fidelityPolicy ?? 'conservative',
+        controlledContent,
+        slotReadings: options.slotReadings,
+      };
+    }
+    const deferred = new Set<Element>();
+    const fills: HtmlMirrorCheckpointFill[] = [];
+    const indexRoots: SourceDocumentReadIndexRoot[] = [];
+    // The first fills of lists a slice stopped in, as one read made them:
+    // inner lists stop first, so they are handed on outermost first, after
+    // the fill or root that holds the outermost shell.
+    const prefills: HtmlMirrorCheckpointFill[] = [];
+    const addElements = (elements: readonly Element[]): void => {
+      for (const element of elements) {
+        indexRoots.push(Object.freeze({ element, includeSelf: true }));
+      }
+    };
+    const handOnPrefills = (): void => {
+      for (let index = prefills.length - 1; index >= 0; index -= 1) {
+        fills.push(prefills[index]!);
+      }
+      prefills.length = 0;
+    };
+    const cut: SourceReadCut = {
+      expired: () => clock.expired(),
+      defer: (unit) => {
+        queue.push(unit);
+        deferred.add(unit.element);
+      },
+      prefill: (fill, elements) => {
+        prefills.push(fill);
+        addElements(elements);
+      },
+      metTwice: false,
+    };
+    let skippedUnits = 0;
+    let stepRoot: HtmlMirrorElementNode | undefined;
+    const rootWalk = beginSourceShadowRootWalk({
+      fresh: options.freshRootWalk !== false,
+    });
+    const heldPass = beginSourceHeldAnimationPass(
+      sourceDocument,
+      true,
+      options.now,
+    );
+    try {
+      // Fresh for this step: none of these may outlive it.
+      const secretAncestors = createSourceSecretAncestorMemo();
+      const slotRegions = new Map<Element, SourceSlotRegion>();
+      if (!started) {
+        started = true;
+        heldPass.list(sourceDocument);
+        const serialized = serializeNode(documentElement, {
+          registry,
+          baseUrl: shared.baseUrl,
+          budget,
+          styleWork: shared.styleWork,
+          privateRegion: false,
+          privacyRegion: false,
+          privateAttributeRegion: false,
+          activationRegion: false,
+          nonContentRegion: false,
+          styleRegion: false,
+          hardSecretRegion: false,
+          visibilityHidden: false,
+          depth: 0,
+          representability,
+          fidelityPolicy: shared.fidelityPolicy,
+          controlledContent: shared.controlledContent,
+          secretAncestors,
+          slotRegions,
+          slotReadings: shared.slotReadings,
+          cut,
+        });
+        if (cut.metTwice) return end('restart');
+        if (
+          !serialized || serialized.kind !== 'element' ||
+          serialized.tagName !== 'html'
+        ) return end('failed');
+        root = serialized;
+        stepRoot = serialized;
+        indexRoots.push(Object.freeze({
+          element: documentElement,
+          includeSelf: true,
+        }));
+        handOnPrefills();
+      }
+      while (queueHead < queue.length) {
+        // A step reads at least one unit, and the root's step may go on.
+        if ((stepRoot || fills.length > 0 || skippedUnits > 0) && clock.expired()) {
+          break;
+        }
+        const unit = queue[queueHead]!;
+        queueHead += 1;
+        const run = readSourceReadUnit(
+          unit,
+          shared,
+          secretAncestors,
+          slotRegions,
+          cut,
+        );
+        if (cut.metTwice || run === 'restart') return end('restart');
+        if (run !== 'skipped') {
+          fills.push(...run.fills);
+          handOnPrefills();
+          addElements(run.elements);
+          if (run.rest) queue.push(run.rest);
+        } else {
+          // Ended with an empty fill, so that every shell is completed once:
+          // the live path patches what the element's parent holds now.
+          prefills.length = 0;
+          skippedUnits += 1;
+          if (unit.phase === 'light') {
+            fills.push(Object.freeze({
+              nodeId: unit.nodeId,
+              children: Object.freeze([]),
+            }));
+          }
+          if (unit.shadowId !== undefined) {
+            fills.push(Object.freeze({
+              nodeId: unit.shadowId,
+              children: Object.freeze([]),
+            }));
+          }
+        }
+      }
+      if (queueHead >= queue.length) {
+        queue.length = 0;
+        queueHead = 0;
+      }
+      let values: SourceDocumentReadValues | undefined;
+      if (queue.length === 0) {
+        const adoptedStyleSheets = captureAdoptedStyleSheets(
+          sourceDocument,
+          shared.baseUrl,
+          budget,
+          shared.styleWork,
+          representability,
+          shared.fidelityPolicy,
+        );
+        if (!adoptedStyleSheets) return end('overflow');
+        values = readSourceDocumentReadValues(
+          sourceDocument,
+          sourceWindow,
+          documentElement,
+          adoptedStyleSheets,
+        );
+        finished = true;
+      }
+      return Object.freeze({
+        outcome: values ? 'done' as const : 'continue' as const,
+        ...(stepRoot ? { root: stepRoot } : {}),
+        fills: Object.freeze(fills),
+        indexRoots: Object.freeze(indexRoots),
+        deferred,
+        skippedUnits,
+        ...(values ? { document: values } : {}),
+      });
+    } catch (error) {
+      if (error instanceof HtmlMirrorCapacityError) {
+        if (!error.diagnosticRecorded) {
+          incrementRepresentability(representability, 'capacityOmissionCount');
+        }
+        return end('overflow');
+      }
+      finished = true;
+      throw error;
+    } finally {
+      heldPass.end();
+      rootWalk.end();
+    }
+  };
+  return {
+    representability,
+    budget,
+    get pendingUnits() {
+      return queue.length - queueHead;
+    },
+    get finished() {
+      return finished;
+    },
+    step,
+  };
+}
+
+function readSourceDocumentReadValues(
+  sourceDocument: Document,
+  sourceWindow: Window,
+  documentElement: Element,
+  adoptedStyleSheets: readonly string[],
+): SourceDocumentReadValues {
+  return Object.freeze({
+    adoptedStyleSheets,
+    documentMode: sourceDocumentMode(sourceDocument),
+    viewportWidth: boundedDimension(sourceWindow.innerWidth),
+    viewportHeight: boundedDimension(sourceWindow.innerHeight),
+    documentWidth: boundedDimension(Math.max(
+      documentElement.scrollWidth,
+      sourceDocument.body?.scrollWidth ?? 0,
+    )),
+    documentHeight: boundedDimension(Math.max(
+      documentElement.scrollHeight,
+      sourceDocument.body?.scrollHeight ?? 0,
+    )),
+  });
+}
+
+/** How many nodes a preview reads before every further box is a placeholder. */
+export const DEFAULT_HTML_MIRROR_PREVIEW_READ_NODES = 3_000;
+/** Past this many nodes, placeholders included, a page gets no preview. */
+export const DEFAULT_HTML_MIRROR_PREVIEW_MAX_NODES = 12_000;
+
+export interface SourcePreviewOptions {
+  readonly representability?: HtmlMirrorRepresentabilityCollector;
+  readonly fidelityPolicy?: SelectableReplicaFidelityPolicy;
+  readonly controlledContent?: SourceControlledContentPolicy;
+  /** Nodes read in full before every further box is a placeholder. */
+  readonly maxReadNodes?: number;
+  /** Nodes in all; a page past it gets no preview (`undefined`). */
+  readonly maxNodes?: number;
+  readonly now?: () => number;
+}
+
+/**
+ * A preview of the document in one task (D163): what is near the viewport
+ * as the whole read has it, and every block-level box (not inline, not
+ * `display: contents`) whose border box lies wholly outside the viewport
+ * stretched by its own height above and below as an element with
+ * `placeholder: { height }` and nothing of its content. Each element's own
+ * privacy decisions are the whole read's: a secret root is its shell, a
+ * withheld element keeps its withheld attributes. Nothing in `<head>`,
+ * no dropdown and no style sheet becomes a placeholder, and nothing outside
+ * HTML. Past `maxReadNodes` nodes every box that holds something is one,
+ * whatever its place; past `maxNodes` in all there is no preview.
+ */
+export function sanitizeSourcePreview(
+  sourceDocument: Document,
+  sourceWindow: Window,
+  registry: HtmlMirrorIdRegistry,
+  options: SourcePreviewOptions = {},
+): HtmlMirrorDocumentGraph | undefined {
+  const representability = options.representability ??
+    createHtmlMirrorRepresentabilityCollector();
+  const documentElement = sourceDocument.documentElement;
+  if (!documentElement) return undefined;
+  const maxReadNodes = Math.max(
+    1,
+    Math.floor(options.maxReadNodes ?? DEFAULT_HTML_MIRROR_PREVIEW_READ_NODES),
+  );
+  const maxNodes = Math.min(
+    MAX_HTML_MIRROR_NODES,
+    Math.max(maxReadNodes, Math.floor(
+      options.maxNodes ?? DEFAULT_HTML_MIRROR_PREVIEW_MAX_NODES,
+    )),
+  );
+  const viewportWidth = Number(sourceWindow.innerWidth);
+  const viewportHeight = Number(sourceWindow.innerHeight);
+  if (
+    !Number.isFinite(viewportWidth) || !Number.isFinite(viewportHeight) ||
+    viewportWidth <= 0 || viewportHeight <= 0
+  ) return undefined;
+  const placeholder = (
+    element: Element,
+    tagName: string,
+    budget: HtmlMirrorReadBudget,
+  ): number | undefined => {
+    if (budget.nodes > maxNodes) {
+      throw new HtmlMirrorCapacityError();
+    }
+    if (
+      element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+      tagName === 'html' || tagName === 'head' || tagName === 'body' ||
+      element.parentElement?.localName.toLowerCase() === 'head'
+    ) return undefined;
+    let rect: DOMRect;
+    try {
+      rect = element.getBoundingClientRect();
+    } catch {
+      return undefined;
+    }
+    const height = Number.isFinite(rect.height)
+      ? Math.max(0, Math.min(
+          MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT,
+          Math.round(rect.height),
+        ))
+      : 0;
+    if (budget.nodes >= maxReadNodes) return height;
+    if (!sourceOuterDisplayIsBlock(element, sourceWindow)) return undefined;
+    const near = rect.bottom > -viewportHeight &&
+      rect.top < viewportHeight * 2 &&
+      rect.right > 0 && rect.left < viewportWidth;
+    return near ? undefined : height;
+  };
+  const cut: SourceReadCut = { placeholder, metTwice: false };
+  const budget = createHtmlMirrorReadBudget();
+  const styleWork = createHtmlMirrorStyleWorkBudget();
+  const fidelityPolicy = options.fidelityPolicy ?? 'conservative';
+  const rootWalk = beginSourceShadowRootWalk({ fresh: true });
+  const heldPass = beginSourceHeldAnimationPass(
+    sourceDocument,
+    true,
+    options.now,
+  );
+  try {
+    const controlledContent = options.controlledContent ??
+      createSourceControlledContentPolicy(
+        sourceDocument,
+        sourceWindow,
+        MAX_HTML_MIRROR_NODES,
+      );
+    if (controlledContent.incomplete) return undefined;
+    heldPass.list(sourceDocument);
+    const root = serializeNode(documentElement, {
+      registry,
+      baseUrl: sourceDocument.baseURI,
+      budget,
+      styleWork,
+      privateRegion: false,
+      privacyRegion: false,
+      privateAttributeRegion: false,
+      activationRegion: false,
+      nonContentRegion: false,
+      styleRegion: false,
+      hardSecretRegion: false,
+      visibilityHidden: false,
+      depth: 0,
+      representability,
+      fidelityPolicy,
+      controlledContent,
+      secretAncestors: createSourceSecretAncestorMemo(),
+      slotRegions: new Map(),
+      slotReadings: undefined,
+      cut,
+    });
+    if (!root || root.kind !== 'element' || root.tagName !== 'html') {
+      return undefined;
+    }
+    const adoptedStyleSheets = captureAdoptedStyleSheets(
+      sourceDocument,
+      sourceDocument.baseURI,
+      budget,
+      styleWork,
+      representability,
+      fidelityPolicy,
+    );
+    if (!adoptedStyleSheets) return undefined;
+    return Object.freeze({
+      root,
+      ...readSourceDocumentReadValues(
+        sourceDocument,
+        sourceWindow,
+        documentElement,
+        adoptedStyleSheets,
+      ),
+    });
+  } catch (error) {
+    if (error instanceof HtmlMirrorCapacityError) return undefined;
+    throw error;
+  } finally {
+    heldPass.end();
+    rootWalk.end();
+  }
+}
+
+/**
+ * Whether an element's outer display is block-level: not inline (or ruby),
+ * not `display: contents`, not an inner part of a table, and displayed.
+ */
+function sourceOuterDisplayIsBlock(
+  element: Element,
+  sourceWindow: Window,
+): boolean {
+  try {
+    const display = sourceWindow.getComputedStyle(element).display
+      ?.trim().toLowerCase();
+    if (!display) return false;
+    return !(
+      display === 'none' || display === 'contents' ||
+      display.startsWith('inline') || display.startsWith('ruby') ||
+      display.startsWith('table-')
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -6344,7 +7651,12 @@ function classifiedStyleOmissionCount(
     target.strictResourcePolicyBlockCount;
 }
 
-function boundedDimension(value: number): number {
+/**
+ * A page size as the protocol carries it: whole pixels from 1 to 1,000,000.
+ * The first copy and every later size update both use it, or a page taller
+ * than the cap fails each update and is read whole again (D162).
+ */
+export function boundedDimension(value: number): number {
   return Number.isFinite(value)
     ? Math.max(1, Math.min(1_000_000, Math.round(value)))
     : 1;

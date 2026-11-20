@@ -306,6 +306,35 @@ describe('TranslationDriver page translation', () => {
     expect(harness.statuses.at(-1)).toContain('complete');
   });
 
+  it('reports a run that began on a preview and ended on its full copy as complete (D163)', async () => {
+    const harness = setup({
+      translate: async () => {
+        // The full copy is committed during the run, at a new lease.
+        harness.state.snapshot = { ...harness.state.snapshot!, replayLease: 2 };
+        return { ...complete(), document: DOCUMENT, replayLease: 2 };
+      },
+    });
+    harness.state.resolvedSourceLanguage = 'ja';
+    harness.state.availability = 'available';
+    await harness.driver.startTranslation(false, 1);
+    expect(harness.state.translationComplete).toBe(true);
+    expect(harness.statuses.at(-1)).toContain('Translation is complete');
+  });
+
+  it('does not report a run on a lease that a newer copy replaced', async () => {
+    const harness = setup({
+      translate: async () => {
+        harness.state.snapshot = { ...harness.state.snapshot!, replayLease: 2 };
+        return { ...complete(), document: DOCUMENT, replayLease: 1 };
+      },
+    });
+    harness.state.resolvedSourceLanguage = 'ja';
+    harness.state.availability = 'available';
+    await harness.driver.startTranslation(false, 1);
+    expect(harness.state.translationComplete).toBe(false);
+    expect(harness.statuses.join('\n')).not.toContain('Translation is complete');
+  });
+
   it('reports a partial translation and a cancellation', async () => {
     const partial = setup({
       translate: async () => ({ ...complete(3), completed: 1, failed: 2 }),

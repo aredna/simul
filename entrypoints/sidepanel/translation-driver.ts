@@ -52,6 +52,7 @@ import {
   type CompanionState,
 } from './companion-state';
 import type { Currency, CurrencyToken } from './currency';
+import { settle } from '../../lib/settle';
 
 export interface LiveLanguageContext {
   documentLanguage?: string;
@@ -732,24 +733,29 @@ export class TranslationDriver {
       if (state.activeTranslationKey === requestedKey) return state.activeTranslationTask;
       state.activeAbortController?.abort();
       const previousTask = state.activeTranslationTask;
-      return previousTask.catch(() => undefined).then(async () => {
+      return (async () => {
+        await settle(previousTask);
         if (
           !this.environment.captureCoordinator.isCurrent(generation) ||
           state.currentTranslationTaskKey(generation) !== requestedKey
         ) return;
         await this.startTranslation(automatic, generation);
-      });
+      })();
     }
     const task = this.#runTranslation(automatic, generation);
     state.activeTranslationTask = task;
     state.activeTranslationKey = requestedKey;
-    const settle = () => {
+    void (async () => {
+      try {
+        await task;
+      } catch {
+        // The caller sees the failure; only the bookkeeping is done here.
+      }
       if (state.activeTranslationTask === task) {
         state.activeTranslationTask = undefined;
         state.activeTranslationKey = undefined;
       }
-    };
-    void task.then(settle, settle);
+    })();
     return task;
   }
 
@@ -784,9 +790,13 @@ export class TranslationDriver {
     state.translationComplete = false;
     this.environment.showProgress(UI_STRINGS.progressPreparingModel, 0, 1);
     updateControls();
+    // A run that began on a preview of the page ends on its full copy
+    // (D163): from then on it is the copy's run.
+    let runSnapshot: Pick<ReplicaTranslationSnapshot, 'document' | 'replayLease'> =
+      requestedSnapshot;
     const stillCurrent = () =>
       captureCoordinator.isCurrent(generation) &&
-      this.currentReplicaSnapshotMatches(requestedSnapshot) &&
+      this.currentReplicaSnapshotMatches(runSnapshot) &&
       state.isCurrentTranslationPair(pair) &&
       !state.isLiveSourceOnlyMode;
     try {
@@ -816,6 +826,13 @@ export class TranslationDriver {
           ),
         onWaitForText: () => this.environment.showReadingProgress?.(),
       });
+      const shown = state.snapshot;
+      if (
+        shown && result.document && result.replayLease === shown.replayLease &&
+        sameSourceDocument(result.document, shown.document) &&
+        sameSourceDocument(shown.document, requestedSnapshot.document) &&
+        coordinator.isResultCurrent(result)
+      ) runSnapshot = shown;
       if (!stillCurrent()) return;
       const pdf = this.environment.isPdfShown?.() ?? false;
       // Scanned pages left unread (a failed page) keep Translate page on,

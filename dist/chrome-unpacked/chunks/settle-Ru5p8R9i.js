@@ -1,0 +1,1 @@
+async function e(e){try{return{ok:!0,value:await e}}catch(e){return{ok:!1,error:e}}}async function t(e){return await null,e()}export{e as n,t};

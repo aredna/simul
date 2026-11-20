@@ -433,9 +433,27 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     expect(fixture.comparisons()).toBe(compared + 1);
   });
 
-  it('compares when the resize observer reports and the page was not compared since it was read whole', () => {
+  it('does not compare again at the observer\'s first report of the size the page was read whole at (D162)', () => {
     const fixture = sessionFixture('<main><p id="probe">text</p></main>');
     fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    let compared = fixture.comparisons();
+    fixture.resizeObserved();
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.comparisons()).toBe(compared);
+
+    // The page has grown since it was read: news.
+    fixture.size.height = 4_000;
+    compared = fixture.comparisons();
+    fixture.resizeObserved();
+    fixture.flushFrame();
+    expect(fixture.comparisons()).toBe(compared + 1);
+  });
+
+  it('compares at the observer\'s first report when the page grew after it was read whole (D162)', () => {
+    const fixture = sessionFixture('<main><p id="probe">text</p></main>');
+    fixture.start();
+    fixture.size.height = 4_000;
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
     const compared = fixture.comparisons();
     fixture.resizeObserved();
@@ -443,7 +461,20 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     expect(fixture.comparisons()).toBe(compared + 1);
   });
 
-  it('compares at the size it compared at once the page has been read whole outside a frame', () => {
+  it('still compares a change the page made before the panel acknowledged it (D162)', () => {
+    const fixture = sessionFixture('<main><p id="probe">text</p></main>');
+    fixture.start();
+    const probe = fixture.byId('probe');
+    probe.setAttribute('class', 'changed');
+    fixture.mutate({ type: 'attributes', target: probe, attributeName: 'class' });
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const compared = fixture.comparisons();
+    fixture.resizeObserved();
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.comparisons()).toBe(compared + 1);
+  });
+
+  it('does not compare at the size a rebuild read the page whole at (D162)', () => {
     const fixture = sessionFixture('<main><p id="probe">text</p></main>');
     fixture.start();
     fixture.settle();
@@ -451,15 +482,20 @@ describe('the page reader does a frame\'s work once (D144)', () => {
     probe.setAttribute('class', 'changed');
     fixture.mutate({ type: 'attributes', target: probe, attributeName: 'class' });
     fixture.flushFrame();
-    // The mirror is built again: that read was no frame's, and the
-    // observer's next report may tell of something later.
+    // The mirror is built again: that read compared the whole page at this
+    // size, so the observer's report of it is no news.
     const sent = (fixture.port.posts.at(-1) as {
       identity: { sequence: number };
     }).identity.sequence;
     fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, sent));
     fixture.port.emitMessage(createHtmlMirrorAck(identity, sent));
     while (fixture.frames.length > 0) fixture.flushFrame();
-    const compared = fixture.comparisons();
+    let compared = fixture.comparisons();
+    fixture.resizeObserved();
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.comparisons()).toBe(compared);
+    fixture.size.height = 4_500;
+    compared = fixture.comparisons();
     fixture.resizeObserved();
     fixture.flushFrame();
     expect(fixture.comparisons()).toBe(compared + 1);
