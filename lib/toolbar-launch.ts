@@ -105,7 +105,9 @@ export class ToolbarLauncher {
   // The newest authorization sent to the companion window. A window that a
   // newer click took over while its page was still loading was not
   // listening when the message went out; it asks for it when it starts
-  // (D121).
+  // (D121). It is handed over once: when the page answers the message or
+  // asks for it, it is dropped, so a page reloaded later is not handed an
+  // old click's tab (D174).
   #windowAuthorization:
     | { readonly windowId: number; readonly message: AuthorizedTabMessage }
     | undefined;
@@ -180,15 +182,18 @@ export class ToolbarLauncher {
    * message may have gone out before the page could listen (D121). The page
    * orders it against what it already has by its launch stamp, as it does a
    * message. A page that asks has started: the click that brought its window
-   * forward has its answer.
+   * forward has its answer. Handed over once (D174): the page has it now,
+   * and the same page reloaded later starts from its own address, which
+   * names the tab it last followed, not from an old click's tab whose
+   * access may have gone with the reader's move to another tab.
    */
   windowAuthorization(windowId: number | undefined): AuthorizedTabMessage | undefined {
-    if (windowId !== undefined && this.#unanswered?.windowId === windowId) {
-      this.#unanswered = undefined;
-    }
-    return windowId !== undefined && this.#windowAuthorization?.windowId === windowId
-      ? this.#windowAuthorization.message
-      : undefined;
+    if (windowId === undefined) return undefined;
+    if (this.#unanswered?.windowId === windowId) this.#unanswered = undefined;
+    const kept = this.#windowAuthorization;
+    if (kept?.windowId !== windowId) return undefined;
+    this.#windowAuthorization = undefined;
+    return kept.message;
   }
 
   async #launch(
@@ -299,6 +304,28 @@ export class ToolbarLauncher {
       identity.tabId,
     );
     let existing = this.#detachedWindow;
+    // The open companion windows, each with the tab its address names, once
+    // asked for: `null` when they cannot be listed.
+    let listed: readonly DetachedCompanionWindow[] | null | undefined;
+    if (
+      existing &&
+      this.#environment.preferences().popoutTabMode !== 'active' &&
+      this.#environment.companionWindows
+    ) {
+      // A pinned window is reused only for its own tab, and its page names
+      // that tab in its address, which it rewrites when it follows or is
+      // pinned to another (D174). The tab it was opened for, as the worker
+      // remembers it, may be another. A window whose page does not list
+      // yet (still loading) names the tab it was opened for.
+      listed = await this.#listCompanionWindows();
+      if (clickSequence !== this.#clickSequence) return false;
+      const known = existing;
+      const current = listed?.find((window) => window.id === known.id);
+      if (current && current.sourceTabId !== known.sourceTabId) {
+        existing = current;
+        if (this.#detachedWindow?.id === current.id) this.#detachedWindow = current;
+      }
+    }
     if (existing && !reusable(existing)) existing = undefined;
     if (existing) {
       const known = existing;
@@ -309,7 +336,9 @@ export class ToolbarLauncher {
     }
     if (!existing) {
       if (!this.#environment.companionWindows) return false;
-      const found = await this.#findOpenDetachedWindow(identity.tabId, reusable);
+      listed ??= await this.#listCompanionWindows();
+      if (clickSequence !== this.#clickSequence) return false;
+      const found = await this.#findOpenDetachedWindow(listed ?? [], identity.tabId, reusable);
       if (!found || clickSequence !== this.#clickSequence) return false;
       // Taken over: a click that is still opening this very window finds
       // that out and leaves it open.
@@ -378,6 +407,9 @@ export class ToolbarLauncher {
     message: AuthorizedTabMessage | CompanionWindowClickMessage,
   ): Promise<void> {
     if (await this.#send(message) !== true) return;
+    // The page has the authorization: it is not kept for it to ask again
+    // (D174).
+    if (this.#windowAuthorization?.message === message) this.#windowAuthorization = undefined;
     const unanswered = this.#unanswered;
     if (
       unanswered !== undefined &&
@@ -540,16 +572,10 @@ export class ToolbarLauncher {
    * that is closing.
    */
   async #findOpenDetachedWindow(
+    open: readonly DetachedCompanionWindow[],
     tabId: number,
     reusable: (window: DetachedCompanionWindow) => boolean,
   ): Promise<DetachedCompanionWindow | undefined> {
-    let open: readonly DetachedCompanionWindow[];
-    try {
-      open = await this.#environment.companionWindows?.() ?? [];
-    } catch {
-      // Not knowing costs one more window, as before.
-      return undefined;
-    }
     const candidates = [
       ...open.filter((window) => window.sourceTabId === tabId),
       ...open.filter((window) => window.sourceTabId !== tabId && reusable(window)),
@@ -558,6 +584,19 @@ export class ToolbarLauncher {
       if (await this.#isOpenCompanionWindow(candidate.id)) return candidate;
     }
     return undefined;
+  }
+
+  /**
+   * The companion pages open now, each with the window it is in and the
+   * tab its address names; `null` when they cannot be listed. Not knowing
+   * costs one more window, as before.
+   */
+  async #listCompanionWindows(): Promise<readonly DetachedCompanionWindow[] | null> {
+    try {
+      return await this.#environment.companionWindows?.() ?? [];
+    } catch {
+      return null;
+    }
   }
 
   /** Whether `windowId` is an open window of the companion's own kind. */

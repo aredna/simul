@@ -83,6 +83,11 @@ export interface CompanionActivity {
 export interface CompanionStateOptions {
   readonly isDetachedWindow: boolean;
   readonly detachedSourceWindowId?: number | undefined;
+  /**
+   * Told each tab the companion comes to follow; a companion window names
+   * it in its own address for the worker (D174).
+   */
+  readonly onFollowedPageIdentity?: ((identity: CapturedPageIdentity) => void) | undefined;
 }
 
 /**
@@ -108,7 +113,18 @@ export class CompanionState {
   resetInFlight = false;
 
   // Followed page: which tab the companion mirrors and what it last read.
-  followedPageIdentity: CapturedPageIdentity | undefined;
+  #followedPageIdentity: CapturedPageIdentity | undefined;
+  readonly #onFollowedPageIdentity: ((identity: CapturedPageIdentity) => void) | undefined;
+
+  get followedPageIdentity(): CapturedPageIdentity | undefined {
+    return this.#followedPageIdentity;
+  }
+
+  set followedPageIdentity(identity: CapturedPageIdentity | undefined) {
+    this.#followedPageIdentity = identity;
+    if (identity) this.#onFollowedPageIdentity?.(identity);
+  }
+
   capturedPageIdentity: CapturedPageIdentity | undefined;
   /**
    * The PDF from this computer that the panel shows or is opening, in place
@@ -174,6 +190,7 @@ export class CompanionState {
   constructor(options: CompanionStateOptions) {
     this.isDetachedWindow = options.isDetachedWindow;
     this.detachedSourceWindowId = options.detachedSourceWindowId;
+    this.#onFollowedPageIdentity = options.onFollowedPageIdentity;
   }
 
   /** The page to rebuild: the followed tab, else the last captured one. */

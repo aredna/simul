@@ -59,6 +59,7 @@ import {
 } from '../../lib/required-host-permissions';
 import {
   asksForSiteAccess,
+  detachedCompanionAddressFor,
   namesCompanionWindow,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
@@ -247,6 +248,14 @@ const isDetachedWindow = detachedIdentityHint !== undefined;
 const state = new CompanionState({
   isDetachedWindow,
   detachedSourceWindowId: detachedIdentityHint?.windowId,
+  // A companion window names the tab it follows in its own address, which
+  // the worker reads to find the window for a click on that tab (D174).
+  onFollowedPageIdentity: isDetachedWindow
+    ? (identity) => {
+        const address = detachedCompanionAddressFor(window.location.href, identity);
+        if (address !== undefined) history.replaceState(history.state, '', address);
+      }
+    : undefined,
 });
 const currency = new Currency();
 const provider = new ChromeTranslatorProvider();

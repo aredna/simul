@@ -47,6 +47,43 @@ export function parseDetachedPageIdentityHint(
     : undefined;
 }
 
+/**
+ * The companion window's address once its page follows the tab `identity`:
+ * the same address naming that tab and its window, or `undefined` when it
+ * names them already or names no tab at all (the side panel, which must
+ * never be made to look like a window). The page writes it into its own
+ * address (D174) so that the worker, which tells companion windows apart
+ * by the tab their address names (`readDetachedCompanionWindow`), finds a
+ * window that followed the reader to another tab, or was pinned there, for
+ * a click on that tab. It is a hint of which window to bring forward and
+ * which tab to look up after a reload, never access: reading a tab takes
+ * Simul's site access or a toolbar click's grant, and the address only ever
+ * names a tab the page already followed.
+ */
+export function detachedCompanionAddressFor(
+  href: string,
+  identity: Pick<CapturedPageIdentity, 'tabId' | 'windowId'>,
+): string | undefined {
+  if (
+    !Number.isSafeInteger(identity.tabId) || identity.tabId < 0 ||
+    !Number.isSafeInteger(identity.windowId) || identity.windowId < 0
+  ) return undefined;
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return undefined;
+  }
+  const named = parseDetachedPageIdentityHint(url.search);
+  if (
+    !named ||
+    (named.tabId === identity.tabId && named.windowId === identity.windowId)
+  ) return undefined;
+  url.searchParams.set('sourceTabId', String(identity.tabId));
+  url.searchParams.set('sourceWindowId', String(identity.windowId));
+  return url.toString();
+}
+
 /** Missing URLs are stale: activeTab access may have expired or the tab may be
  * restricted, and either case must not leave old companion content visible. */
 export function isSamePageIdentity(

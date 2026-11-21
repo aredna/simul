@@ -144,7 +144,15 @@ describe('toolbar launch', () => {
     fixture.fail('send:authorized:22', 'Could not establish connection. Receiving end does not exist.');
     await fixture.launcher.click(tabB);
     expect(fixture.messages).toHaveLength(1);
-    expect(fixture.launcher.windowAuthorization(100)).toEqual({
+    // Only the window it was sent to may have it.
+    expect(fixture.launcher.windowAuthorization(WINDOW_A)).toBeUndefined();
+    expect(fixture.launcher.windowAuthorization(undefined)).toBeUndefined();
+
+    // A click on a tab Simul cannot read only brings the window forward:
+    // the newest authorization is still the earlier click's.
+    await fixture.launcher.click({ id: 31, windowId: WINDOW_A, url: 'file:///reports/a.pdf' });
+    const handed = fixture.launcher.windowAuthorization(100);
+    expect(handed).toEqual({
       type: 'simul:authorized-tab',
       tabId: 22,
       windowId: WINDOW_B,
@@ -153,30 +161,43 @@ describe('toolbar launch', () => {
       launchSequence: 2,
       companionWindowId: 100,
     });
-    expect(fixture.launcher.windowAuthorization(100)).toBe(fixture.messages[0]);
-    // Only the window it was sent to may have it.
-    expect(fixture.launcher.windowAuthorization(WINDOW_A)).toBeUndefined();
-    expect(fixture.launcher.windowAuthorization(undefined)).toBeUndefined();
+    expect(handed).toBe(fixture.messages[0]);
+    // Handed over once (D174): the page reloaded later starts from its
+    // own address, not from this click's tab.
+    expect(fixture.launcher.windowAuthorization(100)).toBeUndefined();
 
-    // A click on a tab Simul cannot read only brings the window forward:
-    // the newest authorization is still the earlier click's.
-    await fixture.launcher.click({ id: 31, windowId: WINDOW_A, url: 'file:///reports/a.pdf' });
-    expect(fixture.launcher.windowAuthorization(100)).toMatchObject({ tabId: 22, launchSequence: 2 });
-
+    fixture.fail('send:authorized:11', 'Could not establish connection. Receiving end does not exist.');
+    await fixture.launcher.click(tabA);
     fixture.launcher.windowRemoved(100);
+    expect(fixture.launcher.windowAuthorization(100)).toBeUndefined();
+  });
+
+  it('drops the kept authorization once the window\'s page has answered it (D174)', async () => {
+    const fixture = createFixture({ surface: 'popout', hydrated: true });
+    await fixture.launcher.click(tabA);
+    // Still loading: the newer click's authorization waits for the page.
+    fixture.silence(100);
+    await fixture.launcher.click(tabB);
+    // The page has started; the next click's message it answers itself.
+    fixture.listening(100);
+    await fixture.launcher.click(tabA);
+    expect(fixture.messages.at(-1)).toMatchObject({ tabId: 11, launchSequence: 3 });
+    // Reloaded now, the page is handed no click's tab: neither the one it
+    // has had nor an older one.
     expect(fixture.launcher.windowAuthorization(100)).toBeUndefined();
   });
 
   it('keeps the newer click\'s authorization when two sends cross (D121)', async () => {
     const fixture = createFixture({ surface: 'popout', hydrated: true });
     await fixture.launcher.click(tabA);
+    // The window's page is not listening yet.
+    fixture.silence(100);
     // The older click is held while the window is brought forward; the
     // newer one overtakes it.
     const held = fixture.hold('focus:100');
     const older = fixture.launcher.click(tabA);
     await held.reached;
     await fixture.launcher.click(tabB);
-    expect(fixture.launcher.windowAuthorization(100)).toMatchObject({ tabId: 22, launchSequence: 3 });
     held.release();
     await older;
     // The older message still goes out, as before; the window orders the
@@ -227,6 +248,32 @@ describe('toolbar launch', () => {
   });
 
   describe('a window the worker did not open (D134)', () => {
+    it('finds a pinned window by the tab its address names now, not the one it was opened for (D174)', async () => {
+      const fixture = createFixture({
+        surface: 'popout', hydrated: true, listsWindows: true, popoutTabMode: 'locked',
+      });
+      await fixture.launcher.click(tabA);
+      expect(fixture.openWindows()).toEqual([100]);
+      // Its page followed the reader to B and was pinned there.
+      fixture.readdressed(100, 22);
+
+      // A click on A is not given the window that shows B: A gets its own.
+      fixture.calls.length = 0;
+      await fixture.launcher.click(tabA);
+      expect(fixture.calls).toEqual([
+        'windows', 'get:1', 'create', 'remember:popout', 'close:1',
+      ]);
+      expect(fixture.openWindows()).toEqual([100, 101]);
+
+      // A click on B brings forward the window pinned to B.
+      fixture.calls.length = 0;
+      await fixture.launcher.click(tabB);
+      expect(fixture.calls).toEqual([
+        'windows', 'get:100', 'focus:100', 'send:authorized:22', 'close:2',
+      ]);
+      expect(fixture.created).toHaveLength(2);
+    });
+
     it('takes over the window the panel\'s own button opened instead of opening another', async () => {
       const fixture = createFixture({ surface: 'popout', hydrated: true, listsWindows: true });
       fixture.openedElsewhere(300, 11);
@@ -235,7 +282,8 @@ describe('toolbar launch', () => {
         'windows', 'get:300', 'focus:300', 'send:authorized:22', 'close:2',
       ]);
       expect(fixture.created).toHaveLength(0);
-      expect(fixture.launcher.windowAuthorization(300)).toMatchObject({ tabId: 22 });
+      // Its page answered: nothing is kept for it to ask for (D174).
+      expect(fixture.launcher.windowAuthorization(300)).toBeUndefined();
       // Known from now on: the next click does not look for it again.
       fixture.calls.length = 0;
       await fixture.launcher.click(tabA);
@@ -1146,6 +1194,11 @@ function createFixture(options: {
     },
     /** The companion page in a tab of browser window `windowId`. */
     shownAsTab: (windowId: number, sourceTabId: number) => { asTabs.set(windowId, sourceTabId); },
+    /**
+     * The window's page names another tab in its address: it followed the
+     * reader there, or was pinned there (D174).
+     */
+    readdressed: (windowId: number, sourceTabId: number) => { sources.set(windowId, sourceTabId); },
     /** A companion window the worker did not open: the panel's own button did. */
     openedElsewhere: (windowId: number, sourceTabId: number) => {
       open.add(windowId);

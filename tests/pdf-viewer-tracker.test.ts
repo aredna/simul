@@ -536,6 +536,31 @@ describe('PdfViewerTracker', () => {
     expect(guess.index).toBe(0);
   });
 
+  it('takes two reports a fraction of a millisecond apart for one frame, not a fast movement (D174)', () => {
+    // Chrome 138 with the companion window: a wheel scroll of 10 px a frame
+    // handed two frames over 0.3 ms apart.
+    const viewer = new FakeViewer(pages(60), 0.5, 700);
+    const tracker = new PdfViewerTracker(pages(60));
+    viewer.scrollTo(viewer.pages[10]!.top * viewer.zoom);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 10);
+    const frames = (count: number) => {
+      for (let frame = 0; frame < count; frame += 1) {
+        viewer.scrollTo(viewer.scroll + 10);
+        const track = send(tracker, viewer, 16.7);
+        expect(track.kind).not.toBe('hold');
+        expect(tracker.position?.index).toBe(viewer.topPage());
+      }
+    };
+    frames(20);
+    viewer.scrollTo(viewer.scroll + 10);
+    send(tracker, viewer, 0.3);
+    frames(40);
+    expect(tracker.settle()).toBeUndefined();
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    expect(tracker.doubt).toBeUndefined();
+  });
+
   it('reads a report that arrives after a held movement without a settle', () => {
     const viewer = new FakeViewer(pages(100), 0.7, 757);
     const tracker = new PdfViewerTracker(pages(100));
@@ -906,6 +931,82 @@ describe('PdfViewerTracker doubts (D133)', () => {
       for (const short of [0, 0.83, 1.85]) expect(atEnd(short, scale)).toBe(true);
       for (const short of [2.6, 6]) expect(atEnd(short, scale)).toBe(false);
     }
+  });
+
+  it('reads End without animated scrolling, one report at the bottom, as the end and a guess (D174)', () => {
+    // The bottom is near or far from the place the report also fits
+    // beside the last one, by the view's height: both are read as End.
+    for (const [height, scale] of [
+      [757, undefined], [700, undefined], [640, 1.25], [812, 1.25], [903, 2],
+    ] as const) {
+      const viewer = new FakeViewer(pages(300), 0.7058, height);
+      const tracker = new PdfViewerTracker(pages(300));
+      tracker.setScreenScale(scale);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      for (let frame = 0; frame < 20; frame += 1) {
+        viewer.scrollTo(viewer.scroll + 30);
+        send(tracker, viewer, 16);
+      }
+      expect(tracker.position?.index).toBe(viewer.topPage());
+      expect(tracker.doubt).toBeUndefined();
+
+      // `--disable-smooth-scrolling`: End is one report, and nothing more.
+      viewer.scrollTo(viewer.maxScroll);
+      expect(send(tracker, viewer, 800).kind).toBe('hold');
+      expect(tracker.settle()?.index).toBe(viewer.topPage());
+      expect(viewer.topPage()).toBeGreaterThanOrEqual(298);
+      // A jump to the last page sends that one report too: a capture says.
+      const doubt = tracker.doubt!;
+      expect(doubt.page).toBe(viewer.mostVisible());
+      expect(tracker.place(doubt, viewer.mostVisible())).toBeUndefined();
+      expect(tracker.doubt).toBeUndefined();
+    }
+  });
+
+  it('follows a scroll whose first frame fits the bottom of the PDF too (D174)', () => {
+    const viewer = new FakeViewer(pages(300), 0.7058, 757);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    // 200 pages above the bottom, the report is the one End sends.
+    const pitch = (viewer.pages[1]!.top - viewer.pages[0]!.top) * viewer.zoom;
+    const fits = viewer.maxScroll - 200 * pitch;
+    // The page box there: a jump, which a capture places.
+    viewer.scrollTo(fits - 20);
+    send(tracker, viewer, 800);
+    send(tracker, viewer, 1);
+    tracker.settle();
+    tracker.place(tracker.doubt!, viewer.mostVisible());
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    expect(tracker.doubt).toBeUndefined();
+
+    viewer.scrollTo(fits);
+    expect(send(tracker, viewer, 800).kind).toBe('hold');
+    for (let frame = 0; frame < 10; frame += 1) {
+      viewer.scrollTo(viewer.scroll + 10);
+      send(tracker, viewer, 16);
+    }
+    tracker.settle();
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    expect(viewer.topPage()).toBeLessThan(110);
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('reads a lone report exactly at the top of the PDF as the top, and a guess (D174)', () => {
+    // A first page of its own size: a lone report at its top fits no other
+    // page's top, as Home without animation sends it from far down.
+    const sizes = [LANDSCAPE, ...pages(60)];
+    const viewer = new FakeViewer(sizes, 0.7058, 757);
+    const tracker = new PdfViewerTracker(sizes);
+    viewer.scrollTo(viewer.pages[40]!.top * viewer.zoom + 100);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 40);
+
+    viewer.scrollTo(0);
+    expect(send(tracker, viewer, 800).kind).toBe('hold');
+    expect(tracker.settle()).toEqual({ index: 0, fraction: 0 });
+    expect(tracker.doubt).toBeDefined();
   });
 
   it('keeps a doubt through scrolling, and takes no page for a report that has passed', () => {

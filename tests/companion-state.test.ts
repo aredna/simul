@@ -35,6 +35,21 @@ describe('CompanionState', () => {
     expect(state.pageUrl).toBe(identity.url);
   });
 
+  it('tells each tab it comes to follow, so a companion window can name it in its address (D174)', () => {
+    const followed: unknown[] = [];
+    const state = new CompanionState({
+      isDetachedWindow: true,
+      onFollowedPageIdentity: (next) => followed.push(next),
+    });
+    state.followedPageIdentity = identity;
+    const other = { tabId: 9, windowId: 3, url: 'https://example.com/b' };
+    state.followedPageIdentity = other;
+    // Following nothing names nothing: the address keeps the last tab.
+    state.clearPage();
+    expect(state.followedPageIdentity).toBeUndefined();
+    expect(followed).toEqual([identity, other]);
+  });
+
   it('requires the active tab for side panels and active-following windows only', () => {
     const panel = new CompanionState({ isDetachedWindow: false });
     expect(panel.requiresActiveSourceTab).toBe(true);

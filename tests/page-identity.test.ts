@@ -8,6 +8,7 @@ import {
   PAGE_LOCAL_FILE_GUIDANCE,
   PageAccessError,
   assertSourceTabIsCurrent,
+  detachedCompanionAddressFor,
   hasNonDefaultPort,
   identityFromTab,
   isLocalFilePage,
@@ -26,6 +27,7 @@ import {
   unreadablePageGuidance,
   withPageTimeout,
 } from '../lib/page-identity';
+import { readDetachedCompanionWindow } from '../lib/companion-surface';
 
 describe('parseDetachedPageIdentityHint', () => {
   it('keeps the query-free native side panel in native mode', () => {
@@ -43,6 +45,47 @@ describe('parseDetachedPageIdentityHint', () => {
     expect(
       parseDetachedPageIdentityHint('?sourceTabId=17&sourceWindowId=4.5'),
     ).toBeUndefined();
+  });
+});
+
+describe('detachedCompanionAddressFor (D174)', () => {
+  const page = 'chrome-extension://simul/sidepanel.html';
+  const opened = `${page}?sourceTabId=11&sourceWindowId=1`;
+
+  it('names the tab a companion window follows now, as the worker reads it', () => {
+    const address = detachedCompanionAddressFor(opened, { tabId: 22, windowId: 2 })!;
+    expect(address).toBe(`${page}?sourceTabId=22&sourceWindowId=2`);
+    expect(parseDetachedPageIdentityHint(new URL(address).search))
+      .toEqual({ tabId: 22, windowId: 2 });
+    // The worker finds the window by the tab its address names.
+    expect(readDetachedCompanionWindow(
+      { contextType: 'TAB', documentUrl: address, windowId: 100 },
+      page,
+    )).toEqual({ id: 100, sourceTabId: 22 });
+    // A tab moved to another window is named with it.
+    expect(detachedCompanionAddressFor(address, { tabId: 22, windowId: 3 }))
+      .toBe(`${page}?sourceTabId=22&sourceWindowId=3`);
+  });
+
+  it('leaves an address that names the tab already, and keeps the rest of it', () => {
+    expect(detachedCompanionAddressFor(opened, { tabId: 11, windowId: 1 })).toBeUndefined();
+    expect(detachedCompanionAddressFor(`${opened}&other=1#top`, { tabId: 5, windowId: 1 }))
+      .toBe(`${page}?sourceTabId=5&sourceWindowId=1&other=1#top`);
+  });
+
+  it('never gives the side panel, whose address names no tab, a tab to name', () => {
+    expect(detachedCompanionAddressFor(page, { tabId: 22, windowId: 2 })).toBeUndefined();
+    expect(detachedCompanionAddressFor(`${page}?sourceTabId=11`, { tabId: 22, windowId: 2 }))
+      .toBeUndefined();
+    expect(detachedCompanionAddressFor('not a url', { tabId: 22, windowId: 2 })).toBeUndefined();
+  });
+
+  it('names no tab that is not one', () => {
+    for (const identity of [
+      { tabId: -1, windowId: 2 },
+      { tabId: 22, windowId: Number.NaN },
+      { tabId: 2.5, windowId: 2 },
+    ]) expect(detachedCompanionAddressFor(opened, identity)).toBeUndefined();
   });
 });
 

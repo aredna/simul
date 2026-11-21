@@ -110,6 +110,12 @@ const SNAP_IN_MOVEMENT_MS = 8;
 const HELD_PAGE_TOP_MOVE = 0.75;
 // One animation frame.
 const FRAME_MS = 1000 / 60;
+// Two reports closer than this are of one frame, however far apart their
+// places: Chrome 138 handed two frames of a wheel scroll over 0.3 ms apart,
+// 10 px apart, which read as 10 px a millisecond and put the frames after
+// it two pages on (D174). Reports of frames in turn are 8 ms or more apart
+// even at 120 Hz.
+const SAME_FRAME_MS = 4;
 // Chrome snaps the scroll position to whole pixels: a sideways place this
 // close (screen px) to the last is the same place, kept through a zoom.
 const SAME_LEFT = 0.75;
@@ -176,6 +182,11 @@ interface KeyStep {
   readonly key: Candidate;
   readonly scroll: Candidate;
   readonly viewport: PdfViewerViewport;
+  /**
+   * `key` is the top or the bottom of the PDF: Home or End where Chrome
+   * does not animate scrolling, taken as a guess (D174).
+   */
+  readonly edge?: boolean;
 }
 
 /**
@@ -264,7 +275,8 @@ export class PdfViewerTracker {
   #jumpInstead = false;
   /**
    * A lone report that is either a small scroll or a page key step to
-   * another page: a scroll sends more frames at once, a key nothing more.
+   * another page, or Home or End without animation (D174): a scroll sends
+   * more frames at once, a key nothing more.
    */
   /** The place before the last accepted report. */
   #jumpFrom: Fix | undefined;
@@ -587,7 +599,9 @@ export class PdfViewerTracker {
       // down, a key repeats the same step, but only after its first press
       // was read as a key (the keyboard waits before repeating); equal
       // wheel steps can look like repeats of the opposite page key.
-      const key = lone || (this.#lastPageKey && this.#repeatsKey(keyStep, viewport, elapsed));
+      const key = lone ||
+        (!keyStep.edge && this.#lastPageKey && this.#repeatsKey(keyStep, viewport, elapsed));
+      if (key && keyStep.edge) this.#guess();
       this.#accept(key ? keyStep.key : keyStep.scroll, keyStep.viewport, 0);
     }
     const track = this.#read(viewport, elapsed, lone, previousLone, zoomed, snapWithin);
@@ -682,7 +696,18 @@ export class PdfViewerTracker {
         return { kind: 'hold', wait: PDF_VIEWER_SETTLE_MS };
       }
       if (key) return this.#accept(key, viewport, 0);
-      if (Math.abs(scroll.y - fix.y) * scroll.zoom > LARGE_MOVE) {
+      const far = Math.abs(scroll.y - fix.y) * scroll.zoom > LARGE_MOVE;
+      // Exactly at the top or the bottom of the PDF: Home or End where
+      // Chrome does not animate scrolling, one report each, or a scroll
+      // whose place fits the end too. A scroll sends more frames at once,
+      // Home and End nothing more (D174). Far from the last place it is
+      // held below, and read at the end the same way.
+      const edge = far ? undefined : this.#atEdge(candidates, viewport);
+      if (edge && edge !== scroll) {
+        this.#keyStep = { key: edge, scroll, viewport, edge: true };
+        return { kind: 'hold', wait: PDF_VIEWER_SETTLE_MS };
+      }
+      if (far) {
         this.#hold = {
           from: fix,
           speed: 0,
@@ -723,7 +748,11 @@ export class PdfViewerTracker {
         this.#zoomed = true;
         return { kind: 'same' };
       }
-      const speed = lone ? 0 : (best.y - fix.y) / Math.max(1, elapsed);
+      // Two reports a fraction of a millisecond apart are one frame's
+      // step, not a speed (D174).
+      const speed = lone
+        ? 0
+        : (best.y - fix.y) / (elapsed < SAME_FRAME_MS ? FRAME_MS : Math.max(1, elapsed));
       return this.#accept(best, viewport, clamp(speed, -MAX_SPEED, MAX_SPEED));
     }
     // A lone report somewhere else: nearest is the best reading. A jump
@@ -1034,6 +1063,13 @@ export class PdfViewerTracker {
     return moved > 0 && moved <= step + PAGE_KEY_TOLERANCE ? bottom : undefined;
   }
 
+  /** The candidate at the very top of the PDF, else at its bottom, if any. */
+  #atEdge(candidates: readonly Candidate[], viewport: PdfViewerViewport): Candidate | undefined {
+    return candidates.find((candidate) =>
+      Math.abs(candidate.y) * candidate.zoom <= PAGE_TOP_EXACT) ??
+      this.#atBottom(candidates, viewport);
+  }
+
   /**
    * The candidate at the very bottom of the PDF, if the report fits one.
    * The most visible page there is the last, or, when two pages fit whole,
@@ -1119,16 +1155,18 @@ export class PdfViewerTracker {
 
   /**
    * Ends a held movement: the top or the bottom of the PDF when it stopped
-   * exactly there, else the page nearest where it began; a held page key
-   * step is taken. `undefined` when nothing was held or the place is the
-   * same, so the reader's own scrolling of the panel stays.
+   * exactly there (a guess after one report), else the page nearest where
+   * it began; a held page key step is taken. `undefined` when nothing was
+   * held or the place is the same, so the reader's own scrolling of the
+   * panel stays.
    */
   settle(): PdfReadingPosition | undefined {
     const keyStep = this.#keyStep;
     if (keyStep) {
-      // No frame followed: a key.
+      // No frame followed: a key, or Home or End, which a capture confirms.
       this.#keyStep = undefined;
       this.#keyUndo = { scroll: keyStep.scroll, viewport: keyStep.viewport };
+      if (keyStep.edge) this.#guess();
       const result = this.#accept(keyStep.key, keyStep.viewport, 0);
       return result.kind === 'move' ? result.position : undefined;
     }
@@ -1139,17 +1177,19 @@ export class PdfViewerTracker {
     if (all.length === 0) return undefined;
     const sameZoom = sameZoomCandidates(all, hold.from, hold.last);
     const candidates = sameZoom.length > 0 ? sameZoom : all;
-    // Only a movement (Home, End, a drag) stops at an edge; a lone jump is
-    // read like any other.
-    const top = hold.frames > 1
-      ? candidates.find((candidate) => Math.abs(candidate.y) * candidate.zoom <= PAGE_TOP_EXACT)
-      : undefined;
-    const bottom = hold.frames > 1 ? this.#atBottom(candidates, hold.last) : undefined;
+    // A movement (Home, End, a drag) that stops at an edge is there. So
+    // may a lone report be: where Chrome does not animate scrolling (its
+    // smooth scrolling switched off, or the system's animations) End and
+    // Home are one report each. But a jump to the last page sends that
+    // report too, and a wheel step or a click on the scrollbar's track may
+    // stop there, so a lone report is taken for the end only as a guess
+    // that a capture confirms (D174).
+    const edge = this.#atEdge(candidates, hold.last);
     // Else where the speed trusted before the hold would have carried the
     // viewer, slowing as a fling does.
     const decay = 0.95;
     const travel = hold.speed * FRAME_MS * decay * (1 - decay ** hold.frames) / (1 - decay);
-    const chosen = top ?? bottom ?? nearest(candidates, hold.from.y + travel);
+    const chosen = edge ?? nearest(candidates, hold.from.y + travel);
     // A jump, wherever it stopped, is a guess: a jump to any page top looks
     // like the top of the PDF. So is what a view came back with. The ends
     // of the PDF are places of their own when a movement stopped there
@@ -1157,8 +1197,8 @@ export class PdfViewerTracker {
     // fling, a scrollbar drag) is read as it always was and is no new
     // doubt: a look then could find a number typed into the page box and
     // not entered, which scrolling within a page leaves there.
-    if (hold.jump || this.#returned) this.#guess();
-    else if (top ?? bottom) this.#unsure = false;
+    if (hold.jump || this.#returned || (edge && hold.frames === 1)) this.#guess();
+    else if (edge) this.#unsure = false;
     this.#returned = false;
     const result = this.#accept(chosen, hold.last, 0);
     return result.kind === 'move' ? result.position : undefined;
