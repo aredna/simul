@@ -4,6 +4,9 @@ import {
   type ReadOnlyReplicaDisclosure,
 } from './read-only-disclosure';
 import {
+  sameResolvedSemanticSourceProof,
+  semanticProofSetComesFromBatch,
+  semanticSourceProofIdentityOfResolved,
   type ResolvedSemanticSourceProof,
 } from './semantic-source-receiver';
 import { semanticAriaStateAttribute } from './semantic-source-protocol';
@@ -19,6 +22,12 @@ export interface SemanticProofPresenterOptions {
 /** Applies only receiver-resolved state and owns every reversible DOM change. */
 export class SemanticProofPresenter {
   readonly #cleanups: Array<() => void> = [];
+  /**
+   * The site menus shown, by proof id, each with what takes it down (D179):
+   * kept apart from the other cleanups so that a batch can change one menu
+   * and leave the others as they are.
+   */
+  readonly #menus = new Map<string, InstalledStructuralMenu>();
   #proofs: readonly ResolvedSemanticSourceProof[] = Object.freeze([]);
   #firewallCleanup: (() => void) | undefined;
   #ancestorCleanup: (() => void) | undefined;
@@ -38,6 +47,9 @@ export class SemanticProofPresenter {
 
   apply(proofs: readonly ResolvedSemanticSourceProof[]): boolean {
     const previous = this.#proofs;
+    if (semanticProofSetComesFromBatch(proofs) && this.#applyMenusInPlace(proofs)) {
+      return true;
+    }
     try {
       this.options.beforeApply?.();
     } catch {
@@ -67,6 +79,85 @@ export class SemanticProofPresenter {
     this.#teardown();
     this.#proofs = Object.freeze([]);
     this.#presentPopovers([]);
+  }
+
+  /**
+   * A batch whose proofs differ from what is shown only in site menus puts
+   * up and takes down only those menus (D179). Every preview used to be
+   * taken down and put up again at every change: 3,000 menus at each of a
+   * page's changes. Anything else that differs, a menu whose controller is
+   * gone, or a set with no interactive proof on either side is presented
+   * whole (false). Nothing between two batches changes the replica but the
+   * presenter: every live patch presents the whole set again.
+   */
+  #applyMenusInPlace(proofs: readonly ResolvedSemanticSourceProof[]): boolean {
+    const previous = new Map<string, ResolvedSemanticSourceProof>();
+    for (const resolved of this.#proofs) {
+      previous.set(semanticSourceProofIdentityOfResolved(resolved), resolved);
+    }
+    const next = new Map<string, ResolvedSemanticSourceProof>();
+    const previousPopovers: string[] = [];
+    const nextPopovers: string[] = [];
+    let interactive = false;
+    for (const resolved of this.#proofs) {
+      if (resolved.kind === 'popover-open') {
+        previousPopovers.push(semanticSourceProofIdentityOfResolved(resolved));
+      }
+    }
+    for (const resolved of proofs) {
+      const proofId = semanticSourceProofIdentityOfResolved(resolved);
+      if (next.has(proofId)) return false;
+      next.set(proofId, resolved);
+      if (resolved.kind === 'popover-open') nextPopovers.push(proofId);
+      interactive ||= resolved.kind === 'select-presentation' ||
+        resolved.kind === 'disclosure-state' ||
+        resolved.kind === 'structural-menu';
+    }
+    if (
+      !interactive || !this.#firewallCleanup ||
+      previousPopovers.join('\u0000') !== nextPopovers.join('\u0000')
+    ) return false;
+    const changedMenus: string[] = [];
+    for (const [proofId, resolved] of next) {
+      const before = previous.get(proofId);
+      const same = before !== undefined && sameResolvedSemanticSourceProof(before, resolved);
+      if (resolved.kind !== 'structural-menu') {
+        if (!same) return false;
+        continue;
+      }
+      const installed = this.#menus.get(proofId);
+      if (!same || !installed || installed.isDisposed()) changedMenus.push(proofId);
+    }
+    const goneMenus: string[] = [];
+    for (const [proofId, resolved] of previous) {
+      if (next.has(proofId)) continue;
+      if (resolved.kind !== 'structural-menu') return false;
+      goneMenus.push(proofId);
+    }
+    if (changedMenus.length === 0 && goneMenus.length === 0 &&
+      previous.size === next.size) {
+      this.#proofs = Object.freeze([...proofs]);
+      return true;
+    }
+    for (const proofId of [...goneMenus, ...changedMenus]) {
+      const installed = this.#menus.get(proofId);
+      this.#menus.delete(proofId);
+      try {
+        installed?.dispose();
+      } catch {
+        // Continue: the menu is shown again or the set is presented whole.
+      }
+    }
+    for (const proofId of changedMenus) {
+      const resolved = next.get(proofId);
+      if (resolved?.kind !== 'structural-menu') return false;
+      const installed = installStructuralMenuDisclosure(resolved);
+      // Presented whole instead, which takes down what was put up here.
+      if (!installed) return false;
+      this.#menus.set(proofId, installed);
+    }
+    this.#proofs = Object.freeze([...proofs]);
+    return true;
   }
 
   /**
@@ -169,9 +260,9 @@ export class SemanticProofPresenter {
       // so the isolated replica uses the live translated panel and authored
       // trigger instead of a stale cloned or generic replacement control.
       for (const resolved of structuralMenus) {
-        const cleanup = installStructuralMenuDisclosure(resolved);
-        if (!cleanup) throw new Error('Structural menu presentation failed.');
-        this.#cleanups.push(cleanup);
+        const installed = installStructuralMenuDisclosure(resolved);
+        if (!installed) throw new Error('Structural menu presentation failed.');
+        this.#menus.set(semanticSourceProofIdentityOfResolved(resolved), installed);
       }
       return true;
     } catch {
@@ -180,6 +271,15 @@ export class SemanticProofPresenter {
   }
 
   #teardown(notify = true): void {
+    // The menus were put up last: they go first.
+    for (const installed of [...this.#menus.values()].reverse()) {
+      try {
+        installed.dispose();
+      } catch {
+        // Continue restoring every independent renderer-owned state slot.
+      }
+    }
+    this.#menus.clear();
     disposeReadOnlyReplicaDisclosures(this.options.document, true);
     this.#ancestorCleanup?.();
     this.#ancestorCleanup = undefined;
@@ -394,8 +494,16 @@ function applyTypedProof(
     const originalAriaDisabled = target.getAttribute('aria-disabled');
     const originalMarker = target.getAttribute('data-simul-source-control-state');
     if (originalDisabled !== undefined) target.disabled = resolved.proof.disabled;
-    const presentedAriaDisabled = resolved.proof.disabled ? 'true' : 'false';
-    target.setAttribute('aria-disabled', presentedAriaDisabled);
+    // `aria-disabled` is written only for a disabled control, or where the
+    // page's element has the attribute (D179): `aria-disabled="false"` on
+    // every enabled button matched a page rule that names the attribute
+    // whatever its value (`button[aria-disabled] { opacity: .4 }`).
+    const presentedAriaDisabled = resolved.proof.disabled
+      ? 'true'
+      : originalAriaDisabled === null ? null : 'false';
+    if (presentedAriaDisabled !== null) {
+      target.setAttribute('aria-disabled', presentedAriaDisabled);
+    }
     target.setAttribute('data-simul-source-control-state', 'v1');
     return () => {
       const stillOwned = target.getAttribute(
@@ -555,11 +663,16 @@ function applyTypedProof(
   };
 }
 
+interface InstalledStructuralMenu {
+  dispose(): void;
+  isDisposed(): boolean;
+}
+
 function installStructuralMenuDisclosure(
   resolved: Extract<ResolvedSemanticSourceProof, {
     kind: 'structural-menu';
   }>,
-): (() => void) | undefined {
+): InstalledStructuralMenu | undefined {
   const { panel, trigger, otherTriggers, proof } = resolved;
   if (!panel.parentNode || !trigger.parentNode) return undefined;
   const opensOnHover = resolved.opening === 'hover';
@@ -585,7 +698,10 @@ function installStructuralMenuDisclosure(
   } catch {
     return undefined;
   }
-  return () => controller.dispose();
+  return {
+    dispose: () => controller.dispose(),
+    isDisposed: () => controller.isDisposed(),
+  };
 }
 
 function isHovered(element: Element): boolean {

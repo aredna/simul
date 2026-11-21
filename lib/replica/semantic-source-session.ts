@@ -7,7 +7,9 @@ import {
   MAX_SEMANTIC_SELECT_SIZE,
   MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS,
   MAX_SEMANTIC_MASKED_LENGTH,
+  SEMANTIC_SOURCE_PROTOCOL_VERSION,
   createSemanticSourceBatch,
+  semanticSourceOrderPlacements,
   readSemanticSourceControllerMessage,
   readSemanticSourcePortIdentity,
   semanticDisclosureRelationId,
@@ -18,7 +20,9 @@ import {
   semanticSourceRecordId,
   semanticSourceBatchByteLength,
   type SemanticSourceBatch,
+  type SemanticSourceBatchDelta,
   type SemanticSourceBridgeId,
+  type SemanticSourceProtocolVersion,
   type SemanticDisclosurePopupRole,
   type SemanticSourceGate,
   type SemanticSourcePortIdentity,
@@ -206,6 +210,12 @@ interface StagedSemanticSourceScan {
   readonly pollCandidates: readonly Element[] | undefined;
   readonly pollFingerprints: WeakMap<Element, string>;
   readonly presentationCandidates: WeakSet<Element>;
+  /**
+   * Where a field or an editor the scan withheld as hidden may be shown by
+   * a change of presentation alone (D179): the box at which the hidden
+   * region starts and the two boxes around it.
+   */
+  readonly shownAgainCandidates: WeakSet<Element>;
 }
 
 /** Why a scan's steps stop before they are done. */
@@ -250,6 +260,18 @@ interface SemanticScanRun {
   busyMs: number;
   /** The page had a turn during the run: the batch is sealed before it goes. */
   yielded: boolean;
+}
+
+/**
+ * What the panel holds once it has applied the last batch posted: the ids
+ * of its records and proofs in the page's order, with their revisions
+ * (D179). The next batch carries only what differs from it.
+ */
+interface PostedSemanticSourceState {
+  readonly recordOrder: readonly number[];
+  readonly recordRevisions: ReadonlyMap<number, number>;
+  readonly proofOrder: readonly string[];
+  readonly proofRevisions: ReadonlyMap<string, number>;
 }
 
 interface ValidatedDisclosure {
@@ -300,10 +322,20 @@ type SemanticSourceProofDraft =
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
 const MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES = 1_024;
+/**
+ * A menu's panel is walked further (D179): a site menu of 400 links, or of
+ * 200 links that each hold an icon and two spans, is over 1,024 nodes. Its
+ * text costs only once now, since a batch carries what changed.
+ */
+const MAX_SEMANTIC_MENU_PANEL_NODES = 8_192;
 const SEMANTIC_CONTROL_POLL_INTERVAL_MS = 500;
 /** How many units of the scan go by between two looks at the slice clock (D164). */
 const SCAN_CLOCK_EVERY = 16;
 const MAX_SEMANTIC_CONTROL_POLL_CANDIDATES = 1_024;
+/** How many places a scan keeps where withheld fields are hidden from (D179). */
+const MAX_SEMANTIC_SHOWN_AGAIN_STARTS = 256;
+/** How far up a run of `visibility: hidden` is followed (D179). */
+const MAX_SEMANTIC_SHOWN_AGAIN_DEPTH = 32;
 const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
   'pointerdown',
   'click',
@@ -454,6 +486,10 @@ export class SemanticSourceSession {
   readonly #semanticEventRoots = new Set<Document | ShadowRoot>();
   readonly #stopListeningForShadowRoots: () => void;
   #sequence = 0;
+  /** What the start asked for: a panel of version 2 gets whole states (D179). */
+  #protocolVersion: SemanticSourceProtocolVersion = SEMANTIC_SOURCE_PROTOCOL_VERSION;
+  /** The state the last posted batch left in the panel (D179). */
+  #posted: PostedSemanticSourceState | undefined;
   #inFlightSequence: number | undefined;
   #dirty = false;
   #scheduled = false;
@@ -464,6 +500,9 @@ export class SemanticSourceSession {
   #controlPollFingerprints = new WeakMap<Element, string>();
   #controlPollCursor = 0;
   #presentationChangeCandidates = new WeakSet<Element>();
+  /** See `StagedSemanticSourceScan.shownAgainCandidates` (D179). */
+  #shownAgainCandidates = new WeakSet<Element>();
+  readonly #stopListeningForStyleSheets: () => void;
   /**
    * Whether the last scan asked if the tab shows a field or the text of an
    * editor (the page holds one that the profile reads). Only then can a
@@ -499,6 +538,12 @@ export class SemanticSourceSession {
         // be masked: read the page again and send what it says (A1).
         if (late) this.refresh();
       },
+    );
+    // A rule put into a sheet shows or hides a field with no change of the
+    // DOM: the page reader's style poll tells of it (D179).
+    this.#stopListeningForStyleSheets = listenForStyleSheetChanges(
+      environment.document,
+      () => this.#scanSoonForWhatIsShown(),
     );
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
@@ -537,6 +582,8 @@ export class SemanticSourceSession {
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
     this.#presentationChangeCandidates = new WeakSet<Element>();
+    this.#shownAgainCandidates = new WeakSet<Element>();
+    this.#stopListeningForStyleSheets();
     this.#popoverOpenOrder = new WeakMap<Element, number>();
     for (const root of this.#semanticEventRoots) {
       this.#stopListeningToRoot(root);
@@ -548,6 +595,7 @@ export class SemanticSourceSession {
     this.#revisions.clear();
     this.#proofRevisions.clear();
     this.#lastEmittedScanSignature = undefined;
+    this.#posted = undefined;
     try {
       this.environment.onDispose?.();
     } catch {
@@ -586,6 +634,7 @@ export class SemanticSourceSession {
         this.dispose(true);
         return;
       }
+      this.#protocolVersion = message.protocolVersion;
       const secretScan = this.environment.secretScan;
       if (secretScan && !secretScan.done) {
         void this.#startAfterSecretScan(
@@ -606,7 +655,8 @@ export class SemanticSourceSession {
     if (
       !this.#documentIdentity ||
       this.#inFlightSequence === undefined ||
-      message.sequence !== this.#inFlightSequence
+      message.sequence !== this.#inFlightSequence ||
+      message.protocolVersion !== this.#protocolVersion
     ) {
       this.dispose(true);
       return;
@@ -632,8 +682,13 @@ export class SemanticSourceSession {
   };
   readonly #onPresentationChange = (event: Event): void => {
     if (
-      !this.#scope?.disclosureContent ||
-      !this.#presentationEventTouchesCandidate(event)
+      !(this.#scope?.disclosureContent &&
+        this.#presentationEventTouches(event, this.#presentationChangeCandidates)) &&
+      // The end of a transition or an animation, or a hover, around a field
+      // or an editor the last scan withheld as hidden may show it (D179).
+      // Only there: a scan at every end doubled the script time of a page
+      // that animates (D145). The scan keeps to the share of time (D164).
+      !this.#presentationEventTouches(event, this.#shownAgainCandidates)
     ) return;
     this.refresh();
   };
@@ -995,7 +1050,7 @@ export class SemanticSourceSession {
     else this.#scheduleControlPoll();
   }
 
-  #presentationEventTouchesCandidate(event: Event): boolean {
+  #presentationEventTouches(event: Event, candidates: WeakSet<Element>): boolean {
     let path: readonly EventTarget[] = [];
     try {
       path = event.composedPath();
@@ -1003,14 +1058,13 @@ export class SemanticSourceSession {
       // Fall through to the bounded parent walk below.
     }
     for (const candidate of path) {
-      if (isElementNode(candidate) &&
-        this.#presentationChangeCandidates.has(candidate)) return true;
+      if (isElementNode(candidate) && candidates.has(candidate)) return true;
     }
     let current = safelyRead(() => event.target) as Node | null | undefined;
     for (let depth = 0; current && depth < 64; depth += 1) {
       if (
         current.nodeType === ELEMENT_NODE &&
-        this.#presentationChangeCandidates.has(current as Element)
+        candidates.has(current as Element)
       ) return true;
       const parent: Node | null | undefined = safelyRead(() => current?.parentNode);
       if (parent) {
@@ -1380,23 +1434,91 @@ export class SemanticSourceSession {
     }
     const sequence = this.#sequence + 1;
     try {
-      const batch = createSemanticSourceBatch(
-        documentIdentity,
-        policyFingerprint,
-        sequence,
-        scan.records,
-        scan.proofs,
-      );
+      const startedAt = now?.() ?? 0;
+      const change = this.#semanticSourceDelta(scan);
+      const batch = change
+        ? createSemanticSourceBatch(
+            documentIdentity,
+            policyFingerprint,
+            sequence,
+            change.records,
+            change.proofs,
+            { delta: change.delta },
+          )
+        : createSemanticSourceBatch(
+            documentIdentity,
+            policyFingerprint,
+            sequence,
+            scan.records,
+            scan.proofs,
+            { protocolVersion: this.#protocolVersion },
+          );
       this.environment.port.postMessage(batch);
+      if (now) run.busyMs += now() - startedAt;
     } catch {
       this.dispose(false);
       return;
     }
     this.#commitScan(scan);
+    this.#posted = postedSemanticSourceState(scan);
     this.#lastEmittedScanSignature = scanSignature;
     this.#sequence = sequence;
     this.#inFlightSequence = sequence;
     this.#endScan(run);
+  }
+
+  /**
+   * What the next batch carries when it can carry only what changed (D179):
+   * the records and proofs whose revision differs from the panel's, the ids
+   * that left, and where the new or moved ids go in the page's order. None
+   * (a whole state) for the first batch of a session, for a panel of
+   * version 2, and when what changed is about as large as the whole: a
+   * page that rebuilds itself gets a fresh checkpoint. A session that ends
+   * on a lost or refused batch is replaced by one that starts whole.
+   */
+  #semanticSourceDelta(scan: SemanticSourceScan): {
+    readonly records: readonly SemanticSourceRecord[];
+    readonly proofs: readonly SemanticSourceProof[];
+    readonly delta: SemanticSourceBatchDelta;
+  } | undefined {
+    const posted = this.#posted;
+    if (
+      !posted || this.#sequence < 1 ||
+      this.#protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION
+    ) return undefined;
+    const records = scan.records.filter((record) =>
+      posted.recordRevisions.get(record.recordId) !== record.nodeRevision);
+    const proofIds = scan.proofs.map(semanticSourceProofIdentity);
+    const proofs = scan.proofs.filter((proof, index) =>
+      posted.proofRevisions.get(proofIds[index]!) !== proof.revision);
+    const recordIds = scan.records.map((record) => record.recordId);
+    const nextRecordIds = new Set(recordIds);
+    const nextProofIds = new Set(proofIds);
+    const delta: SemanticSourceBatchDelta = {
+      base: this.#sequence,
+      removedRecordIds: posted.recordOrder.filter((recordId) =>
+        !nextRecordIds.has(recordId)),
+      removedProofIds: posted.proofOrder.filter((proofId) =>
+        !nextProofIds.has(proofId)),
+      recordPlacements: semanticSourceOrderPlacements(
+        posted.recordOrder,
+        recordIds,
+        0,
+      ),
+      proofPlacements: semanticSourceOrderPlacements(
+        posted.proofOrder,
+        proofIds,
+        '',
+      ),
+      recordCount: scan.records.length,
+      proofCount: scan.proofs.length,
+    };
+    const deltaBytes = semanticSourceBatchByteLength(records, proofs, delta);
+    const wholeBytes = semanticSourceBatchByteLength(scan.records, scan.proofs);
+    if (deltaBytes * 2 > wholeBytes || deltaBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) {
+      return undefined;
+    }
+    return { records, proofs, delta };
   }
 
   /**
@@ -1475,6 +1597,7 @@ export class SemanticSourceSession {
       scan.pollFingerprints,
     );
     this.#presentationChangeCandidates = scan.presentationCandidates;
+    this.#shownAgainCandidates = scan.shownAgainCandidates;
   }
 
   #foundRootsAbove(nodes: readonly Node[]): boolean {
@@ -1522,6 +1645,7 @@ export class SemanticSourceSession {
         pollCandidates: undefined,
         pollFingerprints: new WeakMap<Element, string>(),
         presentationCandidates: new WeakSet<Element>(),
+        shownAgainCandidates: new WeakSet<Element>(),
       });
     }
     // Whether the slice has done its share: asked between units of work,
@@ -1641,6 +1765,75 @@ export class SemanticSourceSession {
         validatedTabs,
       );
     }
+    // Hidden wins over edited: editor text the tab does not show is not
+    // sent, by the rule the mirror's own reading withholds hidden text by
+    // (a box that is not displayed, or is declared hidden and not painted,
+    // anywhere around the text as it is drawn, and `visibility: hidden` on
+    // the box the text is put into). Text slotted into an editor inside a
+    // closed dialog travelled, and was translated; so did the page's own.
+    // An element is asked once a scan, and only for text in an editor and
+    // for a field whose value would be sent.
+    const hiddenStates = new Map<
+      Element,
+      ReturnType<typeof readSourceHiddenRegionState>
+    >();
+    const hiddenState = (element: Element) => {
+      let state = hiddenStates.get(element);
+      if (!state) {
+        state = readSourceHiddenRegionState(
+          element,
+          controlledContent as SourceControlledContentPolicy,
+        );
+        hiddenStates.set(element, state);
+      }
+      return state;
+    };
+    // For each box asked, where the hidden region around it starts, or null.
+    const hiddenRegions = new Map<Element, Element | null>();
+    // What the tab hides is read again in each slice (D164).
+    attempt.sliceCaches.push(hiddenStates, hiddenRegions);
+    // Where a field or an editor the scan withholds is hidden from: a change
+    // of presentation there may show it with no change of the DOM (D179).
+    const hiddenStarts = new Set<Element>();
+    const noteHiddenStart = (start: Element): void => {
+      if (hiddenStarts.size < MAX_SEMANTIC_SHOWN_AGAIN_STARTS) hiddenStarts.add(start);
+    };
+    /** Whether the tab does not show what `box` itself draws. */
+    const boxIsHidden = (box: Element | undefined): boolean => {
+      // The answer can change with no change of the DOM: see
+      // `#scanSoonForWhatIsShown`.
+      askedWhatIsShown = true;
+      if (!box) return true;
+      if (hiddenState(box).visibilityHidden) {
+        // Visibility is inherited: it is hidden from the outermost box of
+        // the run that hides it, which is the one a fade changes.
+        let start = box;
+        for (let depth = 0; depth < MAX_SEMANTIC_SHOWN_AGAIN_DEPTH; depth += 1) {
+          const around = safelyRead(() => readSourceFlatTreeParentElement(start));
+          if (!around || !hiddenState(around).visibilityHidden) break;
+          start = around;
+        }
+        noteHiddenStart(start);
+        return true;
+      }
+      const asked: Element[] = [];
+      let start: Element | null | undefined;
+      for (
+        let around: Element | undefined = box;
+        around;
+        around = readSourceFlatTreeParentElement(around)
+      ) {
+        start = hiddenRegions.get(around);
+        if (start !== undefined) break;
+        asked.push(around);
+        if (!hiddenState(around).starts) continue;
+        start = around;
+        break;
+      }
+      for (const element of asked) hiddenRegions.set(element, start ?? null);
+      if (start) noteHiddenStart(start);
+      return Boolean(start);
+    };
     const proofs: SemanticSourceProof[] = [];
     const proofIds = new Set<string>();
     let batchBytes = 0;
@@ -1762,7 +1955,11 @@ export class SemanticSourceSession {
         if (turn()) yield 'turn';
         const length = this.#readMaskedCredentialLength(element, classification);
         const maskedNodeId = length === undefined ? undefined : this.#nodeId(element);
-        if (length === undefined || !maskedNodeId) continue;
+        // Hidden wins here as it does for a field's value (D179): how many
+        // characters a credential field the tab does not show holds is not
+        // sent. A field shown later gets its dots at the scan that follows
+        // the change that shows it.
+        if (length === undefined || !maskedNodeId || boxIsHidden(element)) continue;
         addProof({
           kind: 'masked-length',
           bridge: this.environment.bridge,
@@ -1991,59 +2188,31 @@ export class SemanticSourceSession {
       }
       return editor ?? undefined;
     };
-    // Hidden wins over edited: editor text the tab does not show is not
-    // sent, by the rule the mirror's own reading withholds hidden text by
-    // (a box that is not displayed, or is declared hidden and not painted,
-    // anywhere around the text as it is drawn, and `visibility: hidden` on
-    // the box the text is put into). Text slotted into an editor inside a
-    // closed dialog travelled, and was translated; so did the page's own.
-    // An element is asked once a scan, and only for text in an editor and
-    // for a field whose value would be sent.
-    const hiddenStates = new Map<
-      Element,
-      ReturnType<typeof readSourceHiddenRegionState>
-    >();
-    const hiddenState = (element: Element) => {
-      let state = hiddenStates.get(element);
-      if (!state) {
-        state = readSourceHiddenRegionState(
-          element,
-          controlledContent as SourceControlledContentPolicy,
-        );
-        hiddenStates.set(element, state);
-      }
-      return state;
-    };
-    const hiddenRegions = new Map<Element, boolean>();
-    // What the tab hides is read again in each slice (D164).
-    attempt.sliceCaches.push(hiddenStates, hiddenRegions);
-    /** Whether the tab does not show what `box` itself draws. */
-    const boxIsHidden = (box: Element | undefined): boolean => {
-      // The answer can change with no change of the DOM: see
-      // `#scanSoonForWhatIsShown`.
-      askedWhatIsShown = true;
-      if (!box || hiddenState(box).visibilityHidden) return true;
-      const asked: Element[] = [];
-      let hidden: boolean | undefined;
-      for (
-        let around: Element | undefined = box;
-        around;
-        around = readSourceFlatTreeParentElement(around)
-      ) {
-        hidden = hiddenRegions.get(around);
-        if (hidden !== undefined) break;
-        asked.push(around);
-        if (!hiddenState(around).starts) continue;
-        hidden = true;
-        break;
-      }
-      for (const element of asked) hiddenRegions.set(element, hidden ?? false);
-      return hidden ?? false;
-    };
     // The boxes around the text were read a moment ago, to know that none
     // of them is a secret: the way up is readable.
     const editorTextIsHidden = (text: Node): boolean =>
       boxIsHidden(readSourceFlatTreeParentElement(text));
+    // Whether the slot `child` is drawn in lies in a panel the mirror may
+    // open, below its host (D179). Asked once a slot a scan.
+    const slotPanels = new Map<Element, boolean>();
+    attempt.sliceCaches.push(slotPanels);
+    const panelAroundSlot = (child: Node): boolean => {
+      const slot = safelyRead(() => readSourceAssignedSlot(child));
+      if (!slot) return false;
+      let inPanel = slotPanels.get(slot);
+      if (inPanel === undefined) {
+        inPanel = false;
+        const host = child.parentNode;
+        for (const around of readSourceFlatTreeElementPath(slot) ?? []) {
+          if (around === host) break;
+          if (!disclosurePanels.has(around)) continue;
+          inPanel = true;
+          break;
+        }
+        slotPanels.set(slot, inPanel);
+      }
+      return inPanel;
+    };
     const isInsidePanelTheMirrorMayOpen = (element: Element): boolean => {
       if (disclosurePanels.size === 0) return false;
       for (
@@ -2129,12 +2298,16 @@ export class SemanticSourceSession {
       const shadowRoot = safelyReadShadowRoot(element);
       if (shadowRoot) children.push(...shadowRoot.childNodes);
       for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index]!;
         textStack.push({
-          node: children[index]!,
-          editable: (shadowRoot
-            ? editorAroundSlot(children[index]!)
-            : undefined) ?? editable,
-          disclosure,
+          node: child,
+          editable: (shadowRoot ? editorAroundSlot(child) : undefined) ?? editable,
+          // What is slotted into a panel of the host's root is that panel's
+          // text where it is drawn (D179): it was offered only once the
+          // page opened the panel.
+          disclosure: disclosure ||
+            (shadowRoot !== undefined && disclosurePanels.size > 0 &&
+              panelAroundSlot(child)),
           secret,
         });
       }
@@ -2405,6 +2578,24 @@ export class SemanticSourceSession {
         }
       }
     }
+    const shownAgainCandidates = new WeakSet<Element>();
+    if (complete) {
+      for (const start of hiddenStarts) {
+        if (turn()) yield 'turn';
+        // The box the region starts at, which a transition, an animation or
+        // a rule changes, and the two around it, which a hover rule names
+        // (`.card:hover .field`). Not the body or the root: every event on
+        // the page would start a scan.
+        let around: Element | undefined = start;
+        for (let depth = 0; around && depth < 3; depth += 1) {
+          const tagName = around.localName.toLowerCase();
+          if (tagName === 'body' || tagName === 'html') break;
+          shownAgainCandidates.add(around);
+          const box: Element = around;
+          around = safelyRead(() => readSourceFlatTreeParentElement(box));
+        }
+      }
+    }
     return Object.freeze({
       records: Object.freeze(records),
       recordNodes: Object.freeze(recordNodes),
@@ -2418,6 +2609,7 @@ export class SemanticSourceSession {
       pollCandidates,
       pollFingerprints,
       presentationCandidates,
+      shownAgainCandidates,
     });
   }
 
@@ -2582,8 +2774,7 @@ export class SemanticSourceSession {
         // The first trigger names the menu; an arrow beside it may be an icon.
         !triggers.every((element, index) =>
           isBoundedSafeDisclosurePanel(element, classifications, index === 0)) ||
-        !isBoundedSafeMenuPanel(panel, classifications) ||
-        !hasMenuSizedText(panel)
+        !isBoundedSafeMenuPanel(panel, classifications)
       ) {
         writes.set(container, undefined);
         continue;
@@ -3538,10 +3729,9 @@ function isBoundedSafeDisclosurePanel(
       !classification || classification.category !== 'public-semantic' ||
       disclosureElementCanCarryUserState(element)
     ) return false;
-    const children: Node[] = [...element.childNodes];
-    const shadowRoot = safelyReadShadowRoot(element);
-    if (shadowRoot) children.push(...shadowRoot.childNodes);
-    pending.push(...children);
+    const children = panelWalkChildren(element);
+    if (!children) return false;
+    pending.push(...children.nodes);
   }
   let textUnits = 0;
   let hasText = false;
@@ -3570,10 +3760,11 @@ function isBoundedSafeMenuPanel(
   let visited = 0;
   let textUnits = 0;
   let hasText = false;
+  let slotted = false;
   while (pending.length > 0) {
     const node = pending.pop();
     if (
-      !node || ++visited > MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES ||
+      !node || ++visited > MAX_SEMANTIC_MENU_PANEL_NODES ||
       node.ownerDocument !== panel.ownerDocument
     ) return false;
     if (node.nodeType === TEXT_NODE) {
@@ -3590,11 +3781,95 @@ function isBoundedSafeMenuPanel(
     if (category === undefined || category === 'secret' || category === 'withheld') {
       return false;
     }
-    pending.push(...element.childNodes);
-    const shadowRoot = safelyReadShadowRoot(element);
-    if (shadowRoot) pending.push(...shadowRoot.childNodes);
+    const children = panelWalkChildren(element);
+    if (!children) return false;
+    slotted ||= children.slotted;
+    pending.push(...children.nodes);
   }
-  return hasText;
+  // What is slotted is a menu's text where it is drawn (D179).
+  return hasText && hasMenuSizedText(panel, slotted);
+}
+
+/**
+ * What a panel's walk goes to under `element`: its children, its root's,
+ * and, for a slot, the nodes the slot is assigned, which are drawn in the
+ * panel though they are the host's children (D179: slotted text and fields
+ * were never seen, so a component's slotted menu was never offered, and a
+ * field slotted into a panel was not looked at). Undefined when a slot's
+ * nodes cannot be read: the panel is refused.
+ */
+function panelWalkChildren(
+  element: Element,
+): { readonly nodes: Node[]; readonly slotted: boolean } | undefined {
+  const nodes: Node[] = [...element.childNodes];
+  const shadowRoot = safelyReadShadowRoot(element);
+  if (shadowRoot) nodes.push(...shadowRoot.childNodes);
+  if (element.localName.toLowerCase() !== 'slot') return { nodes, slotted: false };
+  const assigned = readSlotAssignedNodes(element);
+  if (!assigned) return undefined;
+  nodes.push(...assigned);
+  return { nodes, slotted: assigned.length > 0 };
+}
+
+/** The nodes a slot is assigned; undefined when they cannot be read (D179). */
+function readSlotAssignedNodes(slot: Element): readonly Node[] | undefined {
+  try {
+    const read = (slot as Partial<HTMLSlotElement>).assignedNodes;
+    if (typeof read !== 'function') return [];
+    return [...read.call(slot)];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The text of a panel as it is drawn, for `hasMenuSizedText`: a root's
+ * text in place of its host's children, and what a slot is assigned in
+ * place of its own (D179). With the items' text, outermost items only.
+ * Undefined when the walk cannot be read or goes past the bound.
+ */
+function readDrawnPanelText(
+  panel: Element,
+): { readonly whole: string; readonly items: readonly string[] } | undefined {
+  const parts: string[] = [];
+  const items: string[][] = [];
+  const pending: Array<{ readonly node: Node; readonly item: string[] | undefined }> =
+    [{ node: panel, item: undefined }];
+  let visited = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (++visited > MAX_SEMANTIC_MENU_PANEL_NODES) return undefined;
+    const node = current.node;
+    if (node.nodeType === TEXT_NODE) {
+      const value = safelyRead(() => node.nodeValue);
+      if (typeof value !== 'string') return undefined;
+      parts.push(value);
+      current.item?.push(value);
+      continue;
+    }
+    if (node.nodeType !== ELEMENT_NODE) continue;
+    const element = node as Element;
+    let item = current.item;
+    if (!item && node !== panel && safelyRead(() => element.matches(MENU_ITEM_SELECTOR))) {
+      item = [];
+      items.push(item);
+    }
+    let children: readonly Node[] | undefined;
+    const shadowRoot = safelyReadShadowRoot(element);
+    if (shadowRoot) {
+      children = [...shadowRoot.childNodes];
+    } else if (element.localName.toLowerCase() === 'slot') {
+      const assigned = readSlotAssignedNodes(element);
+      if (!assigned) return undefined;
+      children = assigned.length > 0 ? assigned : [...element.childNodes];
+    } else {
+      children = [...element.childNodes];
+    }
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push({ node: children[index]!, item });
+    }
+  }
+  return { whole: parts.join(''), items: items.map((item) => item.join('')) };
 }
 
 // What a menu's items are: the text of a large panel is mostly theirs.
@@ -3610,7 +3885,17 @@ const MENU_ITEM_SELECTOR =
  * would travel and be translated while hidden. Under one record's length a
  * panel is a menu whatever it holds, as it was.
  */
-function hasMenuSizedText(panel: Element): boolean {
+function hasMenuSizedText(panel: Element, slotted = false): boolean {
+  if (slotted) {
+    const drawn = readDrawnPanelText(panel);
+    if (!drawn) return false;
+    const whole = normalizedTextLength(drawn.whole);
+    if (whole === 0) return false;
+    if (whole <= MAX_SEMANTIC_SOURCE_TEXT) return true;
+    let drawnInItems = 0;
+    for (const item of drawn.items) drawnInItems += normalizedTextLength(item);
+    return drawnInItems * 2 >= whole;
+  }
   const length = normalizedTextLength(safelyRead(() => panel.textContent));
   if (length === 0) return false;
   if (length <= MAX_SEMANTIC_SOURCE_TEXT) return true;
@@ -3652,9 +3937,9 @@ function isBoundedSafeTabPanel(
       !classification || classification.category !== 'public-semantic' ||
       disclosureElementCanCarryUserState(element)
     ) return false;
-    pending.push(...element.childNodes);
-    const shadowRoot = safelyReadShadowRoot(element);
-    if (shadowRoot) pending.push(...shadowRoot.childNodes);
+    const children = panelWalkChildren(element);
+    if (!children) return false;
+    pending.push(...children.nodes);
   }
   return true;
 }
@@ -3722,6 +4007,26 @@ export function semanticSourceProofNodeIds(proof: SemanticSourceProof): number[]
   return nodeIds;
 }
 
+function postedSemanticSourceState(
+  scan: SemanticSourceScan,
+): PostedSemanticSourceState {
+  const recordRevisions = new Map<number, number>();
+  for (const record of scan.records) {
+    recordRevisions.set(record.recordId, record.nodeRevision);
+  }
+  const proofOrder = scan.proofs.map(semanticSourceProofIdentity);
+  const proofRevisions = new Map<string, number>();
+  scan.proofs.forEach((proof, index) => {
+    proofRevisions.set(proofOrder[index]!, proof.revision);
+  });
+  return Object.freeze({
+    recordOrder: Object.freeze(scan.records.map((record) => record.recordId)),
+    recordRevisions,
+    proofOrder: Object.freeze(proofOrder),
+    proofRevisions,
+  });
+}
+
 function semanticSourceScanSignature(scan: SemanticSourceScan): string {
   return [
     scan.records.map((record) => `${record.recordId}:${record.nodeRevision}`)
@@ -3729,4 +4034,34 @@ function semanticSourceScanSignature(scan: SemanticSourceScan): string {
     scan.proofs.map((proof) =>
       `${semanticSourceProofIdentity(proof)}:${proof.revision}`).join(','),
   ].join('|');
+}
+
+/** The sessions of each document that hear of a change of its sheets (D179). */
+const STYLE_SHEET_LISTENERS = new WeakMap<Document, Set<() => void>>();
+
+function listenForStyleSheetChanges(
+  document: Document,
+  listener: () => void,
+): () => void {
+  let listeners = STYLE_SHEET_LISTENERS.get(document);
+  if (!listeners) STYLE_SHEET_LISTENERS.set(document, listeners = new Set());
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/**
+ * Tells the semantic sessions of `document` that a sheet's rules changed
+ * with no change of the DOM (`insertRule`, `replaceSync`, a sheet adopted),
+ * as the page reader's style poll finds (D179). Each scans once a while
+ * later, if its last scan asked whether the tab shows a field or an editor,
+ * as after a resize: such a rule may show one, or hide it.
+ */
+export function noteSemanticSourceStyleSheetChange(document: Document): void {
+  for (const listener of [...STYLE_SHEET_LISTENERS.get(document) ?? []]) {
+    try {
+      listener();
+    } catch {
+      // One session's failure is its own.
+    }
+  }
 }

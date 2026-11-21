@@ -16,7 +16,20 @@ import {
   type SourceEvidenceCategory,
 } from './source-secret-classifier';
 
-export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 2;
+/**
+ * Version 3 lets a batch carry only what changed since the batch before
+ * (D179). A start or an ACK says which version the panel speaks; a page of
+ * this build answers a panel of version 2 with whole-state batches stamped
+ * 2, and a panel of version 2 refuses a start of version 3, so a stale pair
+ * after an update reads whole states or nothing, never half a state. The
+ * port prefix and the message kinds keep their `v2` names: they are names.
+ */
+export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 3;
+/** The version that knows whole-state batches only (before D179). */
+export const SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION = 2;
+export type SemanticSourceProtocolVersion =
+  | typeof SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION
+  | typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
 export const SEMANTIC_SOURCE_PORT_PREFIX = 'simul:semantic-source-v2:';
 // One batch is one message, and its counted bytes are its limit: 8 MiB, well
 // inside the 64 MiB Chrome carries (D63). The counts below only follow from
@@ -83,7 +96,7 @@ export interface SemanticSourcePortIdentity {
 }
 
 export interface SemanticSourceStartMessage {
-  readonly protocolVersion: typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
+  readonly protocolVersion: SemanticSourceProtocolVersion;
   readonly kind: 'simul:semantic-source-v2:start';
   readonly bridge: SemanticSourceBridgeId;
   readonly document: ReplicaSourceDocumentIdentity;
@@ -92,7 +105,7 @@ export interface SemanticSourceStartMessage {
 }
 
 export interface SemanticSourceAckMessage {
-  readonly protocolVersion: typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
+  readonly protocolVersion: SemanticSourceProtocolVersion;
   readonly kind: 'simul:semantic-source-v2:ack';
   readonly document: ReplicaSourceDocumentIdentity;
   readonly policyFingerprint: string;
@@ -392,16 +405,50 @@ export type SemanticSourceProof =
   | SemanticAriaRelationshipProof
   | SemanticPopoverOpenProof;
 
-/** A complete replacement of the admitted semantic set for one policy epoch. */
+/**
+ * What a batch of version 3 changes in the state the batch before it left
+ * (D179). The receiver holds the page's state in the page's order:
+ *
+ * 1. every id in `removedRecordIds` and `removedProofIds` leaves it;
+ * 2. every record and proof the batch carries replaces the one of its id in
+ *    place, or is new;
+ * 3. every id named in the placements is taken out of the order (a new one
+ *    was never in it), and then, pair by pair, put right after the id the
+ *    pair names (`0` or `''`: first). That id is one left in the order or
+ *    one placed by an earlier pair, and no two pairs name the same one.
+ *
+ * The counts are the sizes of the state after the change. A batch that
+ * breaks any of this is a broken stream: the panel lets the session go and
+ * the next one starts with a whole state.
+ */
+export interface SemanticSourceBatchDelta {
+  /** The sequence of the batch this one changes: the one before it. */
+  readonly base: number;
+  readonly removedRecordIds: readonly number[];
+  readonly removedProofIds: readonly string[];
+  /** `[recordId, afterRecordId]` pairs, flattened, in the new order. */
+  readonly recordPlacements: readonly number[];
+  /** `[proofId, afterProofId]` pairs, flattened, in the new order. */
+  readonly proofPlacements: readonly string[];
+  readonly recordCount: number;
+  readonly proofCount: number;
+}
+
+/**
+ * The admitted semantic set for one policy epoch: whole (a checkpoint), or,
+ * in version 3 with `delta`, what changed since the batch before (D179).
+ */
 export interface SemanticSourceBatch {
-  readonly protocolVersion: typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
+  readonly protocolVersion: SemanticSourceProtocolVersion;
   readonly kind: 'simul:semantic-source-v2:batch';
   readonly document: ReplicaSourceDocumentIdentity;
   readonly policyFingerprint: string;
   readonly sequence: number;
+  /** A whole state, or with `delta` the records that are new or changed. */
   readonly records: readonly SemanticSourceRecord[];
   readonly proofs: readonly SemanticSourceProof[];
   readonly byteLength: number;
+  readonly delta?: SemanticSourceBatchDelta;
 }
 
 export function createSemanticSourcePortName(
@@ -436,11 +483,12 @@ export function createSemanticSourceStart(
   bridge: SemanticSourceBridgeId,
   document: ReplicaSourceDocumentIdentity,
   scope: ReplicaReadScope,
+  protocolVersion: SemanticSourceProtocolVersion = SEMANTIC_SOURCE_PROTOCOL_VERSION,
 ): SemanticSourceStartMessage {
   const exactScope = readExactReplicaReadScope(scope);
   if (!exactScope) throw new Error('Invalid semantic read scope.');
   return Object.freeze({
-    protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    protocolVersion,
     kind: 'simul:semantic-source-v2:start',
     bridge,
     document,
@@ -453,12 +501,13 @@ export function createSemanticSourceAck(
   document: ReplicaSourceDocumentIdentity,
   policyFingerprint: string,
   sequence: number,
+  protocolVersion: SemanticSourceProtocolVersion = SEMANTIC_SOURCE_PROTOCOL_VERSION,
 ): SemanticSourceAckMessage {
   if (!isPolicyFingerprint(policyFingerprint) || !positiveSafeInteger(sequence)) {
     throw new Error('Invalid semantic source acknowledgement.');
   }
   return Object.freeze({
-    protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    protocolVersion,
     kind: 'simul:semantic-source-v2:ack',
     document,
     policyFingerprint,
@@ -472,9 +521,10 @@ export function readSemanticSourceControllerMessage(
   expectedDocument?: ReplicaSourceDocumentIdentity,
   expectedPolicyFingerprint?: string,
 ): SemanticSourceControllerMessage | undefined {
-  if (!isRecord(input) || input.protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION) {
+  if (!isRecord(input) || !isSemanticSourceProtocolVersion(input.protocolVersion)) {
     return undefined;
   }
+  const protocolVersion = input.protocolVersion;
   if (input.kind === 'simul:semantic-source-v2:start') {
     if (!hasExactKeys(input, [
       'protocolVersion', 'kind', 'bridge', 'document', 'policyFingerprint',
@@ -492,7 +542,7 @@ export function readSemanticSourceControllerMessage(
         input.policyFingerprint !== expectedPolicyFingerprint)
     ) return undefined;
     return Object.freeze({
-      protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+      protocolVersion,
       kind: input.kind,
       bridge: port.bridge,
       document,
@@ -512,12 +562,19 @@ export function readSemanticSourceControllerMessage(
       input.policyFingerprint !== expectedPolicyFingerprint)
   ) return undefined;
   return Object.freeze({
-    protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    protocolVersion,
     kind: input.kind,
     document,
     policyFingerprint: input.policyFingerprint,
     sequence: input.sequence,
   });
+}
+
+export function isSemanticSourceProtocolVersion(
+  value: unknown,
+): value is SemanticSourceProtocolVersion {
+  return value === SEMANTIC_SOURCE_PROTOCOL_VERSION ||
+    value === SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION;
 }
 
 export function createSemanticSourceBatch(
@@ -526,13 +583,28 @@ export function createSemanticSourceBatch(
   sequence: number,
   records: readonly SemanticSourceRecord[],
   proofs: readonly SemanticSourceProof[] = [],
+  options: {
+    readonly protocolVersion?: SemanticSourceProtocolVersion;
+    /** Only in version 3: the batch carries what changed (D179). */
+    readonly delta?: SemanticSourceBatchDelta;
+  } = {},
 ): SemanticSourceBatch {
   if (!isPolicyFingerprint(policyFingerprint) || !positiveSafeInteger(sequence)) {
     throw new Error('Invalid semantic source batch identity.');
   }
-  const byteLength = semanticSourceBatchByteLength(records, proofs);
+  const protocolVersion = options.protocolVersion ?? SEMANTIC_SOURCE_PROTOCOL_VERSION;
+  const delta = options.delta && Object.freeze({
+    base: options.delta.base,
+    removedRecordIds: Object.freeze([...options.delta.removedRecordIds]),
+    removedProofIds: Object.freeze([...options.delta.removedProofIds]),
+    recordPlacements: Object.freeze([...options.delta.recordPlacements]),
+    proofPlacements: Object.freeze([...options.delta.proofPlacements]),
+    recordCount: options.delta.recordCount,
+    proofCount: options.delta.proofCount,
+  });
+  const byteLength = semanticSourceBatchByteLength(records, proofs, delta);
   const batch = {
-    protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    protocolVersion,
     kind: 'simul:semantic-source-v2:batch' as const,
     document,
     policyFingerprint,
@@ -540,6 +612,7 @@ export function createSemanticSourceBatch(
     records: Object.freeze([...records]),
     proofs: Object.freeze([...proofs]),
     byteLength,
+    ...(delta ? { delta } : {}),
   };
   const read = readSemanticSourceBatch(batch, document, policyFingerprint);
   if (!read) throw new Error('Invalid semantic source batch.');
@@ -549,8 +622,16 @@ export function createSemanticSourceBatch(
 export function semanticSourceBatchByteLength(
   records: readonly SemanticSourceRecord[],
   proofs: readonly SemanticSourceProof[] = [],
+  delta?: SemanticSourceBatchDelta,
 ): number {
   let bytes = 0;
+  if (delta) {
+    // Each id as a record would count its number, and each proof id its
+    // characters, beside a fixed part for the counts (D179).
+    bytes += 64 + (delta.removedRecordIds.length + delta.recordPlacements.length) * 16;
+    for (const proofId of delta.removedProofIds) bytes += proofId.length * 2 + 16;
+    for (const proofId of delta.proofPlacements) bytes += proofId.length * 2 + 16;
+  }
   for (const record of records) {
     bytes += record.text.length * 2 + record.tagName.length +
       record.type.length + record.autocomplete.length + record.role.length +
@@ -582,11 +663,13 @@ export function readSemanticSourceBatch(
   expectedBridge?: SemanticSourceBridgeId,
   expectedScope?: ReplicaReadScope,
 ): SemanticSourceBatch | undefined {
-  if (!isRecord(input) || !hasExactKeys(input, [
-    'protocolVersion', 'kind', 'document', 'policyFingerprint', 'sequence',
-    'records', 'proofs', 'byteLength',
-  ]) ||
-    input.protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION ||
+  if (!isRecord(input) ||
+    !isSemanticSourceProtocolVersion(input.protocolVersion) ||
+    // Only version 3 knows a batch of what changed (D179).
+    !hasExactKeys(input, input.protocolVersion === SEMANTIC_SOURCE_PROTOCOL_VERSION &&
+        Object.hasOwn(input, 'delta')
+      ? SEMANTIC_SOURCE_DELTA_BATCH_KEYS
+      : SEMANTIC_SOURCE_BATCH_KEYS) ||
     input.kind !== 'simul:semantic-source-v2:batch' ||
     !isPolicyFingerprint(input.policyFingerprint) ||
     (expectedPolicyFingerprint !== undefined &&
@@ -634,13 +717,17 @@ export function readSemanticSourceBatch(
     proofIds.add(proofId);
     proofs.push(proof);
   }
-  const computedBytes = semanticSourceBatchByteLength(records, proofs);
+  const delta = Object.hasOwn(input, 'delta')
+    ? readSemanticSourceBatchDelta(input.delta, input.sequence, recordIds, proofIds)
+    : undefined;
+  if (Object.hasOwn(input, 'delta') && !delta) return undefined;
+  const computedBytes = semanticSourceBatchByteLength(records, proofs, delta);
   const byteLength = Number(input.byteLength);
   if (byteLength !== computedBytes || computedBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) {
     return undefined;
   }
   return Object.freeze({
-    protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    protocolVersion: input.protocolVersion,
     kind: input.kind,
     document,
     policyFingerprint: input.policyFingerprint,
@@ -648,7 +735,204 @@ export function readSemanticSourceBatch(
     records: Object.freeze(records),
     proofs: Object.freeze(proofs),
     byteLength,
+    ...(delta ? { delta } : {}),
   });
+}
+
+const SEMANTIC_SOURCE_BATCH_KEYS = Object.freeze([
+  'protocolVersion', 'kind', 'document', 'policyFingerprint', 'sequence',
+  'records', 'proofs', 'byteLength',
+]);
+const SEMANTIC_SOURCE_DELTA_BATCH_KEYS = Object.freeze([
+  ...SEMANTIC_SOURCE_BATCH_KEYS, 'delta',
+]);
+/** The longest proof id: a structural menu's names three bridge ids. */
+const MAX_SEMANTIC_SOURCE_PROOF_ID_LENGTH = 128;
+
+/**
+ * The shape of what a batch changes (D179); whether it fits the state it
+ * changes is the receiver's to check. An id is removed at most once, placed
+ * at most once, never both removed and carried, and every pair names a real
+ * id after one placed earlier or none.
+ */
+function readSemanticSourceBatchDelta(
+  input: unknown,
+  sequence: number,
+  carriedRecordIds: ReadonlySet<number>,
+  carriedProofIds: ReadonlySet<string>,
+): SemanticSourceBatchDelta | undefined {
+  if (!isRecord(input) || !hasExactKeys(input, [
+    'base', 'removedRecordIds', 'removedProofIds', 'recordPlacements',
+    'proofPlacements', 'recordCount', 'proofCount',
+  ]) ||
+    !positiveSafeInteger(input.base) || input.base !== sequence - 1 ||
+    !Array.isArray(input.removedRecordIds) ||
+    input.removedRecordIds.length > MAX_SEMANTIC_SOURCE_RECORDS ||
+    !Array.isArray(input.removedProofIds) ||
+    input.removedProofIds.length > MAX_SEMANTIC_SOURCE_PROOFS ||
+    !Array.isArray(input.recordPlacements) ||
+    input.recordPlacements.length % 2 !== 0 ||
+    input.recordPlacements.length > MAX_SEMANTIC_SOURCE_RECORDS * 2 ||
+    !Array.isArray(input.proofPlacements) ||
+    input.proofPlacements.length % 2 !== 0 ||
+    input.proofPlacements.length > MAX_SEMANTIC_SOURCE_PROOFS * 2 ||
+    !Number.isSafeInteger(input.recordCount) || Number(input.recordCount) < 0 ||
+    Number(input.recordCount) > MAX_SEMANTIC_SOURCE_RECORDS ||
+    !Number.isSafeInteger(input.proofCount) || Number(input.proofCount) < 0 ||
+    Number(input.proofCount) > MAX_SEMANTIC_SOURCE_PROOFS
+  ) return undefined;
+  const removedRecordIds = new Set<number>();
+  for (const recordId of input.removedRecordIds) {
+    if (
+      !positiveSafeInteger(recordId) || removedRecordIds.has(recordId) ||
+      carriedRecordIds.has(recordId)
+    ) return undefined;
+    removedRecordIds.add(recordId);
+  }
+  const removedProofIds = new Set<string>();
+  for (const proofId of input.removedProofIds) {
+    if (
+      !isSemanticSourceProofId(proofId) || removedProofIds.has(proofId) ||
+      carriedProofIds.has(proofId)
+    ) return undefined;
+    removedProofIds.add(proofId);
+  }
+  const placedRecordIds = new Set<number>();
+  for (let index = 0; index < input.recordPlacements.length; index += 2) {
+    const recordId = input.recordPlacements[index];
+    const after = input.recordPlacements[index + 1];
+    if (
+      !positiveSafeInteger(recordId) || removedRecordIds.has(recordId) ||
+      placedRecordIds.has(recordId) ||
+      !Number.isSafeInteger(after) || Number(after) < 0 || after === recordId ||
+      removedRecordIds.has(after as number)
+    ) return undefined;
+    placedRecordIds.add(recordId);
+  }
+  const placedProofIds = new Set<string>();
+  for (let index = 0; index < input.proofPlacements.length; index += 2) {
+    const proofId = input.proofPlacements[index];
+    const after = input.proofPlacements[index + 1];
+    if (
+      !isSemanticSourceProofId(proofId) || removedProofIds.has(proofId) ||
+      placedProofIds.has(proofId) ||
+      typeof after !== 'string' || after === proofId ||
+      (after !== '' && (!isSemanticSourceProofId(after) || removedProofIds.has(after)))
+    ) return undefined;
+    placedProofIds.add(proofId);
+  }
+  return Object.freeze({
+    base: input.base,
+    removedRecordIds: Object.freeze([...removedRecordIds]),
+    removedProofIds: Object.freeze([...removedProofIds]),
+    recordPlacements: Object.freeze([...input.recordPlacements as number[]]),
+    proofPlacements: Object.freeze([...input.proofPlacements as string[]]),
+    recordCount: input.recordCount as number,
+    proofCount: input.proofCount as number,
+  });
+}
+
+function isSemanticSourceProofId(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 1 &&
+    value.length <= MAX_SEMANTIC_SOURCE_PROOF_ID_LENGTH &&
+    /^semantic-[a-z-]+-v1:[0-9a-z:]+$/u.test(value);
+}
+
+/**
+ * Where each id of `next` that is new or out of the old order goes (D179):
+ * the ids of `previous` that stay in the same order among themselves (the
+ * longest such run) stay; every other id of `next` is placed right after
+ * the id before it in `next`, or first (`head`). Pairs come flattened, in
+ * the order of `next`, as `SemanticSourceBatchDelta` reads them.
+ */
+export function semanticSourceOrderPlacements<Id>(
+  previous: readonly Id[],
+  next: readonly Id[],
+  head: Id,
+): Id[] {
+  const previousIndex = new Map<Id, number>();
+  previous.forEach((id, index) => previousIndex.set(id, index));
+  // The longest increasing run of old positions, in the order of `next`
+  // (patience sorting: n log n).
+  const positions: number[] = [];
+  const indexes: number[] = [];
+  for (let index = 0; index < next.length; index += 1) {
+    const position = previousIndex.get(next[index]!);
+    if (position === undefined) continue;
+    positions.push(position);
+    indexes.push(index);
+  }
+  const tails: number[] = [];
+  const tailIndexes: number[] = [];
+  const parents = new Array<number>(positions.length).fill(-1);
+  for (let index = 0; index < positions.length; index += 1) {
+    const position = positions[index]!;
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (tails[middle]! < position) low = middle + 1;
+      else high = middle;
+    }
+    if (low > 0) parents[index] = tailIndexes[low - 1]!;
+    tails[low] = position;
+    tailIndexes[low] = index;
+  }
+  const stays = new Set<number>();
+  for (
+    let index = tailIndexes.length > 0 ? tailIndexes[tailIndexes.length - 1]! : -1;
+    index >= 0;
+    index = parents[index]!
+  ) stays.add(indexes[index]!);
+  const placements: Id[] = [];
+  for (let index = 0; index < next.length; index += 1) {
+    if (stays.has(index)) continue;
+    placements.push(next[index]!, index > 0 ? next[index - 1]! : head);
+  }
+  return placements;
+}
+
+/**
+ * The order a delta leaves (D179), from the order before it: undefined when
+ * the delta does not fit it. `kept` says whether an id is still in the state
+ * (not removed); new ids must be placed, and every placed id must be in the
+ * state once placed.
+ */
+export function applySemanticSourceOrderPlacements<Id>(
+  previous: readonly Id[],
+  removed: ReadonlySet<Id>,
+  placements: readonly Id[],
+  head: Id,
+): Id[] | undefined {
+  const placed = new Set<Id>();
+  for (let index = 0; index < placements.length; index += 2) placed.add(placements[index]!);
+  const positioned = new Set<Id>();
+  const stable: Id[] = [];
+  for (const id of previous) {
+    if (removed.has(id) || placed.has(id)) continue;
+    stable.push(id);
+    positioned.add(id);
+  }
+  const chain = new Map<Id, Id>();
+  for (let index = 0; index < placements.length; index += 2) {
+    const id = placements[index]!;
+    const after = placements[index + 1]!;
+    if (positioned.has(id) || chain.has(after) || (after !== head && !positioned.has(after))) {
+      return undefined;
+    }
+    chain.set(after, id);
+    positioned.add(id);
+  }
+  const order: Id[] = [];
+  const follow = (from: Id): void => {
+    for (let id = chain.get(from); id !== undefined; id = chain.get(id)) order.push(id);
+  };
+  follow(head);
+  for (const id of stable) {
+    order.push(id);
+    follow(id);
+  }
+  return order.length === positioned.size ? order : undefined;
 }
 
 export function readSemanticSourceProof(

@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_SEMANTIC_SOURCE_PROOFS,
   SEMANTIC_SOURCE_PROTOCOL_VERSION,
+  SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION,
+  applySemanticSourceOrderPlacements,
+  createSemanticSourceAck,
+  semanticSourceOrderPlacements,
   createSemanticSourceBatch,
   createSemanticSourcePortName,
   createSemanticSourceStart,
@@ -301,7 +305,7 @@ describe('semantic source protocol', () => {
   });
 
   it('binds start/ack parsing to the exact bridge, document and scope', () => {
-    expect(SEMANTIC_SOURCE_PROTOCOL_VERSION).toBe(2);
+    expect(SEMANTIC_SOURCE_PROTOCOL_VERSION).toBe(3);
     const portName = createSemanticSourcePortName(
       documentIdentity.sessionId,
       'isolated-html',
@@ -562,5 +566,150 @@ describe('semantic source protocol', () => {
       presentation: 'label',
       text: 'Email address',
     })).toBeDefined();
+  });
+
+  // D179: a batch carries only what changed since the batch before.
+  it('places what is new or moved so that the receiver gets the page\'s order back', () => {
+    let seed = 7;
+    const next = (): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    for (let round = 0; round < 300; round += 1) {
+      const previous = Array.from({ length: Math.floor(next() * 40) }, (_, index) =>
+        index + 1);
+      // Keep some, drop some, shuffle a little, add some new ones anywhere.
+      const kept = previous.filter(() => next() < 0.8);
+      for (let swap = 0; kept.length > 1 && swap < Math.floor(next() * 4); swap += 1) {
+        const left = Math.floor(next() * kept.length);
+        const right = Math.floor(next() * kept.length);
+        [kept[left], kept[right]] = [kept[right]!, kept[left]!];
+      }
+      const order = [...kept];
+      for (let add = 0; add < Math.floor(next() * 6); add += 1) {
+        order.splice(Math.floor(next() * (order.length + 1)), 0, 1_000 + round * 10 + add);
+      }
+      const removed = new Set(previous.filter((id) => !order.includes(id)));
+      const placements = semanticSourceOrderPlacements(previous, order, 0);
+      expect(applySemanticSourceOrderPlacements(previous, removed, placements, 0))
+        .toEqual(order);
+    }
+    // Nothing moved: only the new id is placed, after the one before it.
+    expect(semanticSourceOrderPlacements([1, 2, 3], [1, 2, 9, 3], 0)).toEqual([9, 2]);
+    expect(semanticSourceOrderPlacements(['a', 'b'], ['a', 'b'], '')).toEqual([]);
+    // Two pairs after one id, or one after an id not there, do not fit.
+    expect(applySemanticSourceOrderPlacements([1, 2], new Set(), [5, 1, 6, 1], 0))
+      .toBeUndefined();
+    expect(applySemanticSourceOrderPlacements([1, 2], new Set(), [5, 7], 0))
+      .toBeUndefined();
+    expect(applySemanticSourceOrderPlacements([1, 2], new Set([2]), [5, 2], 0))
+      .toBeUndefined();
+  });
+
+  it('reads a batch of what changed only in version 3 and only in its shape', () => {
+    const proofId = semanticSourceProofIdentity(selectProof);
+    const delta = {
+      base: 4,
+      removedRecordIds: [43],
+      removedProofIds: [semanticSourceProofIdentity(choiceProof)],
+      recordPlacements: [35, 0],
+      proofPlacements: [proofId, ''],
+      recordCount: 1,
+      proofCount: 1,
+    };
+    const batch = createSemanticSourceBatch(
+      documentIdentity,
+      'read-v1-111111',
+      5,
+      [ordinaryRecord],
+      [selectProof],
+      { delta },
+    );
+    expect(batch.delta).toEqual(delta);
+    expect(batch.protocolVersion).toBe(SEMANTIC_SOURCE_PROTOCOL_VERSION);
+    expect(batch.byteLength).toBeGreaterThan(
+      semanticSourceBatchByteLength([ordinaryRecord], [selectProof]),
+    );
+    const read = (change: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+      const changed = { ...delta, ...change };
+      return readSemanticSourceBatch({
+        protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+        kind: 'simul:semantic-source-v2:batch',
+        document: documentIdentity,
+        policyFingerprint: 'read-v1-111111',
+        sequence: 5,
+        records: [ordinaryRecord],
+        proofs: [selectProof],
+        byteLength: semanticSourceBatchByteLength(
+          [ordinaryRecord],
+          [selectProof],
+          changed as typeof delta,
+        ),
+        delta: changed,
+        ...extra,
+      }, documentIdentity, 'read-v1-111111', 'isolated-html',
+      FULL_VISIBLE_REPLICA_READ_SCOPE);
+    };
+    expect(read({})).toEqual(batch);
+    // Not the batch before; an id removed and carried; removed twice;
+    // placed twice; placed after a removed one; an odd list; no counts.
+    expect(read({ base: 3 })).toBeUndefined();
+    expect(read({ removedRecordIds: [35] })).toBeUndefined();
+    expect(read({ removedRecordIds: [43, 43] })).toBeUndefined();
+    expect(read({ recordPlacements: [35, 0, 35, 0] })).toBeUndefined();
+    expect(read({ recordPlacements: [35, 43] })).toBeUndefined();
+    expect(read({ recordPlacements: [35] })).toBeUndefined();
+    expect(read({ proofPlacements: ['not a proof id', ''] })).toBeUndefined();
+    expect(read({ recordCount: -1 })).toBeUndefined();
+    expect(read({ extra: true })).toBeUndefined();
+    // A whole-state panel of version 2 never takes one.
+    expect(read({}, { protocolVersion: SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION }))
+      .toBeUndefined();
+    // A first batch has nothing before it.
+    expect(() => createSemanticSourceBatch(
+      documentIdentity,
+      'read-v1-111111',
+      1,
+      [],
+      [],
+      { delta: { ...delta, base: 0, removedRecordIds: [], removedProofIds: [], recordPlacements: [], proofPlacements: [], recordCount: 0, proofCount: 0 } },
+    )).toThrow();
+  });
+
+  it('takes a start and an ACK of version 2, and stamps a whole state with it', () => {
+    const port = readSemanticSourcePortIdentity(createSemanticSourcePortName(
+      documentIdentity.sessionId,
+      'isolated-html',
+    ), 'isolated-html')!;
+    const start = createSemanticSourceStart(
+      'isolated-html',
+      documentIdentity,
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+      SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION,
+    );
+    expect(readSemanticSourceControllerMessage(start, port)?.protocolVersion).toBe(2);
+    const ack = createSemanticSourceAck(
+      documentIdentity,
+      start.policyFingerprint,
+      1,
+      SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION,
+    );
+    expect(readSemanticSourceControllerMessage(ack, port)?.protocolVersion).toBe(2);
+    expect(readSemanticSourceControllerMessage({ ...ack, protocolVersion: 4 }, port))
+      .toBeUndefined();
+    const whole = createSemanticSourceBatch(
+      documentIdentity,
+      start.policyFingerprint,
+      1,
+      [ordinaryRecord],
+      [],
+      { protocolVersion: SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION },
+    );
+    // The shape a panel of version 2 reads: no key it does not know.
+    expect(Object.keys(whole).sort()).toEqual([
+      'byteLength', 'document', 'kind', 'policyFingerprint', 'proofs',
+      'protocolVersion', 'records', 'sequence',
+    ]);
+    expect(whole.protocolVersion).toBe(2);
   });
 });

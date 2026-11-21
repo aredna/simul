@@ -232,6 +232,44 @@ describe('SemanticProofPresenter', () => {
     expect(aria.getAttribute('aria-checked')).toBe('true');
   });
 
+  it('writes aria-disabled only on a disabled control or where the page has it (D179)', () => {
+    const { document } = parseHTML(`<html><body>
+      <button id="plain">Plain</button>
+      <button id="off">Off</button>
+      <div id="custom" role="button" aria-disabled="true">Custom</div>
+    </body></html>`);
+    const plain = document.querySelector<HTMLButtonElement>('#plain')!;
+    const off = document.querySelector<HTMLButtonElement>('#off')!;
+    const custom = document.querySelector<HTMLElement>('#custom')!;
+    const state = (target: HTMLElement, nodeId: number, disabled: boolean) => ({
+      kind: 'control-state' as const,
+      proof: {
+        kind: 'control-state' as const, bridge: 'isolated-html' as const, nodeId,
+        revision: 1, gate: 'controlSemantics' as const, disabled,
+        classifierVersion: 1 as const,
+      },
+      target,
+    });
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    expect(presenter.apply([
+      state(plain, 1, false), state(off, 2, true), state(custom, 3, false),
+    ] as ResolvedSemanticSourceProof[])).toBe(true);
+    // A page rule \`button[aria-disabled]\` matches no enabled button.
+    expect(plain.hasAttribute('aria-disabled')).toBe(false);
+    expect(plain.disabled).toBe(false);
+    expect(off.getAttribute('aria-disabled')).toBe('true');
+    expect(off.disabled).toBe(true);
+    expect(custom.getAttribute('aria-disabled')).toBe('false');
+
+    presenter.clear();
+    expect(plain.hasAttribute('aria-disabled')).toBe(false);
+    expect(off.hasAttribute('aria-disabled')).toBe(false);
+    expect(off.disabled).toBe(false);
+    expect(custom.getAttribute('aria-disabled')).toBe('true');
+  });
+
   it('presents toggle, current-item, indicator and input range state and restores them', () => {
     const { document } = parseHTML(`<html><body>
       <button id="bold">Bold</button>

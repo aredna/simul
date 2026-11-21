@@ -9,6 +9,8 @@ import {
 import { SemanticProofPresenter } from '../lib/replica/semantic-proof-presenter';
 import {
   createSemanticSourceBatch,
+  semanticSourceOrderPlacements,
+  semanticSourceProofIdentity,
   semanticSourceRecordId,
   semanticStructuralMenuRelationId,
   semanticTabRelationId,
@@ -2163,7 +2165,319 @@ describe('semantic source receiver', () => {
     expect(receiver.records()).toEqual([]);
     expect(receiver.clear()).toEqual([]);
   });
+  // D179: a batch of what changed is applied as the whole state it leaves,
+  // at the cost of what changed.
+  it('applies batches of what changed as the whole states they leave', () => {
+    const page = () => parseHTML(`<html><body><select>${
+      Array.from({ length: 60 }, (_, index) => `<option>${index}</option>`).join('')
+    }</select><nav><ul>${
+      Array.from({ length: 8 }, (_, index) =>
+        `<li id="w${index}"><button id="t${index}">Menu ${index}</button>` +
+        `<div id="p${index}"><a href="/${index}">***</a></div></li>`).join('')
+    }</ul></nav><iframe id="frame"></iframe></body></html>`);
+    const replica = () => {
+      const { document } = page();
+      const nodes = new Map<number, Node>();
+      document.querySelectorAll('option').forEach((option, index) => nodes.set(100 + index, option));
+      for (let index = 0; index < 8; index += 1) {
+        nodes.set(200 + index * 4, document.querySelector(`#w${index}`)!);
+        nodes.set(201 + index * 4, document.querySelector(`#t${index}`)!);
+        nodes.set(202 + index * 4, document.querySelector(`#p${index}`)!);
+        nodes.set(203 + index * 4, document.querySelector(`#p${index} a`)!.firstChild!);
+      }
+      let resolved = 0;
+      const presenter = new SemanticProofPresenter({
+        document: document as unknown as Document,
+        iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+      });
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => {
+          resolved += 1;
+          return nodes.get(nodeId);
+        },
+        applyProofs: (proofs) => presenter.apply(proofs),
+      });
+      return { document, receiver, resolved: () => resolved };
+    };
+    const whole = replica();
+    const changed = replica();
+    let seed = 5;
+    const random = (): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    // The page's state: option labels, menu texts and menus, in its order.
+    const labels = new Map<number, { text: string; revision: number }>();
+    for (let index = 0; index < 60; index += 1) {
+      labels.set(100 + index, { text: `Option ${index}`, revision: 1 });
+    }
+    const menus = new Map<number, { expanded: boolean; revision: number }>();
+    for (let index = 0; index < 8; index += 1) menus.set(index, { expanded: false, revision: 1 });
+    const state = (sequence: number) => {
+      const records: SemanticSourceRecord[] = [];
+      for (const [nodeId, label] of labels) {
+        records.push(optionLabelRecord(nodeId, label.text, label.revision));
+      }
+      const proofs: SemanticSourceProof[] = [];
+      for (const [index, menu] of menus) {
+        records.push(menuTextRecord(203 + index * 4, `Item ${index}`));
+        proofs.push(numberedMenuProof(index, menu.expanded, menu.revision));
+      }
+      return createSemanticSourceBatch(identity, 'read-v1-111111', sequence, records, proofs);
+    };
+    let previous = state(1);
+    expect(whole.receiver.applyBatch(previous)).toBeDefined();
+    expect(changed.receiver.applyBatch(previous)).toBeDefined();
+    for (let sequence = 2; sequence < 60; sequence += 1) {
+      const roll = random();
+      const nodeId = 100 + Math.floor(random() * 60);
+      if (roll < 0.4) {
+        labels.set(nodeId, { text: `Relabelled ${sequence}`, revision: sequence });
+      } else if (roll < 0.6) {
+        labels.delete(nodeId);
+      } else if (roll < 0.8) {
+        // Moved to the end of the page's order.
+        const label = labels.get(nodeId);
+        if (label) {
+          labels.delete(nodeId);
+          labels.set(nodeId, label);
+        }
+      } else {
+        const index = Math.floor(random() * 8);
+        const menu = menus.get(index);
+        if (menu && random() < 0.7) {
+          menus.set(index, { expanded: !menu.expanded, revision: sequence });
+        } else if (menu) menus.delete(index);
+        else menus.set(index, { expanded: false, revision: sequence });
+      }
+      const next = state(sequence);
+      const delta = deltaBatch(previous, next);
+      const before = changed.resolved();
+      expect(whole.receiver.applyBatch(next)).toBeDefined();
+      expect(changed.receiver.applyBatch(delta)).toBeDefined();
+      // What changed is resolved, not the page: 60 options and 8 menus.
+      expect(changed.resolved() - before).toBeLessThan(30);
+      expect(changed.document.body.innerHTML).toBe(whole.document.body.innerHTML);
+      expect(changed.receiver.records()).toEqual(whole.receiver.records());
+      previous = next;
+    }
+
+    // A batch that does not fit the state it changes is refused whole.
+    const broken = deltaBatch(previous, state(60));
+    expect(changed.receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 60, broken.records, broken.proofs,
+      { delta: { ...broken.delta!, removedRecordIds: [semanticSourceRecordId(999, 'label')!] } },
+    ))).toBeUndefined();
+    expect(changed.receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 60, broken.records, broken.proofs,
+      { delta: { ...broken.delta!, recordCount: broken.delta!.recordCount + 1 } },
+    ))).toBeUndefined();
+  });
+
+  it('puts up and takes down only the menus a batch changed (D179)', () => {
+    const { document, window } = parseHTML(`<html><body><nav><ul>${
+      Array.from({ length: 4 }, (_, index) =>
+        `<li id="w${index}"><button id="t${index}">Menu ${index}</button>` +
+        `<div id="p${index}"><a href="/${index}">***</a></div></li>`).join('')
+    }</ul></nav><iframe id="frame"></iframe></body></html>`);
+    const nodes = new Map<number, Node>();
+    const installs = [0, 0, 0, 0];
+    for (let index = 0; index < 4; index += 1) {
+      nodes.set(200 + index * 4, document.querySelector(`#w${index}`)!);
+      nodes.set(201 + index * 4, document.querySelector(`#t${index}`)!);
+      const panel = document.querySelector<HTMLElement>(`#p${index}`)!;
+      nodes.set(202 + index * 4, panel);
+      nodes.set(203 + index * 4, document.querySelector(`#p${index} a`)!.firstChild!);
+      // A controller put up on the panel listens to it.
+      const listen = panel.addEventListener.bind(panel);
+      panel.addEventListener = ((type: string, ...rest: unknown[]) => {
+        if (type === 'pointerenter') installs[index]! += 1;
+        return (listen as (...args: unknown[]) => void)(type, ...rest);
+      }) as typeof panel.addEventListener;
+    }
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    const texts = [0, 1, 2, 3].map((index) => menuTextRecord(203 + index * 4, `Item ${index}`));
+    const first = createSemanticSourceBatch(identity, 'read-v1-111111', 1, texts,
+      [0, 1, 2, 3].map((index) => numberedMenuProof(index, false, 1)));
+    expect(receiver.applyBatch(first)).toBeDefined();
+    expect(installs).toEqual([1, 1, 1, 1]);
+
+    // The page shows menu 2: only it is put up again.
+    const second = createSemanticSourceBatch(identity, 'read-v1-111111', 2, texts, [
+      numberedMenuProof(0, false, 1), numberedMenuProof(1, false, 1),
+      numberedMenuProof(2, true, 2), numberedMenuProof(3, false, 1),
+    ]);
+    expect(receiver.applyBatch(deltaBatch(first, second))).toBeDefined();
+    expect(installs).toEqual([1, 1, 2, 1]);
+    // Menu 0 leaves: the others stay as they are.
+    const third = createSemanticSourceBatch(identity, 'read-v1-111111', 3, texts.slice(1), [
+      numberedMenuProof(1, false, 1), numberedMenuProof(2, true, 2),
+      numberedMenuProof(3, false, 1),
+    ]);
+    expect(receiver.applyBatch(deltaBatch(second, third))).toBeDefined();
+    expect(installs).toEqual([1, 1, 2, 1]);
+    expect(document.querySelector('#t0')!.hasAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe(false);
+    // The reader's hover on menu 1 survives a change of menu 3.
+    const trigger = document.querySelector('#t1')!;
+    trigger.dispatchEvent(new window.Event('pointerenter'));
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    const fourth = createSemanticSourceBatch(identity, 'read-v1-111111', 4, texts.slice(1), [
+      numberedMenuProof(1, false, 1), numberedMenuProof(2, true, 2),
+      numberedMenuProof(3, true, 4),
+    ]);
+    expect(receiver.applyBatch(deltaBatch(third, fourth))).toBeDefined();
+    expect(installs).toEqual([1, 1, 2, 2]);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    // After a live patch every menu is put up again, as before.
+    receiver.refreshBindings();
+    expect(installs).toEqual([1, 2, 3, 3]);
+  });
+
+  it('presents a menu of 1,500 links, as far as the page walks it (D179)', () => {
+    const page = (count: number) => {
+      const { document } = parseHTML(`<html><body><nav><ul>
+        <li id="wrapper"><button id="trigger">Products</button>
+        <ul id="panel">${Array.from({ length: count }, (_, index) =>
+          `<li><a href="/${index}">${index === 0 ? '<span id="item">***</span>' : 'x'}</a></li>`).join('')}</ul></li>
+        </ul></nav><iframe id="frame"></iframe></body></html>`);
+      const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+      expect(receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [menuTextRecord(19, 'First item', 'span')],
+        [structuralMenuProof()],
+      ))).toBeDefined();
+      return trigger.hasAttribute('data-simul-replica-disclosure-trigger');
+    };
+    // 1,500 links are 4,501 nodes or more; 1,024 was the bound.
+    expect(page(1_500)).toBe(true);
+    expect(page(2_800)).toBe(false);
+  });
+
+  describe('what is slotted into a panel of a component (D179)', () => {
+    const replica = (slotted: string) => {
+      const { document, window } = parseHTML(
+        `<html><body><x-menu id="host">${slotted}</x-menu><iframe id="frame"></iframe></body></html>`,
+      );
+      const host = document.querySelector('#host')!;
+      const root = host.attachShadow({ mode: 'open' });
+      root.innerHTML = '<nav><ul><li id="wrapper"><button id="trigger">Products</button>' +
+        '<ul id="panel"><slot></slot></ul></li></ul></nav>';
+      const slot = root.querySelector('slot')!;
+      for (const child of host.childNodes) {
+        Object.defineProperty(child, 'assignedSlot', { configurable: true, value: slot });
+      }
+      Object.defineProperty(slot, 'assignedNodes', {
+        configurable: true, value: () => [...host.childNodes],
+      });
+      const item = document.querySelector('#item')!;
+      const nodes = new Map<number, Node>([
+        [16, root.querySelector('#wrapper')!],
+        [17, root.querySelector('#trigger')!],
+        [18, root.querySelector('#panel')!],
+        [19, item.firstChild!],
+      ]);
+      const presenter = new SemanticProofPresenter({
+        document: document as unknown as Document,
+        iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+      });
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => nodes.get(nodeId),
+        applyProofs: (proofs) => presenter.apply(proofs),
+      });
+      receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [menuTextRecord(19, 'Slotted item')],
+        [structuralMenuProof()],
+      ));
+      return { trigger: root.querySelector('#trigger')!, window };
+    };
+
+    it('presents a menu whose items are slotted, its text found where it is drawn', () => {
+      const { trigger, window } = replica('<li><a id="item" href="/a">***</a></li>');
+      expect(trigger.getAttribute('data-simul-replica-disclosure-trigger')).toBe('v1');
+      trigger.dispatchEvent(new window.Event('pointerenter'));
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('refuses one a credential is slotted into', () => {
+      const { trigger } = replica(
+        '<li><a id="item" href="/a">***</a></li><li><input type="password"></li>',
+      );
+      expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+    });
+  });
+
 });
+
+/** Menu `index` of a replica built as `w`, `t`, `p` and its link (D179). */
+function numberedMenuProof(
+  index: number,
+  expanded: boolean,
+  revision: number,
+): Extract<SemanticSourceProof, { kind: 'structural-menu' }> {
+  return {
+    ...structuralMenuProof(),
+    relationId: semanticStructuralMenuRelationId(
+      200 + index * 4, 201 + index * 4, 202 + index * 4,
+    )!,
+    containerNodeId: 200 + index * 4,
+    triggerNodeId: 201 + index * 4,
+    panelNodeId: 202 + index * 4,
+    expanded,
+    revision,
+  };
+}
+
+/** The batch of what changed from one whole state to the next (D179). */
+function deltaBatch(
+  previous: SemanticSourceBatch,
+  next: SemanticSourceBatch,
+): SemanticSourceBatch {
+  const recordRevisions = new Map(previous.records.map((record) =>
+    [record.recordId, record.nodeRevision]));
+  const proofRevisions = new Map(previous.proofs.map((proof) =>
+    [semanticSourceProofIdentity(proof), proof.revision]));
+  const recordIds = next.records.map(({ recordId }) => recordId);
+  const proofIds = next.proofs.map(semanticSourceProofIdentity);
+  return createSemanticSourceBatch(
+    identity,
+    next.policyFingerprint,
+    next.sequence,
+    next.records.filter((record) =>
+      recordRevisions.get(record.recordId) !== record.nodeRevision),
+    next.proofs.filter((proof, index) =>
+      proofRevisions.get(proofIds[index]!) !== proof.revision),
+    {
+      delta: {
+        base: previous.sequence,
+        removedRecordIds: previous.records.map(({ recordId }) => recordId)
+          .filter((recordId) => !recordIds.includes(recordId)),
+        removedProofIds: previous.proofs.map(semanticSourceProofIdentity)
+          .filter((proofId) => !proofIds.includes(proofId)),
+        recordPlacements: semanticSourceOrderPlacements(
+          previous.records.map(({ recordId }) => recordId), recordIds, 0),
+        proofPlacements: semanticSourceOrderPlacements(
+          previous.proofs.map(semanticSourceProofIdentity), proofIds, ''),
+        recordCount: next.records.length,
+        proofCount: next.proofs.length,
+      },
+    },
+  );
+}
 
 function optionLabelRecord(
   nodeId: number,

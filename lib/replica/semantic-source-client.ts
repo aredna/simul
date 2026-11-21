@@ -3,12 +3,15 @@ import { createReplicaIdentity } from './replica-identity';
 import type { ReplicaReadScope } from './read-scope-policy';
 import { replicaReadScopeFingerprint } from './read-scope-policy';
 import {
+  SEMANTIC_SOURCE_PROTOCOL_VERSION,
+  SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION,
   createSemanticSourceAck,
   createSemanticSourcePortName,
   createSemanticSourceStart,
   readSemanticSourceBatch,
   type SemanticSourceBatch,
   type SemanticSourceBridgeId,
+  type SemanticSourceProtocolVersion,
 } from './semantic-source-protocol';
 import { sourceDocumentIdentity } from './source-identity';
 
@@ -29,6 +32,18 @@ export type SemanticSourceStreamFactory = (
   scope: ReplicaReadScope,
   signal?: AbortSignal,
 ) => Promise<SemanticSourceStreamLease>;
+
+/**
+ * Documents whose page let a start of version 3 go before any batch (D179):
+ * a page script of a build before it refuses one. The next start there asks
+ * for version 2, whole states only. Bounded; a document is a page load.
+ */
+const WHOLE_STATE_DOCUMENTS = new Set<string>();
+const MAX_WHOLE_STATE_DOCUMENTS = 64;
+
+function semanticSourceDocumentKey(request: ReplicaCaptureRequest): string {
+  return `${request.tabId}:${request.frameId}:${request.documentId}`;
+}
 
 export async function openChromeSemanticSource(
   request: ReplicaCaptureRequest,
@@ -54,6 +69,7 @@ export async function openChromeSemanticSource(
     frameId: request.frameId,
     name: createSemanticSourcePortName(request.sessionId, bridge),
   });
+  const documentKey = semanticSourceDocumentKey(request);
   return new ChromeSemanticSourceLease(
     port,
     document,
@@ -61,6 +77,15 @@ export async function openChromeSemanticSource(
     bridge,
     scope,
     signal,
+    WHOLE_STATE_DOCUMENTS.has(documentKey)
+      ? SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION
+      : SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    () => {
+      if (WHOLE_STATE_DOCUMENTS.size >= MAX_WHOLE_STATE_DOCUMENTS) {
+        WHOLE_STATE_DOCUMENTS.clear();
+      }
+      WHOLE_STATE_DOCUMENTS.add(documentKey);
+    },
   );
 }
 
@@ -73,6 +98,7 @@ class ChromeSemanticSourceLease implements SemanticSourceStreamLease {
   #explicitlyDisposed = false;
   #failureDelivered = false;
   #terminalFailure = false;
+  #receivedBatch = false;
 
   constructor(
     private readonly port: Browser.runtime.Port,
@@ -81,13 +107,21 @@ class ChromeSemanticSourceLease implements SemanticSourceStreamLease {
     private readonly bridge: SemanticSourceBridgeId,
     private readonly scope: ReplicaReadScope,
     private readonly signal?: AbortSignal,
+    private readonly protocolVersion: SemanticSourceProtocolVersion =
+      SEMANTIC_SOURCE_PROTOCOL_VERSION,
+    private readonly onStartRefused?: () => void,
   ) {
     this.#policyFingerprint = replicaReadScopeFingerprint(scope);
     port.onMessage.addListener(this.#onMessage);
     port.onDisconnect.addListener(this.#onDisconnect);
     signal?.addEventListener('abort', this.#onAbort, { once: true });
     try {
-      port.postMessage(createSemanticSourceStart(bridge, document, scope));
+      port.postMessage(createSemanticSourceStart(
+        bridge,
+        document,
+        scope,
+        protocolVersion,
+      ));
     } catch {
       this.#terminalFailure = true;
       this.#close(true);
@@ -129,10 +163,15 @@ class ChromeSemanticSourceLease implements SemanticSourceStreamLease {
       this.bridge,
       this.scope,
     );
-    if (!batch || batch.sequence !== this.#lastAppliedSequence + 1) {
+    // A panel that asked for whole states takes nothing else (D179).
+    if (
+      !batch || batch.sequence !== this.#lastAppliedSequence + 1 ||
+      (batch.delta && this.protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION)
+    ) {
       this.#fail();
       return;
     }
+    this.#receivedBatch = true;
     if (!this.#observer) {
       // The source is capacity-one until ACK, but retain a defensive bound.
       if (this.#queue.length >= 4) {
@@ -147,6 +186,18 @@ class ChromeSemanticSourceLease implements SemanticSourceStreamLease {
 
   readonly #onDisconnect = (): void => {
     if (this.#disposed) return;
+    // The page let the start go before any batch: a page script that knows
+    // only version 2 does that to a start of version 3 (D179).
+    if (
+      !this.#receivedBatch && !this.#explicitlyDisposed &&
+      this.protocolVersion === SEMANTIC_SOURCE_PROTOCOL_VERSION
+    ) {
+      try {
+        this.onStartRefused?.();
+      } catch {
+        // The next start asks for version 3 again.
+      }
+    }
     this.#terminalFailure = !this.#explicitlyDisposed;
     this.#close(false);
     if (!this.#explicitlyDisposed) this.#deliverFailure();
@@ -175,6 +226,7 @@ class ChromeSemanticSourceLease implements SemanticSourceStreamLease {
         this.document,
         this.#policyFingerprint,
         batch.sequence,
+        this.protocolVersion,
       ));
       return true;
     } catch {

@@ -11,10 +11,12 @@ import {
   createSemanticSourceAck,
   createSemanticSourcePortName,
   createSemanticSourceStart,
+  semanticSourceProofSignature,
   type SemanticSourceBatch,
 } from '../lib/replica/semantic-source-protocol';
 import {
   SemanticSourceSession,
+  noteSemanticSourceStyleSheetChange,
   eagerlyClassifySourceDocumentSecrets,
   rememberSourceEventSecret,
   rememberSourceMutationSecrets,
@@ -29,6 +31,7 @@ import {
   probeSourceShadowRoot,
 } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
+import { wholeSemanticBatch } from './support/semantic-batches';
 
 const identity: ReplicaSourceDocumentIdentity = {
   sessionId: 'semantic-source-session',
@@ -1561,6 +1564,186 @@ describe('semantic source session', () => {
       .join('');
     expect(offered(`<p>${prose.slice(0, 4_000)}</p>${nested}`).menu).toBe(true);
     expect(offered(`<p>${prose}</p>${nested}`).menu).toBe(false);
+  });
+
+  // D179: a menu's panel is walked to 8,192 nodes on both sides, as its
+  // text costs once now that a batch carries what changed.
+  it('offers a site menu of 400 or 1,500 links, and refuses one past 8,192 nodes (D179)', () => {
+    const offered = (count: number) => {
+      const items = Array.from({ length: count }, (_, index) =>
+        `<li><a href="/s-${index}">Section ${index}</a></li>`).join('');
+      const { document, window } = parseHTML(`<html><body><nav>
+        <div id="wrapper"><a id="trigger" href="/library">Resources</a>
+          <ul id="panel" class="collapsed">${items}</ul>
+        </div></nav></body></html>`);
+      installPaintedTabFixture(document, window as unknown as Window);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port, document, window, 'isolated-html', undefined,
+        structuralMenuStyle((element) =>
+          element.classList.contains('collapsed') ? 'display' : undefined),
+      );
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const batch = port.messages[0]!;
+      session.dispose();
+      return {
+        menu: batch.proofs.some((proof) => proof.kind === 'structural-menu'),
+        text: batch.records.filter((record) => record.gate === 'disclosureContent').length,
+      };
+    };
+    // 400 links in a list are 1,201 nodes; 1,024 was the bound.
+    expect(offered(400)).toEqual({ menu: true, text: 400 });
+    expect(offered(1_500)).toEqual({ menu: true, text: 1_500 });
+    // 2,800 links are 8,401 nodes: no menu, and none of its text.
+    expect(offered(2_800)).toEqual({ menu: false, text: 0 });
+  });
+
+  describe('what is slotted into a collapsed panel of a component (D179)', () => {
+    /** A host whose open root holds `markup`, its children slotted by name. */
+    const slotInto = (host: Element, markup: string): ShadowRoot => {
+      const root = host.attachShadow({ mode: 'open' });
+      root.innerHTML = markup;
+      const slots = [...root.querySelectorAll('slot')];
+      const slotOf = (child: Node) => {
+        const name = child.nodeType === 1
+          ? (child as Element).getAttribute('slot') ?? ''
+          : '';
+        return slots.find((slot) => (slot.getAttribute('name') ?? '') === name) ?? null;
+      };
+      for (const child of host.childNodes) {
+        Object.defineProperty(child, 'assignedSlot', {
+          configurable: true, value: slotOf(child),
+        });
+      }
+      for (const slot of slots) {
+        Object.defineProperty(slot, 'assignedNodes', {
+          configurable: true,
+          value: () => [...host.childNodes].filter((child) => slotOf(child) === slot),
+        });
+      }
+      return root;
+    };
+    const DISCLOSURE = '<button id="more" aria-expanded="false" aria-controls="panel">More</button>' +
+      '<div id="panel" hidden><slot></slot></div>';
+    const read = (page: string, markup: string) => {
+      const { document, window } = parseHTML(`<html><body>${page}</body></html>`);
+      const root = slotInto(document.querySelector('#host')!, markup);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const batch = port.messages[0]!;
+      session.dispose();
+      return { batch, document, root };
+    };
+
+    it('offers slotted text as the collapsed panel\'s own', () => {
+      const { batch, root } = read(
+        '<x-disclosure id="host"><p>Slotted words</p>light <b>words</b></x-disclosure>' +
+          '<p>Page words</p>',
+        DISCLOSURE,
+      );
+      expect(batch.proofs).toContainEqual(expect.objectContaining({
+        kind: 'disclosure-state',
+        triggerNodeId: nodeId(root.querySelector('#more')!),
+        panelNodeId: nodeId(root.querySelector('#panel')!),
+        expanded: false,
+      }));
+      expect(batch.records.filter((record) => record.gate === 'disclosureContent')
+        .map((record) => record.text)).toEqual(['Slotted words', 'light', 'words']);
+    });
+
+    it('refuses a panel a field or a secret is slotted into, and sends none of it', () => {
+      for (const slotted of [
+        '<input value="typed draft">',
+        '<input type="password" value="hunter22">',
+        '<div contenteditable="true">edited draft</div>',
+      ]) {
+        const { batch } = read(
+          `<x-disclosure id="host"><p>Slotted words</p>${slotted}</x-disclosure>`,
+          DISCLOSURE,
+        );
+        expect(batch.proofs.some((proof) => proof.kind === 'disclosure-state')).toBe(false);
+        expect(batch.records.some((record) => record.gate === 'disclosureContent'))
+          .toBe(false);
+        const sent = JSON.stringify(batch);
+        for (const secret of ['Slotted words', 'typed draft', 'hunter22', 'edited draft']) {
+          expect(sent).not.toContain(secret);
+        }
+      }
+    });
+
+    it('refuses a panel whose slot cannot be read', () => {
+      const { document, window } = parseHTML(
+        '<html><body><x-disclosure id="host"><p>Slotted words</p></x-disclosure></body></html>',
+      );
+      const root = slotInto(document.querySelector('#host')!, DISCLOSURE);
+      Object.defineProperty(root.querySelector('slot')!, 'assignedNodes', {
+        configurable: true,
+        value: () => {
+          throw new Error('unreadable');
+        },
+      });
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(port.messages[0]!.proofs.some((proof) => proof.kind === 'disclosure-state'))
+        .toBe(false);
+      expect(JSON.stringify(port.messages[0])).not.toContain('Slotted words');
+      session.dispose();
+    });
+
+    it('offers a component\'s menu whose items are slotted', () => {
+      const { document, window } = parseHTML(
+        '<html><body><x-menu id="host">' +
+          Array.from({ length: 3 }, (_, index) =>
+            `<a href="/item-${index}">Slotted item ${index}</a>`).join('') +
+          '</x-menu></body></html>',
+      );
+      const root = slotInto(
+        document.querySelector('#host')!,
+        '<nav><div id="wrapper"><a id="trigger" href="/menu">Products</a>' +
+          '<div id="panel" class="collapsed"><slot></slot></div></div></nav>',
+      );
+      installPaintedTabFixture(document, window as unknown as Window);
+      for (const element of [...root.querySelectorAll('*')]) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true, value: () => paintedRectList(),
+        });
+      }
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port, document, window, 'isolated-html', undefined,
+        structuralMenuStyle((element) =>
+          element.classList.contains('collapsed') ? 'display' : undefined),
+      );
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const batch = port.messages[0]!;
+      expect(batch.proofs).toContainEqual(expect.objectContaining({
+        kind: 'structural-menu',
+        panelNodeId: nodeId(root.querySelector('#panel')!),
+        expanded: false,
+      }));
+      expect(batch.records.filter((record) => record.gate === 'disclosureContent')
+        .map((record) => record.text))
+        .toEqual(['Slotted item 0', 'Slotted item 1', 'Slotted item 2']);
+      session.dispose();
+    });
   });
 
   it('infers a navigation menu whose trigger carries its own plain aria-expanded', () => {
@@ -4284,23 +4467,95 @@ describe('semantic source session', () => {
       for (const event of [
         'transitionend', 'animationend', 'transitioncancel', 'animationcancel',
       ] as const) {
-        it(`starts no scan at a ${event}, and lets none put off the scan a resize started`, () => {
-          const fixture = editors(`<div id="box" style="display: none">${FIELD}</div>`);
+        // D179: the end of a transition or an animation where a field the
+        // last scan withheld is hidden from may show it: a scan, through
+        // the share of time; an end anywhere else starts none (D145).
+        it(`reads a field shown at a ${event} where it was hidden from, and lets none put off the scan a resize started`, () => {
+          const fixture = editors(
+            `<div id="box" style="display: none">${FIELD}</div>` +
+              '<p id="elsewhere"><span id="spinner">words</span></p>',
+          );
           fixture.start();
           expect(values(fixture)).toEqual([]);
           fixture.restyleSilently(fixture.document.querySelector('#box')!, null);
-          expect(settle(fixture, event, 3)).toBe(0);
+          const spinner = fixture.document.querySelector('#spinner')!;
+          spinner.dispatchEvent(new (fixture.document.defaultView as unknown as {
+            Event: typeof Event;
+          }).Event(event, { bubbles: true }));
           expect(fixture.port.messages).toHaveLength(1);
+          expect(settle(fixture, event)).toBe(0);
+          expect(fixture.port.messages).toHaveLength(2);
+          expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+          // Shown now: an end there starts no scan any more.
+          const last = fixture.port.messages.at(-1)!;
+          fixture.port.emit(createSemanticSourceAck(identity, last.policyFingerprint, last.sequence));
+          expect(settle(fixture, event, 3)).toBe(0);
+          expect(fixture.port.messages).toHaveLength(2);
           // The wait a resize started is the same timer after such events.
           fixture.windowListeners.get('resize')!();
           const armed = fixture.timers.at(-1)!;
           expect(settle(fixture, event, 3)).toBe(0);
           expect(fixture.timers.at(-1)).toBe(armed);
-          expect(fixture.runTimersSince(fixture.timers.length - 1)).toBe(1);
-          expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
           fixture.session.dispose();
         });
       }
+
+      it('reads a field a hover rule shows, from the box the hover is on (D179)', () => {
+        const fixture = editors(
+          `<section id="card"><h2 id="title">Card</h2><div id="box" style="display: none">${FIELD}</div></section>` +
+            '<p id="elsewhere">words</p>',
+        );
+        fixture.start();
+        const dispatch = (selector: string, type: string): void => {
+          fixture.document.querySelector(selector)!.dispatchEvent(
+            new (fixture.document.defaultView as unknown as { Event: typeof Event })
+              .Event(type, { bubbles: true }),
+          );
+        };
+        dispatch('#elsewhere', 'pointerover');
+        expect(fixture.port.messages).toHaveLength(1);
+        // `.card:hover .box { display: block }`: the pointer is on the title.
+        fixture.restyleSilently(fixture.document.querySelector('#box')!, null);
+        dispatch('#title', 'pointerover');
+        expect(fixture.port.messages).toHaveLength(2);
+        expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+        fixture.session.dispose();
+      });
+
+      it('reads editor text that a fade shows, from the box the fade is on (D179)', () => {
+        const fixture = editors(
+          '<div id="modal" style="visibility: hidden"><form><label>' +
+            '<div contenteditable="true">faded draft</div></label></form></div>',
+        );
+        expect(fixture.start()).toEqual([]);
+        fixture.restyleSilently(fixture.document.querySelector('#modal')!, null);
+        fixture.document.querySelector('#modal')!.dispatchEvent(
+          new (fixture.document.defaultView as unknown as { Event: typeof Event })
+            .Event('transitionend', { bubbles: true }),
+        );
+        expect(fixture.port.messages.at(-1)!.records.map(({ text }) => text))
+          .toEqual(['faded draft']);
+        fixture.session.dispose();
+      });
+
+      it('scans a while after a rule put into a sheet, where a field was asked about (D179)', () => {
+        const fixture = editors(`<div id="box" style="display: none">${FIELD}</div>`);
+        fixture.start();
+        fixture.restyleSilently(fixture.document.querySelector('#box')!, null);
+        const from = fixture.timers.length;
+        noteSemanticSourceStyleSheetChange(fixture.document as unknown as Document);
+        noteSemanticSourceStyleSheetChange(fixture.document as unknown as Document);
+        // The second put off the first: one wait, one scan.
+        expect(fixture.timers.length - from).toBe(1);
+        expect(timerDelays.get(fixture.timers.at(-1)!)).toBeGreaterThanOrEqual(600);
+        expect(fixture.port.messages).toHaveLength(1);
+        expect(fixture.runTimersSince(from)).toBe(1);
+        expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+        fixture.session.dispose();
+        const left = fixture.timers.length;
+        noteSemanticSourceStyleSheetChange(fixture.document as unknown as Document);
+        expect(fixture.timers.length).toBe(left);
+      });
 
       it('reads editor text that a resize shows', () => {
         const fixture = editors(
@@ -4338,17 +4593,20 @@ describe('semantic source session', () => {
         fixture.session.dispose();
       });
 
-      it('starts none at a pointer or a focus event', () => {
-        const fixture = editors(`<div id="box" style="display: none">${FIELD}</div>`);
+      it('starts none at a pointer or a focus event away from what it withheld', () => {
+        const fixture = editors(
+          `<div id="box" style="display: none">${FIELD}</div><p id="other">words</p>`,
+        );
         fixture.start();
-        const box = fixture.document.querySelector('#box')!;
+        const other = fixture.document.querySelector('#other')!;
         const from = fixture.timers.length;
         for (const type of ['pointerover', 'pointerout', 'focusin', 'focusout']) {
-          box.dispatchEvent(new (fixture.document.defaultView as unknown as {
+          other.dispatchEvent(new (fixture.document.defaultView as unknown as {
             Event: typeof Event;
           }).Event(type, { bubbles: true }));
         }
         expect(fixture.runTimersSince(from)).toBe(0);
+        expect(fixture.port.messages).toHaveLength(1);
         fixture.session.dispose();
       });
 
@@ -4464,6 +4722,29 @@ describe('semantic source session', () => {
         fixture.restyle(box, 'display: none');
         expect(fixture.port.messages).toHaveLength(3);
         expect(last()).toEqual([]);
+        fixture.session.dispose();
+      });
+
+      it('tells no length of a credential field the tab does not show (D179)', () => {
+        const fixture = editors(
+          '<input id="shown" type="password">' +
+          '<div id="box" style="display: none"><input id="pw" type="password">' +
+          '<input id="card" type="text" autocomplete="cc-number"></div>',
+        );
+        const field = (id: string) =>
+          fixture.document.querySelector<HTMLInputElement>(`#${id}`)!;
+        field('shown').value = 'hunter';
+        field('pw').value = 'twelve chars';
+        field('card').value = '41111111111111111';
+        const lengths = (): number[] => fixture.port.messages.at(-1)!.proofs
+          .flatMap((proof) => proof.kind === 'masked-length' ? [proof.length] : []);
+        fixture.start();
+        expect(lengths()).toEqual([6]);
+        // Shown: the dots come with the scan that follows the change.
+        fixture.restyle(fixture.document.querySelector('#box')!, null);
+        expect(lengths()).toEqual([6, 12, 17]);
+        fixture.restyle(fixture.document.querySelector('#box')!, 'visibility: hidden');
+        expect(lengths()).toEqual([6]);
         fixture.session.dispose();
       });
 
@@ -5202,6 +5483,184 @@ describe('semantic source session', () => {
   });
 });
 
+// D179: after a whole first batch, a batch carries only what changed.
+describe('semantic batches of what changed', () => {
+  const stateOf = (batch: SemanticSourceBatch) => ({
+    records: batch.records.map((record) =>
+      `${record.recordId}:${record.presentation}:${record.text}`),
+    proofs: batch.proofs.map((proof) => semanticSourceProofSignature(proof)),
+  });
+  const freshState = (document: Document, window: Window) => {
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+    session.dispose();
+    return stateOf(port.messages[0]!);
+  };
+  const ack = (port: FakeSemanticPort, protocolVersion?: 2 | 3) => {
+    const last = port.messages.at(-1)!;
+    port.emit(createSemanticSourceAck(
+      identity,
+      last.policyFingerprint,
+      last.sequence,
+      protocolVersion,
+    ));
+  };
+
+  it('sends one changed label, not the page, and the state it leaves is the page\'s', () => {
+    const buttons = Array.from({ length: 30 }, (_, index) =>
+      `<button id="b${index}" aria-label="Button ${index}">x</button>`).join('');
+    const { document, window } = parseHTML(
+      `<html><body>${buttons}<textarea id="draft">typed</textarea></body></html>`,
+    );
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+    expect(port.posted[0]!.delta).toBeUndefined();
+    const whole = port.posted[0]!.records.length;
+    expect(whole).toBeGreaterThan(30);
+
+    document.getElementById('b7')!.setAttribute('aria-label', 'Changed');
+    session.refresh();
+    ack(port);
+    const change = port.posted[1]!;
+    expect(change.delta).toMatchObject({
+      base: 1,
+      removedRecordIds: [],
+      recordPlacements: [],
+      recordCount: whole,
+    });
+    expect(change.records.map(({ text }) => text)).toEqual(['Changed']);
+    expect(change.byteLength * 10).toBeLessThan(port.posted[0]!.byteLength);
+    expect(stateOf(port.messages[1]!)).toEqual(freshState(document, window as unknown as Window));
+
+    // One leaves, one comes in the middle, one moves to the end.
+    document.getElementById('b3')!.remove();
+    const added = document.createElement('button');
+    added.setAttribute('aria-label', 'New one');
+    document.getElementById('b12')!.before(added);
+    document.body.append(document.getElementById('b0')!);
+    session.refresh();
+    ack(port);
+    const moved = port.posted[2]!;
+    expect(moved.delta?.removedRecordIds).toHaveLength(1);
+    expect(moved.records.map(({ text }) => text)).toEqual(['New one']);
+    expect(moved.delta!.recordPlacements.length).toBe(4);
+    expect(stateOf(port.messages[2]!)).toEqual(freshState(document, window as unknown as Window));
+
+    // Nothing changed: nothing is sent.
+    session.refresh();
+    ack(port);
+    expect(port.posted).toHaveLength(3);
+    session.dispose();
+  });
+
+  it('keeps the state a fresh read gives through many random changes', () => {
+    let seed = 29;
+    const random = (): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const { document, window } = parseHTML(
+      '<html><body><main id="main"></main></body></html>',
+    );
+    const main = document.getElementById('main')!;
+    let made = 0;
+    const make = (): Element => {
+      made += 1;
+      const roll = random();
+      if (roll < 0.4) {
+        const button = document.createElement('button');
+        button.setAttribute('aria-label', `Label ${made}`);
+        if (random() < 0.3) button.setAttribute('disabled', '');
+        return button;
+      }
+      if (roll < 0.7) {
+        const field = document.createElement('input');
+        field.setAttribute('type', 'text');
+        field.setAttribute('placeholder', `Field ${made}`);
+        return field;
+      }
+      const choice = document.createElement('input');
+      choice.setAttribute('type', 'checkbox');
+      return choice;
+    };
+    for (let index = 0; index < 20; index += 1) main.append(make());
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+    ack(port);
+    let deltas = 0;
+    for (let step = 0; step < 60; step += 1) {
+      for (let change = 0; change < 1 + Math.floor(random() * 3); change += 1) {
+        const children = [...main.children];
+        const pick = children[Math.floor(random() * children.length)];
+        const roll = random();
+        if (!pick || roll < 0.2) main.append(make());
+        else if (roll < 0.35) pick.remove();
+        else if (roll < 0.5) main.insertBefore(pick, children[Math.floor(random() * children.length)] ?? null);
+        else if (roll < 0.65) pick.before(make());
+        else if (pick.localName === 'button') {
+          pick.setAttribute('aria-label', `Relabelled ${step}`);
+        } else if (pick.getAttribute('type') === 'checkbox') {
+          (pick as HTMLInputElement).checked = !(pick as HTMLInputElement).checked;
+        } else {
+          (pick as HTMLInputElement).value = random() < 0.5 ? '' : `typed ${step}`;
+        }
+      }
+      // Nothing is in flight: a change is posted at once, and then taken.
+      const sent = port.posted.length;
+      session.refresh();
+      if (port.posted.length === sent) continue;
+      if (port.posted.at(-1)!.delta) deltas += 1;
+      expect(stateOf(port.messages.at(-1)!)).toEqual(
+        freshState(document, window as unknown as Window),
+      );
+      ack(port);
+    }
+    expect(port.disconnects).toBe(0);
+    expect(deltas).toBeGreaterThan(30);
+    session.dispose();
+  });
+
+  it('answers a panel of version 2 with whole states, and ends on an ACK of another version', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button id="a" aria-label="One">x</button><button aria-label="Two">y</button></body></html>',
+    );
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html',
+      identity,
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+      2,
+    ));
+    expect(port.posted[0]!.protocolVersion).toBe(2);
+    document.getElementById('a')!.setAttribute('aria-label', 'Changed');
+    session.refresh();
+    ack(port, 2);
+    expect(port.posted[1]!.protocolVersion).toBe(2);
+    expect(port.posted[1]!.delta).toBeUndefined();
+    expect(port.posted[1]!.records.map(({ text }) => text)).toEqual(
+      expect.arrayContaining(['Changed', 'Two']),
+    );
+    document.getElementById('a')!.setAttribute('aria-label', 'Again');
+    session.refresh();
+    ack(port, 3);
+    expect(port.disconnects).toBe(1);
+    expect(port.posted).toHaveLength(2);
+    session.dispose();
+  });
+});
+
 const ids = new WeakMap<object, number>();
 let nextId = 1;
 function nodeId(node: object): number {
@@ -5394,7 +5853,10 @@ function selectTab(document: Document, selected: 'a' | 'b'): void {
 }
 
 class FakeSemanticPort implements SemanticSourcePort {
+  /** Each batch as the page's whole state after it (D179). */
   readonly messages: SemanticSourceBatch[] = [];
+  /** The batches as posted: a whole state, or what changed (D179). */
+  readonly posted: SemanticSourceBatch[] = [];
   readonly #messageListeners = new Set<(message: unknown) => void>();
   readonly #disconnectListeners = new Set<() => void>();
   readonly onMessage = {
@@ -5413,7 +5875,8 @@ class FakeSemanticPort implements SemanticSourcePort {
   constructor(readonly name: string) {}
 
   postMessage(message: SemanticSourceBatch): void {
-    this.messages.push(message);
+    this.posted.push(message);
+    this.messages.push(wholeSemanticBatch(this.messages.at(-1), message));
   }
 
   disconnect(): void {

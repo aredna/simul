@@ -118,6 +118,60 @@ describe('Chrome semantic source client', () => {
 
     expect(onFailure).not.toHaveBeenCalled();
   });
+
+  // D179: a page script of a build before batches of what changed refuses a
+  // start of version 3; the next start for that document asks for version 2.
+  it('asks a page that let a start of version 3 go for whole states only', async () => {
+    const stale = { ...request, documentId: 'semantic-client-stale-document' };
+    const staleIdentity = { ...documentIdentity, documentId: stale.documentId };
+    const refused = new FakePort();
+    installBrowser(refused);
+    const first = await openChromeSemanticSource(stale, 'isolated-html', FULL_VISIBLE_REPLICA_READ_SCOPE);
+    const onFailure = vi.fn();
+    first.setObserver({ onBatch: () => true, onFailure });
+    expect(refused.messages[0]).toMatchObject({ protocolVersion: 3 });
+    refused.emitDisconnect();
+    expect(onFailure).toHaveBeenCalledOnce();
+
+    const port = new FakePort();
+    installBrowser(port);
+    const second = await openChromeSemanticSource(stale, 'isolated-html', FULL_VISIBLE_REPLICA_READ_SCOPE);
+    const onBatch = vi.fn(() => true);
+    const secondFailure = vi.fn();
+    second.setObserver({ onBatch, onFailure: secondFailure });
+    expect(port.messages[0]).toMatchObject({
+      kind: 'simul:semantic-source-v2:start',
+      protocolVersion: 2,
+    });
+    const whole = createSemanticSourceBatch(
+      staleIdentity, 'read-v1-111111', 1, [record], [], { protocolVersion: 2 },
+    );
+    port.emitMessage(whole);
+    expect(onBatch).toHaveBeenCalledWith(whole);
+    expect(port.messages[1]).toMatchObject({ kind: 'simul:semantic-source-v2:ack', protocolVersion: 2 });
+    // A batch of what changed is not for a panel that asked for whole states.
+    port.emitMessage(createSemanticSourceBatch(
+      staleIdentity, 'read-v1-111111', 2, [{ ...record, nodeRevision: 2, text: 'next' }], [],
+      { delta: {
+        base: 1, removedRecordIds: [], removedProofIds: [], recordPlacements: [],
+        proofPlacements: [], recordCount: 1, proofCount: 0,
+      } },
+    ));
+    expect(secondFailure).toHaveBeenCalledOnce();
+    expect(onBatch).toHaveBeenCalledOnce();
+
+    // Another document still asks for version 3.
+    const other = new FakePort();
+    installBrowser(other);
+    const third = await openChromeSemanticSource(
+      { ...request, documentId: 'semantic-client-other-document' },
+      'isolated-html',
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+    );
+    expect(other.messages[0]).toMatchObject({ protocolVersion: 3 });
+    third.dispose();
+  });
+
 });
 
 function installBrowser(port: FakePort): ReturnType<typeof vi.fn> {

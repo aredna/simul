@@ -12,6 +12,7 @@ import {
   type SourceClassificationFacts,
 } from './source-secret-classifier';
 import {
+  applySemanticSourceOrderPlacements,
   semanticSourceProofIdentity,
   semanticSourceProofSignature,
   semanticSourceRecordId,
@@ -26,7 +27,10 @@ import {
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
 } from './source-identity';
-import { readSourceFlatTreeElementPath } from './source-privacy-policy';
+import {
+  readSourceFlatTreeElementPath,
+  readSourceFlatTreeParentElement,
+} from './source-privacy-policy';
 import {
   MAX_STRUCTURAL_MENU_TRIGGERS,
   isPlainStructuralMenuTrigger,
@@ -157,6 +161,20 @@ interface SemanticProofHistory {
 
 const SEMANTIC_SELECTION_TEXT = new WeakMap<Element, string>();
 /**
+ * The proof sets a batch hands to `applyProofs` (D179). Between two batches
+ * the replica changes only by what the presenter itself writes: every live
+ * patch is followed by `refreshBindings`, which presents the whole set again.
+ * So a presenter may keep what it already shows for such a set, and put up
+ * or take down only the site menus that changed.
+ */
+const PROOF_SETS_FROM_BATCHES = new WeakSet<readonly ResolvedSemanticSourceProof[]>();
+
+export function semanticProofSetComesFromBatch(
+  proofs: readonly ResolvedSemanticSourceProof[],
+): boolean {
+  return PROOF_SETS_FROM_BATCHES.has(proofs);
+}
+/**
  * Every admitted text is shown as the page has it; only text with a letter
  * or a digit is offered for translation (D132). `$`, `★★★` or `--` as an
  * option's label used to be dropped on the page side, and the row was blank.
@@ -182,13 +200,19 @@ export class SemanticSourceReceiver {
   readonly #identityHistory = new Map<number, SemanticIdentityHistory>();
   readonly #proofHistory = new Map<string, SemanticProofHistory>();
   readonly #proofs = new Map<string, ResolvedSemanticSourceProof>();
+  /**
+   * Every proof of the last batch that resolved on its own, before the
+   * checks between proofs (D179): a batch that does not carry a proof again
+   * takes it from here. `refreshBindings` resolves them again after a patch.
+   */
+  #proofCandidates = new Map<string, ResolvedSemanticSourceProof>();
   readonly #classifier = new StickySourceSecretClassifier();
   #lastSequence = 0;
   #proofPresentationHealthy = true;
   /**
-   * The last batch taken, and the nodes it names that the replica did not
-   * have (D132). A batch is the page's whole state and is sent once; see
-   * `placeArrivedNodes`.
+   * The page's whole state after the last batch taken, and the nodes it
+   * names that the replica did not have (D132). A record is sent once; see
+   * `placeArrivedNodes`. A batch of what changed is applied to it (D179).
    */
   #lastBatch: SemanticSourceBatch | undefined;
   #missingNodeIds = new Set<number>();
@@ -232,11 +256,88 @@ export class SemanticSourceReceiver {
     ) {
       return undefined;
     }
-    const changes = this.#placeBatch(batch);
+    let whole = batch;
+    let carried: CarriedSemanticIds | undefined;
+    if (batch.delta) {
+      const rebuilt = this.#applyDelta(batch);
+      if (!rebuilt) return undefined;
+      whole = rebuilt;
+      carried = {
+        records: new Set(batch.records.map(({ recordId }) => recordId)),
+        proofs: new Set(batch.proofs.map(semanticSourceProofIdentity)),
+      };
+    }
+    const changes = this.#placeBatch(whole, carried);
     if (!changes) return undefined;
     this.#lastSequence = batch.sequence;
-    this.#lastBatch = batch;
+    this.#lastBatch = whole;
     return changes;
+  }
+
+  /**
+   * The page's whole state after a batch of what changed (D179), in the
+   * page's order; undefined when the batch does not fit the state it
+   * changes, which is a broken stream: the session is let go and the next
+   * one starts with a whole state.
+   */
+  #applyDelta(batch: SemanticSourceBatch): SemanticSourceBatch | undefined {
+    const last = this.#lastBatch;
+    const delta = batch.delta;
+    if (!last || !delta || delta.base !== last.sequence) return undefined;
+    const records = new Map<number, SemanticSourceRecord>();
+    for (const record of last.records) records.set(record.recordId, record);
+    const removedRecords = new Set(delta.removedRecordIds);
+    for (const recordId of removedRecords) {
+      if (!records.delete(recordId)) return undefined;
+    }
+    for (const record of batch.records) records.set(record.recordId, record);
+    const recordOrder = applySemanticSourceOrderPlacements(
+      last.records.map(({ recordId }) => recordId),
+      removedRecords,
+      delta.recordPlacements,
+      0,
+    );
+    const proofs = new Map<string, SemanticSourceProof>();
+    const lastProofIds = last.proofs.map(semanticSourceProofIdentity);
+    last.proofs.forEach((proof, index) => proofs.set(lastProofIds[index]!, proof));
+    const removedProofs = new Set(delta.removedProofIds);
+    for (const proofId of removedProofs) {
+      if (!proofs.delete(proofId)) return undefined;
+    }
+    for (const proof of batch.proofs) proofs.set(semanticSourceProofIdentity(proof), proof);
+    const proofOrder = applySemanticSourceOrderPlacements(
+      lastProofIds,
+      removedProofs,
+      delta.proofPlacements,
+      '',
+    );
+    if (
+      !recordOrder || !proofOrder ||
+      recordOrder.length !== records.size || recordOrder.length !== delta.recordCount ||
+      proofOrder.length !== proofs.size || proofOrder.length !== delta.proofCount
+    ) return undefined;
+    const orderedRecords: SemanticSourceRecord[] = [];
+    for (const recordId of recordOrder) {
+      const record = records.get(recordId);
+      if (!record) return undefined;
+      orderedRecords.push(record);
+    }
+    const orderedProofs: SemanticSourceProof[] = [];
+    for (const proofId of proofOrder) {
+      const proof = proofs.get(proofId);
+      if (!proof) return undefined;
+      orderedProofs.push(proof);
+    }
+    return Object.freeze({
+      protocolVersion: batch.protocolVersion,
+      kind: batch.kind,
+      document: batch.document,
+      policyFingerprint: batch.policyFingerprint,
+      sequence: batch.sequence,
+      records: Object.freeze(orderedRecords),
+      proofs: Object.freeze(orderedProofs),
+      byteLength: batch.byteLength,
+    });
   }
 
   /**
@@ -277,6 +378,7 @@ export class SemanticSourceReceiver {
 
   #placeBatch(
     batch: SemanticSourceBatch,
+    carried?: CarriedSemanticIds,
   ): readonly ReplicaSourceTextChange[] | undefined {
     const missing = new Set<number>();
     const unplacedEditorText: SemanticSourceRecord[] = [];
@@ -284,7 +386,7 @@ export class SemanticSourceReceiver {
     this.#unplacedEditorTextNotes = unplacedEditorText;
     this.#passSecretAncestors = new Map();
     try {
-      const changes = this.#placeBatchRecordsAndProofs(batch);
+      const changes = this.#placeBatchRecordsAndProofs(batch, carried);
       if (changes) {
         this.#missingNodeIds = missing;
         this.#unplacedEditorText = unplacedEditorText;
@@ -297,14 +399,25 @@ export class SemanticSourceReceiver {
     }
   }
 
+  /**
+   * With `carried` (a batch of what changed, D179) a record or proof the
+   * batch did not carry, already placed or resolved, is taken as it is: the
+   * replica has changed since only by this receiver's and its presenter's
+   * own writes, and every live patch is followed by `refreshBindings`,
+   * which checks each binding and resolves each proof again. Whatever was
+   * not placed is tried again, as in a whole batch.
+   */
   #placeBatchRecordsAndProofs(
     batch: SemanticSourceBatch,
+    carried?: CarriedSemanticIds,
   ): readonly ReplicaSourceTextChange[] | undefined {
     const plans = new Map<number, {
       readonly sourceRecord: SemanticSourceRecord;
       readonly translationRecord: ReplicaSourceTextRecord;
       readonly binding: SemanticBinding;
       readonly changed: boolean;
+      /** The entry kept as it is (D179). */
+      readonly entry?: SemanticEntry;
     }>();
     // A batch is refused whole only when the stream itself is broken (a
     // forged or repeated identity, a revision rewind). A record or proof the
@@ -313,6 +426,23 @@ export class SemanticSourceReceiver {
     // and kept them away for as long as the page sent it (D62).
     let droppedRecords = 0;
     for (const sourceRecord of batch.records) {
+      if (carried && !carried.records.has(sourceRecord.recordId)) {
+        const projectionNodeId = semanticProjectionNodeId(sourceRecord.recordId);
+        const current = projectionNodeId === undefined
+          ? undefined
+          : this.#entries.get(projectionNodeId);
+        if (current && current.sourceRecord === sourceRecord) {
+          if (plans.has(projectionNodeId!)) return undefined;
+          plans.set(projectionNodeId!, {
+            sourceRecord,
+            translationRecord: current.translationRecord,
+            binding: current.binding,
+            changed: false,
+            entry: current,
+          });
+          continue;
+        }
+      }
       if (
         semanticSourceRecordId(
           sourceRecord.nodeId,
@@ -375,7 +505,11 @@ export class SemanticSourceReceiver {
       });
     }
     const admittedRecords = [...plans.values()].map(({ sourceRecord }) => sourceRecord);
-    const proofResolution = this.#resolveProofs(batch.proofs, admittedRecords);
+    const proofResolution = this.#resolveProofs(
+      batch.proofs,
+      admittedRecords,
+      carried?.proofs,
+    );
     if (!proofResolution) return undefined;
     const proofPlans = proofResolution.resolved;
     const proofPresentationChanged = !sameResolvedProofSet(
@@ -451,10 +585,10 @@ export class SemanticSourceReceiver {
     if (
       committed && proofPresentationChanged && this.environment.applyProofs
     ) {
+      const proofSet = Object.freeze([...proofPlans.values()]);
+      PROOF_SETS_FROM_BATCHES.add(proofSet);
       try {
-        committed = this.environment.applyProofs(
-          Object.freeze([...proofPlans.values()]),
-        ) === true;
+        committed = this.environment.applyProofs(proofSet) === true;
       } catch {
         committed = false;
       }
@@ -477,6 +611,11 @@ export class SemanticSourceReceiver {
 
     this.#entries.clear();
     for (const [projectionNodeId, plan] of plans) {
+      // An entry kept as it is has its history already (D179).
+      if (plan.entry) {
+        this.#entries.set(projectionNodeId, plan.entry);
+        continue;
+      }
       this.#entries.set(projectionNodeId, Object.freeze({
         sourceRecord: plan.sourceRecord,
         translationRecord: plan.translationRecord,
@@ -489,14 +628,20 @@ export class SemanticSourceReceiver {
         signature: sourceRecordSignature(plan.sourceRecord),
       }));
     }
+    const previousProofObjects = new Map<string, SemanticSourceProof>();
+    for (const [proofId, resolved] of this.#proofs) {
+      previousProofObjects.set(proofId, resolved.proof);
+    }
     this.#proofs.clear();
     for (const [proofId, resolved] of proofPlans) {
       this.#proofs.set(proofId, resolved);
+      if (previousProofObjects.get(proofId) === resolved.proof) continue;
       this.#proofHistory.set(proofId, Object.freeze({
         revision: resolved.proof.revision,
         signature: semanticSourceProofSignature(resolved.proof),
       }));
     }
+    this.#proofCandidates = proofResolution.candidates;
     if (droppedRecords > 0 || proofResolution.dropped > 0) {
       try {
         this.environment.reportDroppedItems?.(
@@ -577,6 +722,9 @@ export class SemanticSourceReceiver {
         retainedProofs.set(semanticSourceProofIdentity(resolved.proof), refreshed);
       }
     }
+    // What the next batch of what changed takes as it is (D179): only what
+    // was resolved again just now; the rest is resolved by that batch.
+    this.#proofCandidates = new Map(retainedProofs);
     // A menu whose panel text is gone is no longer presented; the others are.
     const menuTextHolders = this.#elementsHoldingMenuText(
       [...this.#entries.values()].map(({ sourceRecord }) => sourceRecord),
@@ -651,6 +799,7 @@ export class SemanticSourceReceiver {
     }
     this.#proofPresentationHealthy = true;
     this.#proofs.clear();
+    this.#proofCandidates = new Map();
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
       entry.binding.restore();
@@ -678,11 +827,15 @@ export class SemanticSourceReceiver {
   #resolveProofs(
     proofs: readonly SemanticSourceProof[],
     records: readonly SemanticSourceRecord[],
+    /** A batch of what changed: the proofs it carried (D179). */
+    carried?: ReadonlySet<string>,
   ): {
     readonly resolved: Map<string, ResolvedSemanticSourceProof>;
+    readonly candidates: Map<string, ResolvedSemanticSourceProof>;
     readonly dropped: number;
   } | undefined {
     const resolved = new Map<string, ResolvedSemanticSourceProof>();
+    const candidates = new Map<string, ResolvedSemanticSourceProof>();
     const seen = new Set<string>();
     let dropped = 0;
     const drop = (proofId: string): void => {
@@ -701,11 +854,19 @@ export class SemanticSourceReceiver {
           (proof.revision === history.revision && signature !== history.signature)
         )
       ) return undefined;
-      const next = this.#resolveProof(proof);
+      // Not carried and resolved before: taken as it is (D179), unless it
+      // names a node the replica lacked, which is asked for again.
+      const kept = carried && !carried.has(proofId)
+        ? this.#proofCandidates.get(proofId)
+        : undefined;
+      const next = kept && kept.proof === proof && resolvedProofIsWhole(kept)
+        ? kept
+        : this.#resolveProof(proof);
       if (!next) {
         dropped += 1;
         continue;
       }
+      candidates.set(proofId, next);
       resolved.set(proofId, next);
     }
     // A field whose value travels as text never also shows dots.
@@ -769,7 +930,7 @@ export class SemanticSourceReceiver {
         !menuTextHolders?.has(value.panel)
       ) drop(proofId);
     }
-    return { resolved, dropped };
+    return { resolved, candidates, dropped };
   }
 
   #resolveProof(
@@ -930,9 +1091,11 @@ export class SemanticSourceReceiver {
         !shape.otherTriggers.every((other) =>
           this.#proofTargetIsSafe(other, false)) ||
         !this.#proofTargetIsSafe(panel, false) ||
-        // A menu's panel may hold a field; never a credential (D132).
+        // A menu's panel may hold a field; never a credential (D132). It
+        // is walked as far as the page walks it (D179).
         !receiverDisclosureSubtreeIsSafe(panel, (element) =>
-          this.#proofTargetIsSafe(element, false), true)
+          this.#proofTargetIsSafe(element, false), true,
+        RECEIVER_MENU_PANEL_NODES)
       ) return undefined;
       return Object.freeze({
         kind: proof.kind,
@@ -990,8 +1153,9 @@ export class SemanticSourceReceiver {
    * from each text record. A menu is asked for with one lookup: going
    * through the records again for each menu cost menus times records, which
    * the old limits hid and a table with a menu on every row did not (D132).
-   * Undefined when a node cannot be read. A walk stops at a shadow root, as
-   * `contains` does.
+   * Undefined when a node cannot be read. A walk goes up the tree as it is
+   * drawn, through the slot a node is assigned and the host of a root
+   * (D179), where it stopped at a root as `contains` does.
    */
   #elementsHoldingMenuText(
     records: readonly SemanticSourceRecord[],
@@ -1013,11 +1177,17 @@ export class SemanticSourceReceiver {
         node?.nodeType !== 3 ||
         node.ownerDocument !== this.environment.replicaDocument
       ) continue;
-      for (
-        let current: Node | null = node.parentNode;
-        current && !holders.has(current);
-        current = current.parentNode
-      ) holders.add(current);
+      // Up the tree as it is drawn: text slotted into a panel of a root is
+      // that panel's (D179).
+      try {
+        for (
+          let current = readSourceFlatTreeParentElement(node);
+          current && !holders.has(current);
+          current = readSourceFlatTreeParentElement(current)
+        ) holders.add(current);
+      } catch {
+        return undefined;
+      }
     }
     return holders;
   }
@@ -1189,6 +1359,18 @@ export class SemanticSourceReceiver {
   }
 }
 
+/** The ids a batch of what changed carried (D179). */
+interface CarriedSemanticIds {
+  readonly records: ReadonlySet<number>;
+  readonly proofs: ReadonlySet<string>;
+}
+
+/** Whether a resolved proof found every node it names. */
+function resolvedProofIsWhole(resolved: ResolvedSemanticSourceProof): boolean {
+  return resolved.kind !== 'aria-relationship' ||
+    resolved.references.length === resolved.proof.targetNodeIds.length;
+}
+
 function entryIsTranslated(
   entry: Pick<SemanticEntry, 'binding' | 'sourceRecord'>,
 ): boolean {
@@ -1206,6 +1388,19 @@ function sameResolvedProofSet(
     if (!left || !sameResolvedProof(left, right)) return false;
   }
   return true;
+}
+
+export function semanticSourceProofIdentityOfResolved(
+  resolved: ResolvedSemanticSourceProof,
+): string {
+  return semanticSourceProofIdentity(resolved.proof);
+}
+
+export function sameResolvedSemanticSourceProof(
+  left: ResolvedSemanticSourceProof,
+  right: ResolvedSemanticSourceProof,
+): boolean {
+  return sameResolvedProof(left, right);
 }
 
 function sameResolvedProof(
@@ -1589,17 +1784,22 @@ function receiverDisclosureRoleMatches(
   return role === popupRole;
 }
 
+/** How far a panel is walked: as far as the page walks it (D179). */
+const RECEIVER_DISCLOSURE_PANEL_NODES = 1_024;
+const RECEIVER_MENU_PANEL_NODES = 8_192;
+
 function receiverDisclosureSubtreeIsSafe(
   panel: Element,
   classify: (element: Element) => boolean,
   /** A menu's panel may hold a field that `classify` passes (D132). */
   allowFields = false,
+  maxNodes = RECEIVER_DISCLOSURE_PANEL_NODES,
 ): boolean {
   const pending: Node[] = [panel];
   let visited = 0;
   while (pending.length > 0) {
     const node = pending.pop();
-    if (!node || ++visited > 1_024 || node.ownerDocument !== panel.ownerDocument) {
+    if (!node || ++visited > maxNodes || node.ownerDocument !== panel.ownerDocument) {
       return false;
     }
     if (node.nodeType === 11) {
@@ -1622,6 +1822,12 @@ function receiverDisclosureSubtreeIsSafe(
     pending.push(...element.childNodes);
     try {
       if (element.shadowRoot?.mode === 'open') pending.push(element.shadowRoot);
+      // What a slot is assigned is drawn in the panel, though it is the
+      // host's (D179): it is asked as the panel's own nodes are.
+      if (tagName === 'slot') {
+        const assigned = (element as Partial<HTMLSlotElement>).assignedNodes;
+        if (typeof assigned === 'function') pending.push(...assigned.call(element));
+      }
     } catch {
       return false;
     }
