@@ -118,7 +118,7 @@ describe('validateArtifact', () => {
 
     expect(validation.manifest).toMatchObject({
       manifest_version: 3,
-      minimum_chrome_version: '138',
+      minimum_chrome_version: '141',
       permissions: APPROVED_PERMISSIONS,
       host_permissions: APPROVED_HOST_PERMISSIONS,
     });
@@ -212,6 +212,21 @@ describe('validateArtifact', () => {
     await expect(validateArtifact(artifact)).rejects.toThrow(
       'third-party notices differ from the reviewed vendor notices',
     );
+  });
+
+  it('requires Chrome 141, the first with a per-window side panel close (D176)', async () => {
+    for (const version of ['138', '140', '140.0.7339.80']) {
+      const older = await createTemporaryArtifact({
+        manifest: { minimum_chrome_version: version },
+      });
+      await expect(validateArtifact(older), version).rejects.toThrow(
+        'manifest.json must require Chrome 141 or newer.',
+      );
+    }
+    const newer = await createTemporaryArtifact({
+      manifest: { minimum_chrome_version: '142' },
+    });
+    await expect(validateArtifact(newer)).resolves.toBeDefined();
   });
 
   it('rejects excess required permissions and required host permissions', async () => {
@@ -1460,7 +1475,7 @@ async function createValidArtifact(
     name: 'Simul',
     version: '0.1.0',
     version_name: '0.1.0 test',
-    minimum_chrome_version: '138',
+    minimum_chrome_version: '141',
     permissions: [...APPROVED_PERMISSIONS],
     host_permissions: [...APPROVED_HOST_PERMISSIONS],
     background: { service_worker: 'background.js' },

@@ -1239,7 +1239,15 @@ shell and the mirror has nothing to copy (D103).
         the viewport as reported (fit to width is exactly that wide, and
         has no scrollbar across). Both only where a width measured near
         half way between two whole numbers leaves it open. Not told, both
-        with a scrollbar of 15 px, as before D134 with 14.
+        with a scrollbar of 15 px, as before D134 with 14. Chrome 158 stops
+        a PDF wider than the view a pixel higher, 14 px of the tab's 15
+        (End at zooms of 125% to 300%), so with a scrollbar across both
+        that bottom and the one a pixel lower are looked for (D177).
+      - Under a default zoom other than 100% (Chrome's settings) the tab
+        measures its scrollbar in its own zoomed pixels (18 px at 83%,
+        12.5 at 120%) while the viewer, which that zoom does not scale,
+        leaves 14; at 83% End on a PDF wider than the view is missed
+        (D177, an open item).
       - Every bottom looked for, and every pixel allowed around it, is a
         place in each page where a movement that stops there reads as End.
         Far zoomed out, where each turn of the wheel is a held movement,
@@ -1310,20 +1318,37 @@ shell and the mirror has nothing to copy (D103).
       place again every 30 ms, and a step of whole pages names the same
       place on another page: the review of this rule found both taken for
       jumps); within a burst a report more than 8 px from the one before
-      it, for 8 ms, sooner than the next frame of a movement can come (an
-      outline entry clicked while the viewer still scrolls, in the frames
-      the tracker follows and in a movement it holds alike); and straight
-      after a report read as a zoom at the same place, a report anywhere
-      else, for 8 ms (an outline entry or link that sets a zoom percent
-      sends the zoom, then the place gone to several times within a
-      millisecond). Two reports are one place when they are under 0.9 of a
+      it, for 12 ms, sooner than the next frame of a movement at 60 Hz can
+      come (an outline entry clicked while the viewer still scrolls, in the
+      frames the tracker follows and in a movement it holds alike; 8 ms
+      until D177, which missed Chrome 138's second reports up to 18.8 ms
+      late); and straight after a report read as a zoom at the same place,
+      a report anywhere else, for 12 ms (an outline entry or link that sets
+      a zoom percent sends the zoom, then the place gone to several times
+      within a millisecond). A burst whose fourth report names the place of
+      the report read as a zoom is a jump too (D177): an outline entry or
+      link that sets a zoom and goes from a page's top or corner to
+      another's sends 4 or 6 such reports, a plain zoom exactly 2 (42 of 42
+      in Chrome for Testing 158). Two reports are one place when they are under 0.9 of a
       pixel of the screen apart, by the scale the tab says its screen has:
       a snap moves a place by 0.52 of a screen pixel at most, a scroll by
       one or more, which is half a CSS pixel on a screen scaled by 2.
       Scrolling is never a doubt, however
       fast: a movement that stopped away from the ends of the PDF (a fling,
       a scrollbar drag, one big step of the wheel) is read as it always
-      was, and its last frames, a pixel apart or less, are no jump. That is
+      was, and its last frames, a pixel apart or less, are no jump. A held
+      movement of two steps or more, its reports 25 ms apart or more, its
+      steps of one length (within 1.5 px) and each under 0.4 of a page, is
+      read by its steps instead, each as the place nearest the one before
+      (D177): the wheel where Chrome does not animate scrolling, whose
+      last place is then known even on a page top, which a held movement
+      otherwise reads as the top of the PDF. Every report fits every page
+      within half a page, so a longer step, or a frame of an animated
+      movement that went whole pages, could be any length; the frames of
+      Home, End, a fling or a drag come less than 25 ms apart or differ in
+      length. A lone report at a page key's step from the place before that
+      also fits the top or the bottom of the PDF is a doubt (D177): Home or
+      End with no animation send one report, which can land there. That is
       on purpose: scrolling within a page leaves a number typed into the
       page box and not entered where it is, and a look would read it; a
       jump always enters or replaces it. A doubt lasts
@@ -1360,8 +1385,8 @@ shell and the mirror has nothing to copy (D103).
       `activeTab` grant left and no all-sites access) stops looking until
       the PDF is shown anew; nothing is asked for. The top 56 px are copied
       out and the capture is closed before anything is read. A toolbar
-      that showed no page box three looks running (a narrow tab, forced
-      colours) is not captured again for a minute, unless the tab changes
+      that showed no page box three looks running (a narrow tab, a menu
+      over it) is not captured again for a minute, unless the tab changes
       size. The capture is the whole tab as a PNG, so a look takes 54 to
       90 ms in a window of 1280 by 900 and 202 to 276 ms at 1920 by 1080
       with a device scale of 2.
@@ -1377,9 +1402,15 @@ shell and the mirror has nothing to copy (D103).
       box is `max(2, digits) ch` wide). The count is the ink that starts
       within 12 px after the box and ends at a 14 px gap (a one-digit count
       is centred in a place for two, up to 9 px from the divider; the next
-      control is 20 px on), its last run as tall as the box's digits. A caret, a selected number, a menu over the
-      toolbar, the zoom box (nothing after it) and a tab under about 420 px
-      (no page box) give no layout. The count comes after the number in a
+      control is 20 px on), its last run as tall as the box's digits. A
+      caret or a selected number splits the box's columns; a box so split
+      with the count beside it is reported as its number missing, which
+      ends the looks into that doubt (D177). In forced colours Chrome draws
+      no box: the number, a slanted "/" and the count stand on the bar, and
+      the reader finds them by the "/" (D177; checked with Chrome's
+      `--force-high-contrast`, light and dark). A menu over the toolbar,
+      the zoom box (nothing after it) and a tab under about 420 px (no page
+      box) give no layout. The count comes after the number in a
       right-to-left Chrome too.
     - *The reading.* `composePdfPageBoxLine` makes a grey picture of the
       number and the count alone, each lifted off its own ground to dark ink
@@ -1420,19 +1451,15 @@ shell and the mirror has nothing to copy (D103).
       either way.
     - *Limits.* A number typed into the page box and not entered is what
       the box shows; with the caret blinked off it reads as a page, which
-      is why only jumps are looked into. A jump made while the viewer
-      still scrolls whose second report comes more than 8 ms after its
-      first raises no doubt (Chrome 138 with the companion window sent it
-      up to 16 ms late on a busy machine), nor does a jump on a PDF so long
-      that the snap moves its place by a whole pixel (above about 8.4
-      million px of scroll). An outline entry or link that sets a zoom is a
-      doubt only when the place gone to differs, on its page, from the
-      place the viewer was at on its own: from a page's top to another
-      page's top, or corner to corner, every report names one place, and it
-      reads as a zoom at the same place (such a click sent 4 or 6 reports
-      where a plain zoom sends 2, which nothing reads yet). So does, on a
-      viewer too slow for the 20 ms, a jump without a zoom from a page's
-      corner to another page's. And two things that are no jump raise a
+      is why only jumps are looked into, and why a look that finds the
+      number selected or with a caret ends the looks into that doubt
+      (D177). A jump made while the viewer still scrolls whose second
+      report comes more than 12 ms after its first raises no doubt (Chrome
+      138 with the companion window sent it up to 18.8 ms late on a busy
+      machine), nor does a jump on a PDF so long that the snap moves its
+      place by a whole pixel (above about 8.4 million px of scroll). Nor
+      does, on a viewer too slow for the 20 ms, a jump without a zoom from
+      a page's corner to another page's. These are known limits (D177). And two things that are no jump raise a
       doubt, one capture each with the page right: a key pressed again
       within its burst after the press that was cut short by the end of
       the PDF, or a step of exactly one page within the burst of another
@@ -1488,11 +1515,10 @@ in another window, a superseded click on its way to the separate window
 closes its own window's side panel, at whichever step it finds out (D121:
 only the first step did, so the panel stayed open beside the newer click's
 window). That is the panel it opened itself or one that was open before, as
-a click that was not superseded closes it. It never uses the fallback for
-Chrome before 141, which has no per-window close: disabling and re-enabling
-the panel closes it in every window, the newer click's too. There the panel
-stays until the newer click, when it opens the separate window, closes
-every panel itself. A superseded click removes a window it has just created
+a click that was not superseded closes it, by `sidePanel.close()` for that
+window alone (Chrome 141, the minimum since D176; Chrome 138 to 140 had no
+per-window close, and the fallback that disabled and re-enabled the panel
+closed it in every window). A superseded click removes a window it has just created
 but not one it has already recorded: the newer click may have taken that
 window over, and removing it left no companion at all. A click that knows
 no companion window it may reuse asks Chrome which are open (D134:
@@ -1571,12 +1597,20 @@ the option. Confirm stale overlays
 disappear, same-language images stay unchanged, and page text translation stays
 responsive.
 
+On each new Chrome version, before a release, check Chrome's PDF toolbar
+again (D177): the PDF follower reads the viewer's page from the page box
+(D133), and a Chrome that draws the toolbar otherwise leaves every jump a
+guess, silently. Capture the toolbar after jumps at device scales 1 and 2,
+right to left, and in forced colours light and dark, and read every strip as
+the panel does: each must name the page jumped to (72 of 72 on Chrome for
+Testing 158).
+
 Run `npm run artifact:check` and confirm the ready-to-load artifact remains
 under the 42 MiB unpacked limit, contains the pinned Tesseract catalog, the
 pinned pdf.js subset, and their notices, and has no remote OCR or PDF runtime
 references.
 
-The manifest must retain Chrome 138, required permissions `activeTab`,
+The manifest must retain Chrome 141 (D176), required permissions `activeTab`,
 `scripting`, `sidePanel`, `storage`, and `offscreen`, no required host
 permissions, only the approved optional HTTP(S) patterns, and the exact local
 Wasm/Worker extension-page CSP, which every build profile carries because

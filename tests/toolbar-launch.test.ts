@@ -88,16 +88,6 @@ describe('toolbar launch', () => {
     ]);
   });
 
-  it('falls back to closing every panel where Chrome has no per-window close', async () => {
-    const fixture = createFixture({
-      surface: 'popout', hydrated: false, perWindowClose: false,
-    });
-    const launch = fixture.launcher.click(tabA);
-    fixture.hydrate();
-    await launch;
-    expect(fixture.calls.slice(-2)).toEqual(['enabled:false', 'enabled:true']);
-  });
-
   it('tells an open side panel about a tab Simul cannot read, without its address (D112)', async () => {
     const fixture = createFixture({ surface: 'side-panel', hydrated: true });
     await fixture.launcher.click({
@@ -384,7 +374,6 @@ describe('toolbar launch', () => {
         expect(fixture.openWindows(), step).toHaveLength(1);
         expect(fixture.calls, step).toContain('close:1');
         expect(fixture.calls, step).toContain('close:2');
-        expect(fixture.calls, step).not.toContain('enabled:false');
         // The window left shows the tab clicked last.
         const [left] = fixture.openWindows();
         const shown = fixture.messages.at(-1)?.tabId ??
@@ -780,13 +769,13 @@ describe('toolbar launch', () => {
       expect(fixture.openWindows()).toEqual([101]);
     });
 
-    it('falls back to closing every panel when the per-window close is rejected', async () => {
+    it('closes no other window\'s panel when the per-window close is rejected (D176)', async () => {
       const fixture = createFixture({ surface: 'popout', hydrated: true });
       fixture.fail('close:1', 'No active side panel.');
-      await fixture.launcher.click(tabA);
-      expect(fixture.calls).toEqual([
-        'get:1', 'create', 'remember:popout', 'close:1', 'enabled:false', 'enabled:true',
-      ]);
+      await expect(fixture.launcher.click(tabA)).resolves.toBeUndefined();
+      // Chrome 138 to 140 had no per-window close, and the panel of every
+      // window was disabled and enabled again in its place.
+      expect(fixture.calls).toEqual(['get:1', 'create', 'remember:popout', 'close:1']);
     });
 
     it('still closes the panel when the surface could not be remembered', async () => {
@@ -825,7 +814,6 @@ describe('toolbar launch', () => {
       ]);
       expect(fixture.created).toHaveLength(1);
       expect(fixture.openWindows()).toEqual([100]);
-      expect(fixture.calls).not.toContain('enabled:false');
     });
 
     it('closes the first window\'s panel and its own new window when the second click comes while that window opens (D121)', async () => {
@@ -841,7 +829,6 @@ describe('toolbar launch', () => {
       expect(fixture.calls).toContain('remove:100');
       // The second click's window is the one left.
       expect(fixture.openWindows()).toEqual([101]);
-      expect(fixture.calls).not.toContain('enabled:false');
     });
 
     it('keeps the window the second click took over, and closes the first window\'s panel (D121)', async () => {
@@ -862,7 +849,6 @@ describe('toolbar launch', () => {
       expect(fixture.calls).toContain('close:1');
       expect(fixture.calls).not.toContain('remove:100');
       expect(fixture.openWindows()).toEqual([100]);
-      expect(fixture.calls).not.toContain('enabled:false');
     });
 
     it('closes the first window\'s panel when the second click comes while an open window is checked (D121)', async () => {
@@ -880,7 +866,6 @@ describe('toolbar launch', () => {
       held.release();
       await Promise.all([first, second]);
       expect(fixture.calls).toContain('close:1');
-      expect(fixture.calls).not.toContain('enabled:false');
       expect(fixture.openWindows()).toEqual([100]);
     });
 
@@ -897,7 +882,6 @@ describe('toolbar launch', () => {
       held.release();
       await Promise.all([first, second]);
       expect(fixture.calls).toContain('close:1');
-      expect(fixture.calls).not.toContain('enabled:false');
     });
 
     it('closes a panel that was already open in the first window, as a click that was not superseded does (D121)', async () => {
@@ -913,7 +897,6 @@ describe('toolbar launch', () => {
         await Promise.all([first, second]);
         expect(fixture.calls, step).not.toContain('open:1');
         expect(fixture.calls.filter((call) => call === 'close:1'), step).toHaveLength(1);
-        expect(fixture.calls, step).not.toContain('enabled:false');
       }
       // The same when the click reuses the window that is already open.
       const fixture = createFixture({ surface: 'popout', hydrated: true });
@@ -926,7 +909,6 @@ describe('toolbar launch', () => {
       held.release();
       await Promise.all([first, second]);
       expect(fixture.calls.filter((call) => call === 'close:1')).toHaveLength(1);
-      expect(fixture.calls).not.toContain('enabled:false');
     });
 
     it('closes only a panel it opened itself when superseded before the saved choice was read', async () => {
@@ -937,31 +919,6 @@ describe('toolbar launch', () => {
       fixture.hydrate();
       await Promise.all([first, second]);
       expect(fixture.calls.filter((call) => call.startsWith('close:'))).toEqual(['close:2']);
-    });
-
-    it('never closes every panel for a click that lost, where Chrome has no per-window close (D121)', async () => {
-      for (const step of ['hydration', 'get:1', 'create', 'remember:popout'] as const) {
-        const fixture = createFixture({
-          surface: 'side-panel', hydrated: false, perWindowClose: false,
-        });
-        // The second click's side panel is the surface that won.
-        const held = step === 'hydration' ? undefined : fixture.hold(step);
-        const first = fixture.launcher.click(tabA);
-        if (held) {
-          // Only a click that takes the separate window reaches these steps.
-          fixture.setSurface('popout');
-          fixture.hydrate();
-          await held.reached;
-          fixture.setSurface('side-panel');
-        }
-        const second = fixture.launcher.click(tabB);
-        if (held) held.release();
-        else fixture.hydrate();
-        await Promise.all([first, second]);
-        expect(fixture.calls, step).not.toContain('enabled:false');
-        expect(fixture.calls, step).toContain('send:authorized:22');
-        expect(fixture.calls, step).not.toContain('close:2');
-      }
     });
 
     it('closes a panel an earlier click of the same window opened, on three clicks (D121)', async () => {
@@ -982,7 +939,6 @@ describe('toolbar launch', () => {
       await Promise.all([first, second, third]);
       expect(fixture.calls.filter((call) => call === 'open:1')).toHaveLength(1);
       expect(fixture.calls).toContain('close:1');
-      expect(fixture.calls).not.toContain('enabled:false');
       expect(fixture.openWindows()).toEqual([101]);
     });
 
@@ -1012,7 +968,6 @@ describe('toolbar launch', () => {
       held.release();
       await Promise.all([first, second]);
       expect(fixture.calls.filter((call) => call.startsWith('close:'))).toEqual([]);
-      expect(fixture.calls).not.toContain('enabled:false');
     });
   });
 });
@@ -1026,7 +981,6 @@ interface Hold {
 function createFixture(options: {
   readonly surface: 'side-panel' | 'popout';
   readonly hydrated: boolean;
-  readonly perWindowClose?: boolean;
   readonly popoutTabMode?: 'active' | 'locked';
   /** `windows.create` resolves without a window. */
   readonly createsNoWindow?: boolean;
@@ -1082,10 +1036,10 @@ function createFixture(options: {
   const environment: ToolbarLaunchEnvironment = {
     sidePanel: {
       open: ({ windowId }) => step(`open:${windowId}`),
-      ...(options.perWindowClose === false
-        ? {}
-        : { close: ({ windowId }: { windowId: number }) => step(`close:${windowId}`) }),
-      setOptions: ({ enabled }) => step(`enabled:${enabled}`),
+      close: ({ windowId }) => step(`close:${windowId}`),
+      // Chrome's own API has it; the launch must not call it since D176
+      // (it closed the panel of every window on Chrome 138 to 140).
+      ...({ setOptions: ({ enabled }: { enabled: boolean }) => step(`enabled:${enabled}`) } as object),
     },
     windows: {
       get: async (windowId) => {

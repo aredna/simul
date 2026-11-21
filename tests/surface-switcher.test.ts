@@ -29,11 +29,9 @@ function setup(options: {
     openSidePanel: vi.fn(async (windowId) => {
       calls.push(`open:${windowId}`);
     }),
-    closeSidePanel: options.canClose === false ? undefined : vi.fn(async (windowId) => {
+    closeSidePanel: vi.fn(async (windowId) => {
+      if (options.canClose === false) throw new Error('No active side panel.');
       calls.push(`close:${windowId}`);
-    }),
-    setSidePanelOptions: vi.fn(async (opts) => {
-      calls.push(`options:${opts.enabled}`);
     }),
     getSidePanelLayout: options.layoutSide ? async () => ({ side: options.layoutSide! }) : undefined,
     sendMessage: vi.fn(async (message) => calls.push(`message:${(message as { type: string }).type}`)),
@@ -84,10 +82,10 @@ describe('SurfaceSwitcher', () => {
     expect(harness.statuses.at(-1)).toContain('Open a regular page');
 
     harness.state.followedPageIdentity = IDENTITY;
-    (harness.browser.setSidePanelOptions as ReturnType<typeof vi.fn>)
-      .mockRejectedValue(new Error('no'));
     await harness.switcher.openDetachedWindow();
     expect(harness.statuses.at(-1)).toContain('could not close the old side panel');
+    // Nothing closes the panel of every window in its place (D176).
+    expect(harness.calls.filter((call) => call.startsWith('close:'))).toEqual([]);
 
     const unsaved = setup({ failRemember: true });
     unsaved.state.followedPageIdentity = IDENTITY;

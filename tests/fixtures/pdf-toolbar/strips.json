@@ -404,6 +404,69 @@
       "box": "37",
       "chrome": "154",
       "state": "a window 500 px wide"
+    },
+    {
+      "file": "chrome158-1x-111-of-300.png",
+      "scale": 1,
+      "pageCount": 300,
+      "page": 111,
+      "box": "111",
+      "chrome": "158",
+      "state": "at rest after a jump (D177)"
+    },
+    {
+      "file": "chrome158-2x-60-of-300.png",
+      "scale": 2,
+      "pageCount": 300,
+      "page": 60,
+      "box": "60",
+      "chrome": "158",
+      "state": "after ArrowRight twice from page 58 (D177)"
+    },
+    {
+      "file": "chrome158-rtl-1x-208-of-300.png",
+      "scale": 1,
+      "pageCount": 300,
+      "page": 208,
+      "box": "208",
+      "chrome": "158",
+      "state": "Chrome in Hebrew: a right-to-left toolbar (D177)"
+    },
+    {
+      "file": "forced-light-1x-58-of-300.png",
+      "scale": 1,
+      "pageCount": 300,
+      "page": 58,
+      "box": "58",
+      "chrome": "158",
+      "state": "forced colours, light: --force-high-contrast (D177)"
+    },
+    {
+      "file": "forced-light-2x-208-of-300.png",
+      "scale": 2,
+      "pageCount": 300,
+      "page": 208,
+      "box": "208",
+      "chrome": "158",
+      "state": "forced colours, light: --force-high-contrast (D177)"
+    },
+    {
+      "file": "forced-dark-1x-111-of-300.png",
+      "scale": 1,
+      "pageCount": 300,
+      "page": 111,
+      "box": "111",
+      "chrome": "158",
+      "state": "forced colours, dark: --force-high-contrast --force-dark-mode (D177)"
+    },
+    {
+      "file": "forced-dark-2x-12-of-12.png",
+      "scale": 2,
+      "pageCount": 12,
+      "page": 12,
+      "box": "12",
+      "chrome": "158",
+      "state": "forced colours, dark: --force-high-contrast --force-dark-mode (D177)"
     }
   ]
 }

@@ -33,9 +33,8 @@ export interface ToolbarLaunchTab {
 export interface ToolbarLaunchEnvironment {
   readonly sidePanel: {
     open(options: { windowId: number }): Promise<void>;
-    /** Absent before Chrome 141. */
-    readonly close?: (options: { windowId: number }) => Promise<void>;
-    setOptions(options: { enabled: boolean }): Promise<void>;
+    /** Closes one window's side panel; Chrome 141 is the minimum for it (D176). */
+    close(options: { windowId: number }): Promise<void>;
   };
   readonly windows: {
     get(windowId: number): Promise<BrowserWindowGeometry & { readonly type?: string }>;
@@ -493,17 +492,11 @@ export class ToolbarLauncher {
       await this.#closeSupersededSidePanel(tab, clickSequence, preopenedSidePanel);
       return;
     }
-    if (await this.#closeSidePanelOfWindow(windowId)) return;
-    // Chrome before sidePanel.close() can still tear down this extension's
-    // global panel by disabling its default entry. Re-enabling makes it
-    // available for the next explicit action without reopening it.
-    try {
-      await this.#environment.sidePanel.setOptions({ enabled: false });
-      await this.#environment.sidePanel.setOptions({ enabled: true });
-    } catch {
-      // The popup is already usable; inability to close an older panel degrades
-      // surface cleanup only.
-    }
+    // A close that fails (no panel open there) leaves nothing to close: the
+    // popup is already usable. Chrome 138 to 140, which had no per-window
+    // close, disabled and re-enabled the panel of every window instead; 141
+    // is the minimum since D176.
+    await this.#closeSidePanelOfWindow(windowId);
   }
 
   /**
@@ -514,11 +507,8 @@ export class ToolbarLauncher {
    * whoever opened it (`panelToClose`, true by default), as a click that
    * was not superseded closes it; at the first step, where the saved choice
    * is not looked at, only a panel this click opened itself. It closes
-   * nothing else. The fallback for Chrome before 141 closes the panel in
-   * every window, the newer click's too, so a click that lost never runs
-   * it; there the panel stays until the newer click's own cleanup. Never
-   * the same window: its newer click may be relying on that exact
-   * user-gesture open.
+   * nothing else. Never the same window: its newer click may be relying on
+   * that exact user-gesture open.
    */
   async #closeSupersededSidePanel(
     tab: ToolbarLaunchTab,
@@ -550,11 +540,9 @@ export class ToolbarLauncher {
     );
   }
 
-  /** False where Chrome has no sidePanel.close() or the close failed. */
-  async #closeSidePanelOfWindow(windowId: number): Promise<boolean> {
-    const sidePanel = this.#environment.sidePanel;
-    if (typeof sidePanel.close !== 'function') return false;
-    return (await settle(sidePanel.close({ windowId }))).ok;
+  /** Never rejects: a window with no panel open has none to close. */
+  async #closeSidePanelOfWindow(windowId: number): Promise<void> {
+    await settle(this.#environment.sidePanel.close({ windowId }));
   }
 
   async #closeStaleDetachedWindow(windowId: number | undefined): Promise<void> {

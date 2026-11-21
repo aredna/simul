@@ -70,8 +70,23 @@ export const PDF_CAPTURE_UNWANTED = 'unwanted';
 /** Looking again is no use in this tab: Chrome does not allow the capture. */
 export const PDF_LOCATE_STOP = 'stop';
 
-/** The page found (0-based), none, or that looking again is no use. */
-export type PdfLocateResult = number | undefined | typeof PDF_LOCATE_STOP;
+/**
+ * The page box's number is selected or has a caret: the reader is at the
+ * box, and what it shows may be a number typed and not yet entered, which
+ * a later look could take once the caret has blinked off. This doubt is
+ * not looked into again (D177).
+ */
+export const PDF_LOCATE_TYPING = 'typing';
+
+/**
+ * The page found (0-based), none, that looking again is no use, or that
+ * the reader is at the page box.
+ */
+export type PdfLocateResult =
+  | number
+  | undefined
+  | typeof PDF_LOCATE_STOP
+  | typeof PDF_LOCATE_TYPING;
 
 /** Content-free: an outcome, what was missing and a time only. */
 export interface PdfLocateDiagnostic {
@@ -267,26 +282,29 @@ export class PdfPageBoxReader {
     if (!strip) return finish('kept', 'size');
     const search = findPdfPageBox(strip, scale, pageCount);
     if (!search.found) {
-      // A number that is not plain (selected, a caret) is so for a moment;
-      // a toolbar without a page box stays without one.
-      if (search.missing !== 'number') {
-        const { tabWidth, tabHeight } = capture;
-        const before = this.#unreadable;
-        const again = before !== undefined &&
-          before.tabId === request.tabId &&
-          before.tabWidth === tabWidth &&
-          before.tabHeight === tabHeight &&
-          before.pageCount === pageCount;
-        this.#unreadable = {
-          tabId: request.tabId,
-          tabWidth,
-          tabHeight,
-          pageCount,
-          missing: search.missing,
-          looks: again ? before.looks + 1 : 1,
-          at: started,
-        };
+      // A number that is not plain (selected, a caret): the reader is at
+      // the box, maybe typing. No look at this doubt reads it (D177).
+      if (search.missing === 'number') {
+        finish('kept', 'number');
+        return PDF_LOCATE_TYPING;
       }
+      // A toolbar without a page box stays without one.
+      const { tabWidth, tabHeight } = capture;
+      const before = this.#unreadable;
+      const again = before !== undefined &&
+        before.tabId === request.tabId &&
+        before.tabWidth === tabWidth &&
+        before.tabHeight === tabHeight &&
+        before.pageCount === pageCount;
+      this.#unreadable = {
+        tabId: request.tabId,
+        tabWidth,
+        tabHeight,
+        pageCount,
+        missing: search.missing,
+        looks: again ? before.looks + 1 : 1,
+        at: started,
+      };
       return finish('kept', search.missing);
     }
     this.#unreadable = undefined;

@@ -38,7 +38,8 @@ export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
 export const APPROVED_HOST_PERMISSIONS = Object.freeze([
   '<all_urls>',
 ]);
-export const MINIMUM_CHROME_VERSION = 138;
+// The first Chrome with sidePanel.close() (D176).
+export const MINIMUM_CHROME_VERSION = 141;
 /**
  * Two editions are built from one source (lib/edition.ts): the public one in
  * dist/chrome-unpacked (release zips, Chrome Web Store) and the owner's dev

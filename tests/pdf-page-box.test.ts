@@ -31,7 +31,9 @@ const { strips } = JSON.parse(readFileSync(resolve(directory, 'strips.json'), 'u
 };
 /** Strips whose page box shows a plain number, whatever else the toolbar shows. */
 const plain = strips.filter((strip) =>
-  !/selected|caret|more-menu/u.test(strip.file));
+  !/selected|caret|more-menu|forced/u.test(strip.file));
+/** Chrome in forced colours: no box of its own colour (D177). */
+const forced = strips.filter((strip) => strip.file.startsWith('forced-'));
 
 async function pixelsOf(file: string): Promise<RgbaPixels> {
   const image = await loadImage(resolve(directory, file));
@@ -48,9 +50,10 @@ function layoutOf(pixels: RgbaPixels, strip: StripFixture): PdfPageBoxLayout {
 }
 
 describe('the page box in pictures of Chrome\'s PDF toolbar (D133)', () => {
-  it('has fixtures of Chrome 154 and 138, four device scales and other fonts', () => {
+  it('has fixtures of Chrome 158, 154 and 138, four device scales and other fonts', () => {
     expect(new Set(strips.map((strip) => strip.scale))).toEqual(new Set([1, 1.25, 1.5, 2]));
-    expect(new Set(strips.map((strip) => strip.chrome))).toEqual(new Set(['154', '138']));
+    // Chrome for Testing 158 by the release check of D177.
+    expect(new Set(strips.map((strip) => strip.chrome))).toEqual(new Set(['158', '154', '138']));
     expect(new Set(strips.map((strip) => strip.font))).toEqual(
       new Set([undefined, 'Selawik', 'Inter', 'Liberation Sans']),
     );
@@ -82,12 +85,47 @@ describe('the page box in pictures of Chrome\'s PDF toolbar (D133)', () => {
     ['state-2x-selected.png', 'the number selected'],
     ['state-1x-typed-caret.png', 'a caret after typed digits'],
     ['state-2x-typed-caret.png', 'a caret after a typed digit'],
-    ['state-1x-more-menu.png', 'the toolbar under an open menu'],
-  ])('finds no plain number in %s (%s)', async (file) => {
+  ])('finds the page box with a number that is not plain in %s (%s, D177)', async (file) => {
+    // The highlight and the caret split the box's columns; the box is still
+    // the page box, so the reader can tell the reader is at it.
     const strip = strips.find((entry) => entry.file === file)!;
     const search = findPdfPageBox(await pixelsOf(file), strip.scale, strip.pageCount);
-    expect(search.found).toBe(false);
+    expect(search).toEqual({ found: false, missing: 'number' });
   });
+
+  it('finds no page box in the toolbar under an open menu', async () => {
+    const strip = strips.find((entry) => entry.file === 'state-1x-more-menu.png')!;
+    const search = findPdfPageBox(await pixelsOf(strip.file), strip.scale, strip.pageCount);
+    expect(search).toEqual({ found: false, missing: 'box' });
+  });
+
+  it('has forced-colours fixtures, light and dark, at two device scales (D177)', () => {
+    expect(new Set(forced.map((strip) => strip.scale))).toEqual(new Set([1, 2]));
+    expect(forced.some((strip) => strip.file.includes('light'))).toBe(true);
+    expect(forced.some((strip) => strip.file.includes('dark'))).toBe(true);
+  });
+
+  it.each(forced.map((strip) => [strip.file, strip] as const))(
+    'finds the number and the count without a box in %s (forced colours, D177)',
+    async (_file, strip) => {
+      const pixels = await pixelsOf(strip.file);
+      const layout = layoutOf(pixels, strip);
+      expect(layout.digits).toBe(strip.box.length);
+      // Chrome draws the box in the bar's colour: the number stands on the bar.
+      expect(layout.boxLuma).toBe(layout.barLuma);
+      expect(layout.darkInk === true).toBe(strip.file.includes('light'));
+      // The digits about 10 CSS px tall, the count after the number.
+      expect((layout.number.bottom - layout.number.top) / strip.scale).toBeGreaterThan(7);
+      expect((layout.number.bottom - layout.number.top) / strip.scale).toBeLessThan(13);
+      expect(layout.count.left).toBeGreaterThan(layout.number.right);
+      // The picture for reading is dark ink on white, as for any toolbar.
+      const line = composePdfPageBoxLine(pixels, layout);
+      const inked = [...line.data].filter((value) => value < 128).length;
+      expect(inked).toBeGreaterThan(20);
+      expect([...line.data].filter((value) => value === 255).length)
+        .toBeGreaterThan(line.data.length * 0.6);
+    },
+  );
 
   it('finds no page box in a narrow tab\'s toolbar, which has none', async () => {
     // A tab 374 CSS pixels wide: Chrome leaves the page selector out.

@@ -23,9 +23,8 @@ export interface SurfaceBrowser {
   removeWindow(windowId: number): Promise<void>;
   queryActiveTab(windowId: number): Promise<PageTabLike | undefined>;
   openSidePanel(windowId: number): Promise<void>;
-  /** Present on Chrome builds that expose sidePanel.close. */
-  readonly closeSidePanel?: ((windowId: number) => Promise<void>) | undefined;
-  setSidePanelOptions(options: { enabled: boolean }): Promise<void>;
+  /** One window's side panel; Chrome 141 is the minimum for it (D176). */
+  closeSidePanel(windowId: number): Promise<void>;
   /** Present on Chrome builds that expose sidePanel.getLayout. */
   readonly getSidePanelLayout?: (() => Promise<{ side: string }>) | undefined;
   sendMessage(message: unknown): Promise<unknown>;
@@ -184,19 +183,14 @@ export class SurfaceSwitcher {
     }
   }
 
+  /**
+   * False when the panel would not close. Chrome 138 to 140, without a
+   * per-window close, disabled and re-enabled the panel of every window
+   * instead; 141 is the minimum since D176.
+   */
   async #closeNativeSidePanel(windowId: number): Promise<boolean> {
-    const { browser } = this.environment;
-    if (typeof browser.closeSidePanel === 'function') {
-      try {
-        await browser.closeSidePanel(windowId);
-        return true;
-      } catch {
-        // Fall through to the pre-close API teardown below.
-      }
-    }
     try {
-      await browser.setSidePanelOptions({ enabled: false });
-      await browser.setSidePanelOptions({ enabled: true });
+      await this.environment.browser.closeSidePanel(windowId);
       return true;
     } catch {
       return false;

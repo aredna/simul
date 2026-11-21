@@ -16,7 +16,7 @@ too.
 
 ## Requirements
 
-- Google Chrome 138 or newer, Microsoft Edge 148 or newer, or Opera 122 or
+- Google Chrome 141 or newer, Microsoft Edge 148 or newer, or Opera 125 or
   newer, on a desktop or laptop (Simul is tested in Chrome)
 - About 43 MB of disk space
 

@@ -13,12 +13,14 @@ import type { RgbaPixels } from './colour-sample';
  * strip is a toolbar, where the box is, how many digits it holds, and that
  * the count beside it is the PDF's own. A page number is taken only when
  * every check holds, so a toolbar that looks different (another Chrome, a
- * high-contrast theme, a selected number, a caret) gives no page rather than
- * a wrong one. What the box shows is what is read: a number typed and not
- * yet entered, once its caret has blinked off, is a plain number here.
+ * selected number, a caret) gives no page rather than a wrong one. In forced
+ * colours Chrome draws no box, and the number is found by the "/" after it
+ * (D177, measured with Chrome's `--force-high-contrast`, light and dark).
+ * What the box shows is what is read: a number typed and not yet entered,
+ * once its caret has blinked off, is a plain number here.
  */
 
-/** Chrome's PDF toolbar is this tall, in CSS pixels (Chrome 138 to 154). */
+/** Chrome's PDF toolbar is this tall, in CSS pixels (Chrome 138 to 158, D177). */
 export const PDF_TOOLBAR_HEIGHT = 56;
 
 /**
@@ -56,6 +58,11 @@ export interface PdfPageBoxLayout {
   /** The luma of the box and of the bar around it, 0 to 255. */
   readonly boxLuma: number;
   readonly barLuma: number;
+  /**
+   * The text is darker than its ground: Chrome's toolbar in forced colours
+   * on a light theme (black on white). Absent, it is lighter (D177).
+   */
+  readonly darkInk?: true;
 }
 
 /**
@@ -83,7 +90,7 @@ const MIN_BAR_SHARE = 0.5;
 const MIN_BOX_CONTRAST = 12;
 // A pixel is the box's (or the bar's) colour within this, each channel.
 const COLOUR_TOLERANCE = 3;
-// The box's size, in CSS pixels: 20 tall in Chrome 138 to 154, and wide
+// The box's size, in CSS pixels: 20 tall in Chrome 138 to 158, and wide
 // enough for two digits to six with its padding.
 const MIN_BOX_HEIGHT = 14;
 const MAX_BOX_HEIGHT = 28;
@@ -134,8 +141,9 @@ export function findPdfPageBox(
   const colours = barAndBoxColours(strip);
   if (!colours) return { found: false, missing: 'bar' };
   const { bar, box } = colours;
-  // The toolbar of a tab under about 420 CSS pixels wide has no page box.
-  if (!box) return { found: false, missing: 'box' };
+  // The toolbar of a tab under about 420 CSS pixels wide has no page box,
+  // and in forced colours Chrome draws the box in the bar's own colour.
+  if (!box) return boxlessPageBox(strip, bar, scale, pageCount) ?? { found: false, missing: 'box' };
   const boxLuma = lumaOf(box[0], box[1], box[2]);
   const barLuma = lumaOf(bar[0], bar[1], bar[2]);
 
@@ -150,7 +158,8 @@ export function findPdfPageBox(
   const countDigits = String(pageCount).length;
   // How far the search got: the zoom box, a box too, has no count after it.
   let missing: PdfPageBoxMissing = 'box';
-  for (const [left, right] of runs(width, (x) => filled[x]! >= minimum)) {
+  const boxColumns = runs(width, (x) => filled[x]! >= minimum);
+  for (const [left, right] of boxColumns) {
     const boxWidth = (right - left) / scale;
     if (boxWidth < MIN_BOX_WIDTH || boxWidth > MAX_BOX_WIDTH) continue;
     const rows = boxRows(strip, left, right, box, scale);
@@ -190,7 +199,219 @@ export function findPdfPageBox(
       },
     };
   }
-  return { found: false, missing };
+  if (missing === 'number') return { found: false, missing };
+  // A selected number or a caret splits the box's columns: the highlight and
+  // the caret fill whole columns of it with their own colour. Its parts
+  // with a count beside them are the page box with a number that is not
+  // plain, which is looked at again later, not taken for no box (D177).
+  if (splitPageBox(strip, boxColumns, bar, box, scale, countDigits)) {
+    return { found: false, missing: 'number' };
+  }
+  // Forced colours on a theme whose box Chrome still draws darker than the
+  // bar is not known; a toolbar with no box at all may still be one (D177).
+  return boxlessPageBox(strip, bar, scale, pageCount) ?? { found: false, missing };
+}
+
+/**
+ * Whether runs of the box's columns that stand apart are one box split by
+ * a highlight or a caret: between them no column of the box's rows shows
+ * the bar, the whole is a box's size, and a count is beside it.
+ */
+function splitPageBox(
+  strip: RgbaPixels,
+  boxColumns: readonly (readonly [number, number])[],
+  bar: Rgb,
+  box: Rgb,
+  scale: number,
+  countDigits: number,
+): boolean {
+  const barLuma = lumaOf(bar[0], bar[1], bar[2]);
+  for (let first = 0; first < boxColumns.length; first += 1) {
+    for (let last = first + 1; last < boxColumns.length; last += 1) {
+      const left = boxColumns[first]![0];
+      const right = boxColumns[last]![1];
+      const boxWidth = (right - left) / scale;
+      if (boxWidth > MAX_BOX_WIDTH) break;
+      if (boxWidth < MIN_BOX_WIDTH) continue;
+      const rows = boxRows(strip, left, right, box, scale);
+      if (!rows) continue;
+      const [top, bottom] = rows;
+      const boxHeight = (bottom - top) / scale;
+      if (boxHeight < MIN_BOX_HEIGHT || boxHeight > MAX_BOX_HEIGHT) continue;
+      // Every column between the parts holds no pixel of the bar's colour.
+      let joined = true;
+      for (let part = first; part < last && joined; part += 1) {
+        for (let x = boxColumns[part]![1]; x < boxColumns[part + 1]![0] && joined; x += 1) {
+          for (let y = top; y < bottom; y += 1) {
+            if (isColour(strip.data, (y * strip.width + x) * 4, bar)) {
+              joined = false;
+              break;
+            }
+          }
+        }
+      }
+      if (!joined) break;
+      const place = (boxWidth - BOX_PADDING) / Math.max(2, countDigits) * scale;
+      if (!(place > 0)) continue;
+      if (countBeside(strip, { left, top, right, bottom }, barLuma, scale, place, countDigits)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The page selector as Chrome draws it in forced colours (D177): no box of
+ * its own colour, only the number, a "/" and the count in the text colour
+ * on the bar, dark on light or light on dark. Found by the divider, a glyph
+ * that slants, with a word of digits before it and the count after it,
+ * all of one height; and only where the number stands on the bar's own
+ * colour, so a box Chrome does draw (an ordinary toolbar the search above
+ * could not read, under an open menu) is not read this way.
+ */
+function boxlessPageBox(
+  strip: RgbaPixels,
+  bar: Rgb,
+  scale: number,
+  pageCount: number,
+): PdfPageBoxSearch | undefined {
+  const barLuma = lumaOf(bar[0], bar[1], bar[2]);
+  const dark = barLuma > 127;
+  const whole = { left: 0, top: 0, right: strip.width, bottom: strip.height };
+  const glyphs = inkRuns(strip, whole, barLuma, dark)
+    .map(([left, right]) => {
+      const rows = inkRows(strip, { ...whole, left, right }, barLuma, dark);
+      return rows ? { left, right, top: rows[0], bottom: rows[1] } : undefined;
+    })
+    .filter((glyph) => glyph !== undefined);
+  const countDigits = String(pageCount).length;
+  const reach = COUNT_REACH * scale;
+  const gap = COUNT_GAP * scale;
+  for (let index = 1; index < glyphs.length - 1; index += 1) {
+    const divider = glyphs[index]!;
+    if (!slants(strip, divider, barLuma, dark)) continue;
+    // The count: glyphs after the divider up to a wide gap, digits of one height.
+    const count = [glyphs[index + 1]!];
+    if (count[0]!.left - divider.right > reach) continue;
+    for (let next = index + 2; next < glyphs.length; next += 1) {
+      if (glyphs[next]!.left - count.at(-1)!.right >= gap) break;
+      count.push(glyphs[next]!);
+    }
+    const countTop = count[0]!.top;
+    const countBottom = count[0]!.bottom;
+    const digitHeight = countBottom - countTop;
+    if (digitHeight < 4 * scale) continue;
+    if (count.some((glyph) => Math.abs(glyph.top - countTop) > 1 || Math.abs(glyph.bottom - countBottom) > 1)) {
+      continue;
+    }
+    const place = (count.at(-1)!.right - count[0]!.left) / countDigits;
+    // The number: the glyphs before the divider, close together, within
+    // the box's padding and a reach of the divider.
+    const number = [glyphs[index - 1]!];
+    const before = BOX_PADDING * scale + reach + countDigits * place;
+    if (divider.left - number[0]!.right > before) continue;
+    for (let previous = index - 2; previous >= 0; previous -= 1) {
+      if (number[0]!.left - glyphs[previous]!.right > place) break;
+      number.unshift(glyphs[previous]!);
+    }
+    const top = number[0]!.top;
+    const bottom = number[0]!.bottom;
+    let digits = 0;
+    let plain = true;
+    for (const glyph of number) {
+      if (
+        Math.abs(glyph.top - top) > 1 || Math.abs(glyph.bottom - bottom) > 1 ||
+        glyph.right - glyph.left < MIN_DIGIT_WIDTH * scale
+      ) {
+        plain = false;
+        break;
+      }
+      digits += glyph.right - glyph.left > TOUCHING_RUN * place
+        ? Math.round((glyph.right - glyph.left) / place)
+        : 1;
+    }
+    if (!plain || digits < 1 || digits > countDigits) continue;
+    if (Math.abs(digitHeight - (bottom - top)) > 1 + SAME_HEIGHT_SHARE * (bottom - top)) continue;
+    const rect = { left: number[0]!.left, top, right: number.at(-1)!.right, bottom };
+    // The number stands on the bar: a box drawn behind it is not this case.
+    if (!onBar(strip, rect, barLuma, dark, scale)) continue;
+    return {
+      found: true,
+      layout: {
+        box: rect,
+        number: rect,
+        digits,
+        count: {
+          left: divider.left,
+          top: Math.min(divider.top, countTop),
+          right: count.at(-1)!.right,
+          bottom: Math.max(divider.bottom, countBottom),
+        },
+        boxLuma: barLuma,
+        barLuma,
+        ...(dark ? { darkInk: true as const } : {}),
+      },
+    };
+  }
+  return undefined;
+}
+
+/** Whether a glyph is a "/": its top row of ink well right of its bottom row's, each narrow. */
+function slants(strip: RgbaPixels, glyph: PdfToolbarRect, ground: number, dark: boolean): boolean {
+  const width = glyph.right - glyph.left;
+  const height = glyph.bottom - glyph.top;
+  if (width < 2 || height < 4 || width > height) return false;
+  const rowInk = (y: number) => {
+    let sum = 0;
+    let weight = 0;
+    let first = -1;
+    let last = -1;
+    for (let x = glyph.left; x < glyph.right; x += 1) {
+      const ink = inkAt(strip, x, y, ground, dark);
+      if (ink < INK) continue;
+      sum += x * ink;
+      weight += ink;
+      if (first < 0) first = x;
+      last = x + 1;
+    }
+    return weight > 0 ? { centre: sum / weight, span: last - first } : undefined;
+  };
+  const top = rowInk(glyph.top);
+  const bottom = rowInk(glyph.bottom - 1);
+  return top !== undefined && bottom !== undefined &&
+    top.span <= 0.6 * width && bottom.span <= 0.6 * width &&
+    top.centre - bottom.centre >= 0.4 * width;
+}
+
+/**
+ * Whether the number stands on the bar, not in a box: nothing around it
+ * within the box's padding is off the bar's colour the other way from the
+ * ink (a box darker than the bar behind light digits) by a box's contrast.
+ */
+function onBar(
+  strip: RgbaPixels,
+  rect: PdfToolbarRect,
+  barLuma: number,
+  dark: boolean,
+  scale: number,
+): boolean {
+  const pad = Math.max(1, Math.round(3 * scale));
+  const top = Math.max(0, rect.top - pad);
+  const bottom = Math.min(strip.height, rect.bottom + pad);
+  for (const [from, to] of [
+    [Math.max(0, rect.left - pad), rect.left],
+    [rect.right, Math.min(strip.width, rect.right + pad)],
+  ] as const) {
+    for (let x = from; x < to; x += 1) {
+      for (let y = top; y < bottom; y += 1) {
+        const at = (y * strip.width + x) * 4;
+        const luma = lumaOf(strip.data[at]!, strip.data[at + 1]!, strip.data[at + 2]!);
+        if ((dark ? luma - barLuma : barLuma - luma) >= MIN_BOX_CONTRAST) return false;
+      }
+    }
+  }
+  return true;
 }
 
 /**
@@ -214,10 +435,11 @@ export function composePdfPageBoxLine(
   const margin = Math.max(2, Math.round(LINE_MARGIN * inkHeight));
   const gap = Math.max(2, Math.round(LINE_GAP * inkHeight));
   const spread = spaced ? Math.round(LINE_SPREAD * inkHeight) : 0;
+  const dark = layout.darkInk === true;
   const parts = [
     { rect: number, ground: layout.boxLuma },
     { rect: count, ground: layout.barLuma },
-  ].map((part) => ({ ...part, glyphs: inkRuns(strip, part.rect, part.ground) }));
+  ].map((part) => ({ ...part, glyphs: inkRuns(strip, part.rect, part.ground, dark) }));
   const spreads = parts.reduce((sum, part) => sum + Math.max(0, part.glyphs.length - 1), 0);
   const width = margin * 2 + gap + spreads * spread +
     (number.right - number.left) + (count.right - count.left);
@@ -231,7 +453,7 @@ export function composePdfPageBoxLine(
       const shift = offset + index * spread - rect.left;
       for (let y = rect.top; y < rect.bottom; y += 1) {
         for (let x = left; x < right; x += 1) {
-          const ink = inkAt(strip, x, y, ground);
+          const ink = inkAt(strip, x, y, ground, dark);
           data[(margin + y - top) * width + shift + x] = Math.round(255 * (1 - ink));
         }
       }
@@ -401,10 +623,11 @@ function inkRuns(
   strip: RgbaPixels,
   rect: PdfToolbarRect,
   ground: number,
+  dark = false,
 ): (readonly [number, number])[] {
   const inked = (x: number) => {
     for (let y = rect.top; y < rect.bottom; y += 1) {
-      if (inkAt(strip, x, y, ground) >= INK) return true;
+      if (inkAt(strip, x, y, ground, dark) >= INK) return true;
     }
     return false;
   };
@@ -417,12 +640,13 @@ function inkRows(
   strip: RgbaPixels,
   rect: PdfToolbarRect,
   ground: number,
+  dark = false,
 ): readonly [number, number] | undefined {
   let top = -1;
   let bottom = -1;
   for (let y = rect.top; y < rect.bottom; y += 1) {
     for (let x = rect.left; x < rect.right; x += 1) {
-      if (inkAt(strip, x, y, ground) < INK) continue;
+      if (inkAt(strip, x, y, ground, dark) < INK) continue;
       if (top < 0) top = y;
       bottom = y + 1;
       break;
@@ -431,11 +655,15 @@ function inkRows(
   return top < 0 ? undefined : [top, bottom];
 }
 
-/** How much of the way from `ground` to white the pixel is, 0 to 1. */
-function inkAt(strip: RgbaPixels, x: number, y: number, ground: number): number {
+/**
+ * How much of the way from `ground` to white the pixel is, 0 to 1; to black
+ * for `dark` ink (forced colours on a light theme, D177).
+ */
+function inkAt(strip: RgbaPixels, x: number, y: number, ground: number, dark = false): number {
   const at = (y * strip.width + x) * 4;
   const luma = lumaOf(strip.data[at]!, strip.data[at + 1]!, strip.data[at + 2]!);
-  return Math.min(1, Math.max(0, (luma - ground) / (255 - ground)));
+  const share = dark ? (ground - luma) / Math.max(1, ground) : (luma - ground) / Math.max(1, 255 - ground);
+  return Math.min(1, Math.max(0, share));
 }
 
 /** Runs of indexes below `length` where `test` holds: [start, end). */

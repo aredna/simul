@@ -37,6 +37,8 @@ export interface PdfViewerFollowerDependencies {
    * (0-based), with `undefined` when it cannot tell, or with `stop` when
    * looking again is no use: Chrome does not allow the capture. Then it is
    * not asked again until the PDF is shown anew (a Refresh, another PDF).
+   * `typing` when the page box's number is selected or has a caret: the
+   * reader is at the box, so that doubt is not looked into again (D177).
    * Returns `undefined` at once when it cannot try (Simul's text
    * recognition is off).
    */
@@ -44,7 +46,7 @@ export interface PdfViewerFollowerDependencies {
     target: PdfViewerTarget,
     doubt: PdfViewerDoubt,
     signal: AbortSignal,
-  ) => Promise<number | undefined | 'stop'> | undefined;
+  ) => Promise<number | undefined | 'stop' | 'typing'> | undefined;
   /** The tab's zoom, which is the viewer's (D104); `undefined` when unknown. */
   readonly viewerZoom?: () => number | undefined;
   /**
@@ -343,7 +345,7 @@ export class PdfViewerFollower {
     }
     if (session.tries >= PDF_LOCATE_MAX_TRIES) return;
     const stop = new AbortController();
-    let locating: Promise<number | undefined | 'stop'> | undefined;
+    let locating: Promise<number | undefined | 'stop' | 'typing'> | undefined;
     try {
       locating = locate(session.target, doubt, stop.signal);
     } catch {
@@ -353,7 +355,7 @@ export class PdfViewerFollower {
     if (!locating) return;
     session.tries += 1;
     session.locating = stop;
-    let page: number | undefined | 'stop';
+    let page: number | undefined | 'stop' | 'typing';
     try {
       page = await locating;
     } catch {
@@ -365,6 +367,13 @@ export class PdfViewerFollower {
       // No grant for this tab: the guesses stay.
       session.stopped = true;
       return;
+    }
+    if (page === 'typing') {
+      // The reader is at the page box: a later look at this doubt could
+      // take a number typed and not entered, its caret blinked off. The
+      // guess stays until the next doubt (D177).
+      session.tries = PDF_LOCATE_MAX_TRIES;
+      page = undefined;
     }
     if (page !== undefined) this.#place(session, doubt, page);
     if (session.locateAgain) {

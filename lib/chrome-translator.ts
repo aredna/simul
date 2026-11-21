@@ -236,7 +236,7 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     if (!this.api) {
       throw new TranslationProviderError(
         'api-unavailable',
-        'Chrome\'s built-in Translator API is unavailable. Use Chrome 138 or newer on a supported desktop device.',
+        'Chrome\'s built-in Translator API is unavailable. Use Chrome 141 or newer on a supported desktop device.',
       );
     }
     return this.api;

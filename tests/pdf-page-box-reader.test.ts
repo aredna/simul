@@ -9,6 +9,7 @@ import {
   PDF_CAPTURE_REFUSED,
   PDF_CAPTURE_UNWANTED,
   PDF_LOCATE_STOP,
+  PDF_LOCATE_TYPING,
   PdfPageBoxReader,
   captureChromePdfTab,
   type PdfLocateDiagnostic,
@@ -156,9 +157,20 @@ describe('PdfPageBoxReader on pictures of Chrome\'s toolbar, read by the bundled
     ['state-2x-selected.png'],
     ['state-1x-typed-caret.png'],
     ['state-2x-typed-caret.png'],
-    ['state-1x-more-menu.png'],
-  ])('keeps the guess for %s, without reading anything', async (file) => {
+  ])('keeps the guess for %s, without reading anything, and says the reader is at the box (D177)', async (file) => {
     const strip = fixture(file);
+    const read = vi.fn(tesseract);
+    const { reader, diagnostics } = readerFor(await captureOf(strip));
+
+    expect(await reader.locate(requestFor(strip, { read }))).toBe(PDF_LOCATE_TYPING);
+    expect(read).not.toHaveBeenCalled();
+    expect(diagnostics).toEqual([
+      { stage: 'locate', outcome: 'kept', why: 'number', milliseconds: 0 },
+    ]);
+  });
+
+  it('keeps the guess for a toolbar with a menu open, without reading anything', async () => {
+    const strip = fixture('state-1x-more-menu.png');
     const read = vi.fn(tesseract);
     const { reader, diagnostics } = readerFor(await captureOf(strip));
 
@@ -166,7 +178,7 @@ describe('PdfPageBoxReader on pictures of Chrome\'s toolbar, read by the bundled
     expect(read).not.toHaveBeenCalled();
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toMatchObject({ outcome: 'kept' });
-    expect(['box', 'count', 'number']).toContain(diagnostics[0]!.why);
+    expect(['box', 'count']).toContain(diagnostics[0]!.why);
   });
 });
 
@@ -396,7 +408,7 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
     const { reader, taken, diagnostics } = readerFor(await captureOf(typing));
 
     for (let look = 1; look <= 5; look += 1) {
-      expect(await reader.locate(requestFor(typing))).toBeUndefined();
+      expect(await reader.locate(requestFor(typing))).toBe(PDF_LOCATE_TYPING);
     }
     expect(diagnostics.every((entry) => entry.why === 'number')).toBe(true);
     expect(taken).toHaveBeenCalledTimes(5);

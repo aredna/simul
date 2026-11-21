@@ -440,6 +440,32 @@ describe('PdfViewerFollower looks into a doubted place (D133)', () => {
     expect(locate).toHaveBeenCalledTimes(PDF_LOCATE_MAX_TRIES + 1);
   });
 
+  it('does not look into a doubt again once a look found the reader at the page box (D177)', async () => {
+    vi.useFakeTimers();
+    // The page box's number selected or with a caret: a number typed and
+    // not entered, which a later look could read once the caret blinked off.
+    const locate = vi.fn(async (): Promise<'typing' | number> => 'typing');
+    const { follower, view, send } = setup({ locate });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(100, 1_000));
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    expect(locate).toHaveBeenCalledTimes(1);
+    // The reader scrolls within the page and rests: no look at that doubt.
+    for (let rest = 1; rest <= 4; rest += 1) {
+      send(report(100 + rest * 60, 1_000 + rest * 2_000));
+      await vi.advanceTimersByTimeAsync(2_000);
+    }
+    expect(locate).toHaveBeenCalledTimes(1);
+    expect(view.position?.index).toBe(0);
+    // Another jump is another doubt, and is looked into.
+    locate.mockResolvedValue(89);
+    jump(send, 89 * PITCH + 300, 60_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(locate).toHaveBeenCalledTimes(2);
+    expect(view.position?.index).toBe(89);
+  });
+
   it('stops looking when looking again is no use: no capture allowed', async () => {
     vi.useFakeTimers();
     const locate = vi.fn(async (): Promise<'stop'> => 'stop');

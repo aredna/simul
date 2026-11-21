@@ -218,30 +218,32 @@ on a page once it is drawn.
     picture for each such turn.
   - No picture is taken for scrolling, however fast (the wheel, a trackpad,
     the scrollbar), for the other keys, or for zooming; none while
-    following is off, and none of a tab that is not the one showing. So a
-    scrollbar drag across a long PDF, or a fling too fast to follow, is
-    still a guess.
+    following is off, and none of a tab that is not the one showing. Steps
+    of the wheel that Chrome does not animate (its smooth scrolling
+    switched off) are followed step by step, however fast they come. A
+    single long step of the wheel, a scrollbar drag across a long PDF, or
+    a fling too fast to follow is still a guess.
   - The guess stays, as in 0.6.2, when Tesseract.js is switched off in
     Settings (nothing is captured then); when the tab is narrower than
     about 420 px (Chrome's toolbar then has no page box); when the toolbar
     is hidden (an address with `#toolbar=0`, or presenting: such a tab is
-    not captured); when Chrome draws its toolbar in forced high-contrast
-    colours, or a menu of the toolbar is open; when Chrome does not allow a
+    not captured); when a menu of the toolbar is open; when Chrome does not allow a
     picture of the tab (the access the Simul icon gave has lapsed and
     all-sites access is off; Simul asks for nothing); and while the page
-    box's number is selected or being typed. A toolbar that showed no page
-    box three times running is left alone for a minute.
+    box's number is selected or being typed: once a picture shows that,
+    Simul does not look again until the next jump. A toolbar that showed
+    no page box three times running is left alone for a minute. Chrome's
+    toolbar in forced high-contrast colours is read too; it was checked
+    with Chrome's own forced colours on Linux, not yet with a Windows
+    high-contrast theme.
   - A jump made while the viewer is still scrolling (an outline entry
     clicked during a fling) is looked into as well. On a slow or busy
     computer it can still pass for part of the scrolling, and the panel
     then stays on the page it was following.
   - A jump that also changes the zoom (an outline entry or a link that
-    sets its own zoom) is looked into when it lands somewhere else on its
-    page than the viewer was on its own: from the top of a page to a
-    heading further down, say. From the top of one page to the top of
-    another, or from one page's corner to another's, it still passes for a
-    zoom at the same place; it is then not looked into and the panel stays
-    where it was until the next jump.
+    sets its own zoom) is looked into as well, also from the top of one
+    page to the top of another: Chrome reports it more often than it
+    reports a zoom.
   - Pressing a key where the viewer cannot go on (Page Down at the end of
     the PDF) takes no picture. Two such presses within a tenth of a second
     right after the press that reached the end can take one.
@@ -540,7 +542,7 @@ complete design and browser-boundary rationale.
   `file://` tabs, even with **Allow access to file URLs** on. Select
   **Open a PDF file…** in the panel, or drop the file on it.
 - **Nothing translates at all:** the browser must have the Translator API
-  (Chrome 138 or newer, Edge 148 or newer, or Opera 122 or newer, on a
+  (Chrome 141 or newer, Edge 148 or newer, or Opera 125 or newer, on a
   computer; https://caniuse.com/mdn-api_translator lists them). Other
   browsers can load Simul but cannot translate with it.
 - **A language pair is unavailable:** update Chrome and allow its on-device

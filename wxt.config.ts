@@ -225,7 +225,9 @@ export default defineConfig({
     name: 'Simul',
     description:
       'Follow a page in a live read-only mirror and translate it on-device in Chrome.',
-    minimum_chrome_version: '138',
+    // 141 has sidePanel.close(), which closes one window's side panel
+    // (D176).
+    minimum_chrome_version: '141',
     action: {
       default_title: 'Simul',
     },
