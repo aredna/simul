@@ -55,6 +55,11 @@ export interface AcquiredImagePixels {
   /** Absent means the viewport screenshot. */
   readonly pixelSource?: ImageFilePixelSource;
   /**
+   * A screenshot over a part of which a public control of the page lay
+   * (D172): its words may hold the control's.
+   */
+  readonly covered?: true;
+  /**
    * For a screenshot: how long before these pixels were handed over it was
    * asked for (the time Chrome took to make it, and the second rectangle
    * and the crop after it).
@@ -478,6 +483,7 @@ export class PixelAcquisitionCoordinator {
           ...(metrics.nearestElementLanguage
             ? { nearestElementLanguage: metrics.nearestElementLanguage }
             : {}),
+          ...(metrics.covered ? { covered: true as const } : {}),
         }),
       };
     } catch (error) {

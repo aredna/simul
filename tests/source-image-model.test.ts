@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { SourceImageDescriptor } from '../lib/ocr/contracts';
 import { SourceImageModel } from '../lib/ocr/source-image-model';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 
@@ -134,6 +135,34 @@ describe('SourceImageModel', () => {
         },
       },
     });
+  });
+
+  it('keeps a read that does not look at the screen current through new observations of the same content (D172)', () => {
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const first = (model.upsert(upsert(7)) as { change: { descriptor: SourceImageDescriptor } })
+      .change.descriptor;
+    // A script moves something elsewhere every frame: new observations,
+    // captures and admissions of the same content.
+    for (let step = 0; step < 3; step += 1) {
+      model.upsert(upsert(7, {
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+        admissionChanged: true,
+      }));
+    }
+    expect(model.isCurrent(first)).toBe(false);
+    expect(model.isContentCurrent(first)).toBe(true);
+    // Another content, size or CSS picture is another read.
+    expect(model.isContentCurrent({ ...first, contentRevision: 2 })).toBe(false);
+    expect(model.isContentCurrent({ ...first, renderedWidth: first.renderedWidth + 1 }))
+      .toBe(false);
+    expect(model.isContentCurrent({ ...first, cssPicture: 3 })).toBe(false);
+    // A descriptor from the future is not current either.
+    expect(model.isContentCurrent({ ...first, observationRevision: 99 })).toBe(false);
+    model.upsert(upsert(7, { contentChanged: true, observationChanged: true }));
+    expect(model.isContentCurrent(first)).toBe(false);
   });
 
   it('keeps the picture revision through a capture change that scrolling alone made', () => {

@@ -3,6 +3,7 @@ import { describe, expect, it, onTestFinished } from 'vitest';
 
 import {
   MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES,
+  MAX_PICTURE_ANIMATION_LOOKS,
   SourceImageObserver,
   type SourceImageObservationEvent,
 } from '../lib/ocr/source-image-observer';
@@ -401,6 +402,128 @@ describe('SourceImageObserver', () => {
         admissionChanged: true,
       },
     });
+    stop();
+  });
+
+  it('compares a scrolled image only with the controls near it on a page of many controls (D172)', () => {
+    const fixture = createFixture(
+      `${'<a href="#x">x</a>'.repeat(1_100)}` +
+        '<a id="near" href="#n">n</a><input id="fixed" type="password">',
+    );
+    const view = fixture.document.defaultView!;
+    const near = fixture.document.querySelector('#near')!;
+    const fixed = fixture.document.querySelector('#fixed')!;
+    let scrollY = 0;
+    let animating = false;
+    const ordinary = {
+      display: 'block', visibility: 'visible', contentVisibility: 'visible',
+      opacity: '1', clipPath: 'none', maskImage: 'none', perspective: 'none',
+      rotate: 'none', scale: 'none', transform: 'none', filter: 'none',
+      mixBlendMode: 'normal', content: 'normal',
+      getPropertyValue: () => '',
+    };
+    // linkedom windows share their properties: undone after the test.
+    Object.defineProperties(view, {
+      scrollX: { configurable: true, get: () => 0 },
+      scrollY: { configurable: true, get: () => scrollY },
+      getComputedStyle: {
+        configurable: true,
+        value: (element: Element) => ({
+          ...ordinary,
+          position: element === fixed ? 'fixed' : 'static',
+        }),
+      },
+    });
+    onTestFinished(() => {
+      for (const name of ['scrollX', 'scrollY', 'getComputedStyle']) {
+        delete (view as unknown as Record<string, unknown>)[name];
+      }
+    });
+    Object.defineProperty(fixture.document, 'getAnimations', {
+      configurable: true,
+      value: () => animating ? [{ playState: 'running' }] : [],
+    });
+    // A link 300 px below the image in the document, and a password field
+    // fixed at the top right of the screen.
+    const nearBounds = { left: 0, top: 300, width: 200, height: 20 };
+    const fixedBounds = { left: 600, top: 0, width: 100, height: 40 };
+    setElementBounds(near, nearBounds);
+    setElementBounds(fixed, fixedBounds);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    const admissions = () => events.filter(
+      (event) => event.kind === 'upsert' && event.input.admissionChanged,
+    ).length;
+    events.length = 0;
+    const scrollTo = (y: number, imageFixed = false) => {
+      scrollY = y;
+      if (!imageFixed) fixture.bounds.top = -y;
+      nearBounds.top = 300 - y;
+      fixture.document.dispatchEvent(new view.Event('scroll'));
+      fixture.frames.flush();
+    };
+    // The first scroll makes the index, and fails closed meanwhile.
+    scrollTo(10);
+    expect(admissions()).toBe(1);
+    events.length = 0;
+    // The image moves with the page: no control it passes changes.
+    for (const y of [20, 40, 60, 80]) scrollTo(y);
+    expect(admissions()).toBe(0);
+
+    // The fixed field comes over the image: a change.
+    fixedBounds.left = 50;
+    scrollTo(100);
+    expect(admissions()).toBe(1);
+    fixedBounds.left = 600;
+    scrollTo(110);
+    events.length = 0;
+
+    // An image fixed on the screen sweeps the document: only the link it
+    // passes is a change.
+    fixture.bounds.top = 0;
+    scrollTo(120, true);
+    scrollTo(140, true);
+    expect(admissions()).toBe(0);
+    scrollTo(250, true);
+    expect(admissions()).toBe(1);
+    fixture.bounds.top = -260;
+    scrollTo(260);
+    events.length = 0;
+
+    // The pointer moves with nothing moved by it: the index, checked whole,
+    // is kept.
+    const pointer = () => fixture.document.dispatchEvent(
+      new view.Event('pointerover', { bubbles: true }),
+    );
+    pointer();
+    scrollTo(262);
+    expect(admissions()).toBe(0);
+    // `:hover` moved a link with no mutation: the index is made again.
+    pointer();
+    nearBounds.left = 40;
+    scrollTo(264);
+    expect(admissions()).toBe(1);
+    events.length = 0;
+    scrollTo(266);
+    expect(admissions()).toBe(0);
+
+    // While anything animates the index is not trusted.
+    animating = true;
+    scrollTo(270);
+    expect(admissions()).toBe(1);
+    animating = false;
+    events.length = 0;
+    // A mutation drops the index: the next scroll makes it again.
+    near.setAttribute('title', 'moved');
+    fixture.mutation.callback([attributeRecord(near, 'title')]);
+    fixture.frames.flush();
+    events.length = 0;
+    scrollTo(280);
+    expect(admissions()).toBe(1);
+    events.length = 0;
+    scrollTo(290);
+    expect(admissions()).toBe(0);
     stop();
   });
 
@@ -3774,6 +3897,82 @@ describe('SourceImageObserver', () => {
     send('pointerover', fixture.image);
     expect(fixture.timers.size).toBe(0);
     expect(events).toEqual([]);
+  });
+
+  it('follows a pressed pointer and an animation on the image\'s path, a bounded number of times (D172)', () => {
+    const fixture = createFixture('<p id="text">Text</p>');
+    const text = fixture.document.querySelector('#text')!;
+    const style = pictureStyleFixture(fixture.document, fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.intersections[1]!.trigger(fixture.image, true);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    events.length = 0;
+    const others = fixture.timers.size;
+    const send = (type: string, target: Element) => target.dispatchEvent(
+      new fixture.document.defaultView!.Event(type, { bubbles: true }),
+    );
+
+    // `a:active img { content: url() }`: pressed and let go.
+    style.content = 'url("https://private.example/active.png")';
+    send('pointerdown', fixture.image);
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, cssPicture: expect.any(Number) },
+    }]);
+    events.length = 0;
+    style.content = 'normal';
+    send('pointerup', fixture.image);
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{ kind: 'upsert', input: { nodeId: 7 } }]);
+    events.length = 0;
+
+    // An animation beside the image, not around it, is not followed.
+    send('animationstart', text);
+    expect(fixture.timers.size).toBe(others);
+
+    // Keyframes of `content` on the image: looked at again while it runs.
+    send('animationstart', fixture.image);
+    expect(fixture.timers.size).toBe(others + 1);
+    style.content = 'url("https://private.example/frame-1.png")';
+    fixture.timers.runLatest();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, cssPicture: expect.any(Number) },
+    }]);
+    events.length = 0;
+    // A look that finds the same picture reports nothing.
+    fixture.timers.runLatest();
+    expect(events).toEqual([]);
+    // An endless animation is looked at a bounded number of times.
+    let looks = 2;
+    while (fixture.timers.size > others) {
+      fixture.timers.runLatest();
+      looks += 1;
+    }
+    expect(looks).toBe(MAX_PICTURE_ANIMATION_LOOKS);
+
+    // Its end is looked at once, and stops the looks.
+    send('animationstart', fixture.image);
+    expect(fixture.timers.size).toBe(others + 1);
+    style.content = 'normal';
+    send('animationend', fixture.image);
+    expect(events).toMatchObject([{ kind: 'upsert', input: { nodeId: 7 } }]);
+    events.length = 0;
+    // The end also settles the layout once (a wait of its own); no look is
+    // left behind.
+    while (fixture.timers.size > others) fixture.timers.runLatest();
+    expect(events).toEqual([]);
+
+    // Stopped, nothing is followed and a look under way is given up.
+    send('animationstart', fixture.image);
+    expect(fixture.timers.size).toBe(others + 1);
+    stop();
+    expect(fixture.timers.size).toBe(0);
+    send('animationstart', fixture.image);
+    send('pointerdown', fixture.image);
+    expect(fixture.timers.size).toBe(0);
   });
 
   it('does not flag an image for a background, a border or an object fit', () => {

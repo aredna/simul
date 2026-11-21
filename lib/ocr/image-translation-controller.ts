@@ -71,7 +71,10 @@ import {
   type ImageSourceLease,
 } from './image-source-client';
 import type { ImageTextProviderId } from './known-provider-ids';
-import type { SourceImageAccessibilityTextEvidence } from './image-source-protocol';
+import type {
+  SourceImageAccessibilityTextEvidence,
+  SourceImageCaptureMetrics,
+} from './image-source-protocol';
 import {
   assessSemanticImageEvidence,
   IMAGE_EVIDENCE_RANKING_POLICY_VERSION,
@@ -123,16 +126,6 @@ const MAX_UNCHANGED_EMPTY_RETRIES = 2;
  * where it is before the capture that confirms it is taken (D170).
  */
 const EMPTY_CONFIRMING_LOOK_MS = 600;
-/**
- * When an image whose picture CSS decides is looked at again after its
- * capture held no text, counted from the look before: nothing reports the
- * load of a CSS picture, so one that is still on its way paints an empty
- * box. Two looks, then "no text" is kept as for any image.
- */
-const CSS_PICTURE_LATE_LOOK_DELAYS_MS: readonly number[] = Object.freeze([
-  1_500,
-  4_000,
-]);
 /**
  * A screenshot made sooner than this after an image's CSS picture changed
  * may still show the picture before: the tab had not painted the new one.
@@ -199,6 +192,7 @@ export type ImageTranslationDiagnosticStage =
   | 'recognition-failed'
   | 'no-text-found'
   | 'no-text-same-pixels'
+  | 'no-text-file-only'
   | 'translation-started'
   | 'translation-failed'
   | 'translation-empty'
@@ -716,12 +710,26 @@ export class ImageTranslationController {
     readonly contentRevision: number;
     readonly address: string | undefined;
   }>();
-  /** Later looks at a CSS picture whose capture held no text, by image. */
-  readonly #lateLooks = new Map<number, {
-    readonly picture: number;
-    looks: number;
-    timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Images whose words were read from a screenshot a public control lay
+   * over, by the picture they were read from (D172). Read once more,
+   * without busy state, when a rectangle says the control has gone.
+   */
+  readonly #coveredReads = new Map<number, {
+    readonly document: ReplicaSourceDocumentIdentity;
+    readonly contentRevision: number;
+    readonly pictureRevision: number | undefined;
   }>();
+  /**
+   * The file of an image with a CSS background, read without words, by
+   * image (D172): the same file is not read again.
+   */
+  readonly #fileOnlyEmpty = new Map<number, {
+    readonly contentRevision: number;
+    readonly pixelHash: string;
+  }>();
+  /** The job that reads such an image again, which shows no busy state. */
+  #silentJob: ImageScanJob | undefined;
   /** When each image's CSS picture last changed, or was first seen. */
   readonly #cssPictureChangedAt = new Map<number, number>();
   /** Images whose last screenshot was made too soon after that, by picture. */
@@ -1266,6 +1274,8 @@ export class ImageTranslationController {
     this.#semanticRefreshRetainedOcrNodeIds.clear();
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
+    this.#coveredReads.clear();
+    this.#fileOnlyEmpty.clear();
     this.#semanticEvidenceIndex.clear();
     this.#judgeVerdicts.clear();
     this.#resetAutoLanguageProbe();
@@ -1422,6 +1432,8 @@ export class ImageTranslationController {
     this.#semanticRefreshRetainedOcrNodeIds.clear();
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
+    this.#coveredReads.clear();
+    this.#fileOnlyEmpty.clear();
     this.#semanticEvidenceIndex.clear();
     this.#judgeVerdicts.clear();
     this.#projector.clear();
@@ -1683,11 +1695,12 @@ export class ImageTranslationController {
       this.#emptyRetries.delete(change.nodeId);
       this.#cssPictures.delete(change.nodeId);
       this.#pageFiles.delete(change.nodeId);
+      this.#coveredReads.delete(change.nodeId);
+      this.#fileOnlyEmpty.delete(change.nodeId);
       this.#cssPictureChangedAt.delete(change.nodeId);
       this.#earlyCssPictureReads.delete(change.nodeId);
       this.#returnLooks.delete(change.nodeId);
       this.#forgetConfirmingLook(change.nodeId);
-      this.#forgetLateLook(change.nodeId);
       this.#projector.remove(change.document, change.nodeId);
     }
     for (const nodeId of semanticPeers) {
@@ -1791,6 +1804,7 @@ export class ImageTranslationController {
             this.#activeAbortController = undefined;
           }
           this.#activeJobValue = undefined;
+          if (this.#silentJob === job) this.#silentJob = undefined;
           // A newer processing version (a purge, a pause, a source-policy
           // change) abandoned this job; release its capacity slot so the next
           // run can dispatch. It used to stay active, and each restart below
@@ -2035,6 +2049,15 @@ export class ImageTranslationController {
         }
       }
     }
+
+    if (await this.#keptWhileCovered(
+      job,
+      scheduler,
+      processingVersion,
+      pairEpoch,
+      pairKey,
+      signal,
+    )) return;
 
     // A semantic-only revision can reuse capture-revision-bound OCR evidence.
     // Re-rank it only after the fresh accessibility label has been read.
@@ -2286,12 +2309,22 @@ export class ImageTranslationController {
       // made quietly, with no recognition and no busy state (D170).
       // A part of a picture confirmed without text is not read either.
       const emptyRead = this.#emptyReadFor(job.descriptor);
+      const fileOnly = this.#fileOnlyEmpty.get(job.descriptor.nodeId);
       if (
-        emptyRead &&
-        emptyRead.settingsKey === this.#finalAnalysisSettingsKey(steps) &&
         (
-          emptyRead.pixelHash === pixels.pixelHash ||
-          (emptyRead.confirmed && emptyRead.whole && !isWholeImageCrop(pixels))
+          emptyRead &&
+          emptyRead.settingsKey === this.#finalAnalysisSettingsKey(steps) &&
+          (
+            emptyRead.pixelHash === pixels.pixelHash ||
+            (emptyRead.confirmed && emptyRead.whole && !isWholeImageCrop(pixels))
+          )
+        ) ||
+        (
+          // The same file, read before without words, of an image with a
+          // CSS background: not read again (D172).
+          pixels.pixelSource !== undefined &&
+          fileOnly?.contentRevision === job.descriptor.contentRevision &&
+          fileOnly.pixelHash === pixels.pixelHash
         )
       ) {
         sawEmptyRecognition = true;
@@ -2754,6 +2787,25 @@ export class ImageTranslationController {
       return;
     }
 
+    if (
+      sawEmptyRecognition &&
+      pixels?.pixelSource !== undefined &&
+      imageHasBackgroundPicture(anchor.image)
+    ) {
+      // Its file holds no words, but what the image shows is its file over a
+      // background: "no text" is not kept, and the image is read from the
+      // screen when it is next looked at there (D172).
+      this.#fileOnlyEmpty.set(job.descriptor.nodeId, Object.freeze({
+        contentRevision: job.descriptor.contentRevision,
+        pixelHash: pixels.pixelHash,
+      }));
+      if (await commitHeldSemantic()) return;
+      scheduler.defer(job);
+      this.#clearProjection(job.descriptor);
+      this.environment.onDiagnostic?.('no-text-file-only');
+      return;
+    }
+
     if (sawEmptyRecognition && pixels) {
       const emptyDecision = this.#emptyRetryDecision(
         job,
@@ -2787,19 +2839,16 @@ export class ImageTranslationController {
           pixels,
         );
       } else {
-        // A picture that CSS gives may still be on its way. Until it has
-        // been looked at again, "no text" is not kept for it, and the read
-        // just made stays known so that the next look is one capture.
-        const lookAgain = this.#lookAgainLater(job.descriptor);
         // Kept as confirmed for the picture the image shows: an image no
-        // address can keep is answered from it when it returns (D170).
-        if (!lookAgain) this.#confirmEmptyRead(job.descriptor, pixels.pixelHash);
+        // address can keep is answered from it when it returns (D170). A
+        // picture that CSS gives is no longer looked at later in case it
+        // was still on its way: its page gives no rectangle for it before
+        // its file has decoded and been painted (D172).
+        this.#confirmEmptyRead(job.descriptor, pixels.pixelHash);
         if (await commitHeldSemantic()) return;
         scheduler.settle(job);
         this.#clearProjection(job.descriptor);
-        if (!lookAgain) {
-          this.#rememberImageIdentityEmpty(anchor, pixels, finalConfigurationKey);
-        }
+        this.#rememberImageIdentityEmpty(anchor, pixels, finalConfigurationKey);
         this.environment.onDiagnostic?.('no-text-found');
       }
       return;
@@ -2964,6 +3013,7 @@ export class ImageTranslationController {
           job.descriptor,
           projection,
           finalConfigurationKey,
+          candidate.pixels.covered === true,
         );
         this.#rememberOriginFinalAnalysis({
           pixels: candidate.pixels,
@@ -4367,12 +4417,24 @@ export class ImageTranslationController {
     descriptor: SourceImageDescriptor,
     projection: ImageOverlayProjection,
     finalConfigurationKey: string,
+    covered = false,
   ): void {
     // A read that may show the picture before is kept as not yet confirmed:
     // its words go back over the image at once when the image moves, and no
     // read is answered from it. The look that follows reads the image afresh,
-    // and what that finds is kept for good.
-    const unconfirmed = this.#confirmEarlyCssPictureRead(descriptor);
+    // and what that finds is kept for good. So is a read of a screenshot a
+    // public control lay over (D172): its words may hold the control's.
+    const early = this.#confirmEarlyCssPictureRead(descriptor);
+    const unconfirmed = early || covered;
+    if (covered) {
+      this.#coveredReads.set(descriptor.nodeId, Object.freeze({
+        document: descriptor.document,
+        contentRevision: descriptor.contentRevision,
+        pictureRevision: descriptor.pictureRevision,
+      }));
+    } else {
+      this.#coveredReads.delete(descriptor.nodeId);
+    }
     this.#rememberImageIdentityAnalysis(
       descriptor,
       projection,
@@ -4670,6 +4732,63 @@ export class ImageTranslationController {
     });
   }
 
+  /**
+   * An image whose words were read while a public control lay over it
+   * (D172): while a rectangle says a control still does, its words stay
+   * and nothing is captured; once none does, the job reads it once more
+   * without busy state, and the overlay changes only if the words do.
+   */
+  async #keptWhileCovered(
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    pairEpoch: number,
+    pairKey: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const descriptor = job.descriptor;
+    const covered = this.#coveredReads.get(descriptor.nodeId);
+    if (!covered) return false;
+    const last = this.#retainedFinalAnalyses.get(descriptor.nodeId);
+    if (
+      !sameSourceDocument(covered.document, descriptor.document) ||
+      covered.contentRevision !== descriptor.contentRevision ||
+      covered.pictureRevision !== descriptor.pictureRevision ||
+      !last ||
+      last.pictureRevision !== descriptor.pictureRevision
+    ) {
+      this.#coveredReads.delete(descriptor.nodeId);
+      return false;
+    }
+    const source = this.#source;
+    let metrics: SourceImageCaptureMetrics | undefined;
+    try {
+      metrics = await source?.measure(descriptor, signal);
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) throw error;
+      metrics = undefined;
+    }
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Covered read became stale.', 'AbortError');
+    }
+    if (!metrics || metrics.covered) {
+      // Its words are over it still (carried through the move), or shown
+      // again.
+      const shown = this.#retainedProjections.get(descriptor.nodeId);
+      if (
+        shown?.pixelHash !== last.projection.pixelHash &&
+        !this.#showKeptProjection(last.projection)
+      ) return false;
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('image-result-kept');
+      return true;
+    }
+    this.#coveredReads.delete(descriptor.nodeId);
+    this.#silentJob = job;
+    return false;
+  }
+
   #showKeptProjection(projection: ImageOverlayProjection): boolean {
     this.#projectedHashes.set(projection.nodeId, projection.pixelHash);
     this.#projectedOrdinals.set(projection.nodeId, projection.jobOrdinal);
@@ -4698,13 +4817,7 @@ export class ImageTranslationController {
       this.#earlyCssPictureReads.delete(descriptor.nodeId);
     }
     if (picture === undefined) {
-      // Its own file again: a look that was arranged has nothing to look at.
       this.#cssPictureChangedAt.delete(descriptor.nodeId);
-      const look = this.#lateLooks.get(descriptor.nodeId);
-      if (look?.timer !== undefined) {
-        this.#clearTimer(look.timer);
-        look.timer = undefined;
-      }
       return;
     }
     if (pictureChanged) {
@@ -4713,7 +4826,6 @@ export class ImageTranslationController {
     const known = this.#cssPictures.get(descriptor.nodeId);
     if (known === picture) return;
     this.#cssPictures.set(descriptor.nodeId, picture);
-    this.#forgetLateLook(descriptor.nodeId);
     if (known === undefined) return;
     const prefix = cssPictureKeyPrefix(descriptor.document, known);
     for (const [key, kept] of [...this.#imageIdentityAnalyses]) {
@@ -4721,44 +4833,6 @@ export class ImageTranslationController {
       this.#imageIdentityAnalyses.delete(key);
       this.#imageIdentityAnalysisWeight -= kept.weight;
     }
-  }
-
-  /**
-   * Arranges one more look at an image whose picture CSS decides and whose
-   * capture held no text. False once the picture has had its looks, or for
-   * any other image: "no text" is then kept.
-   */
-  #lookAgainLater(descriptor: SourceImageDescriptor): boolean {
-    const picture = descriptor.cssPicture;
-    if (picture === undefined) return false;
-    const nodeId = descriptor.nodeId;
-    const known = this.#lateLooks.get(nodeId);
-    const looks = known?.picture === picture ? known.looks : 0;
-    if (known?.timer !== undefined) this.#clearTimer(known.timer);
-    const delay = CSS_PICTURE_LATE_LOOK_DELAYS_MS[looks];
-    if (delay === undefined) {
-      this.#lateLooks.set(nodeId, { picture, looks, timer: undefined });
-      return false;
-    }
-    const record: {
-      readonly picture: number;
-      looks: number;
-      timer: ReturnType<typeof setTimeout> | undefined;
-    } = { picture, looks: looks + 1, timer: undefined };
-    record.timer = this.#setTimer(() => {
-      if (this.#lateLooks.get(nodeId) !== record) return;
-      record.timer = undefined;
-      const current = this.#descriptors.get(nodeId);
-      if (
-        this.#disposed ||
-        !current ||
-        current.cssPicture !== picture ||
-        !this.#scheduler?.requeueCurrent(current)
-      ) return;
-      this.#kick();
-    }, delay);
-    this.#lateLooks.set(nodeId, record);
-    return true;
   }
 
   /**
@@ -4794,17 +4868,7 @@ export class ImageTranslationController {
     this.#clippedLooks.delete(nodeId);
   }
 
-  #forgetLateLook(nodeId: number): void {
-    const known = this.#lateLooks.get(nodeId);
-    if (known?.timer !== undefined) this.#clearTimer(known.timer);
-    this.#lateLooks.delete(nodeId);
-  }
-
   #clearLateLooks(): void {
-    for (const known of this.#lateLooks.values()) {
-      if (known.timer !== undefined) this.#clearTimer(known.timer);
-    }
-    this.#lateLooks.clear();
     for (const look of this.#confirmingLooks.values()) {
       this.#clearTimer(look.timer);
     }
@@ -6671,6 +6735,8 @@ export class ImageTranslationController {
     this.#semanticRefreshRetainedOcrNodeIds.clear();
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
+    this.#coveredReads.clear();
+    this.#fileOnlyEmpty.clear();
     if (!preserveSemanticEvidence) this.#semanticEvidenceIndex.clear();
     this.#projector.beginPair(
       this.#pairEpoch,
@@ -6741,6 +6807,8 @@ export class ImageTranslationController {
    */
   #announceWork(): void {
     if (!this.#processing || this.#workAnnounced) return;
+    // Reading again an image whose words show already is no news (D172).
+    if (this.#silentJob && this.#silentJob === this.#activeJobValue) return;
     this.#workAnnounced = true;
     this.environment.onBusyChange?.(true);
   }
@@ -7267,7 +7335,7 @@ function originFinalAnalysisKey(
   ]);
 }
 
-const IMAGE_IDENTITY_SCHEMA_VERSION = 'image-identity-v1';
+const IMAGE_IDENTITY_SCHEMA_VERSION = 'image-identity-v2';
 /** Longer sources (inline data URLs) are not kept as keys. */
 const MAX_IMAGE_IDENTITY_SOURCE_LENGTH = 4_096;
 
@@ -7328,12 +7396,19 @@ function imageIdentityKey(
     const address = pageFileAddress ?? (image.currentSrc || image.src);
     if (address.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH) return undefined;
     let fit = ['', ''];
+    let background = '';
     try {
       const style = image.ownerDocument?.defaultView?.getComputedStyle(image);
       fit = [style?.objectFit ?? '', style?.objectPosition ?? ''];
+      // A transparent file over its CSS background shows the background:
+      // two images of one address with other backgrounds, or a background
+      // a class swaps, are other pictures (D172).
+      background = style?.backgroundImage ?? '';
     } catch {
       // Without a computed style the default fit is the only one assumed.
     }
+    if (background === 'none') background = '';
+    if (background.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH) return undefined;
     return JSON.stringify([
       IMAGE_IDENTITY_SCHEMA_VERSION,
       address,
@@ -7342,10 +7417,26 @@ function imageIdentityKey(
       Math.round(renderedWidth),
       Math.round(renderedHeight),
       ...fit,
+      background,
       finalConfigurationKey,
     ]);
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Whether the replica's copy of an image has a CSS background picture: a
+ * read of the file alone may then miss words the background shows (D172).
+ */
+function imageHasBackgroundPicture(image: HTMLImageElement | undefined): boolean {
+  if (!image) return false;
+  try {
+    const background = image.ownerDocument?.defaultView
+      ?.getComputedStyle(image).backgroundImage ?? '';
+    return background !== '' && background !== 'none';
+  } catch {
+    return false;
   }
 }
 

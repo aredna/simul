@@ -129,6 +129,38 @@ describe('a picture that CSS alone decides', () => {
     expect(styleReplacesImagePicture(picture('url("")', 'none'), '')).toBe(true);
   });
 
+  it('takes other spellings of the image\'s own file for it (D172)', () => {
+    const size = { width: 280, height: 150 };
+    for (const content of [
+      `url("${OWN}#part")`,
+      `image-set(url("${OWN}") 1x)`,
+      `image-set(url("${OWN}") 1dppx)`,
+      `image-set(url("${OWN}"))`,
+    ]) {
+      expect(styleReplacesImagePicture(picture(content, 'none'), OWN, size))
+        .toBe(false);
+    }
+    for (const viewBox of [
+      'inset(0px calc(100% - 280px) calc(100% - 150px) 0px)',
+      'inset(0px calc(100% - 280px) 0px 0px)',
+    ]) {
+      expect(styleReplacesImagePicture(picture('normal', viewBox), OWN, size))
+        .toBe(false);
+    }
+    // Still pictures: two candidates, another density, another query, a view
+    // box that cuts the file, and one whose file size is not known.
+    for (const [content, viewBox, known] of [
+      [`image-set(url("${OWN}") 1x, url("https://example.test/b.png") 2x)`, 'none', size],
+      [`image-set(url("${OWN}") 2x)`, 'none', size],
+      [`url("${OWN}?v=2#part")`, 'none', size],
+      ['normal', 'inset(0px calc(100% - 200px) calc(100% - 150px) 0px)', size],
+      ['normal', 'inset(0px calc(100% - 280px) calc(100% - 150px) 0px)', undefined],
+    ] as const) {
+      expect(styleReplacesImagePicture(picture(content, viewBox), OWN, known))
+        .toBe(true);
+    }
+  });
+
   it('reads a style object that has no getPropertyValue', () => {
     expect(styleReplacesImagePicture(
       { content: 'normal' } as unknown as CSSStyleDeclaration,

@@ -2,6 +2,7 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  CSS_PICTURE_DECODE_WAIT_MS,
   hasProtectedSiblingOverlap,
   hasSafeCaptureGeometry,
   hasSourceAriaControlledRegionAncestor,
@@ -1509,19 +1510,22 @@ describe('image source capture safety', () => {
       createImageSourcePortName(identity.sessionId),
     );
     const queries: string[] = [];
-    const scheme = new FakeMediaQueryList();
+    const media = new Map<string, FakeMediaQueryList>();
+    const sourceWindow = {
+      innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+      devicePixelRatio: 1,
+      getComputedStyle: style,
+      matchMedia: (query: string) => {
+        queries.push(query);
+        const list = new FakeMediaQueryList();
+        media.set(query, list);
+        return list;
+      },
+    };
     const session = new ImageSourceSession({
       port,
       document: document as unknown as Document,
-      window: {
-        innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
-        devicePixelRatio: 1,
-        getComputedStyle: style,
-        matchMedia: (query: string) => {
-          queries.push(query);
-          return scheme;
-        },
-      } as unknown as Window,
+      window: sourceWindow as unknown as Window,
       resolveNode: (nodeId) => nodeId === 7 ? image : null,
       getNodeId: (candidate) => candidate === image ? 7 : undefined,
       createObserver: (environment) => new SourceImageObserver({
@@ -1532,9 +1536,17 @@ describe('image source capture safety', () => {
         createMutationObserver: () => new NoopMutationObserver(),
       }),
     });
-    // One query, one listener.
-    expect(queries).toEqual(['(prefers-color-scheme: dark)']);
-    expect(scheme.listeners()).toBe(1);
+    // One query for each media feature a picture may hang on, one listener
+    // each (the contrast, forced colours and the pixel ratio since D172).
+    expect(queries).toEqual([
+      '(prefers-color-scheme: dark)',
+      '(prefers-contrast: more)',
+      '(prefers-contrast: less)',
+      '(forced-colors: active)',
+      '(resolution: 1dppx)',
+    ]);
+    for (const list of media.values()) expect(list.listeners()).toBe(1);
+    const scheme = media.get('(prefers-color-scheme: dark)')!;
     port.emitMessage({
       kind: 'simul:image-source-v2:start',
       document: identity,
@@ -1580,10 +1592,188 @@ describe('image source capture safety', () => {
     expect(lastUpsertDescriptor(port.messages)!.captureRevision)
       .toBe(light.captureRevision! + 2);
 
+    // Forced colours and more contrast are followed the same way (D172).
+    picture.content = 'url("https://cdn.example.test/contrast.png")';
+    expect(sentBy(() => media.get('(prefers-contrast: more)')!.change()))
+      .toHaveLength(1);
+    picture.content = 'normal';
+    expect(sentBy(() => media.get('(forced-colors: active)')!.change()))
+      .toHaveLength(1);
+
+    // The pixel ratio changes (the window moves to another screen, or the
+    // page is zoomed): an `image-set()` may pick another candidate. The
+    // query for the old ratio is dropped and one for the new one is made.
+    const oldRatio = media.get('(resolution: 1dppx)')!;
+    sourceWindow.devicePixelRatio = 2;
+    picture.content = 'url("https://cdn.example.test/2x.png")';
+    expect(sentBy(() => oldRatio.change())).toHaveLength(1);
+    expect(oldRatio.listeners()).toBe(0);
+    expect(queries.at(-1)).toBe('(resolution: 2dppx)');
+    expect(media.get('(resolution: 2dppx)')!.listeners()).toBe(1);
+
     session.dispose();
-    expect(scheme.listeners()).toBe(0);
+    for (const list of media.values()) expect(list.listeners()).toBe(0);
     picture.content = 'url("https://cdn.example.test/dark.png")';
     expect(sentBy(() => scheme.change())).toEqual([]);
+  });
+
+  it('gives a rectangle for a CSS picture once its file has decoded and been painted (D172)', async () => {
+    // Nothing reports the load of a picture that CSS gives: a screenshot
+    // made while its file was on its way showed an empty box, and the panel
+    // looked again twice later in case.
+    const { document } = parseHTML(
+      '<html><body><img id="image"></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    installHitTest(document as unknown as Document, image);
+    const picture = { content: 'normal' };
+    const style = (element: Element) => ({
+      ...baseStyle,
+      content: element === image ? picture.content : 'normal',
+      getPropertyValue: (name: string) =>
+        name === 'object-view-box' ? 'none' : '',
+    }) as unknown as CSSStyleDeclaration;
+    Object.defineProperty(document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: style,
+    });
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'decode-wait-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'decode-wait-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const scheme = new FakeMediaQueryList();
+    const frames = new FakePaintClock();
+    const loads: string[] = [];
+    const decodes = new Map<string, PromiseWithResolvers<void>>();
+    class FakeImage {
+      decoding = 'auto';
+      #src = '';
+      set src(value: string) {
+        this.#src = value;
+        loads.push(value);
+        decodes.set(value, Promise.withResolvers<void>());
+      }
+      decode(): Promise<void> {
+        return decodes.get(this.#src)!.promise;
+      }
+    }
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
+        devicePixelRatio: 1,
+        getComputedStyle: style,
+        matchMedia: () => scheme,
+        requestAnimationFrame: frames.requestAnimationFrame,
+        setTimeout: frames.setTimeout,
+        clearTimeout: frames.clearTimeout,
+        Image: FakeImage,
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-110000',
+      controlImages: true,
+      accessibilityTextEnabled: false,
+    });
+    const answers = (requestId: string) => port.messages.filter((message) =>
+      (message as { requestId?: string }).requestId === requestId);
+    const measure = (requestId: string, descriptor: SourceImageDescriptor) =>
+      port.emitMessage({
+        kind: 'simul:image-source-v2:measure',
+        requestId,
+        descriptor,
+      });
+    const swap = (content: string): SourceImageDescriptor => {
+      picture.content = content;
+      scheme.change();
+      return lastUpsertDescriptor(port.messages)!;
+    };
+    const paint = () => {
+      frames.frame();
+      frames.frame();
+    };
+    // The image's own file needs no decode.
+    paint();
+    expect(loads).toEqual([]);
+
+    // A CSS picture: its file is decoded through an Image(), and its
+    // rectangle waits for that and then for the frame that paints it.
+    const dark = swap('url("https://cdn.example.test/dark.png")');
+    expect(loads).toEqual(['https://cdn.example.test/dark.png']);
+    expect(frames.timers()).toContain(CSS_PICTURE_DECODE_WAIT_MS);
+    measure('dark', dark);
+    paint();
+    expect(answers('dark')).toEqual([]);
+    const asked = frames.requested();
+    decodes.get('https://cdn.example.test/dark.png')!.resolve();
+    await vi.waitFor(() => expect(frames.requested()).toBeGreaterThan(asked));
+    expect(answers('dark')).toEqual([]);
+    paint();
+    expect(answers('dark')).toMatchObject([{ status: 'ready' }]);
+    expect(frames.timers()).toEqual([]);
+
+    // The same file again later is not decoded again.
+    swap('normal');
+    paint();
+    const again = swap('url("https://cdn.example.test/dark.png")');
+    expect(loads).toHaveLength(1);
+    measure('again', again);
+    paint();
+    expect(answers('again')).toMatchObject([{ status: 'ready' }]);
+
+    // A file that takes longer than the wait: the rectangle is given as
+    // before, and the image is reported again once its file has decoded.
+    const slow = swap('url("https://cdn.example.test/slow.png")');
+    measure('slow', slow);
+    paint();
+    expect(answers('slow')).toEqual([]);
+    frames.timeout();
+    expect(answers('slow')).toMatchObject([{ status: 'ready' }]);
+    const reported = port.messages.length;
+    decodes.get('https://cdn.example.test/slow.png')!.resolve();
+    await vi.waitFor(() => expect(port.messages.length).toBeGreaterThan(reported));
+    const loaded = lastUpsertDescriptor(port.messages)!;
+    expect(loaded.cssPicture).toBe(slow.cssPicture);
+    expect(loaded.captureRevision).toBe(slow.captureRevision! + 1);
+    expect(loaded.pictureRevision).toBeGreaterThan(slow.pictureRevision!);
+    paint();
+
+    // A file that fails paints nothing either way: no second report.
+    const broken = swap('url("https://cdn.example.test/broken.png")');
+    measure('broken', broken);
+    paint();
+    const askedBroken = frames.requested();
+    decodes.get('https://cdn.example.test/broken.png')!.reject(new Error('404'));
+    await vi.waitFor(() =>
+      expect(frames.requested()).toBeGreaterThan(askedBroken));
+    expect(answers('broken')).toEqual([]);
+    paint();
+    expect(answers('broken')).toMatchObject([{ status: 'ready' }]);
+    expect(lastUpsertDescriptor(port.messages)).toEqual(broken);
+
+    // A gradient names no file.
+    swap('linear-gradient(red, blue)');
+    expect(loads).toHaveLength(3);
+    session.dispose();
   });
 
   it('gives a rectangle for a screenshot once the tab has painted the image\'s new picture', () => {
@@ -1921,7 +2111,7 @@ describe('image source capture safety', () => {
     }
   });
 
-  it('does not read an image from its file while CSS decides its picture', async () => {
+  it('reads the one file a CSS picture shows whole, and no file for any other CSS picture (D172)', async () => {
     const { document } = parseHTML(
       '<html><body>' +
       '<img id="image" src="https://cdn.example.test/first.png">' +
@@ -2017,21 +2207,38 @@ describe('image source capture safety', () => {
       return { descriptor, reply: port.messages.at(-1) as { status: string } };
     };
 
+    // `content: url(X)` with no view box shows X whole: X is described for
+    // the extension to fetch, never the image's own file (D172).
     const swapped = await answer('content');
     expect(swapped.descriptor.cssPicture).toEqual(expect.any(Number));
-    expect(swapped.reply).toEqual({
-      kind: 'simul:image-source-v2:pixels',
-      requestId: 'content',
-      descriptor: swapped.descriptor,
-      status: 'blocked',
+    expect(swapped.reply).toMatchObject({
+      status: 'ready',
+      file: { url: 'https://cdn.example.test/second.png' },
     });
     expect(encodeImageRegion).not.toHaveBeenCalled();
+
+    // A candidate of an image-set(), a gradient, or a file after a part of
+    // another: which picture shows is the screen's to say.
+    for (const [index, content] of [
+      'image-set(url("https://cdn.example.test/second.png") 1x, url("https://cdn.example.test/third.png") 2x)',
+      'linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))',
+      'url("https://cdn.example.test/second.png") "x"',
+    ].entries()) {
+      picture.content = content;
+      const other = await answer(`other-${index}`);
+      expect(other.descriptor.cssPicture).toEqual(expect.any(Number));
+      expect(other.reply.status).toBe('blocked');
+    }
 
     picture.content = 'normal';
     picture.viewBox = 'inset(10px 20px)';
     const cropped = await answer('view-box');
     expect(cropped.descriptor.cssPicture).toEqual(expect.any(Number));
     expect(cropped.descriptor.cssPicture).not.toBe(swapped.descriptor.cssPicture);
+    // The same file with a view box: a part of it.
+    picture.content = 'url("https://cdn.example.test/second.png")';
+    expect((await answer('file-view-box')).reply.status).toBe('blocked');
+    picture.content = 'normal';
     expect(cropped.reply.status).toBe('blocked');
     expect(encodeImageRegion).not.toHaveBeenCalled();
 

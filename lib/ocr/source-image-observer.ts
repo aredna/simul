@@ -96,21 +96,54 @@ const MAX_SOURCE_IMAGE_MUTATION_CHILD_NODES = 4_096;
 const SHADOW_DISCOVERY_INTERVAL_MS = 1_000;
 const MAX_CAPTURE_SAFETY_SCAN_ELEMENTS = 50_000;
 const MAX_CAPTURE_SAFETY_TARGETS = 1_024;
+/**
+ * Past MAX_CAPTURE_SAFETY_TARGETS controls their positions are not read at
+ * every scroll frame. They are read once into an index of the document by
+ * bands of this height, and a scroll compares an image only with the
+ * controls in the bands it passes through (D172). At most this many
+ * controls are indexed; past that the page fails closed, as before.
+ */
+const CAPTURE_BAND_HEIGHT = 512;
+const MAX_CAPTURE_BAND_TARGETS = 16_384;
+/** A control taller than this many bands is compared with every image. */
+const MAX_CAPTURE_BAND_SPAN = 16;
+/**
+ * The pointer or the focus moved (`:hover` may move a control with no
+ * mutation): an index of at most this many controls is checked whole at the
+ * next frame and kept if nothing moved; a larger one is made again.
+ */
+const MAX_CAPTURE_BAND_RECHECK = 4_096;
 const MAX_CAPTURE_OVERLAP_COMPARISONS = 50_000;
 const MAX_LAYOUT_SETTLE_TARGETS = 256;
 const UNREADABLE_SHADOW_ROOT = Symbol('unreadable-shadow-root');
 type ShadowRootRead = ShadowRoot | null |
   typeof UNREADABLE_SHADOW_ROOT;
 /**
- * The pointer coming onto an element or leaving it, and the focus moving:
- * what `:hover`, `:focus` and `:focus-within` follow, on an image or on
- * anything around it.
+ * The pointer coming onto an element or leaving it, pressed or let go, and
+ * the focus moving: what `:hover`, `:active` (since D172), `:focus` and
+ * `:focus-within` follow, on an image or on anything around it.
  */
 const PICTURE_STATE_EVENT_TYPES = Object.freeze([
   'pointerover',
   'pointerout',
+  'pointerdown',
+  'pointerup',
+  'pointercancel',
   'focusin',
   'focusout',
+] as const);
+/**
+ * A CSS animation on an image or around it may swap its picture with no
+ * event between (keyframes of `content`). While one runs, the pictures on
+ * screen are looked at again at this pace, and at most this many times for
+ * each start: an endless spinner does not keep the page busy (D172).
+ */
+export const PICTURE_ANIMATION_LOOK_MS = 500;
+export const MAX_PICTURE_ANIMATION_LOOKS = 16;
+const PICTURE_ANIMATION_EVENT_TYPES = Object.freeze([
+  'animationstart',
+  'animationend',
+  'animationcancel',
 ] as const);
 /**
  * How long the pointer and the focus must have stayed where they are before
@@ -211,6 +244,26 @@ interface CaptureSafetyBounds {
   readonly height: number;
 }
 
+/**
+ * Where each control is in the document, read once while nothing but the
+ * document's own scroll has happened since. A control that a document
+ * scroll moves on the screen differently from the page (fixed, sticky, or
+ * moved by a scroll timeline) is a mover: it is read again at each frame.
+ */
+interface CaptureBandIndex {
+  readonly bands: ReadonlyMap<number, readonly Element[]>;
+  readonly wide: readonly Element[];
+  readonly documentBounds: ReadonlyMap<Element, CaptureSafetyBounds>;
+  /** Controls with no box when the index was made. */
+  readonly empty: readonly Element[];
+  readonly movers: readonly Element[];
+  /** Movers' screen bounds, and images' document bounds, at the last frame. */
+  readonly moverBounds: Map<Element, CaptureSafetyBounds>;
+  readonly imageBounds: Map<HTMLImageElement, CaptureSafetyBounds>;
+  scrollX: number;
+  scrollY: number;
+}
+
 interface CaptureSafetyRelationAssessment {
   readonly changedImages: ReadonlySet<HTMLImageElement>;
   readonly controlBounds: ReadonlyMap<Element, CaptureSafetyBounds>;
@@ -298,11 +351,16 @@ export class SourceImageObserver {
   readonly #eventRoots = new Set<Document | ShadowRoot>();
   #loadListener: ((event: Event) => void) | undefined;
   #viewportListener: (() => void) | undefined;
-  #scrollListener: (() => void) | undefined;
+  #scrollListener: ((event: Event) => void) | undefined;
   #pictureStateListener: (() => void) | undefined;
   /** Pointer and focus events seen, and the timer that waits for them to stop. */
   #pictureStateEvents = 0;
   #pictureStateTimer: unknown;
+  #pictureAnimationListener: ((event: Event) => void) | undefined;
+  #pictureAnimationTimer: unknown;
+  #pictureAnimationLooksLeft = 0;
+  /** Animations running on an image's path, by their element. */
+  readonly #pictureAnimations = new Map<Element, number>();
   #layoutSettleListener: ((event: Event) => void) | undefined;
   #fontSettleListener: (() => void) | undefined;
   #scrollFrame: number | undefined;
@@ -313,6 +371,13 @@ export class SourceImageObserver {
   readonly #layoutSettleSafetyTargets = new Set<Element>();
   readonly #captureSafetyBounds = new Map<Element, CaptureSafetyBounds>();
   #captureSafetyBoundsReliable = true;
+  #captureBandIndex: CaptureBandIndex | undefined;
+  /** An index could not be made; none is tried again until a change. */
+  #captureBandIndexRefused = false;
+  /** The pointer or the focus moved since the index was last checked. */
+  #captureBandIndexUnchecked = false;
+  /** A scroll of something other than the document came in this frame. */
+  #innerScrollSeen = false;
   #identityRetryFrame: number | undefined;
   #shadowDiscoveryTimer: unknown;
   #started = false;
@@ -438,6 +503,16 @@ export class SourceImageObserver {
   }
 
   /**
+   * The file of an image's CSS picture has now decoded, after its rectangle
+   * was given without it (D172): the image is a new capture of a new
+   * picture, which the tab can now paint.
+   */
+  refreshLoadedPicture(image: HTMLImageElement): void {
+    if (!this.#started || !this.#states.has(image)) return;
+    this.#refresh(image, false, true, true, true);
+  }
+
+  /**
    * Something that is no change to the document may have given the images
    * on screen another picture (the system's colour scheme, the pointer, the
    * focus). Each is looked at again, and only one whose picture CSS now
@@ -445,6 +520,12 @@ export class SourceImageObserver {
    */
   refreshVisiblePictures(): void {
     if (!this.#started) return;
+    // A media feature that changed a picture may have moved controls too.
+    this.#invalidateCaptureBands();
+    this.#refreshVisiblePicturesOnly();
+  }
+
+  #refreshVisiblePicturesOnly(): void {
     for (const image of [...this.#visible]) this.#refreshPicture(image);
   }
 
@@ -461,8 +542,64 @@ export class SourceImageObserver {
         this.#awaitPictureStateRest(generation);
         return;
       }
-      this.refreshVisiblePictures();
+      // What the pointer and the focus moved is checked by the index's own
+      // whole check (#captureBandIndexUnchecked).
+      this.#refreshVisiblePicturesOnly();
     }, PICTURE_STATE_SETTLE_MS);
+  }
+
+  /**
+   * An animation started or ended on an element. One on the path of an image
+   * on screen (the image or anything around it) has the pictures on screen
+   * looked at again at a bounded pace while it runs (D172).
+   */
+  #onPictureAnimation(type: string, target: Element, generation: number): void {
+    if (type !== 'animationstart') {
+      const running = (this.#pictureAnimations.get(target) ?? 0) - 1;
+      if (running > 0) this.#pictureAnimations.set(target, running);
+      else this.#pictureAnimations.delete(target);
+      if (
+        this.#pictureAnimations.size === 0 &&
+        this.#pictureAnimationTimer !== undefined
+      ) {
+        this.#clearTimer(this.#pictureAnimationTimer);
+        this.#pictureAnimationTimer = undefined;
+      }
+      // Its last frame may be another picture.
+      this.refreshVisiblePictures();
+      return;
+    }
+    let onPath = false;
+    for (const image of this.#visible) {
+      const contains = sameOrContainsElement(target, image);
+      // Unreadable ancestry counts as on the path: a look too many is safe.
+      if (contains !== false) {
+        onPath = true;
+        break;
+      }
+    }
+    if (!onPath) return;
+    this.#pictureAnimations.set(
+      target,
+      (this.#pictureAnimations.get(target) ?? 0) + 1,
+    );
+    this.#pictureAnimationLooksLeft = MAX_PICTURE_ANIMATION_LOOKS;
+    if (this.#pictureAnimationTimer === undefined) {
+      this.#awaitPictureAnimationLook(generation);
+    }
+  }
+
+  #awaitPictureAnimationLook(generation: number): void {
+    this.#pictureAnimationTimer = this.#setTimer(() => {
+      this.#pictureAnimationTimer = undefined;
+      if (!this.#isActiveGeneration(generation)) return;
+      if (this.#pictureAnimations.size === 0) return;
+      this.#pictureAnimationLooksLeft -= 1;
+      this.refreshVisiblePictures();
+      if (this.#pictureAnimationLooksLeft > 0) {
+        this.#awaitPictureAnimationLook(generation);
+      }
+    }, PICTURE_ANIMATION_LOOK_MS);
   }
 
   /** Reads one image's own style, and refreshes it if its picture changed. */
@@ -481,6 +618,7 @@ export class SourceImageObserver {
   /** CSSOM has no MutationRecord, so conservatively re-prove every image. */
   refreshAfterStyleChange(): void {
     if (!this.#started) return;
+    this.#invalidateCaptureBands();
     this.#performGlobalRefresh(true, false, true);
   }
 
@@ -550,6 +688,7 @@ export class SourceImageObserver {
     );
     this.#resizeObserver = this.#environment.createResizeObserver((entries) => {
       if (!this.#isActiveGeneration(generation)) return;
+      this.#invalidateCaptureBands();
       for (const entry of entries) {
         if (isImageElement(entry.target)) this.#refresh(entry.target);
       }
@@ -562,6 +701,7 @@ export class SourceImageObserver {
     );
     this.#loadListener = (event) => {
       if (!this.#isActiveGeneration(generation)) return;
+      this.#invalidateCaptureBands();
       if (isImageElement(event.target)) {
         this.#refresh(event.target, true, false, true);
       } else if (isElement(event.target) && isStyleSourceElement(event.target)) {
@@ -572,12 +712,21 @@ export class SourceImageObserver {
     };
     this.#viewportListener = () => {
       if (!this.#isActiveGeneration(generation)) return;
+      this.#invalidateCaptureBands();
       this.#refreshAfterViewportChange();
     };
-    this.#scrollListener = () => {
-      if (!this.#isActiveGeneration(generation) || this.#scrollFrame !== undefined) {
-        return;
+    this.#scrollListener = (event) => {
+      if (!this.#isActiveGeneration(generation)) return;
+      const target = event.target;
+      if (
+        target !== this.#environment.document &&
+        target !== this.#environment.document.scrollingElement
+      ) {
+        // An inner scroller moves its own controls past the images: the
+        // document index does not know where they are now.
+        this.#innerScrollSeen = true;
       }
+      if (this.#scrollFrame !== undefined) return;
       this.#scrollFrame = this.#scheduleFrame(() => {
         this.#scrollFrame = undefined;
         if (!this.#isActiveGeneration(generation)) return;
@@ -591,7 +740,13 @@ export class SourceImageObserver {
         const safetyAssessment = knownControls
           ? this.#captureSafetyRelationChanges(visible, knownControls)
           : undefined;
-        const failClosedCandidates = safetyAssessment?.changedImages ?? visible;
+        if (this.#innerScrollSeen) {
+          this.#innerScrollSeen = false;
+          this.#invalidateCaptureBands();
+        }
+        const failClosedCandidates = safetyAssessment?.changedImages ??
+          (knownControls ? visible : this.#captureBandChanges(visible)) ??
+          visible;
         for (const image of visible) {
           const captureSafetyChanged = failClosedCandidates.has(image);
           // What a scroll changes is where the image is: its crop by the
@@ -615,15 +770,24 @@ export class SourceImageObserver {
     // state that restyles an image otherwise is no change here.
     this.#pictureStateListener = () => {
       if (!this.#isActiveGeneration(generation)) return;
+      // `:hover`, `:active` and `:focus` may move controls with no mutation:
+      // the index is checked whole before it is used again.
+      this.#captureBandIndexUnchecked = true;
       this.#pictureStateEvents += 1;
       if (this.#pictureStateTimer === undefined) {
         this.#awaitPictureStateRest(generation);
       }
     };
-    this.#layoutSettleListener = (event) => {
+    this.#pictureAnimationListener = (event) => {
       if (!this.#isActiveGeneration(generation) || !isElement(event.target)) {
         return;
       }
+      this.#onPictureAnimation(event.type, event.target, generation);
+    };
+    this.#layoutSettleListener = (event) => {
+      if (!this.#isActiveGeneration(generation)) return;
+      this.#invalidateCaptureBands();
+      if (!isElement(event.target)) return;
       let refreshAll = false;
       try {
         refreshAll = this.#environment.layoutSettleRequiresRefreshAll?.(
@@ -641,6 +805,7 @@ export class SourceImageObserver {
     };
     this.#fontSettleListener = () => {
       if (!this.#isActiveGeneration(generation)) return;
+      this.#invalidateCaptureBands();
       this.#queueLayoutSettle(undefined, true, true);
     };
     this.#observeSourceRoot(this.#environment.document);
@@ -685,6 +850,11 @@ export class SourceImageObserver {
           root.removeEventListener(type, this.#pictureStateListener, true);
         }
       }
+      if (this.#pictureAnimationListener) {
+        for (const type of PICTURE_ANIMATION_EVENT_TYPES) {
+          root.removeEventListener(type, this.#pictureAnimationListener, true);
+        }
+      }
       if (this.#layoutSettleListener) {
         for (const type of LAYOUT_SETTLE_EVENT_TYPES) {
           root.removeEventListener(type, this.#layoutSettleListener, true);
@@ -722,6 +892,12 @@ export class SourceImageObserver {
       this.#clearTimer(this.#pictureStateTimer);
       this.#pictureStateTimer = undefined;
     }
+    if (this.#pictureAnimationTimer !== undefined) {
+      this.#clearTimer(this.#pictureAnimationTimer);
+      this.#pictureAnimationTimer = undefined;
+    }
+    this.#pictureAnimations.clear();
+    this.#pictureAnimationLooksLeft = 0;
     this.#visibleObserver?.disconnect();
     this.#nearObserver?.disconnect();
     this.#resizeObserver?.disconnect();
@@ -741,6 +917,7 @@ export class SourceImageObserver {
     this.#viewportListener = undefined;
     this.#scrollListener = undefined;
     this.#pictureStateListener = undefined;
+    this.#pictureAnimationListener = undefined;
     this.#layoutSettleListener = undefined;
     this.#fontSettleListener = undefined;
     this.#states.clear();
@@ -775,6 +952,14 @@ export class SourceImageObserver {
     if (this.#pictureStateListener) {
       for (const type of PICTURE_STATE_EVENT_TYPES) {
         root.addEventListener(type, this.#pictureStateListener, {
+          capture: true,
+          passive: true,
+        });
+      }
+    }
+    if (this.#pictureAnimationListener) {
+      for (const type of PICTURE_ANIMATION_EVENT_TYPES) {
+        root.addEventListener(type, this.#pictureAnimationListener, {
           capture: true,
           passive: true,
         });
@@ -1204,6 +1389,7 @@ export class SourceImageObserver {
 
   #onMutations(records: readonly MutationRecord[]): void {
     if (!this.#started) return;
+    this.#invalidateCaptureBands();
     if (records.length > MAX_SOURCE_IMAGE_MUTATION_RECORDS) {
       // A hostile delivery cannot induce unbounded record×subtree work. One
       // global privacy refresh advances both content and observation evidence.
@@ -2030,6 +2216,284 @@ export class SourceImageObserver {
     this.#captureSafetyBoundsReliable = true;
   }
 
+  #invalidateCaptureBands(): void {
+    this.#captureBandIndex = undefined;
+    this.#captureBandIndexRefused = false;
+    this.#captureBandIndexUnchecked = false;
+  }
+
+  /**
+   * Whether every control is where the index has it, at the present scroll:
+   * the same box in the document, still no box, or still a mover. Asked
+   * after the pointer or the focus moved; an index too large to check is
+   * not kept.
+   */
+  #captureBandIndexHolds(
+    index: CaptureBandIndex,
+    scrollX: number,
+    scrollY: number,
+  ): boolean {
+    if (
+      index.documentBounds.size + index.empty.length + index.movers.length >
+        MAX_CAPTURE_BAND_RECHECK
+    ) return false;
+    const moving = new Map<Element, boolean>();
+    for (const [control, placed] of index.documentBounds) {
+      if (!control.isConnected) return false;
+      const bounds = readCaptureSafetyBounds(control);
+      if (!bounds) return false;
+      if (elementMovesWithViewport(control, moving) !== false) return false;
+      const now = translateBounds(bounds, scrollX, scrollY);
+      if (
+        Math.abs(now.left - placed.left) > 0.5 ||
+        Math.abs(now.top - placed.top) > 0.5 ||
+        Math.abs(now.right - placed.right) > 0.5 ||
+        Math.abs(now.bottom - placed.bottom) > 0.5
+      ) return false;
+    }
+    for (const control of index.empty) {
+      if (!control.isConnected) return false;
+      const bounds = readCaptureSafetyBounds(control);
+      if (!bounds || (bounds.width > 0 && bounds.height > 0)) return false;
+      if (elementMovesWithViewport(control, moving) !== false) return false;
+    }
+    for (const mover of index.movers) {
+      if (elementMovesWithViewport(mover, moving) !== true) return false;
+    }
+    return true;
+  }
+
+  /**
+   * The images on screen whose capture a document scroll may have changed,
+   * on a page of more controls than are read at each frame (D172). Only the
+   * controls in the bands of the document each image passed through, the
+   * wide controls and the movers are compared; the rest stayed where they
+   * were in the document, away from the image. `undefined` fails closed:
+   * there is no index yet (it is made now, for the next frame), it could
+   * not be made, or anything is animating.
+   */
+  #captureBandChanges(
+    images: ReadonlySet<HTMLImageElement>,
+  ): Set<HTMLImageElement> | undefined {
+    if (images.size === 0) return new Set();
+    const view = this.#environment.document.defaultView;
+    const scrollX = view?.scrollX;
+    const scrollY = view?.scrollY;
+    if (
+      typeof scrollX !== 'number' || !Number.isFinite(scrollX) ||
+      typeof scrollY !== 'number' || !Number.isFinite(scrollY)
+    ) return undefined;
+    // A running animation or transition may move any control between
+    // frames with no event: the index is not trusted while one runs.
+    if (documentHasRunningAnimation(this.#environment.document)) {
+      this.#invalidateCaptureBands();
+      return undefined;
+    }
+    let index = this.#captureBandIndex;
+    if (index && this.#captureBandIndexUnchecked) {
+      this.#captureBandIndexUnchecked = false;
+      if (!this.#captureBandIndexHolds(index, scrollX, scrollY)) {
+        this.#invalidateCaptureBands();
+        index = undefined;
+      }
+    }
+    if (!index) {
+      if (this.#captureBandIndexRefused) return undefined;
+      index = this.#buildCaptureBandIndex(scrollX, scrollY);
+      if (!index) {
+        this.#captureBandIndexRefused = true;
+        return undefined;
+      }
+      this.#captureBandIndex = index;
+      for (const image of images) {
+        const bounds = readCaptureSafetyBounds(image);
+        if (bounds) {
+          index.imageBounds.set(image, translateBounds(bounds, scrollX, scrollY));
+        }
+      }
+      // Nothing to compare with yet.
+      return undefined;
+    }
+    const moverBounds = new Map<Element, CaptureSafetyBounds>();
+    for (const mover of index.movers) {
+      const bounds = mover.isConnected ? readCaptureSafetyBounds(mover) : undefined;
+      if (!bounds) {
+        this.#invalidateCaptureBands();
+        return undefined;
+      }
+      moverBounds.set(mover, bounds);
+    }
+    const changed = new Set<HTMLImageElement>();
+    const imageBounds = new Map<HTMLImageElement, CaptureSafetyBounds>();
+    let comparisons = 0;
+    for (const image of images) {
+      const current = readCaptureSafetyBounds(image);
+      const path = readSourceFlatTreeElementPath(image);
+      if (!current || !path) {
+        this.#invalidateCaptureBands();
+        return undefined;
+      }
+      const currentDocument = translateBounds(current, scrollX, scrollY);
+      imageBounds.set(image, currentDocument);
+      const previousDocument = index.imageBounds.get(image);
+      if (!previousDocument) {
+        // New on screen since the last frame: its capture is new anyway.
+        changed.add(image);
+        continue;
+      }
+      const sweptDocument = captureSafetyBoundsHull(
+        previousDocument,
+        currentDocument,
+      );
+      const stillInDocument = sameCaptureSafetyBounds(
+        previousDocument,
+        currentDocument,
+      );
+      const nearby = new Set<Element>(index.wide);
+      const first = Math.floor(sweptDocument.top / CAPTURE_BAND_HEIGHT) - 1;
+      const last = Math.floor(sweptDocument.bottom / CAPTURE_BAND_HEIGHT) + 1;
+      if (last - first > MAX_CAPTURE_BAND_SPAN * 4) {
+        this.#invalidateCaptureBands();
+        return undefined;
+      }
+      for (let band = first; band <= last; band += 1) {
+        for (const control of index.bands.get(band) ?? []) nearby.add(control);
+      }
+      let imageChanged = false;
+      for (const control of nearby) {
+        comparisons += 1;
+        if (comparisons > MAX_CAPTURE_OVERLAP_COMPARISONS) {
+          this.#invalidateCaptureBands();
+          return undefined;
+        }
+        if (path.includes(control)) continue;
+        // A control that left the document since is a change only through
+        // the mutation that removed it, which drops this index first.
+        const bounds = index.documentBounds.get(control);
+        if (!bounds) continue;
+        if (stillInDocument) continue;
+        // The control stayed in place in the document; widened by a pixel
+        // so that rounding never hides a touch.
+        const control1 = inflateBounds(bounds, 1);
+        const before = rectanglesOverlap(previousDocument, control1);
+        const after = rectanglesOverlap(currentDocument, control1);
+        if (before !== after || rectanglesOverlap(sweptDocument, control1)) {
+          imageChanged = true;
+          break;
+        }
+      }
+      if (!imageChanged) {
+        const previousScreen = translateBounds(
+          previousDocument,
+          -index.scrollX,
+          -index.scrollY,
+        );
+        for (const mover of index.movers) {
+          comparisons += 1;
+          if (comparisons > MAX_CAPTURE_OVERLAP_COMPARISONS) {
+            this.#invalidateCaptureBands();
+            return undefined;
+          }
+          if (path.includes(mover)) continue;
+          const before = index.moverBounds.get(mover);
+          const after = moverBounds.get(mover);
+          if (!before || !after) {
+            imageChanged = true;
+            break;
+          }
+          const overlappedBefore = rectanglesOverlap(previousScreen, before);
+          const overlappedAfter = rectanglesOverlap(current, after);
+          if (
+            overlappedBefore !== overlappedAfter ||
+            (
+              !sameCaptureSafetyRelativeGeometry(
+                previousScreen,
+                current,
+                before,
+                after,
+              ) &&
+              rectanglesOverlap(
+                captureSafetyBoundsHull(previousScreen, current),
+                captureSafetyBoundsHull(before, after),
+              )
+            )
+          ) {
+            imageChanged = true;
+            break;
+          }
+        }
+      }
+      if (imageChanged) changed.add(image);
+    }
+    index.imageBounds.clear();
+    for (const [image, bounds] of imageBounds) index.imageBounds.set(image, bounds);
+    index.moverBounds.clear();
+    for (const [mover, bounds] of moverBounds) index.moverBounds.set(mover, bounds);
+    index.scrollX = scrollX;
+    index.scrollY = scrollY;
+    return changed;
+  }
+
+  #buildCaptureBandIndex(
+    scrollX: number,
+    scrollY: number,
+  ): CaptureBandIndex | undefined {
+    const controls = collectCurrentCaptureControlTargets(
+      this.#environment.document,
+      MAX_CAPTURE_BAND_TARGETS,
+    );
+    if (!controls) return undefined;
+    const bands = new Map<number, Element[]>();
+    const wide: Element[] = [];
+    const documentBounds = new Map<Element, CaptureSafetyBounds>();
+    const empty: Element[] = [];
+    const movers: Element[] = [];
+    const moverBounds = new Map<Element, CaptureSafetyBounds>();
+    const moving = new Map<Element, boolean>();
+    for (const control of controls) {
+      const bounds = readCaptureSafetyBounds(control);
+      if (!bounds) return undefined;
+      const mover = elementMovesWithViewport(control, moving);
+      if (mover === undefined) return undefined;
+      if (mover) {
+        if (movers.length >= MAX_CAPTURE_SAFETY_TARGETS) return undefined;
+        movers.push(control);
+        moverBounds.set(control, bounds);
+        continue;
+      }
+      // An empty box paints nothing and overlaps nothing.
+      if (!(bounds.width > 0 && bounds.height > 0)) {
+        empty.push(control);
+        continue;
+      }
+      const placed = translateBounds(bounds, scrollX, scrollY);
+      documentBounds.set(control, placed);
+      const first = Math.floor(placed.top / CAPTURE_BAND_HEIGHT);
+      const last = Math.floor(placed.bottom / CAPTURE_BAND_HEIGHT);
+      if (last - first > MAX_CAPTURE_BAND_SPAN) {
+        if (wide.length >= MAX_CAPTURE_SAFETY_TARGETS) return undefined;
+        wide.push(control);
+        continue;
+      }
+      for (let band = first; band <= last; band += 1) {
+        const list = bands.get(band);
+        if (list) list.push(control);
+        else bands.set(band, [control]);
+      }
+    }
+    return {
+      bands,
+      wide,
+      documentBounds,
+      empty,
+      movers,
+      moverBounds,
+      imageBounds: new Map(),
+      scrollX,
+      scrollY,
+    };
+  }
+
   #rebuildCaptureSafetyBounds(): void {
     const controls = collectCurrentCaptureControlTargets(
       this.#environment.document,
@@ -2606,6 +3070,7 @@ function readImageSourceShadowRoot(element: Element): ShadowRootRead {
 
 function collectCurrentCaptureControlTargets(
   document: Document,
+  limit = MAX_CAPTURE_SAFETY_TARGETS,
 ): readonly Element[] | undefined {
   const targets: Element[] = [];
   const pending: Node[] = [document];
@@ -2620,7 +3085,7 @@ function collectCurrentCaptureControlTargets(
         const controlMatch = elementMatchesCaptureControl(node);
         if (controlMatch === undefined) return undefined;
         if (controlMatch) {
-          if (targets.length >= MAX_CAPTURE_SAFETY_TARGETS) return undefined;
+          if (targets.length >= limit) return undefined;
           targets.push(node);
         }
         const shadow = readImageSourceShadowRoot(node);
@@ -2641,6 +3106,91 @@ function collectCurrentCaptureControlTargets(
     return undefined;
   }
   return Object.freeze(targets);
+}
+
+/**
+ * Whether a document scroll may move an element on the screen otherwise than
+ * the page: it or something around it is fixed or sticky, or follows a
+ * scroll or view timeline. Unreadable is `undefined`. Answers for the
+ * elements around are kept in `known`, which one index build shares.
+ */
+function elementMovesWithViewport(
+  element: Element,
+  known: Map<Element, boolean>,
+): boolean | undefined {
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return undefined;
+  const view = element.ownerDocument.defaultView;
+  const getComputedStyle = view?.getComputedStyle;
+  if (typeof getComputedStyle !== 'function') return undefined;
+  const walked: Element[] = [];
+  let moves = false;
+  for (const current of path) {
+    const cached = known.get(current);
+    if (cached !== undefined) {
+      moves = cached;
+      break;
+    }
+    walked.push(current);
+    let style: CSSStyleDeclaration;
+    try {
+      style = getComputedStyle.call(view, current);
+    } catch {
+      return undefined;
+    }
+    const position = style.position ?? '';
+    const timeline = style.getPropertyValue?.('animation-timeline') ?? '';
+    if (
+      position === 'fixed' || position === 'sticky' ||
+      (timeline !== '' && timeline !== 'auto')
+    ) {
+      moves = true;
+      break;
+    }
+  }
+  for (const current of walked) known.set(current, moves);
+  return moves;
+}
+
+/** Whether any animation or transition of the document is playing now. */
+function documentHasRunningAnimation(document: Document): boolean {
+  try {
+    if (typeof document.getAnimations !== 'function') return true;
+    return document.getAnimations().some(
+      (animation) => animation.playState === 'running',
+    );
+  } catch {
+    return true;
+  }
+}
+
+function translateBounds(
+  bounds: CaptureSafetyBounds,
+  x: number,
+  y: number,
+): CaptureSafetyBounds {
+  return Object.freeze({
+    left: bounds.left + x,
+    top: bounds.top + y,
+    right: bounds.right + x,
+    bottom: bounds.bottom + y,
+    width: bounds.width,
+    height: bounds.height,
+  });
+}
+
+function inflateBounds(
+  bounds: CaptureSafetyBounds,
+  amount: number,
+): CaptureSafetyBounds {
+  return Object.freeze({
+    left: bounds.left - amount,
+    top: bounds.top - amount,
+    right: bounds.right + amount,
+    bottom: bounds.bottom + amount,
+    width: bounds.width + 2 * amount,
+    height: bounds.height + 2 * amount,
+  });
 }
 
 function containsControlledRelationshipElement(node: Node): boolean {
@@ -2820,7 +3370,9 @@ function readCssPictureFacts(
   style: CSSStyleDeclaration | undefined,
 ): PrivateSourceToken | undefined {
   const file = typeof image.currentSrc === 'string' ? image.currentSrc : '';
-  if (!style || !styleReplacesImagePicture(style, file)) return undefined;
+  if (!style || !styleReplacesImagePicture(style, file, naturalSizeOf(image))) {
+    return undefined;
+  }
   return encodePrivateToken([
     style.content ?? '',
     style.getPropertyValue?.('object-view-box') ?? '',
@@ -2828,6 +3380,17 @@ function readCssPictureFacts(
     style.objectPosition ?? '',
     file,
   ]);
+}
+
+/** The file's own size, when the image can say (D172). */
+function naturalSizeOf(
+  image: HTMLImageElement,
+): { width: number; height: number } | undefined {
+  try {
+    return { width: image.naturalWidth, height: image.naturalHeight };
+  } catch {
+    return undefined;
+  }
 }
 
 function readRoutingComputedStyle(

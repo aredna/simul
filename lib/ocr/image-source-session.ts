@@ -77,6 +77,19 @@ export interface ImageSourcePort {
  * no frame at all; the rectangle is then given as it was before this wait.
  */
 export const PICTURE_PAINT_WAIT_LIMIT_MS = 250;
+/**
+ * How long a rectangle may wait for the file of an image's new CSS picture
+ * to decode (D172). Nothing reports the load of a picture that CSS gives, so
+ * the same file is decoded through an `Image()`; a screenshot made before
+ * showed an empty box. Shorter than the panel's wait for a rectangle: past
+ * it the rectangle is given, and the image is reported again once its file
+ * has decoded.
+ */
+export const CSS_PICTURE_DECODE_WAIT_MS = 1_000;
+/** Addresses at most read from one computed `content`. */
+const MAX_CSS_PICTURE_FILES = 4;
+/** Addresses remembered as decoded, so a picture seen again waits for none. */
+const MAX_DECODED_CSS_PICTURE_FILES = 256;
 /** Rectangles that may wait for a frame at once. */
 const MAX_WAITING_MEASURES = 32;
 /** Further requests held pending for that paint; beyond this they are refused. */
@@ -126,6 +139,52 @@ export type ImageRegionEncoder = (
  * text, or with its file facts: its HTTP(S) URL, where it paints, and (when
  * the page may read them) its pixels.
  */
+/**
+ * The one file a CSS picture shows whole: a computed `content` of a single
+ * `url()` (with or without a text alternative) and no view box. An
+ * `image-set()`, a gradient, several images or a view box is `undefined`:
+ * which part, or which candidate, is painted is the screen's to say.
+ */
+function cssPictureWholeFile(
+  view: Window,
+  image: HTMLImageElement,
+): string | undefined {
+  const style = safeComputedStyle(view, image);
+  if (!style) return undefined;
+  const viewBox = (style.getPropertyValue?.('object-view-box') ?? '').trim();
+  if (viewBox !== '' && viewBox !== 'none') return undefined;
+  const match = /^url\("((?:[^"\\]|\\.)*)"\)(?:\s*\/.*)?$/su
+    .exec((style.content ?? '').trim());
+  if (!match) return undefined;
+  const file = (match[1] ?? '').replace(/\\(.)/gu, '$1');
+  return /^(?:https?:|data:image\/|blob:)/iu.test(file) ? file : undefined;
+}
+
+/**
+ * The addresses a computed `content` names: each `url()`, alone or as a
+ * candidate of an `image-set()`. Gradients name none.
+ */
+function cssPictureFiles(view: Window, image: HTMLImageElement): string[] {
+  const style = safeComputedStyle(view, image);
+  const content = style?.content ?? '';
+  const files: string[] = [];
+  for (const match of content.matchAll(/url\("((?:[^"\\]|\\.)*)"\)/gu)) {
+    const file = (match[1] ?? '').replace(/\\(.)/gu, '$1');
+    if (!/^(?:https?:|data:image\/|blob:)/iu.test(file)) continue;
+    if (!files.includes(file)) files.push(file);
+    if (files.length >= MAX_CSS_PICTURE_FILES) break;
+  }
+  return files;
+}
+
+/** The media features followed besides the device pixel ratio (D172). */
+const PICTURE_MEDIA_QUERIES = Object.freeze([
+  '(prefers-color-scheme: dark)',
+  '(prefers-contrast: more)',
+  '(prefers-contrast: less)',
+  '(forced-colors: active)',
+] as const);
+
 export class ImageSourceSession {
   readonly #sessionId: string;
   #documentIdentity: ReplicaSourceDocumentIdentity | undefined;
@@ -138,8 +197,14 @@ export class ImageSourceSession {
   #accessibilityTextEnabled = false;
   /** An image was refused a rectangle because the tab was pinch-zoomed. */
   #refusedWhileMagnified = false;
-  /** The system's colour scheme, which a page's CSS may hang pictures on. */
-  #colorScheme: MediaQueryList | undefined;
+  /**
+   * Media features a page's CSS may hang pictures on with no change to the
+   * document: the colour scheme, the contrast asked for, forced colours
+   * (D172), and the device pixel ratio that picks an `image-set()`
+   * candidate (D172), whose query is made again at each change.
+   */
+  readonly #pictureMedia: MediaQueryList[] = [];
+  #resolutionMedia: MediaQueryList | undefined;
   /**
    * Images whose picture changed and has not been painted since, each with
    * the frame wait that will clear it; and the rectangles asked for them
@@ -162,6 +227,10 @@ export class ImageSourceSession {
     readonly descriptor: SourceImageDescriptor;
   }[] = [];
   readonly #paintTimers = new Set<number>();
+  /** Files of CSS pictures that have decoded in this page (D172). */
+  readonly #decodedFiles = new Set<string>();
+  /** Images whose CSS picture's file is decoding, and its wait. */
+  readonly #decoding = new Map<number, { readonly picture: number; timedOut: boolean }>();
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
   /** A start waits for the injection-time credential scan (D163). */
@@ -185,15 +254,18 @@ export class ImageSourceSession {
     } catch {
       // Without the event an image waits for the page's next change.
     }
-    // A change of the colour scheme is no change to the document either.
-    try {
-      this.#colorScheme = environment.window.matchMedia?.(
-        '(prefers-color-scheme: dark)',
-      );
-      this.#colorScheme?.addEventListener?.('change', this.#onColorSchemeChange);
-    } catch {
-      this.#colorScheme = undefined;
+    // A change of these is no change to the document either.
+    for (const query of PICTURE_MEDIA_QUERIES) {
+      try {
+        const media = environment.window.matchMedia?.(query);
+        if (!media) continue;
+        media.addEventListener?.('change', this.#onColorSchemeChange);
+        this.#pictureMedia.push(media);
+      } catch {
+        // Without the query such a picture waits for the image's next look.
+      }
     }
+    this.#watchResolution();
   }
 
   dispose(disconnect = false): void {
@@ -209,15 +281,23 @@ export class ImageSourceSession {
     } catch {
       // The window may already be gone.
     }
+    for (const media of this.#pictureMedia) {
+      try {
+        media.removeEventListener?.('change', this.#onColorSchemeChange);
+      } catch {
+        // As above.
+      }
+    }
+    this.#pictureMedia.length = 0;
     try {
-      this.#colorScheme?.removeEventListener?.(
+      this.#resolutionMedia?.removeEventListener?.(
         'change',
-        this.#onColorSchemeChange,
+        this.#onResolutionChange,
       );
     } catch {
       // As above.
     }
-    this.#colorScheme = undefined;
+    this.#resolutionMedia = undefined;
     for (const timer of this.#paintTimers) {
       try {
         this.environment.window.clearTimeout(timer);
@@ -227,6 +307,8 @@ export class ImageSourceSession {
     }
     this.#paintTimers.clear();
     this.#unpainted.clear();
+    this.#decoding.clear();
+    this.#decodedFiles.clear();
     this.#openPaintWait = undefined;
     this.#waitingMeasures = [];
     this.#overflowMeasures = [];
@@ -307,8 +389,21 @@ export class ImageSourceSession {
     if (isImageElement(requestedNode)) {
       this.#observer.refreshImage(requestedNode);
     }
-    const descriptor = this.#model.get(message.descriptor.nodeId);
-    if (!descriptor || !this.#model.isCurrent(message.descriptor)) {
+    // A read that does not look at the screen is answered while the image's
+    // content is the one asked about, whatever moved since (D172); it is
+    // answered for the descriptor it was asked for.
+    const screenless =
+      message.kind === 'simul:image-source-v2:accessibility-text' ||
+      message.kind === 'simul:image-source-v2:pixels';
+    const known = this.#model.get(message.descriptor.nodeId);
+    const descriptor = screenless ? message.descriptor : known;
+    if (
+      !known ||
+      !descriptor ||
+      !(screenless
+        ? this.#model.isContentCurrent(message.descriptor)
+        : this.#model.isCurrent(message.descriptor))
+    ) {
       this.#post(
         message.kind === 'simul:image-source-v2:accessibility-text' ||
           message.kind === 'simul:image-source-v2:pixels'
@@ -476,6 +571,77 @@ export class ImageSourceSession {
     this.#unpainted.set(nodeId, wait);
   }
 
+  /**
+   * Holds an image's rectangle until the files its CSS picture names have
+   * decoded, then waits for the frame that paints them (D172). Past
+   * CSS_PICTURE_DECODE_WAIT_MS the rectangle is given; a file that decodes
+   * later has the image reported again as a new capture of its picture.
+   */
+  #awaitDecode(nodeId: number, picture: number): void {
+    const image = this.environment.resolveNode(nodeId);
+    if (!isImageElement(image)) return;
+    const files = cssPictureFiles(this.environment.window, image)
+      .filter((file) => !this.#decodedFiles.has(file));
+    if (files.length === 0) return;
+    const view = this.environment.window;
+    const ImageConstructor = (view as { Image?: typeof Image }).Image;
+    if (typeof ImageConstructor !== 'function') return;
+    const record = { picture, timedOut: false };
+    this.#decoding.set(nodeId, record);
+    const wait = new Set<number>([nodeId]);
+    this.#unpainted.set(nodeId, wait);
+    let timer: number | undefined;
+    try {
+      timer = view.setTimeout(() => {
+        if (timer !== undefined) this.#paintTimers.delete(timer);
+        if (this.#decoding.get(nodeId) !== record) return;
+        record.timedOut = true;
+        // The rectangle is given as before this wait.
+        this.#painted(wait);
+      }, CSS_PICTURE_DECODE_WAIT_MS);
+      this.#paintTimers.add(timer);
+    } catch {
+      timer = undefined;
+    }
+    const decodes = files.map(async (file) => {
+      const loader = new ImageConstructor();
+      loader.decoding = 'async';
+      loader.src = file;
+      await loader.decode();
+      return file;
+    });
+    void Promise.allSettled(decodes).then((results) => {
+      if (this.#disposed || this.#decoding.get(nodeId) !== record) return;
+      this.#decoding.delete(nodeId);
+      if (timer !== undefined) {
+        this.#paintTimers.delete(timer);
+        try {
+          view.clearTimeout(timer);
+        } catch {
+          // The window may already be gone.
+        }
+      }
+      for (const result of results) {
+        if (result.status !== 'fulfilled') continue;
+        if (this.#decodedFiles.size >= MAX_DECODED_CSS_PICTURE_FILES) {
+          this.#decodedFiles.clear();
+        }
+        this.#decodedFiles.add(result.value);
+      }
+      const current = this.#model?.get(nodeId);
+      if (current?.cssPicture !== picture) return;
+      if (record.timedOut) {
+        // Its rectangle went out before the file was there: a screenshot
+        // may have shown an empty box. The image is looked at again.
+        this.#observer?.refreshLoadedPicture(image);
+        return;
+      }
+      // A file that failed to decode paints nothing either way. Now the
+      // frame that paints the picture.
+      if (this.#unpainted.get(nodeId) === wait) this.#awaitPaint(nodeId);
+    });
+  }
+
   #painted(wait: Set<number>): void {
     if (this.#disposed) return;
     for (const nodeId of wait) {
@@ -542,6 +708,39 @@ export class ImageSourceSession {
    */
   readonly #onColorSchemeChange = (): void => {
     if (this.#disposed) return;
+    this.#observer?.refreshVisiblePictures();
+  };
+
+  /** A query for the present device pixel ratio, made again when it ends. */
+  #watchResolution(): void {
+    try {
+      const ratio = this.environment.window.devicePixelRatio;
+      if (!(typeof ratio === 'number' && ratio > 0)) return;
+      const media = this.environment.window.matchMedia?.(
+        `(resolution: ${ratio}dppx)`,
+      );
+      if (!media) return;
+      media.addEventListener?.('change', this.#onResolutionChange);
+      this.#resolutionMedia = media;
+    } catch {
+      this.#resolutionMedia = undefined;
+    }
+  }
+
+  readonly #onResolutionChange = (): void => {
+    if (this.#disposed) return;
+    // The query was for the ratio that has ended: one for the new ratio
+    // takes its place.
+    try {
+      this.#resolutionMedia?.removeEventListener?.(
+        'change',
+        this.#onResolutionChange,
+      );
+    } catch {
+      // The old query is dropped either way.
+    }
+    this.#resolutionMedia = undefined;
+    this.#watchResolution();
     this.#observer?.refreshVisiblePictures();
   };
 
@@ -649,6 +848,10 @@ export class ImageSourceSession {
     ) {
       // Another picture, or the same one elsewhere: not on screen yet.
       this.#awaitPaint(change.descriptor.nodeId);
+      const picture = change.descriptor.cssPicture;
+      if (picture !== undefined && before?.cssPicture !== picture) {
+        this.#awaitDecode(change.descriptor.nodeId, picture);
+      }
     }
     this.#post({ kind: 'simul:image-source-v2:change', change });
     if (change.kind === 'remove') this.#drainOverflowMeasures();
@@ -690,6 +893,7 @@ export class ImageSourceSession {
       left + width <= 0 ||
       top + height <= 0
     ) return undefined;
+    let covered = false;
     if (!hasSafeCaptureGeometry(
       node,
       rect,
@@ -698,6 +902,9 @@ export class ImageSourceSession {
       {
         allowControlImages: this.#controlImages,
         isSecret: (candidate) => this.#hasStickySecretAncestor(candidate),
+        onPublicControlOverlap: () => {
+          covered = true;
+        },
       },
     )) return undefined;
     const nearestElementLanguage = nearestValidElementLanguage(node);
@@ -718,6 +925,7 @@ export class ImageSourceSession {
       ...(nearestElementLanguage
         ? { nearestElementLanguage }
         : {}),
+      ...(covered ? { covered: true as const } : {}),
     });
   }
 
@@ -733,7 +941,7 @@ export class ImageSourceSession {
       file = undefined;
     }
     if (this.#disposed || !this.#model) return;
-    if (!this.#model.isCurrent(descriptor)) {
+    if (!this.#model.isContentCurrent(descriptor)) {
       this.#post({
         kind: 'simul:image-source-v2:pixels',
         requestId,
@@ -787,8 +995,15 @@ export class ImageSourceSession {
       (candidate) => this.#hasStickySecretAncestor(candidate),
     )) return undefined;
     // CSS shows another picture than the file's, or a part of it: the file
-    // would give the words of a picture that is not on the page.
-    if (imageShowsCssPicture(node, this.environment.window)) return undefined;
+    // would give the words of a picture that is not on the page. One file
+    // shown whole in its place (`content: url(X)`, no view box) is read
+    // instead, as the image's own would be (D172).
+    if (imageShowsCssPicture(node, this.environment.window)) {
+      const cssFile = cssPictureWholeFile(this.environment.window, node);
+      return cssFile
+        ? await this.#readCssPictureFile(descriptor, node, cssFile, includePixels)
+        : undefined;
+    }
     const layout = readImageFileLayout(node, this.environment.window);
     if (!layout) return undefined;
     const loaded = node.complete && node.naturalWidth > 0 &&
@@ -820,6 +1035,73 @@ export class ImageSourceSession {
       layout,
       ...(loaded
         ? { naturalWidth: node.naturalWidth, naturalHeight: node.naturalHeight }
+        : {}),
+      ...(fileUrl ? { url: fileUrl } : {}),
+      ...(pixels ? { pixels } : {}),
+      ...(nearestElementLanguage ? { nearestElementLanguage } : {}),
+    });
+  }
+
+  /**
+   * The file a CSS picture shows whole, described as an image's own file
+   * is: its size from an `Image()` of it, its region read here when the
+   * page may read it, and its address for the extension to fetch a copy
+   * otherwise (all sites are granted, D166).
+   */
+  async #readCssPictureFile(
+    descriptor: SourceImageDescriptor,
+    node: HTMLImageElement,
+    cssFile: string,
+    includePixels: boolean,
+  ): Promise<SourceImageFileEvidence | undefined> {
+    const layout = readImageFileLayout(node, this.environment.window);
+    if (!layout) return undefined;
+    const ImageConstructor = (this.environment.window as { Image?: typeof Image })
+      .Image;
+    let loader: HTMLImageElement | undefined;
+    if (typeof ImageConstructor === 'function') {
+      try {
+        const candidate = new ImageConstructor();
+        candidate.decoding = 'async';
+        candidate.src = cssFile;
+        await candidate.decode();
+        if (candidate.naturalWidth > 0 && candidate.naturalHeight > 0) {
+          loader = candidate;
+        }
+      } catch {
+        loader = undefined;
+      }
+    }
+    if (this.#disposed || !node.isConnected) return undefined;
+    // The picture may have changed while its file was decoding.
+    if (cssPictureWholeFile(this.environment.window, node) !== cssFile) {
+      return undefined;
+    }
+    const fileUrl = isSourceImageFileUrl(cssFile) ? cssFile : undefined;
+    if (!loader && !fileUrl) return undefined;
+    const placement = loader
+      ? computeImageFilePlacement({
+          ...layout,
+          naturalWidth: loader.naturalWidth,
+          naturalHeight: loader.naturalHeight,
+        })
+      : undefined;
+    const pixels = includePixels && loader && placement
+      ? await readTabImagePixels(
+          loader,
+          placement,
+          this.environment.encodeImageRegion ?? encodeImageRegionAsPngDataUrl,
+        )
+      : undefined;
+    const nearestElementLanguage = nearestValidElementLanguage(node);
+    return Object.freeze({
+      document: descriptor.document,
+      nodeId: descriptor.nodeId,
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+      layout,
+      ...(loader
+        ? { naturalWidth: loader.naturalWidth, naturalHeight: loader.naturalHeight }
         : {}),
       ...(fileUrl ? { url: fileUrl } : {}),
       ...(pixels ? { pixels } : {}),
@@ -1032,7 +1314,13 @@ function imageShowsCssPicture(
   } catch {
     return true;
   }
-  return styleReplacesImagePicture(style, file);
+  let naturalSize: { width: number; height: number } | undefined;
+  try {
+    naturalSize = { width: image.naturalWidth, height: image.naturalHeight };
+  } catch {
+    naturalSize = undefined;
+  }
+  return styleReplacesImagePicture(style, file, naturalSize);
 }
 
 /**
@@ -1186,6 +1474,8 @@ export function hasSafeCaptureGeometry(
   options: {
     readonly allowControlImages?: boolean;
     readonly isSecret?: (element: Element) => boolean;
+    /** Told when a public control is painted over a part of the image. */
+    readonly onPublicControlOverlap?: () => void;
   } = {},
 ): boolean {
   if (typeof sourceWindow.getComputedStyle !== 'function') return false;
@@ -1216,6 +1506,7 @@ export function hasSafeCaptureGeometry(
     sourceDocument,
     sourceWindow,
     classifySecret,
+    options.onPublicControlOverlap,
   )) return false;
   return !isCoveredByForeignText(image, imageRect, path, sourceDocument);
 }
@@ -1235,6 +1526,7 @@ export function hasProtectedSiblingOverlap(
   sourceDocument: Document,
   sourceWindow: Window,
   isSecret: (element: Element) => boolean = hasSourceCredentialSecretAncestor,
+  onPublicControlOverlap?: () => void,
 ): boolean {
   const candidates = collectCaptureOverlapElements(sourceDocument);
   if (!candidates) return true;
@@ -1269,9 +1561,27 @@ export function hasProtectedSiblingOverlap(
     // Generic div/span overlays can carry sticky password, OTP, payment,
     // WebAuthn, or computed text-security classification too.
     if (safeSecretClassification(candidate, isSecret)) return true;
+    if (onPublicControlOverlap && elementIsPublicControl(candidate)) {
+      onPublicControlOverlap();
+    }
   }
   return false;
 }
+
+/** A link, button, field or other control a reader may act on (D172). */
+function elementIsPublicControl(element: Element): boolean {
+  try {
+    return element.matches(PUBLIC_CONTROL_SELECTOR);
+  } catch {
+    return true;
+  }
+}
+
+const PUBLIC_CONTROL_SELECTOR = [
+  'a[href]', 'area[href]', 'button', 'input', 'label', 'select', 'summary',
+  'textarea', '[role="button"]', '[role="link"]', '[role="tab"]',
+  '[role="menuitem"]', '[contenteditable]',
+].join(',');
 
 /**
  * captureVisibleTab paints whatever is on top. A fixed header, caption, or

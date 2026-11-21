@@ -38,13 +38,20 @@ const WHOLE_FILE_VIEW_BOX =
  * current file, replaces the picture of its file, and an `object-view-box`
  * that is not the whole file shows a part of it. The image's address and
  * its file then say nothing of what it paints, so its text can only be read
- * from the screen. `ownFile` is the image's `currentSrc`. A value this does
- * not know counts as a picture: such an image is read from the screen,
- * which is right whatever it shows.
+ * from the screen. `ownFile` is the image's `currentSrc`, `naturalSize` its
+ * file's size. A value this does not know counts as a picture: such an
+ * image is read from the screen, which is right whatever it shows.
+ *
+ * Since D172 three more spellings of the image's own file are taken for it:
+ * its address with another fragment or spelled otherwise (`#part`, a default
+ * port, an escaped letter), the file as the one candidate of an
+ * `image-set()`, and a view box of the whole file written in pixels, which
+ * Chrome computes to `calc(100% - <width>px)` insets.
  */
 export function styleReplacesImagePicture(
   style: CSSStyleDeclaration,
   ownFile = '',
+  naturalSize?: { readonly width: number; readonly height: number },
 ): boolean {
   const content = (style.content ?? '').trim();
   const viewBox = (style.getPropertyValue?.('object-view-box') ?? '').trim();
@@ -52,14 +59,62 @@ export function styleReplacesImagePicture(
     content !== '' &&
     !CONTENT_TEXT_PART.test(content) &&
     !contentIsFile(content, ownFile)
-  ) || !(viewBox === '' || viewBox === 'none' || WHOLE_FILE_VIEW_BOX.test(viewBox));
+  ) || !(
+    viewBox === '' ||
+    viewBox === 'none' ||
+    WHOLE_FILE_VIEW_BOX.test(viewBox) ||
+    viewBoxIsWholeFileInPixels(viewBox, naturalSize)
+  );
 }
 
-/** `content: url(<the file>)`, with or without a text alternative. */
+/**
+ * `content: url(<the file>)`, alone or as the one candidate of an
+ * `image-set()`, with or without a text alternative.
+ */
 function contentIsFile(content: string, file: string): boolean {
   if (file === '') return false;
-  const match = /^url\("([^"]*)"\)(?:\s*\/.*)?$/su.exec(content);
-  return match?.[1] === file;
+  const match = /^url\("([^"]*)"\)(?:\s*\/.*)?$/su.exec(content) ??
+    /^image-set\(\s*url\("([^"]*)"\)(?:\s+(?:1(?:\.0+)?(?:x|dppx)|96dpi))?\s*\)(?:\s*\/.*)?$/su
+      .exec(content);
+  const address = match?.[1];
+  if (address === undefined) return false;
+  return address === file || sameResource(address, file);
+}
+
+/** Two addresses of one file: the same once parsed, the fragment aside. */
+function sameResource(first: string, second: string): boolean {
+  try {
+    const a = new URL(first);
+    const b = new URL(second);
+    a.hash = '';
+    b.hash = '';
+    return a.href === b.href;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `inset(0px calc(100% - Wpx) calc(100% - Hpx) 0px)` where W and H are the
+ * file's own size: `xywh(0 0 Wpx Hpx)` or `rect(0 Wpx Hpx 0)` of the whole
+ * file, as Chrome computes it.
+ */
+function viewBoxIsWholeFileInPixels(
+  viewBox: string,
+  naturalSize: { readonly width: number; readonly height: number } | undefined,
+): boolean {
+  if (!naturalSize || !(naturalSize.width > 0) || !(naturalSize.height > 0)) {
+    return false;
+  }
+  const match =
+    /^inset\(\s*0(?:px|%)?\s+(?:0(?:px|%)?|calc\(100% - ([\d.]+)px\))\s+(?:0(?:px|%)?|calc\(100% - ([\d.]+)px\))\s+0(?:px|%)?\s*\)$/u
+      .exec(viewBox);
+  if (!match) return false;
+  const width = match[1] === undefined ? undefined : Number(match[1]);
+  const height = match[2] === undefined ? undefined : Number(match[2]);
+  return (width === undefined || width === naturalSize.width) &&
+    (height === undefined || height === naturalSize.height) &&
+    (width !== undefined || height !== undefined);
 }
 
 /**

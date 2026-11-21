@@ -272,6 +272,33 @@ export class SourceImageModel {
     );
   }
 
+  /**
+   * Whether a read that does not look at the screen (the image's label, its
+   * file) may still be answered for this descriptor: the same document,
+   * content and CSS picture, at the same size. A new observation, capture or
+   * admission (a script moving something elsewhere every frame) does not
+   * make such a read stale: it is checked against the live node when it is
+   * answered (D172).
+   */
+  isContentCurrent(descriptor: SourceImageDescriptor): boolean {
+    const parsed = readSourceImageDescriptor(descriptor);
+    if (!parsed) return false;
+    const current = this.#records.get(parsed.nodeId);
+    return Boolean(
+      current &&
+      sameSourceDocument(current.document, parsed.document) &&
+      current.contentRevision === parsed.contentRevision &&
+      current.observationRevision >= parsed.observationRevision &&
+      current.sourceKind === parsed.sourceKind &&
+      current.connected === parsed.connected &&
+      current.renderedWidth === parsed.renderedWidth &&
+      current.renderedHeight === parsed.renderedHeight &&
+      current.intrinsicWidth === parsed.intrinsicWidth &&
+      current.intrinsicHeight === parsed.intrinsicHeight &&
+      current.cssPicture === parsed.cssPicture,
+    );
+  }
+
   clear(): void {
     this.#document = undefined;
     this.#records.clear();

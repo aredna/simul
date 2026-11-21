@@ -127,6 +127,12 @@ export interface SourceImageCaptureMetrics {
   readonly scrollY: number;
   readonly devicePixelRatio: number;
   readonly nearestElementLanguage?: SupportedLanguage;
+  /**
+   * A link, button or other public control of the page lies over a part of
+   * the image (D172). It may be captured, and what it paints is read with
+   * the image's words: a result read so is read once more without it.
+   */
+  readonly covered?: true;
 }
 
 /** Content-free inventory reported after the initial synchronous DOM scan. */
@@ -597,10 +603,11 @@ export function readSourceImageCaptureMetrics(
     'scrollX',
     'scrollY',
     'devicePixelRatio',
-  ], ['nearestElementLanguage'])) return undefined;
+  ], ['nearestElementLanguage', 'covered'])) return undefined;
   const document = readSourceDocumentIdentity(input.document);
   if (
     !document ||
+    (input.covered !== undefined && input.covered !== true) ||
     !isPositiveSafeInteger(input.nodeId) ||
     !isPositiveSafeInteger(input.contentRevision) ||
     !isPositiveSafeInteger(input.observationRevision) ||
@@ -633,6 +640,7 @@ export function readSourceImageCaptureMetrics(
     ...(isSupportedLanguage(input.nearestElementLanguage)
       ? { nearestElementLanguage: input.nearestElementLanguage }
       : {}),
+    ...(input.covered === true ? { covered: true as const } : {}),
   });
 }
 
@@ -655,6 +663,7 @@ export function sameImageCaptureMetrics(
     left.scrollY === right.scrollY &&
     left.devicePixelRatio === right.devicePixelRatio
     && left.nearestElementLanguage === right.nearestElementLanguage
+    && left.covered === right.covered
   );
 }
 
