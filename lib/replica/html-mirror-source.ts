@@ -679,6 +679,8 @@ const SHAPE_SIGNATURE_SHEETS = new WeakSet<CSSStyleSheet>();
 const CAPTURED_RESOURCE_ELEMENTS: ReadonlySet<string> = new Set(['img', 'link']);
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
+/** How many roots a full set refuses between two compactions (D171). */
+const IMAGE_EVENT_ROOT_COMPACTION_EVERY = 256;
 const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
 /**
  * Nodes of a slot read again one by one when what the slot shows changes;
@@ -761,6 +763,14 @@ const CHECKPOINT_READ_SHARE = 0.5;
  */
 const MAX_CHECKPOINT_READ_RESTARTS = 2;
 /**
+ * How many times a read in parts reads the controlled-content policy again
+ * because the page changed it between two slices (D171), until a restart
+ * that builds it anew; past it the replay of the kept changes after the
+ * copy follows the policy, as before. A page that flips a panel every frame
+ * does not hold the read.
+ */
+const MAX_CHECKPOINT_POLICY_REBUILDS = 2;
+/**
  * Mutation records kept while a checkpoint is read in slices, to be judged
  * against the new copy once it is sent (D163). A page that changes more
  * than this meanwhile is read again.
@@ -815,6 +825,23 @@ interface CheckpointRead {
   readonly held: Set<Element>;
   /** What a read in slices has marked so far. */
   staged?: MirroredGraphState;
+  /**
+   * How many of `records` were judged against the read's policy (D171):
+   * those after it may have changed it since.
+   */
+  policyChecked: number;
+  /** Policies read again between slices since the policy was built (D171). */
+  policyRebuilds: number;
+  /**
+   * A kept change may have moved the policy and it was not read again (the
+   * rebuilds ran out): the replay after the copy reads it again (D171).
+   */
+  policyStale: boolean;
+  /**
+   * Elements read already whose state in the policy changed when it was
+   * read again between slices (D171): sent again after the copy's ACK.
+   */
+  readonly policyRequeue: Set<Element>;
 }
 
 /** The slices of one checkpoint read (D163). */
@@ -937,6 +964,11 @@ export class HtmlMirrorSourceSession {
   #selectedImageSources = new WeakMap<Element, string>();
   #imageRefreshRequested = false;
   readonly #imageEventRoots = new Set<Document | ShadowRoot>();
+  /**
+   * Roots refused since the set of roots was last compacted, when it is
+   * full (D171): compacted again only every so often, not for each.
+   */
+  #imageEventRootsRefused = 0;
   readonly #observedShadowRoots = new WeakSet<ShadowRoot>();
   #shadowHostCandidates: Element[] = [];
   #knownShadowHostCandidates = new WeakSet<Element>();
@@ -1048,6 +1080,18 @@ export class HtmlMirrorSourceSession {
   /** The policy read again in slices after a change of layout (D165). */
   #policyRefreshRunning = false;
   #policyRefreshGeneration = 0;
+  /**
+   * The running policy read was begun by the replay of a read's kept
+   * changes (D171): no flush runs until it is done, so nothing is sent
+   * under the policy the copy was read with.
+   */
+  #policyRefreshHoldsFlush = false;
+  /**
+   * While a read's kept changes are replayed (D171): whether they may still
+   * move the policy (`sliced`: read it again in slices, the first flush held)
+   * or were judged against it already between the slices (`skip`).
+   */
+  #replayPolicy: 'sliced' | 'skip' | undefined;
   #visibilityFullRefreshPending = false;
   /** The comparison of what the page paints that is running, if any (D164). */
   #comparisonRun: ComparisonRun | undefined;
@@ -1491,7 +1535,14 @@ export class HtmlMirrorSourceSession {
       recordTargets: new Set(),
       loaded: new Set(),
       held: new Set(),
+      policyChecked: 0,
+      policyRebuilds: 0,
+      policyStale: false,
+      policyRequeue: new Set(),
     };
+    // The copy brings its own policy: a read of it begun before is of no
+    // use, and must not hold the first flush after this copy (D171).
+    this.#cancelPolicyRefresh();
     this.#checkpointRead = read;
     // A recovery or a fresh start: nothing waits for an older ACK (D164).
     this.#releaseAckHold();
@@ -1551,6 +1602,9 @@ export class HtmlMirrorSourceSession {
         );
         offerPreview = false;
         if (outcome !== 'restart' || !this.#readIsCurrent(read)) return;
+        // The policy the attempt ended with: read again between its slices
+        // when the page moved it (D171).
+        policy = read.staged?.controlledContentPolicy ?? policy;
         await slices.next();
         if (!this.#readIsCurrent(read)) return;
         // What the policy was built from may have changed meanwhile.
@@ -1633,11 +1687,78 @@ export class HtmlMirrorSourceSession {
     read.loaded.clear();
     read.held.clear();
     read.recordsOverflow = false;
+    read.policyChecked = 0;
+    read.policyRebuilds = 0;
+    read.policyStale = false;
+    read.policyRequeue.clear();
     return beginSourceControlledContentPolicy(
       this.environment.document,
       this.environment.window,
       MAX_HTML_MIRROR_NODES,
     );
+  }
+
+  /**
+   * Reads the controlled-content policy of a read in parts again when what
+   * the page changed since it was judged may have moved it (D171). Before,
+   * the policy was built once before the read: a panel painted then and
+   * collapsed before its slice went into the copy with its text. Read in
+   * slices of its own (the read waits); what it changes of what is read
+   * already is sent again after the copy's ACK, and what is not read yet
+   * is read with it. A change of the policy's own bounds starts the read
+   * again. Past `MAX_CHECKPOINT_POLICY_REBUILDS` the replay after the copy
+   * follows the policy, as before.
+   */
+  async #followControlledContentPolicy(
+    read: CheckpointRead,
+    slices: CheckpointReadSlices,
+    reader: ReturnType<typeof beginSourceDocumentRead>,
+    staged: MirroredGraphState,
+  ): Promise<'ended' | 'restart' | undefined> {
+    for (;;) {
+      const policy = staged.controlledContentPolicy;
+      if (!policy || read.policyChecked >= read.records.length) return undefined;
+      const fresh = read.records.slice(read.policyChecked);
+      read.policyChecked = read.records.length;
+      if (!sourceControlledContentMutationsMayChange(fresh, policy)) continue;
+      if (read.policyRebuilds >= MAX_CHECKPOINT_POLICY_REBUILDS) {
+        read.policyStale = true;
+        return undefined;
+      }
+      read.policyRebuilds += 1;
+      const builder = beginSourceControlledContentPolicy(
+        this.environment.document,
+        this.environment.window,
+        MAX_HTML_MIRROR_NODES,
+      );
+      const expired = (): boolean => slices.clock.expired();
+      let next = this.#withoutOwnLateRoots(() => builder.step(expired));
+      while (!next) {
+        await slices.next();
+        if (!this.#readIsCurrent(read)) return 'ended';
+        if (read.recordsOverflow) return 'restart';
+        next = this.#withoutOwnLateRoots(() => builder.step(expired));
+      }
+      if (next.incomplete || sourceControlledContentBoundaryChanged(policy, next)) {
+        return 'restart';
+      }
+      for (const target of sourceControlledContentChangedTargets(policy, next)) {
+        if (staged.mirroredNodes.has(target)) {
+          read.policyRequeue.add(target);
+          continue;
+        }
+        // Not read yet, but what a slot in it draws may be: the host's own
+        // children are read before its root (D135).
+        const root = target.getRootNode();
+        if (
+          isSourceShadowRoot(root) && staged.mirroredNodes.has(root.host) &&
+          (target.localName === 'slot' || target.querySelector('slot'))
+        ) return 'restart';
+      }
+      if (read.policyRequeue.size > MAX_HTML_MIRROR_PENDING_TARGETS) return 'restart';
+      reader.setControlledContent(next);
+      staged.controlledContentPolicy = next;
+    }
   }
 
   /**
@@ -1657,13 +1778,32 @@ export class HtmlMirrorSourceSession {
   }
 
   #countSourceElements(): number {
+    let count = 0;
     try {
       const document = this.environment.document;
       // Outside a browser (a test's DOM) `*` may name no element at all.
-      return document.getElementsByTagName('*').length ||
+      count = document.getElementsByTagName('*').length ||
         document.querySelectorAll('*').length;
+      if (count >= HTML_MIRROR_PREVIEW_MIN_ELEMENTS) return count;
+      // A page of web components holds most of itself in shadow roots,
+      // which `*` does not count (D171): the roots' elements are counted
+      // too, until the threshold. At most that many elements are asked for
+      // a root, in the slice's own walk of the roots.
+      return this.#withoutOwnLateRoots(() => {
+        const visit = (scope: Document | ShadowRoot): void => {
+          for (const element of scope.querySelectorAll('*')) {
+            if (count >= HTML_MIRROR_PREVIEW_MIN_ELEMENTS) return;
+            const root = readSourceShadowRoot(element);
+            if (!root) continue;
+            count += root.querySelectorAll('*').length;
+            visit(root);
+          }
+        };
+        visit(document);
+        return count;
+      });
     } catch {
-      return 0;
+      return count;
     }
   }
 
@@ -1759,9 +1899,10 @@ export class HtmlMirrorSourceSession {
   async #readCheckpointInSlices(
     read: CheckpointRead,
     slices: CheckpointReadSlices,
-    policy: SourceControlledContentPolicy,
+    policyAtStart: SourceControlledContentPolicy,
     offerPreview: boolean,
   ): Promise<'restart' | 'ended'> {
+    let policy = policyAtStart;
     const fidelityPolicy = this.#fidelityPolicy;
     if (!fidelityPolicy || !this.#identity) return 'ended';
     if (slices.clock.expired()) {
@@ -1783,6 +1924,21 @@ export class HtmlMirrorSourceSession {
     });
     const staged = this.#createMirroredGraphState(policy);
     read.staged = staged;
+    // After each turn the page had (D171): the read goes on, ends, or
+    // starts again; the policy is read again first when what the page
+    // changed in the turn may have moved it.
+    const afterTurn = async (): Promise<'ended' | 'restart' | undefined> => {
+      if (!this.#readIsCurrent(read)) return 'ended';
+      if (read.recordsOverflow) return 'restart';
+      const outcome = await this.#followControlledContentPolicy(
+        read,
+        slices,
+        reader,
+        staged,
+      );
+      if (outcome === undefined) policy = staged.controlledContentPolicy!;
+      return outcome;
+    };
     const index = SourceVisibilityBoundaryIndex.beginBuild(
       document,
       window,
@@ -1873,8 +2029,8 @@ export class HtmlMirrorSourceSession {
         let yielded = false;
         if (step.fills.length > 0 && !offerPreview && slices.clock.expired()) {
           await slices.next();
-          if (!this.#readIsCurrent(read)) return 'ended';
-          if (read.recordsOverflow) return 'restart';
+          const turned = await afterTurn();
+          if (turned) return turned;
           yielded = true;
         }
         if (step.fills.length > 0) {
@@ -1918,8 +2074,8 @@ export class HtmlMirrorSourceSession {
         }
         if (!yielded || slices.clock.expired()) {
           await slices.next();
-          if (!this.#readIsCurrent(read)) return 'ended';
-          if (read.recordsOverflow) return 'restart';
+          const turned = await afterTurn();
+          if (turned) return turned;
         }
         if (offerPreview) {
           // The read does not fit one slice: the panel is shown a preview
@@ -1927,8 +2083,8 @@ export class HtmlMirrorSourceSession {
           offerPreview = false;
           if (this.#postPreview(policy)) {
             await slices.next();
-            if (!this.#readIsCurrent(read)) return 'ended';
-            if (read.recordsOverflow) return 'restart';
+            const turned = await afterTurn();
+            if (turned) return turned;
           }
           if (heldFills && !sendPart(heldFills, assembly)) {
             this.#failCheckpointRead(representability, true);
@@ -1938,8 +2094,8 @@ export class HtmlMirrorSourceSession {
           // The held part had this slice: the next step reads in its own.
           if (slices.clock.expired()) {
             await slices.next();
-            if (!this.#readIsCurrent(read)) return 'ended';
-            if (read.recordsOverflow) return 'restart';
+            const turned = await afterTurn();
+            if (turned) return turned;
           }
         }
       }
@@ -2110,6 +2266,10 @@ export class HtmlMirrorSourceSession {
         window,
         MAX_HTML_MIRROR_NODES,
       );
+      // Built after every change kept so far, as the copy is read (D171).
+      read.policyChecked = read.records.length;
+      read.policyStale = false;
+      read.policyRequeue.clear();
       const graph = sanitizeSourceDocument(
         document,
         window,
@@ -2240,10 +2400,34 @@ export class HtmlMirrorSourceSession {
     this.#takeMetPanes();
     this.#postScroll(false, true);
     this.#scheduleShadowDiscovery();
+    // Read already when the policy was read again between the slices, and
+    // moved by it (D171): sent again after the ACK under the new policy.
+    for (const target of read.policyRequeue) {
+      if (!target.isConnected || !this.#mirroredNodes.has(target)) continue;
+      this.#queuePending(this.#pendingChildren, target);
+      this.#queuePending(this.#pendingAttributes, target);
+    }
     // What the page changed while it was read in slices: each record is
     // judged against the copy just sent, as any record after it is, and
     // what changed in what was read already is patched after the ACK.
-    if (read.records.length > 0) this.#onMutations(read.records);
+    // The records judged against the policy between the slices need no
+    // second look at it; when others may move it, it is read again in
+    // slices and the first flush waits for it (D171).
+    if (read.records.length > 0) {
+      const policy = this.#controlledContentPolicy;
+      this.#replayPolicy = policy && (
+        read.policyStale ||
+        sourceControlledContentMutationsMayChange(
+          read.records.slice(read.policyChecked),
+          policy,
+        )
+      ) ? 'sliced' : 'skip';
+      try {
+        this.#onMutations(read.records);
+      } finally {
+        this.#replayPolicy = undefined;
+      }
+    }
     for (const target of read.loaded) this.#queueCapturedResourceRefresh(target);
   }
 
@@ -2356,11 +2540,19 @@ export class HtmlMirrorSourceSession {
         this.#visibilityMutationRecords.push(...visibilityRecords);
       }
     }
-    if (this.#controlledContentPolicy &&
+    const replayPolicy = this.#replayPolicy;
+    if (replayPolicy === 'sliced') {
+      // The replay of a read's kept changes (D171): the policy is read
+      // again in slices with the first flush held, not whole in the task
+      // that installs the copy (45–75 ms at 54,000–72,000 elements).
+      this.#beginPolicyRefresh(true);
+    } else if (
+      replayPolicy === undefined && this.#controlledContentPolicy &&
       sourceControlledContentMutationsMayChange(
         records,
         this.#controlledContentPolicy,
-      )) {
+      )
+    ) {
       accepted = this.#refreshControlledContentPolicy() || accepted;
     }
     // One bounded walk per batch: nested records share the visited set so a
@@ -2538,6 +2730,8 @@ export class HtmlMirrorSourceSession {
     if (
       this.#disposed || !this.#identity || !fidelityPolicy || this.#paused
     ) return;
+    // The policy is read again after a copy (D171): its end flushes.
+    if (this.#policyRefreshHoldsFlush) return;
     if (
       this.#sequence - this.#acknowledged >=
       MAX_HTML_MIRROR_UNACKED_BATCHES
@@ -4411,10 +4605,14 @@ export class HtmlMirrorSourceSession {
    * between the slices, and this read is dropped: what it would adopt
    * never mixes the page before such a change with the page after it.
    */
-  #beginPolicyRefresh(): void {
+  #beginPolicyRefresh(holdFlush = false): void {
     if (!this.#controlledContentPolicy) return;
+    // A read that replaces one holding the flush holds it too (D171).
+    const hold = holdFlush ||
+      (this.#policyRefreshRunning && this.#policyRefreshHoldsFlush);
     const generation = (this.#policyRefreshGeneration += 1);
     this.#policyRefreshRunning = true;
+    this.#policyRefreshHoldsFlush = hold;
     const builder = beginSourceControlledContentPolicy(
       this.environment.document,
       this.environment.window,
@@ -4432,6 +4630,12 @@ export class HtmlMirrorSourceSession {
     if (!this.#policyRefreshRunning) return;
     this.#policyRefreshRunning = false;
     this.#policyRefreshGeneration += 1;
+    // Cancelled by a policy read whole, a copy or the end (D171): what the
+    // hold kept goes out with the next flush.
+    if (this.#policyRefreshHoldsFlush) {
+      this.#policyRefreshHoldsFlush = false;
+      this.#scheduleFlush();
+    }
   }
 
   async #continuePolicyRefresh(
@@ -4439,9 +4643,11 @@ export class HtmlMirrorSourceSession {
     builder: ReturnType<typeof beginSourceControlledContentPolicy>,
     clock: ReturnType<typeof createSliceClock>,
   ): Promise<void> {
+    // One that holds the flush runs while the copy waits for its ACK (D171).
     const current = (): boolean =>
       this.#policyRefreshGeneration === generation && !this.#disposed &&
-      !!this.#identity && !this.#paused && !!this.#controlledContentPolicy;
+      !!this.#identity && (!this.#paused || this.#policyRefreshHoldsFlush) &&
+      !!this.#controlledContentPolicy;
     for (;;) {
       // The first slice too comes after a turn: the frame that asked for
       // the read runs its flush on its own.
@@ -4456,14 +4662,21 @@ export class HtmlMirrorSourceSession {
         next = builder.step(() => clock.expired());
       } catch {
         // What cannot be read in slices is read whole.
+        const held = this.#policyRefreshHoldsFlush;
         this.#policyRefreshRunning = false;
-        if (this.#refreshControlledContentPolicy()) this.#scheduleFlush();
+        this.#policyRefreshHoldsFlush = false;
+        if (this.#refreshControlledContentPolicy() || held) this.#scheduleFlush();
         return;
       }
       if (!next) continue;
+      const held = this.#policyRefreshHoldsFlush;
       this.#policyRefreshRunning = false;
+      this.#policyRefreshHoldsFlush = false;
       this.#policyRefreshGeneration += 1;
-      if (this.#adoptControlledContentPolicy(this.#controlledContentPolicy!, next)) {
+      if (
+        this.#adoptControlledContentPolicy(this.#controlledContentPolicy!, next) ||
+        held
+      ) {
         this.#scheduleFlush();
       }
       return;
@@ -4874,10 +5087,20 @@ export class HtmlMirrorSourceSession {
 
   #observeImageEvents(root: Document | ShadowRoot): void {
     if (this.#imageEventRoots.has(root)) return;
-    if (this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS) {
+    // A full set was compacted for every root offered: on a page of more
+    // than 4,000 roots each further root walked all of them, 25–30 ms of
+    // every slice of the first read at 54,000 elements in 5,400 roots
+    // (D171). It is compacted once per 256 roots refused.
+    if (
+      this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS &&
+      this.#imageEventRootsRefused % IMAGE_EVENT_ROOT_COMPACTION_EVERY === 0
+    ) {
       this.#compactImageEventRoots();
     }
-    if (this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS) return;
+    if (this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS) {
+      this.#imageEventRootsRefused += 1;
+      return;
+    }
     this.#imageEventRoots.add(root);
     root.addEventListener('load', this.#onCapturedResourceLoad, true);
     root.addEventListener('error', this.#onCapturedResourceError, true);
@@ -4891,6 +5114,7 @@ export class HtmlMirrorSourceSession {
   }
 
   #compactImageEventRoots(): void {
+    this.#imageEventRootsRefused = 0;
     for (const root of this.#imageEventRoots) {
       if (root === this.environment.document || ('host' in root && root.host.isConnected)) {
         continue;

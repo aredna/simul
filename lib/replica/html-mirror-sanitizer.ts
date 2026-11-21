@@ -515,12 +515,40 @@ interface SourceReadCut {
     budget: HtmlMirrorReadBudget,
   ) => number | undefined;
   /**
+   * The preview: the height of a box to stand in for an element that is
+   * never cut (a dropdown) when reading it whole would pass the preview's
+   * limit (D171); undefined to read it whole.
+   */
+  readonly wholeBox?: (
+    element: Element,
+    tagName: string,
+    budget: HtmlMirrorReadBudget,
+  ) => number | undefined;
+  /**
    * The preview: a node a box before it already stands for (D169), left
    * out of the read.
    */
   readonly skip?: (node: Node) => boolean;
+  /**
+   * The sliced read: where the queued units, first fills and index roots
+   * stand now, and taking back what was queued since (D171). An element
+   * left out after a slice cut some of what it holds (a cap of adopted
+   * sheets, a root whose id cannot be read) takes its cuts with it, as the
+   * one-task read leaves its content out with it: else their fills went
+   * out for shells no part holds, the part was refused, and the whole read
+   * failed as over the limit.
+   */
+  readonly mark?: () => SourceReadCutMark;
+  readonly rollback?: (mark: SourceReadCutMark) => void;
   /** A node was met a second time in this read: it moved while read. */
   metTwice: boolean;
+}
+
+/** See `SourceReadCut.mark` (D171). */
+interface SourceReadCutMark {
+  readonly units: number;
+  readonly prefills: number;
+  readonly indexRoots: number;
 }
 
 /**
@@ -1752,12 +1780,22 @@ export function readHtmlMirrorNode(
     )) ||
     (input.placeholder !== undefined && (
       !placeholder || !shells?.placeholder ||
-      !isValidTransportedShell(
-        input.tagName,
-        styleRegion,
-        nativeSelectParent,
-        opaquePlaceholder,
-        input.children.length,
+      !(
+        isValidTransportedShell(
+          input.tagName,
+          styleRegion,
+          nativeSelectParent,
+          opaquePlaceholder,
+          input.children.length,
+        ) ||
+        // The preview's box of a dropdown (D171), with nothing chosen.
+        (
+          input.tagName === 'select' && input.namespace === 'html' &&
+          input.children.length === 0 && !opaquePlaceholder && !styleRegion &&
+          nativeSelectParent === false &&
+          input.selectedOptionIndexes === undefined &&
+          input.selectPickerOpen === undefined
+        )
       ) ||
       // Nothing of a placeholder's root travels either.
       input.shadowRoot !== undefined
@@ -2511,11 +2549,44 @@ function serializeNode(
     const cut = cutSourceElement(context, context.cut!, cutFacts);
     if (cut !== false) return cut;
   }
+  const wholeBoxHeight = context.cut?.wholeBox && !styleRegion
+    ? context.cut.wholeBox(liveElement, tagName, context.budget)
+    : undefined;
+  if (wholeBoxHeight !== undefined) {
+    // The preview's box of a dropdown (D171): what it holds, and what is
+    // chosen in it, are not read.
+    const {
+      selectedOptionIndexes: _selected,
+      selectPickerOpen: _open,
+      ...boxHints
+    } = hints;
+    context.budget.bytes += 24;
+    if (context.budget.bytes > MAX_HTML_MIRROR_BYTES) {
+      incrementRepresentability(context.representability, 'capacityOmissionCount');
+      throw new HtmlMirrorCapacityError(true);
+    }
+    return Object.freeze({
+      kind: 'element',
+      id,
+      namespace,
+      tagName,
+      attributes,
+      children: Object.freeze([]),
+      ...boxHints,
+      placeholder: Object.freeze({ height: wholeBoxHeight }),
+    });
+  }
   // A read in slices may stop in the middle of this element's list, or its
   // root's, once it has read a child of it (D163): what follows comes in a
   // later fill, appended. The elements read are kept for the index.
   const split = cutFacts && context.cut?.defer ? context.cut : undefined;
   const lightElements: Element[] | undefined = split ? [] : undefined;
+  // Left out after its content was read (D171): what was cut in it goes too.
+  const cutMark = split?.mark?.();
+  const leftOut = (): undefined => {
+    if (cutMark) split!.rollback?.(cutMark);
+    return undefined;
+  };
   // What its elements' ended script animations hold is worked out for the
   // root as one, before any of them is read.
   if (sourceShadow) listSourceHeldAnimations(sourceShadow);
@@ -2536,7 +2607,7 @@ function serializeNode(
           read: children,
           elements: lightElements,
         });
-        return resumed === false ? undefined : resumed;
+        return resumed === false || resumed === undefined ? leftOut() : resumed;
       }
       lightRead += 1;
       if (lightElements && liveChild.nodeType === Node.ELEMENT_NODE) {
@@ -2633,7 +2704,7 @@ function serializeNode(
       'accessibleOpenShadowRootCount',
     );
     const shadowId = context.registry.getId(sourceShadow);
-    if (!isNodeId(shadowId) || context.budget.ids.has(shadowId)) return undefined;
+    if (!isNodeId(shadowId) || context.budget.ids.has(shadowId)) return leftOut();
     admitNode(context.budget, shadowId, 32, context.representability);
     const shadowChildren: HtmlMirrorNode[] = [];
     const shadowElements: Element[] | undefined = split ? [] : undefined;
@@ -2647,7 +2718,7 @@ function serializeNode(
           read: shadowChildren,
           elements: [...lightElements ?? [], ...shadowElements],
           children,
-        });
+        }) ?? leftOut();
       }
       shadowRead += 1;
       if (shadowElements && childNode.nodeType === Node.ELEMENT_NODE) {
@@ -2674,7 +2745,7 @@ function serializeNode(
       context.representability,
       context.fidelityPolicy,
     );
-    if (!adoptedStyleSheets) return undefined;
+    if (!adoptedStyleSheets) return leftOut();
     shadowRoot = Object.freeze({
       id: shadowId,
       mode: 'open',
@@ -3195,6 +3266,12 @@ export interface SourceDocumentRead {
   /** No further step: done, restarted, over a limit or failed. */
   readonly finished: boolean;
   /**
+   * The policy the steps after this one read with (D171): the page's
+   * controlled content changed between two steps, and the policy was read
+   * again. What was read already stays as it was read.
+   */
+  setControlledContent(policy: SourceControlledContentPolicy): void;
+  /**
    * Reads until `clock` runs out, and at least one unit (the root, at the
    * first step). Every cache of one walk (the secret-ancestor memo, the slot
    * boxes, the shadow-root walk, the held-animation pass) is opened and
@@ -3235,6 +3312,7 @@ export function beginSourceDocumentRead(
   let finished = false;
   let root: HtmlMirrorElementNode | undefined;
   let shared: SourceReadShared | undefined;
+  let controlledOverride: SourceControlledContentPolicy | undefined;
   const end = (outcome: 'restart' | 'overflow' | 'failed'): SourceDocumentReadStep => {
     finished = true;
     queue.length = 0;
@@ -3246,7 +3324,8 @@ export function beginSourceDocumentRead(
     const documentElement = sourceDocument.documentElement;
     if (!documentElement) return end('failed');
     if (!shared) {
-      const controlledContent = options.controlledContent ??
+      const controlledContent = controlledOverride ??
+        options.controlledContent ??
         createSourceControlledContentPolicy(
           sourceDocument,
           sourceWindow,
@@ -3294,6 +3373,21 @@ export function beginSourceDocumentRead(
       prefill: (fill, elements) => {
         prefills.push(fill);
         addElements(elements);
+      },
+      mark: () => ({
+        units: queue.length,
+        prefills: prefills.length,
+        indexRoots: indexRoots.length,
+      }),
+      rollback: (mark) => {
+        // What was queued since the mark is all inside the element left
+        // out: the read is depth first and synchronous within a step.
+        for (let index = mark.units; index < queue.length; index += 1) {
+          deferred.delete(queue[index]!.element);
+        }
+        if (queue.length > mark.units) queue.length = mark.units;
+        if (prefills.length > mark.prefills) prefills.length = mark.prefills;
+        if (indexRoots.length > mark.indexRoots) indexRoots.length = mark.indexRoots;
       },
       metTwice: false,
     };
@@ -3443,6 +3537,10 @@ export function beginSourceDocumentRead(
     get finished() {
       return finished;
     },
+    setControlledContent(policy: SourceControlledContentPolicy) {
+      if (shared) shared = { ...shared, controlledContent: policy };
+      else controlledOverride = policy;
+    },
     step,
   };
 }
@@ -3556,6 +3654,15 @@ export function sanitizeSourcePreview(
       tagName === 'html' || tagName === 'head' || tagName === 'body' ||
       element.parentElement?.localName.toLowerCase() === 'head'
     ) return undefined;
+    const display = readSourceOuterDisplay(element, sourceWindow);
+    // No box at all (D171): a `display: none` menu or panel paints nothing,
+    // and the whole read withholds its text, so it is a box of no height
+    // here, near or far, and costs the preview's read nothing. A header of
+    // closed menus of thousands of nodes used to spend the read cap before
+    // the content in view was read. Not when it holds what paints elsewhere:
+    // a style sheet, or SVG symbols other elements draw.
+    if (display === 'none' && !holdsSourcePaintForOthers(element)) return 0;
+    if (display === 'none') return undefined;
     let rect: DOMRect;
     try {
       rect = element.getBoundingClientRect();
@@ -3569,12 +3676,52 @@ export function sanitizeSourcePreview(
         ))
       : 0;
     if (budget.nodes >= maxReadNodes) {
-      return boxOfRun(element, rect, height, () => true);
+      // Past the cap only a box that keeps a height is one (D171): an
+      // inline element (`span`, `a`) ignores the height it is given, so the
+      // block read when the cap was reached came out shorter. It is read
+      // on, and what it holds is a box by this same rule.
+      if (!sourceOuterDisplayKeepsHeight(display)) return undefined;
+      return boxOfRun(element, rect, height, (next) =>
+        sourceOuterDisplayKeepsHeight(readSourceOuterDisplay(next, sourceWindow)));
     }
-    if (!sourceOuterDisplayIsBlock(element, sourceWindow)) return undefined;
+    if (!sourceOuterDisplayIsBlockValue(display)) return undefined;
     if (isNear(rect)) return undefined;
     return boxOfRun(element, rect, height, (next, nextRect) =>
-      !isNear(nextRect) && sourceOuterDisplayIsBlock(next, sourceWindow));
+      !isNear(nextRect) &&
+      sourceOuterDisplayIsBlockValue(readSourceOuterDisplay(next, sourceWindow)));
+  };
+  // A dropdown is never cut (D163), so one of tens of thousands of options
+  // was read whole, past the preview's limit, and the preview was given up
+  // after it (D171). One that would pass what is left of the limit is a
+  // box of its height instead; the copy reads it whole, as before.
+  const wholeBox = (
+    element: Element,
+    tagName: string,
+    budget: HtmlMirrorReadBudget,
+  ): number | undefined => {
+    if (tagName !== 'select') return undefined;
+    let estimate: number;
+    try {
+      // Each option and group (their text travels on the option).
+      estimate = element.getElementsByTagName('*').length ||
+        element.querySelectorAll('*').length;
+    } catch {
+      return undefined;
+    }
+    if (budget.nodes + estimate <= maxNodes) return undefined;
+    let height = 0;
+    try {
+      const rect = element.getBoundingClientRect();
+      if (Number.isFinite(rect.height)) {
+        height = Math.max(0, Math.min(
+          MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT,
+          Math.round(rect.height),
+        ));
+      }
+    } catch {
+      // A box of no height.
+    }
+    return height;
   };
   const isNear = (rect: DOMRect): boolean =>
     rect.bottom > -viewportHeight &&
@@ -3634,6 +3781,7 @@ export function sanitizeSourcePreview(
   };
   const cut: SourceReadCut = {
     placeholder,
+    wholeBox,
     skip: (node) => skipped.has(node),
     metTwice: false,
   };
@@ -3711,21 +3859,53 @@ export function sanitizeSourcePreview(
  * Whether an element's outer display is block-level: not inline (or ruby),
  * not `display: contents`, not an inner part of a table, and displayed.
  */
-function sourceOuterDisplayIsBlock(
+/** The element's computed `display`, lower case; undefined when unreadable. */
+function readSourceOuterDisplay(
   element: Element,
   sourceWindow: Window,
-): boolean {
+): string | undefined {
   try {
-    const display = sourceWindow.getComputedStyle(element).display
-      ?.trim().toLowerCase();
-    if (!display) return false;
-    return !(
-      display === 'none' || display === 'contents' ||
-      display.startsWith('inline') || display.startsWith('ruby') ||
-      display.startsWith('table-')
-    );
+    return sourceWindow.getComputedStyle(element).display
+      ?.trim().toLowerCase() || undefined;
   } catch {
-    return false;
+    return undefined;
+  }
+}
+
+function sourceOuterDisplayIsBlockValue(display: string | undefined): boolean {
+  if (!display) return false;
+  return !(
+    display === 'none' || display === 'contents' ||
+    display.startsWith('inline') || display.startsWith('ruby') ||
+    display.startsWith('table-')
+  );
+}
+
+/**
+ * Whether a box of this `display` takes the height it is given (D171):
+ * not an inline box (`inline`, `inline flow`, `ruby`), and not one with no
+ * box of its own (`contents`, `none`). An atomic inline (`inline-block`,
+ * `inline-flex`, `inline-table`) does, and so do table rows and cells.
+ */
+function sourceOuterDisplayKeepsHeight(display: string | undefined): boolean {
+  if (!display) return false;
+  return !(
+    display === 'none' || display === 'contents' ||
+    display === 'inline' || display === 'inline flow' ||
+    display.startsWith('ruby')
+  );
+}
+
+/**
+ * Whether what an element holds paints outside it (D171): a style sheet, or
+ * SVG symbols and definitions that other elements draw with `<use>` or
+ * `url(#…)`. Such an element is read, even with no box of its own.
+ */
+function holdsSourcePaintForOthers(element: Element): boolean {
+  try {
+    return element.querySelector('style, link, symbol, defs') !== null;
+  } catch {
+    return true;
   }
 }
 

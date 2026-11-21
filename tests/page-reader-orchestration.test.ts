@@ -706,3 +706,145 @@ describe('the first read of a page in slices (D163)', () => {
     }
   });
 });
+
+describe('a read in parts that follows the page (D171)', () => {
+  /** About 4,500 elements in open roots, under a light tree of 160. */
+  const COMPONENTS = '<main id="main">' + Array.from({ length: 150 }, (_, block) =>
+    `<x-block id="c${block}" data-top="${block * 1200}"></x-block>`).join('') + '</main>';
+
+  function components(tick: number) {
+    const target = fixture(COMPONENTS, { tick });
+    for (const host of target.document.querySelectorAll('x-block')) {
+      host.attachShadow({ mode: 'open' }).innerHTML = Array.from({ length: 10 }, (_, row) =>
+        `<p>Root ${host.id} row ${row} <b>x</b> <i>y</i></p>`).join('');
+    }
+    return target;
+  }
+
+  it('offers a page of web components its preview: the roots\' elements count', async () => {
+    const target = components(0.02);
+    expect(target.document.querySelectorAll('*').length).toBeLessThan(4_000);
+    target.start();
+    await target.settle();
+    const [preview, closing] = target.checkpoints();
+    expect(preview!.payload.preview).toBe(true);
+    expect(closing!.payload.partCount).toBe(target.parts().length);
+    sameGraph(assembled(target, closing!), oneTaskCheckpoint(target, 1));
+    expect(target.errors()).toEqual([]);
+  });
+
+  /**
+   * A controlled panel: painted until it is collapsed, then of no opacity,
+   * which only the controlled-content policy withholds.
+   */
+  function withPanel(at: 'top' | 'end') {
+    const panel = '<div id="panel"><p id="panel-text">Panel words</p></div>';
+    const target = fixture(
+      '<button id="control" aria-controls="panel" aria-expanded="true">More</button>' +
+        (at === 'top' ? panel : '') + SECTIONS + (at === 'end' ? panel : ''),
+      { tick: 1 },
+    );
+    const style = target.window.getComputedStyle;
+    Object.defineProperty(target.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const base = style.call(target.window, element);
+        return element.closest?.('[data-collapsed]') ? { ...base, opacity: '0' } : base;
+      },
+    });
+    // Only the control's change is recorded: the panel's look changes with
+    // it (a class far above, say).
+    const collapse = () => {
+      target.byId('panel').setAttribute('data-collapsed', '');
+      target.byId('control').setAttribute('aria-expanded', 'false');
+      target.mutate(attributeRecord(target.byId('control'), 'aria-expanded'));
+    };
+    return { target, collapse };
+  }
+
+  it('reads with the policy as it is when a panel not read yet collapses between slices', async () => {
+    const { target, collapse } = withPanel('end');
+    const panelText = target.byId('panel-text').firstChild as Text;
+    target.start();
+    let collapsed = false;
+    while (target.checkpoints().length === 0) {
+      if (!collapsed && target.parts().length > 0) {
+        expect(target.parts().some((part) =>
+          partHolds(part, target.registry.getId(panelText)))).toBe(false);
+        collapse();
+        collapsed = true;
+      }
+      await target.turn();
+    }
+    expect(collapsed).toBe(true);
+    // One attempt: nothing read was moved by it.
+    expect(new Set(target.parts().map((part) => part.identity.sequence)).size).toBe(1);
+    const closing = target.checkpoints().at(-1)!;
+    expect(JSON.stringify(target.parts())).not.toContain('Panel words');
+    sameGraph(assembled(target, closing), oneTaskCheckpoint(target, closing.identity.sequence));
+    // Judged between the slices: the copy is installed with no policy to
+    // read again after it.
+    expect(target.turns).toHaveLength(0);
+    expect(target.errors()).toEqual([]);
+  });
+
+  it('sends again after the ACK a panel read already that the policy read again withholds', async () => {
+    const { target, collapse } = withPanel('top');
+    const panelText = target.byId('panel-text').firstChild as Text;
+    target.start();
+    let collapsed = false;
+    await target.settle(() => {
+      if (collapsed) return;
+      if (!target.parts().some((part) => partHolds(part, target.registry.getId(panelText)))) {
+        return;
+      }
+      collapse();
+      collapsed = true;
+    });
+    expect(collapsed).toBe(true);
+    expect(new Set(target.parts().map((part) => part.identity.sequence)).size).toBe(1);
+    expect(JSON.stringify(target.parts())).toContain('Panel words');
+    const closing = target.checkpoints().at(-1)!;
+    target.port.emit(createHtmlMirrorAck(identity, closing.identity.sequence));
+    while (target.frames.length > 0) target.frames.shift()!();
+    const after = JSON.stringify(target.patches());
+    expect(after).toContain(`${target.registry.getId(target.byId('panel'))}`);
+    expect(after).not.toContain('Panel words');
+    expect(target.errors()).toEqual([]);
+  });
+
+  it('reads the policy in slices after the copy, the first flush held, when the page kept moving it', async () => {
+    const { target } = withPanel('end');
+    const control = target.byId('control');
+    target.start();
+    // The control flips at every turn: the policy is read again twice, then
+    // left to the replay after the copy.
+    let flips = 0;
+    while (target.checkpoints().length === 0) {
+      const open = control.getAttribute('aria-expanded') !== 'true';
+      control.setAttribute('aria-expanded', String(open));
+      if (open) target.byId('panel').removeAttribute('data-collapsed');
+      else target.byId('panel').setAttribute('data-collapsed', '');
+      target.mutate(attributeRecord(control, 'aria-expanded'));
+      flips += 1;
+      await target.turn();
+    }
+    expect(flips).toBeGreaterThan(3);
+    const closing = target.checkpoints().at(-1)!;
+    // The policy is read in slices of its own, from the next turn.
+    expect(target.turns.length).toBeGreaterThan(0);
+    target.port.emit(createHtmlMirrorAck(identity, closing.identity.sequence));
+    while (target.frames.length > 0) target.frames.shift()!();
+    // Nothing goes out under the policy the copy was read with.
+    expect(target.patches()).toEqual([]);
+    await target.settle();
+    while (target.frames.length > 0) target.frames.shift()!();
+    // Then the panel is as the page shows it now.
+    const shown = control.getAttribute('aria-expanded') === 'true';
+    const sent = JSON.stringify([assembled(target, closing).payload.root, target.patches()]);
+    const lastWords = sent.lastIndexOf('Panel words');
+    expect(shown ? lastWords >= 0 : !JSON.stringify(target.patches()).includes('Panel words'))
+      .toBe(true);
+    expect(target.errors()).toEqual([]);
+  });
+});

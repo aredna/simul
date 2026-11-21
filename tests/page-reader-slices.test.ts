@@ -629,8 +629,13 @@ describe('the preview (D163)', () => {
     const full = oneTaskRead(target, registry).graph;
     expect(findElement(preview.root, 's1')).toEqual(findElement(full.root, 's1'));
     expect(findElement(preview.root, 'open')).toEqual(findElement(full.root, 'open'));
-    // `display: none` is no block: read (and withheld) as always.
-    expect(findElement(preview.root, 'hidden')).toEqual(findElement(full.root, 'hidden'));
+    // `display: none` has no box: a box of no height, whose text the whole
+    // read withholds anyway (D171).
+    expect(findElement(preview.root, 'hidden')).toMatchObject({
+      placeholder: { height: 0 },
+      children: [],
+    });
+    expect(findElement(full.root, 'hidden')!.children.length).toBeGreaterThan(0);
     const json = JSON.stringify(preview);
     expect(json).not.toContain('swordfish');
     expect(json).not.toContain('Paragraph 3');
@@ -871,5 +876,164 @@ describe('a long list read over several fills (D163)', () => {
     expect(sliced.steps.reduce((total, step) => total + step.skippedUnits, 0)).toBe(1);
     expect(json).not.toContain('added');
     expect(json).toContain(`Row ${ROWS - 1}`);
+  });
+});
+
+describe('the preview\'s budget and boxes (D171)', () => {
+  function viewportOf(target: Page): Window {
+    return {
+      innerWidth: 1200,
+      innerHeight: 800,
+      getComputedStyle: target.window.getComputedStyle,
+    } as unknown as Window;
+  }
+
+  function placeholders(node: HtmlMirrorNode, found: HtmlMirrorElementNode[] = []) {
+    if (node.kind === 'text') return found;
+    if (node.placeholder) found.push(node);
+    for (const child of [...node.children, ...(node.shadowRoot?.children ?? [])]) {
+      placeholders(child, found);
+    }
+    return found;
+  }
+
+  it('spends nothing of its read on menus that are not displayed', () => {
+    const menu = Array.from({ length: 300 }, (_, index) =>
+      `<li><a href="/m${index}">Menu ${index}</a></li>`).join('');
+    const target = page('<!doctype html><html lang="en"><head><title>Menus</title></head><body>' +
+      `<header id="top"><ul id="menu" class="gone">${menu}</ul>` +
+      '<div id="sprites" class="gone"><style>.near { color: green }</style></div></header>' +
+      '<main id="main"><p id="near">Near text <b>in view</b></p></main>' +
+      '<x-open id="open"></x-open><x-closed id="closed"></x-closed></body></html>');
+    const preview = sanitizeSourcePreview(target.document, viewportOf(target), new WeakNodeIdRegistry(), {
+      maxReadNodes: 40,
+    })!;
+    expect(preview).toBeDefined();
+    // The closed menu is one box of no height; what is in view is read.
+    expect(findElement(preview.root, 'menu')).toMatchObject({
+      placeholder: { height: 0 }, children: [],
+    });
+    expect(JSON.stringify(preview)).not.toContain('Menu 1');
+    expect(findElement(preview.root, 'near')!.placeholder).toBeUndefined();
+    expect(JSON.stringify(findElement(preview.root, 'near'))).toContain('in view');
+    // One that holds a style sheet is read: the sheet paints the page.
+    expect(findElement(preview.root, 'sprites')!.placeholder).toBeUndefined();
+    expect(JSON.stringify(preview)).toContain('color: green');
+  });
+
+  it('reads an inline element on past its read cap, and boxes only what keeps a height', () => {
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      `<p id="row-${index}">Row <a href="/r${index}">link ${index}</a> and ` +
+      `<span id="span-${index}">span <b>${index}</b></span></p>`).join('');
+    const target = page('<!doctype html><html lang="en"><head><title>Inline</title></head><body>' +
+      `<main id="main">${rows}</main><x-open id="open"></x-open><x-closed id="closed"></x-closed>` +
+      '</body></html>');
+    const preview = sanitizeSourcePreview(target.document, viewportOf(target), new WeakNodeIdRegistry(), {
+      maxReadNodes: 30,
+    })!;
+    expect(preview).toBeDefined();
+    const boxes = placeholders(preview.root);
+    expect(boxes.length).toBeGreaterThan(0);
+    // No inline element is a box: its height would be ignored.
+    expect(boxes.filter((box) => ['a', 'span', 'b'].includes(box.tagName))).toEqual([]);
+    expect(boxes.some((box) => box.tagName === 'p')).toBe(true);
+  });
+
+  it('stands a box in for a dropdown that would pass what is left of its limit', () => {
+    const options = Array.from({ length: 120 }, (_, index) =>
+      `<option${index === 7 ? ' selected' : ''}>Choice ${index}</option>`).join('');
+    const target = page('<!doctype html><html lang="en"><head><title>Select</title></head><body>' +
+      '<main id="main"><p id="near">Near</p>' +
+      `<select id="big" data-height="24">${options}</select>` +
+      '<select id="small"><option>A</option><option selected>B</option></select></main>' +
+      '<x-open id="open"></x-open><x-closed id="closed"></x-closed></body></html>');
+    const registry = new WeakNodeIdRegistry();
+    const preview = sanitizeSourcePreview(target.document, viewportOf(target), registry, {
+      maxReadNodes: 60,
+      maxNodes: 100,
+    })!;
+    // Read whole, the dropdown passed the limit and there was no preview.
+    expect(preview).toBeDefined();
+    // A dropdown's own attributes are private: found by their place.
+    const selects = findElement(preview.root, 'main')!.children.filter((child) =>
+      child.kind === 'element' && child.tagName === 'select') as HtmlMirrorElementNode[];
+    expect(selects).toHaveLength(2);
+    const [big, small] = selects as [HtmlMirrorElementNode, HtmlMirrorElementNode];
+    expect(big).toMatchObject({ tagName: 'select', placeholder: { height: 24 }, children: [] });
+    expect(big.selectedOptionIndexes).toBeUndefined();
+    expect(JSON.stringify(preview)).not.toContain('Choice');
+    // One that fits is read whole, as always.
+    expect(small.placeholder).toBeUndefined();
+    expect(small.children).toHaveLength(2);
+    // The checks take it as a preview, and only as one.
+    const values = {
+      captureMs: 1, viewportWidth: preview.viewportWidth,
+      viewportHeight: preview.viewportHeight, documentWidth: preview.documentWidth,
+      documentHeight: preview.documentHeight,
+    };
+    const checkpoint = createHtmlMirrorCheckpoint(IDENTITY, {
+      root: preview.root, adoptedStyleSheets: preview.adoptedStyleSheets, ...values,
+      preview: true,
+    })!;
+    expect(checkpoint).toBeDefined();
+    expect(readHtmlMirrorSourceMessage(JSON.parse(JSON.stringify(checkpoint)), IDENTITY))
+      .toEqual(checkpoint);
+    expect(createHtmlMirrorCheckpoint(IDENTITY, {
+      root: preview.root, adoptedStyleSheets: preview.adoptedStyleSheets, ...values,
+    })).toBeUndefined();
+  });
+});
+
+describe('an element left out after its content was cut (D171)', () => {
+  /** A registry that cannot give the open root an id: the host is left out. */
+  class RootlessRegistry extends WeakNodeIdRegistry {
+    constructor(private readonly lost: () => Node | undefined) {
+      super();
+    }
+
+    override getId(node: Node): number {
+      return node === this.lost() ? 0 : super.getId(node);
+    }
+  }
+
+  const MARKUP = '<!doctype html><html lang="en"><head><title>Left out</title></head><body>' +
+    '<main id="main"><p id="before">Before <b>bold</b></p>' +
+    '<x-open id="open">' + Array.from({ length: 8 }, (_, index) =>
+      `<span id="light-${index}">light ${index} <b>deep <i>deeper ${index}</i></b></span>`).join('') +
+    '</x-open><p id="after">After <i>it</i></p></main>' +
+    '<x-closed id="closed"></x-closed></body></html>';
+
+  it('leaves out the element alone, as the one-task read does, at every forced boundary', async () => {
+    let cutInside = 0;
+    for (let budget = 1; budget <= 24; budget += 1) {
+      const target = page(MARKUP);
+      const shadow = readSourceShadowRoot(target.byId('open'))!;
+      const registry = new RootlessRegistry(() => shadow);
+      const sliced = await readInSlices(target, registry, budget);
+      expect(sliced.outcome, `budget ${budget}`).toBe('done');
+      // A slice stopped in the host's own children: cuts in it were taken back.
+      const hostId = registry.getId(target.byId('open'));
+      if (!JSON.stringify(sliced.root).includes(`"id":${hostId},`) &&
+        sliced.steps.length > 1) cutInside += 1;
+      const reference = oneTaskRead(target, registry);
+      expect(findElement(reference.graph.root, 'open')).toBeUndefined();
+      expect(fillGraph(sliced.root!, sliced.fills), `budget ${budget}`)
+        .toEqual(reference.graph.root);
+      // And the page's own check takes every part.
+      const assembly = new HtmlMirrorCheckpointAssembly();
+      expect(assembly.readRoot(sliced.root)).toBeDefined();
+      let index = 0;
+      for (const step of sliced.steps) {
+        if (step.fills.length === 0) continue;
+        expect(createHtmlMirrorCheckpointPart(
+          IDENTITY, index, step.fills, 'conservative', assembly,
+        ), `budget ${budget} part ${index}`).toBeDefined();
+        index += 1;
+      }
+      expect(assembly.readAdoptedStyleSheets(sliced.values!.adoptedStyleSheets)).toBeDefined();
+      expect(assembly.pendingShells, `budget ${budget}`).toBe(0);
+      expect(JSON.stringify([sliced.root, sliced.fills])).not.toContain('deeper');
+    }
+    expect(cutInside).toBeGreaterThan(0);
   });
 });
