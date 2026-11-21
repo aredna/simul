@@ -494,13 +494,15 @@ cloud translation/OCR integration.
 | `storage` | Save settings and explicit automatic-translation scopes. |
 | `offscreen` | Run packaged local OCR away from the visible companion UI. |
 
-`<all_urls>` is an **optional** host permission. Simul requests it only from an
-explicit gesture when all-sites automation or reliable image capture needs it.
-A saved feature remains paused if its grant is absent; Simul does not prompt for
-broad access at startup. Simul releases only the site access it asked for and
-no longer needs; access you grant yourself in `chrome://extensions` is left in
-place (and covers your saved per-site choices) until you remove it there or
-use **Reset all**, which clears every grant.
+`<all_urls>` is a **required** host permission since 0.6.7 (D166), so the panel
+follows each page and tab the reader opens without a click on the Simul icon
+on every new site. Chrome lets the reader withhold it (Site access: On click,
+or chosen sites); Simul then reads a tab after its icon is selected there, a
+saved feature that needs the access stays paused, and the panel's message
+that asks for the icon offers **Allow on all sites**, which asks Chrome from
+that click. Simul never removes the required access (Chrome would refuse);
+it releases only narrower site access it asked for and no longer needs, and
+**Reset all** clears those.
 
 ## Fidelity
 

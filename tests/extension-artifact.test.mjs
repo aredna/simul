@@ -23,7 +23,7 @@ import {
   APPROVED_EXTENSION_PAGE_CSP,
   APPROVED_OCR_PACKAGE_LOCK_METADATA,
   APPROVED_OCR_PERMISSIONS,
-  APPROVED_OPTIONAL_HOST_PERMISSIONS,
+  APPROVED_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
   DEFAULT_OCR_PROVIDER_IDS,
   FORBIDDEN_LEGACY_REPLICA_BUNDLES,
@@ -120,7 +120,7 @@ describe('validateArtifact', () => {
       manifest_version: 3,
       minimum_chrome_version: '138',
       permissions: APPROVED_PERMISSIONS,
-      optional_host_permissions: APPROVED_OPTIONAL_HOST_PERMISSIONS,
+      host_permissions: APPROVED_HOST_PERMISSIONS,
     });
     expect(validation.files).toContain('manifest.json');
     expect(validation.files).toContain('assets/popup.css');
@@ -223,10 +223,10 @@ describe('validateArtifact', () => {
     );
 
     const hostAccess = await createTemporaryArtifact({
-      manifest: { host_permissions: ['https://example.com/*'] },
+      manifest: { optional_host_permissions: ['<all_urls>'] },
     });
     await expect(validateArtifact(hostAccess)).rejects.toThrow(
-      'must not contain host_permissions',
+      'must not contain optional_host_permissions',
     );
   });
 
@@ -293,23 +293,23 @@ describe('validateArtifact', () => {
     [undefined, 'missing'],
     [['http://*/*', 'https://*/*'], 'legacy wildcard pair'],
     [
-      [...APPROVED_OPTIONAL_HOST_PERMISSIONS, 'https://example.com/*'],
+      [...APPROVED_HOST_PERMISSIONS, 'https://example.com/*'],
       'excess site access',
     ],
     [
       [
-        APPROVED_OPTIONAL_HOST_PERMISSIONS[0],
-        APPROVED_OPTIONAL_HOST_PERMISSIONS[0],
+        APPROVED_HOST_PERMISSIONS[0],
+        APPROVED_HOST_PERMISSIONS[0],
       ],
       'duplicate access',
     ],
-  ])('rejects %s optional host permissions (%s)', async (permissions) => {
+  ])('rejects %s host permissions (%s)', async (permissions) => {
     const artifact = await createTemporaryArtifact({
-      manifest: { optional_host_permissions: permissions },
+      manifest: { host_permissions: permissions },
     });
 
     await expect(validateArtifact(artifact)).rejects.toThrow(
-      'optional_host_permissions must be exactly',
+      'host_permissions must be exactly',
     );
   });
 
@@ -893,9 +893,9 @@ describe('disabled OCR production profile', () => {
 
     expect(validation.ocrEnabled).toBe(false);
     expect(validation.pdfjs).toBe(true);
-    expect(validation.manifest.version).toBe('0.6.6');
+    expect(validation.manifest.version).toBe('0.6.7');
     expect(validation.manifest.version_name).toBe(
-      '0.6.6 beta v.20261119.7',
+      '0.6.7 beta v.20261121.1',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest.content_security_policy).toEqual({
@@ -1317,7 +1317,7 @@ describe('public and dev editions', () => {
     const publicManifest = JSON.parse(
       await readFile('dist/chrome-unpacked/manifest.json', 'utf8'),
     );
-    expect(publicManifest.version_name).toBe('0.6.6 beta v.20261119.7');
+    expect(publicManifest.version_name).toBe('0.6.7 beta v.20261121.1');
 
     const publicHtml = await readFile('dist/chrome-unpacked/sidepanel.html', 'utf8');
     for (const marker of PUBLIC_EDITION_FORBIDDEN_MARKERS) {
@@ -1343,10 +1343,10 @@ describe('public and dev editions', () => {
       const devManifest = JSON.parse(
         await readFile('dist/chrome-dev/manifest.json', 'utf8'),
       );
-      expect(devManifest.version_name).toBe('0.6.6 beta v.20261119.7 dev');
+      expect(devManifest.version_name).toBe('0.6.7 beta v.20261121.1 dev');
       expect(devManifest.permissions).toEqual(publicManifest.permissions);
-      expect(devManifest.optional_host_permissions)
-        .toEqual(publicManifest.optional_host_permissions);
+      expect(devManifest.host_permissions)
+        .toEqual(publicManifest.host_permissions);
       expect(devManifest.content_security_policy)
         .toEqual(publicManifest.content_security_policy);
 
@@ -1462,7 +1462,7 @@ async function createValidArtifact(
     version_name: '0.1.0 test',
     minimum_chrome_version: '138',
     permissions: [...APPROVED_PERMISSIONS],
-    optional_host_permissions: [...APPROVED_OPTIONAL_HOST_PERMISSIONS],
+    host_permissions: [...APPROVED_HOST_PERMISSIONS],
     background: { service_worker: 'background.js' },
     action: { default_title: 'Simul' },
     side_panel: { default_path: 'sidepanel.html' },

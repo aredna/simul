@@ -34,7 +34,8 @@ export const APPROVED_EXTENSION_PAGE_CSP =
   "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'none'; base-uri 'none'; " +
   "require-trusted-types-for 'script'; trusted-types simul-mirror-shell default;";
 export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
-export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
+// Every site from install (D166); before, the same access was optional.
+export const APPROVED_HOST_PERMISSIONS = Object.freeze([
   '<all_urls>',
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
@@ -1169,25 +1170,21 @@ function validateManifest(manifest, filePaths) {
       `manifest.json permissions must be exactly one approved profile: ${APPROVED_PERMISSIONS.join(', ')} or ${APPROVED_OCR_PERMISSIONS.join(', ')}.`,
     );
   }
-  const optionalHostPermissions = Array.isArray(
-    manifest.optional_host_permissions,
-  )
-    ? manifest.optional_host_permissions
+  const hostPermissions = Array.isArray(manifest.host_permissions)
+    ? manifest.host_permissions
     : [];
   if (
-    optionalHostPermissions.length !==
-      APPROVED_OPTIONAL_HOST_PERMISSIONS.length ||
-    new Set(optionalHostPermissions).size !==
-      APPROVED_OPTIONAL_HOST_PERMISSIONS.length ||
-    !APPROVED_OPTIONAL_HOST_PERMISSIONS.every((permission) =>
-      optionalHostPermissions.includes(permission),
+    hostPermissions.length !== APPROVED_HOST_PERMISSIONS.length ||
+    new Set(hostPermissions).size !== APPROVED_HOST_PERMISSIONS.length ||
+    !APPROVED_HOST_PERMISSIONS.every((permission) =>
+      hostPermissions.includes(permission),
     )
   ) {
     throw new ArtifactError(
-      `manifest.json optional_host_permissions must be exactly: ${APPROVED_OPTIONAL_HOST_PERMISSIONS.join(', ')}.`,
+      `manifest.json host_permissions must be exactly: ${APPROVED_HOST_PERMISSIONS.join(', ')}.`,
     );
   }
-  for (const field of ['host_permissions', 'optional_permissions']) {
+  for (const field of ['optional_host_permissions', 'optional_permissions']) {
     if (field in manifest) {
       throw new ArtifactError(`manifest.json must not contain ${field}.`);
     }

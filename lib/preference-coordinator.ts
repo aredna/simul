@@ -28,6 +28,10 @@ import {
   type CompanionViewSettingsPatch,
   type MirrorDisplayMode,
 } from './preferences';
+import {
+  manifestHostPermissions,
+  removeRemovableHostOrigins,
+} from './required-host-permissions';
 import { readHtmlMirrorLimitSettings } from './replica/html-mirror-limits';
 import { isImageScanPolicy } from './ocr/contracts';
 import {
@@ -131,6 +135,11 @@ export interface PreferenceCoordinatorAdapter {
   save(preferences: CompanionPreferences): Promise<void>;
   contains(origins: string[]): Promise<boolean>;
   getAllOrigins(): Promise<string[]>;
+  /**
+   * Host access the manifest requires (D166): Chrome keeps it whatever a
+   * reset removes, so a reset does not wait for it to go.
+   */
+  requiredOrigins?(): readonly string[];
   remove(origins: string[]): Promise<boolean>;
 }
 
@@ -454,7 +463,7 @@ export class PreferenceCoordinator {
   ): Promise<number> {
     // Reset is the user's explicit request to release Simul's site access,
     // so every managed grant goes, owned or not.
-    const retained = new Set(resetRetainedPermissionOrigins(preferences));
+    const retained = this.resetRetained(preferences);
     const actual = await this.adapter.getAllOrigins();
     const removable = actual.filter(
       (origin) =>
@@ -467,11 +476,18 @@ export class PreferenceCoordinator {
   private async countUndesiredManagedOrigins(
     preferences: CompanionPreferences,
   ): Promise<number> {
-    const retained = new Set(resetRetainedPermissionOrigins(preferences));
+    const retained = this.resetRetained(preferences);
     return (await this.adapter.getAllOrigins()).filter(
       (origin) =>
         isManagedPermissionOriginPattern(origin) && !retained.has(origin),
     ).length;
+  }
+
+  private resetRetained(preferences: CompanionPreferences): Set<string> {
+    return new Set([
+      ...resetRetainedPermissionOrigins(preferences),
+      ...(this.adapter.requiredOrigins?.() ?? []),
+    ]);
   }
 
   private async countUndesiredManagedOriginsBestEffort(
@@ -865,12 +881,20 @@ export function createBrowserPreferenceAdapter(): PreferenceCoordinatorAdapter {
     async contains(origins) {
       return browser.permissions.contains({ origins });
     },
+    requiredOrigins() {
+      return manifestHostPermissions(() => browser.runtime.getManifest());
+    },
     async getAllOrigins() {
       const permissions = await browser.permissions.getAll();
       return permissions.origins ?? [];
     },
     async remove(origins) {
-      return browser.permissions.remove({ origins });
+      // What the manifest requires stays (D166).
+      return removeRemovableHostOrigins(
+        origins,
+        manifestHostPermissions(() => browser.runtime.getManifest()),
+        (removable) => browser.permissions.remove({ origins: removable }),
+      );
     },
   };
 }

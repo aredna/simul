@@ -53,12 +53,14 @@ detector) only when they are already installed. It never downloads them.
 
 ## Site access
 
-Selecting the Simul icon gives it access to that one tab, until the tab goes
-to another page. Simul asks for access to all sites only when you turn on
-automatic translation for all sites, or image text that keeps working as you
-move between pages. For one site it asks for that site only. You can
-withdraw access in Chrome's extension settings at any time, and Simul gives
-access back when you turn the feature off.
+Simul can read the pages you open from the time you install it, so the
+panel follows each page and tab without a click on its icon. It reads a page
+only while its panel shows that page, and nothing it reads leaves your
+device. You can limit it in Chrome's extension settings (Site access: On
+click, or a list of sites); Simul then reads a tab after you select its icon
+there, and its panel offers to let it read all sites again. Access to one
+site that Simul asked for, for automatic translation on that site, it gives
+back when you turn that off.
 
 ## Deleting your data
 

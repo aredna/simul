@@ -208,6 +208,29 @@ describe('preference coordinator', () => {
     expect(adapter.hasGrant('https://site.example/*')).toBe(false);
   });
 
+  it('completes a reset that leaves the access the manifest requires (D166)', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+      autoTranslateAllSites: true,
+      readScopeSetupVersion: 1,
+    });
+    adapter.grant('<all_urls>', 'https://site.example/*');
+    adapter.required = ['<all_urls>'];
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+
+    expect(result).toMatchObject({
+      applied: true,
+      cleanup: { status: 'complete', remainingManagedOrigins: 0 },
+    });
+    // Chrome keeps what the manifest requires; the rest goes.
+    expect(adapter.hasGrant('<all_urls>')).toBe(true);
+    expect(adapter.hasGrant('https://site.example/*')).toBe(false);
+  });
+
   it('keeps reset cleanup durable until permission, transient, and offscreen cleanup all succeed', async () => {
     const adapter = new MemoryPreferenceAdapter({
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
@@ -1486,8 +1509,18 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
     return [...this.grants];
   }
 
+  /** Host access the manifest requires: Chrome refuses to remove it. */
+  required: string[] = [];
+
+  requiredOrigins(): readonly string[] {
+    return this.required;
+  }
+
   async remove(origins: string[]): Promise<boolean> {
     if (this.failRemove) throw new Error('permission removal failed');
+    if (origins.some((origin) => this.required.includes(origin))) {
+      throw new Error('You cannot remove required permissions.');
+    }
     let removed = false;
     for (const origin of origins) {
       removed = this.grants.delete(origin) || removed;

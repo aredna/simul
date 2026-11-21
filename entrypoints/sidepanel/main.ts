@@ -54,6 +54,10 @@ import {
   languageEndonym,
 } from '../../lib/language-options';
 import {
+  manifestHostPermissions,
+  removeRemovableHostOrigins,
+} from '../../lib/required-host-permissions';
+import {
   asksForSiteAccess,
   namesCompanionWindow,
   parseDetachedPageIdentityHint,
@@ -748,7 +752,17 @@ const readScopeController = new ReadScopeController({
 const permissionFlows = new PermissionFlows({
   state,
   currency,
-  permissions: browser.permissions,
+  permissions: {
+    contains: (permissions) => browser.permissions.contains(permissions),
+    request: (permissions) => browser.permissions.request(permissions),
+    // What the manifest requires stays: Chrome refuses to remove it (D166).
+    remove: (permissions) => removeRemovableHostOrigins(
+      permissions.origins ?? [],
+      manifestHostPermissions(() => browser.runtime.getManifest()),
+      (origins) => browser.permissions.remove({ ...permissions, origins }),
+    ),
+    getAll: () => browser.permissions.getAll(),
+  },
   isUserActivationActive: () => navigator.userActivation.isActive,
   preferenceClient,
   usablePixelProviderCount: () => imageTranslationConfig.usablePixelProviderOrder().length,

@@ -15,7 +15,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20261119.7';
+const betaBuildSuffix = 'beta v.20261121.1';
 // `SIMUL_EDITION=dev` builds the owner's edition with every option; anything
 // else builds the public edition (lib/edition.ts).
 const simulEdition = parseSimulEdition(process.env.SIMUL_EDITION);
@@ -244,7 +244,11 @@ export default defineConfig({
       'storage',
       ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
-    optional_host_permissions: ['<all_urls>'],
+    // Every site from install (D166): the panel follows each page the
+    // reader opens in the window without a click on Simul's icon on every
+    // new site. The reader can withhold it in Chrome's Site access; the
+    // panel then offers it again from a click.
+    host_permissions: ['<all_urls>'],
     content_security_policy: {
       extension_pages: privilegedCsp,
     },

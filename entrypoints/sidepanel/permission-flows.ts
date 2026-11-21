@@ -294,7 +294,9 @@ export class PermissionFlows {
           throw new Error(UI_STRINGS.statusImageCaptureRetained);
         }
         removedImageCaptureGrant = !broadStillPresent;
-        if (exactOrigins.length > 0) {
+        // Access to every site that stays (the manifest requires it since
+        // D166, or the reader gave it outside Simul) still covers the sites.
+        if (exactOrigins.length > 0 && !broadStillPresent) {
           narrowAccessRestored = userActivationAvailable &&
             await permissions.request({ origins: exactOrigins });
           if (narrowAccessRestored) {
