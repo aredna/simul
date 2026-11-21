@@ -480,6 +480,17 @@ describe('ImageOverlayProjector', () => {
     expect(imageOverlayContent(rebasedRoot)?.firstElementChild).toBe(originalRegion);
     expect(rebasedRoot?.style.left).toBe('30px');
     expect(rebasedRoot?.style.top).toBe('40px');
+
+    // The same words from another capture of the image (another hash) are
+    // what is drawn already: the same overlay (D170).
+    expect(projector.project(projection({
+      jobOrdinal: 3,
+      contentRevision: 2,
+      observationRevision: 5,
+      pixelHash: 'f'.repeat(64),
+    }))).toBe(true);
+    expect(overlayFor(document, 7)).toBe(originalRoot);
+    expect(imageOverlayContent(originalRoot)?.firstElementChild).toBe(originalRegion);
   });
 
   it('updates position on scroll without refitting text at stable dimensions', () => {

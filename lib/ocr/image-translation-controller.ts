@@ -119,6 +119,11 @@ const MAX_TRANSLATED_IMAGE_REGIONS = 512;
 const MAX_TRANSIENT_CAPTURE_RETRIES = 1;
 const MAX_UNCHANGED_EMPTY_RETRIES = 2;
 /**
+ * How long an image read without text, and not yet confirmed, must stay
+ * where it is before the capture that confirms it is taken (D170).
+ */
+const EMPTY_CONFIRMING_LOOK_MS = 600;
+/**
  * When an image whose picture CSS decides is looked at again after its
  * capture held no text, counted from the look before: nothing reports the
  * load of a CSS picture, so one that is still on its way paints an empty
@@ -193,6 +198,7 @@ export type ImageTranslationDiagnosticStage =
   | 'recognition-started'
   | 'recognition-failed'
   | 'no-text-found'
+  | 'no-text-same-pixels'
   | 'translation-started'
   | 'translation-failed'
   | 'translation-empty'
@@ -556,6 +562,8 @@ interface RetainedFinalImageAnalysis {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly contentRevision: number;
   readonly captureRevision: number;
+  /** The picture it was read from (D154), when the observer says (D170). */
+  readonly pictureRevision?: number;
   readonly finalConfigurationKey: string;
   readonly projection: ImageOverlayProjection;
   readonly expiresAt: number;
@@ -629,6 +637,28 @@ interface KeptWholeImageResult {
   readonly projection?: ImageOverlayProjection;
   readonly finalConfigurationKey: string;
   readonly answers: boolean;
+  /**
+   * A "no text" that waits for the capture that confirms it (D87): it is
+   * taken once the image has stayed still, not at each step of a scroll
+   * (D170).
+   */
+  readonly confirmingLook?: true;
+}
+
+interface EmptyReadRecord {
+  readonly contentRevision: number;
+  readonly observationRevision: number;
+  readonly pictureRevision: number | undefined;
+  /** The reading settings, pair and methods the empty read was made under. */
+  readonly settingsKey: string;
+  /** Read from the whole image, not from a part the view cut off. */
+  readonly whole: boolean;
+  readonly renderedWidth: number;
+  readonly renderedHeight: number;
+  pixelHash: string;
+  attempts: number;
+  /** A second capture of the same pixels found them so (D87). */
+  confirmed?: true;
 }
 
 /**
@@ -716,12 +746,14 @@ export class ImageTranslationController {
     readonly observationRevision: number;
     attempts: number;
   }>();
-  readonly #emptyRetries = new Map<number, {
-    readonly contentRevision: number;
-    readonly observationRevision: number;
-    pixelHash: string;
-    attempts: number;
-  }>();
+  /**
+   * An image read whole that found no text, until a second capture of the
+   * same pixels confirms it (D87). It is kept by the picture the image shows,
+   * not by the observation: a scroll that only moves the crop does not undo
+   * the read, and a capture after it with the same hash is the confirming
+   * look, made with no OCR (D170).
+   */
+  readonly #emptyRetries = new Map<number, EmptyReadRecord>();
   readonly #probeSampleIdentities = new Map<
     number,
     AutoLanguageProbeSampleIdentity
@@ -1483,9 +1515,17 @@ export class ImageTranslationController {
         ) || invalidatedAutoResolution;
       }
       this.#descriptors.set(change.descriptor.nodeId, change.descriptor);
+      // What the tab paints changes with a new picture, not with a crop:
+      // a scroll step does not make the next screenshot of a picture CSS
+      // gives too early to keep (D170).
       this.#noteCssPicture(
         change.descriptor,
-        !previous || contentChanged || captureChanged,
+        !previous || contentChanged || (
+          captureChanged && (
+            previous.pictureRevision === undefined ||
+            previous.pictureRevision !== change.descriptor.pictureRevision
+          )
+        ),
       );
       if (
         previous &&
@@ -1565,15 +1605,23 @@ export class ImageTranslationController {
             this.#projectedHashes.delete(change.descriptor.nodeId);
             this.#projectedOrdinals.delete(change.descriptor.nodeId);
             this.#retainedProjections.delete(change.descriptor.nodeId);
+            const lastFinal = this.#retainedFinalAnalyses.get(
+              change.descriptor.nodeId,
+            );
             this.#deleteRetainedFinalAnalysis(change.descriptor.nodeId);
             if (answered && kept && !kept.projection) {
               // A confirmed "no text": nothing goes over the image, and no
-              // job reads it again (D168).
+              // job reads it again (D168). One not yet confirmed has its
+              // second look when the image stops moving (D170).
               this.#projector.remove(
                 change.descriptor.document,
                 change.descriptor.nodeId,
               );
-              this.#forgetClippedLook(change.descriptor.nodeId);
+              if (kept.confirmingLook) {
+                this.#lookWhenStill(change.descriptor, EMPTY_CONFIRMING_LOOK_MS);
+              } else {
+                this.#forgetClippedLook(change.descriptor.nodeId);
+              }
               this.environment.onDiagnostic?.('image-result-kept');
             } else if (
               !kept?.projection ||
@@ -1594,6 +1642,11 @@ export class ImageTranslationController {
                 kept.finalConfigurationKey,
               );
               this.environment.onDiagnostic?.('image-result-kept');
+            } else if (lastFinal) {
+              // Shown while its job looks again: still the image's last
+              // result, so the next scroll step shows it as well instead of
+              // taking it down (D170).
+              this.#carryFinalAnalysis(lastFinal, change.descriptor);
             }
           } else if (!this.#rebaseRetainedObservation(change.descriptor)) {
             // A missing/replaced replay anchor cannot inherit projection
@@ -1604,7 +1657,11 @@ export class ImageTranslationController {
         }
         this.#rerankRequestedNodeIds.delete(change.descriptor.nodeId);
         this.#captureRetries.delete(change.descriptor.nodeId);
-        this.#emptyRetries.delete(change.descriptor.nodeId);
+        // An empty read stays while the image shows the same picture: a
+        // scroll that moves its crop does not say its pixels changed (D170).
+        if (!this.#emptyReadFor(change.descriptor)) {
+          this.#emptyRetries.delete(change.descriptor.nodeId);
+        }
       }
     } else {
       for (const nodeId of this.#semanticEvidenceIndex.unregister(
@@ -1945,6 +2002,38 @@ export class ImageTranslationController {
         this.#rememberSemanticAbsence(job.descriptor);
         this.environment.onDiagnostic?.('accessibility-text-blocked');
       }
+      // The label's translation was left over the image while its label was
+      // read again (D170). The read found no label to show: it goes now,
+      // before anything else is tried.
+      if (
+        !eagerSemanticCandidate &&
+        this.#retainedProjections.get(job.descriptor.nodeId)?.evidenceKind ===
+          'semantic'
+      ) this.#clearProjection(job.descriptor);
+      // The label read again reads as it did for the image's kept result
+      // (on a page whose controls cannot all be placed, every scroll step
+      // reads it again): that result is the answer, with no capture (D170).
+      if (this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+        const kept = this.#keptWholeImageResult(job.descriptor);
+        if (kept?.answers && !kept.confirmingLook) {
+          if (!kept.projection) {
+            this.#clearProjection(job.descriptor);
+            scheduler.settle(job);
+            this.environment.onDiagnostic?.('image-result-kept');
+            return;
+          }
+          if (this.#showKeptProjection(kept.projection)) {
+            this.#rememberFinalAnalysis(
+              job.descriptor,
+              kept.projection,
+              kept.finalConfigurationKey,
+            );
+            scheduler.settle(job);
+            this.environment.onDiagnostic?.('image-result-kept');
+            return;
+          }
+        }
+      }
     }
 
     // A semantic-only revision can reuse capture-revision-bound OCR evidence.
@@ -2190,6 +2279,24 @@ export class ImageTranslationController {
         if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
           throw new DOMException('Image job became stale.', 'AbortError');
         }
+      }
+      // The same pixels this picture showed when it was read and found
+      // without text, under the same settings: OCR would find nothing again.
+      // This capture is the look that confirms "no text" (D87), and it is
+      // made quietly, with no recognition and no busy state (D170).
+      // A part of a picture confirmed without text is not read either.
+      const emptyRead = this.#emptyReadFor(job.descriptor);
+      if (
+        emptyRead &&
+        emptyRead.settingsKey === this.#finalAnalysisSettingsKey(steps) &&
+        (
+          emptyRead.pixelHash === pixels.pixelHash ||
+          (emptyRead.confirmed && emptyRead.whole && !isWholeImageCrop(pixels))
+        )
+      ) {
+        sawEmptyRecognition = true;
+        this.environment.onDiagnostic?.('no-text-same-pixels');
+        continue;
       }
 
       if (!sourceLanguage) {
@@ -2648,7 +2755,18 @@ export class ImageTranslationController {
     }
 
     if (sawEmptyRecognition && pixels) {
-      const emptyDecision = this.#emptyRetryDecision(job, pixels.pixelHash);
+      const emptyDecision = this.#emptyRetryDecision(
+        job,
+        pixels,
+        this.#finalAnalysisSettingsKey(steps),
+      );
+      if (emptyDecision.status === 'partial') {
+        if (await commitHeldSemantic()) return;
+        scheduler.settle(job);
+        this.#clearProjection(job.descriptor);
+        this.environment.onDiagnostic?.('no-text-found');
+        return;
+      }
       if (emptyDecision.status === 'retry') {
         scheduler.retry(job);
         this.#reportJobProgress(
@@ -2673,7 +2791,9 @@ export class ImageTranslationController {
         // been looked at again, "no text" is not kept for it, and the read
         // just made stays known so that the next look is one capture.
         const lookAgain = this.#lookAgainLater(job.descriptor);
-        if (!lookAgain) this.#emptyRetries.delete(job.descriptor.nodeId);
+        // Kept as confirmed for the picture the image shows: an image no
+        // address can keep is answered from it when it returns (D170).
+        if (!lookAgain) this.#confirmEmptyRead(job.descriptor, pixels.pixelHash);
         if (await commitHeldSemantic()) return;
         scheduler.settle(job);
         this.#clearProjection(job.descriptor);
@@ -3428,12 +3548,14 @@ export class ImageTranslationController {
    * or a read the tab refused, stays as it was only while the admission
    * revision does (a protected element the scroll moves over the image
    * refuses the label); "no label" stays while the content does. With the
-   * label method off nothing is read.
+   * label method off nothing is read. `anyAdmission` asks only whether the
+   * label read the same at its last admission (D170).
    */
   #labelReadUnchanged(
     descriptor: SourceImageDescriptor,
     steps: readonly ImageReadingExecutionStep[],
     labelUsed: boolean,
+    anyAdmission = false,
   ): boolean {
     if (!steps.some((step) => step.kind === 'accessibility-text')) {
       return !labelUsed;
@@ -3446,6 +3568,7 @@ export class ImageTranslationController {
     ) return false;
     if (read.outcome === 'none') return !labelUsed;
     if ((read.outcome === 'label') !== labelUsed) return false;
+    if (anyAdmission) return true;
     return read.admissionRevision !== undefined &&
       read.admissionRevision === descriptor.admissionRevision;
   }
@@ -4263,6 +4386,9 @@ export class ImageTranslationController {
       document: descriptor.document,
       contentRevision: descriptor.contentRevision,
       captureRevision: descriptorCaptureRevision(descriptor),
+      ...(descriptor.pictureRevision === undefined
+        ? {}
+        : { pictureRevision: descriptor.pictureRevision }),
       finalConfigurationKey,
       projection: Object.freeze({ ...projection }),
       expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
@@ -4280,6 +4406,21 @@ export class ImageTranslationController {
       if (oldest === undefined) break;
       this.#deleteRetainedFinalAnalysis(oldest);
     }
+  }
+
+  #carryFinalAnalysis(
+    retained: RetainedFinalImageAnalysis,
+    descriptor: SourceImageDescriptor,
+  ): void {
+    if (
+      !sameSourceDocument(retained.document, descriptor.document) ||
+      retained.contentRevision !== descriptor.contentRevision
+    ) return;
+    // Its capture revision stays that of the read: the job still looks
+    // again, and is not answered from it.
+    this.#deleteRetainedFinalAnalysis(descriptor.nodeId);
+    this.#retainedFinalAnalyses.set(descriptor.nodeId, retained);
+    this.#retainedFinalAnalysisWeight += retained.weight;
   }
 
   #deleteRetainedFinalAnalysis(nodeId: number): boolean {
@@ -4439,11 +4580,11 @@ export class ImageTranslationController {
     const labelUsed = !finalConfigurationKey.startsWith(
       `${settingsKey}\u0001\u0001`,
     );
-    const answerable = (): boolean =>
+    const answerable = (anyAdmission = false): boolean =>
       finalConfigurationKey.startsWith(`${settingsKey}\u0001`) &&
       !this.#probeSampleIdentities.has(descriptor.nodeId) &&
       !this.#pageLanguageResolutionBlocksWork() &&
-      this.#labelReadUnchanged(descriptor, steps, labelUsed);
+      this.#labelReadUnchanged(descriptor, steps, labelUsed, anyAdmission);
     let projection: ImageOverlayProjection | undefined;
     let answers: boolean;
     if (last && current?.projection) {
@@ -4454,11 +4595,15 @@ export class ImageTranslationController {
       last?.projection.evidenceKind === 'semantic' &&
       last.projection.regions.length > 0
     ) {
-      // The image's label won: its translation is put back only as the
-      // answer, when the label would be read as it was (D168).
-      if (last.unconfirmed || !answerable()) return undefined;
+      // The image's label won: its translation is the answer when the label
+      // would be read as it was (D168). When only what admits the read may
+      // have changed (a control passed on the scroll; on a page whose
+      // controls cannot all be placed, every scroll step), it stays over the
+      // image while the job reads the label again, and goes only if the
+      // read now finds something else (D170).
+      if (last.unconfirmed || !answerable(true)) return undefined;
       projection = last.projection;
-      answers = true;
+      answers = answerable();
     } else if (
       !last &&
       current &&
@@ -4471,8 +4616,43 @@ export class ImageTranslationController {
       // seen nothing yet.
       if (!answerable()) return undefined;
       return Object.freeze({ finalConfigurationKey, answers: true });
+    } else if (
+      last?.projection.evidenceKind === 'ocr' &&
+      last.projection.regions.length > 0 &&
+      last.pictureRevision !== undefined &&
+      last.pictureRevision === descriptor.pictureRevision &&
+      Math.abs(last.projection.renderedWidthCss - descriptor.renderedWidth) <= 1 &&
+      Math.abs(last.projection.renderedHeightCss - descriptor.renderedHeight) <= 1
+    ) {
+      // Words read from this very picture, which nothing keeps by its
+      // identity (no address can keep an image the mirror could not load):
+      // they stay over the image in the same overlay, and answer it when
+      // they were read from the whole of it (D170).
+      projection = last.projection;
+      answers = isWholeImageCrop(last.projection) &&
+        !last.unconfirmed &&
+        answerable();
     } else {
-      return undefined;
+      // A whole picture read without text, by this image, under the same
+      // settings: the same pixels as far as anything says. It is answered
+      // with no job; until a second capture has confirmed it (D87), that
+      // capture is taken once the image is still (D170). A picture CSS gives
+      // keeps its own look on return (above).
+      const emptyRead = last || current || descriptor.cssPicture !== undefined
+        ? undefined
+        : this.#emptyReadFor(descriptor);
+      if (
+        !emptyRead?.whole ||
+        emptyRead.settingsKey !== settingsKey ||
+        emptyRead.renderedWidth !== descriptor.renderedWidth ||
+        emptyRead.renderedHeight !== descriptor.renderedHeight ||
+        !answerable()
+      ) return undefined;
+      return Object.freeze({
+        finalConfigurationKey,
+        answers: true,
+        ...(emptyRead.confirmed ? {} : { confirmingLook: true as const }),
+      });
     }
     return Object.freeze({
       projection: Object.freeze({
@@ -5486,17 +5666,59 @@ export class ImageTranslationController {
     return record.attempts;
   }
 
+  /**
+   * The empty read kept for the picture the image shows now (D170): the
+   * same content revision and picture revision. Without a picture revision
+   * (an older descriptor) only the same observation counts, as before.
+   */
+  #emptyReadFor(descriptor: SourceImageDescriptor): EmptyReadRecord | undefined {
+    const record = this.#emptyRetries.get(descriptor.nodeId);
+    if (!record || record.contentRevision !== descriptor.contentRevision) {
+      return undefined;
+    }
+    if (
+      record.pictureRevision !== undefined &&
+      descriptor.pictureRevision !== undefined
+    ) {
+      return record.pictureRevision === descriptor.pictureRevision
+        ? record
+        : undefined;
+    }
+    return record.observationRevision === descriptor.observationRevision
+      ? record
+      : undefined;
+  }
+
+  #confirmEmptyRead(descriptor: SourceImageDescriptor, pixelHash: string): void {
+    const record = this.#emptyReadFor(descriptor);
+    if (record?.pixelHash === pixelHash) record.confirmed = true;
+    else this.#emptyRetries.delete(descriptor.nodeId);
+  }
+
   #emptyRetryDecision(
     job: ImageScanJob,
-    pixelHash: string,
+    pixels: AcquiredImagePixels,
+    settingsKey: string,
   ): { readonly status: 'retry'; readonly attempt: number } |
-      { readonly status: 'confirmed' | 'changed' } {
+      { readonly status: 'confirmed' | 'changed' | 'partial' } {
+    const pixelHash = pixels.pixelHash;
     const descriptor = job.descriptor;
-    const previous = this.#emptyRetries.get(descriptor.nodeId);
+    const previous = this.#emptyReadFor(descriptor);
+    const whole = isWholeImageCrop(pixels);
     if (
       previous &&
-      previous.contentRevision === descriptor.contentRevision &&
-      previous.observationRevision === descriptor.observationRevision
+      previous.settingsKey === settingsKey &&
+      previous.whole && !whole
+    ) {
+      // A part of a picture read whole without text: it says nothing of
+      // the whole, which stays as it was (D170).
+      return Object.freeze({ status: 'partial' as const });
+    }
+    if (
+      previous &&
+      previous.settingsKey === settingsKey &&
+      !(previous.confirmed && previous.pixelHash !== pixelHash) &&
+      previous.whole === whole
     ) {
       if (
         previous.pixelHash !== pixelHash &&
@@ -5513,9 +5735,14 @@ export class ImageTranslationController {
         status: previous.pixelHash === pixelHash ? 'confirmed' : 'changed',
       });
     }
-    const record = {
+    const record: EmptyReadRecord = {
       contentRevision: descriptor.contentRevision,
       observationRevision: descriptor.observationRevision,
+      pictureRevision: descriptor.pictureRevision,
+      settingsKey,
+      whole,
+      renderedWidth: descriptor.renderedWidth,
+      renderedHeight: descriptor.renderedHeight,
       pixelHash,
       attempts: 1,
     };

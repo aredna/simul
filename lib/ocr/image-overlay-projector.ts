@@ -689,6 +689,13 @@ function imageOverlayProjectionWeight(
  * any visual/evidence difference still takes the conservative replacement
  * path.
  */
+/**
+ * Whether the overlay already drawn shows exactly this projection: the same
+ * words in the same places. The hash of the pixels they came from is not
+ * drawn: the same words read again from another capture (a label put back
+ * after the pixels were read, a screenshot instead of the file) stay in the
+ * same overlay rather than being taken down and drawn again (D170).
+ */
 function projectionCanRebaseInPlace(
   previous: ImageOverlayProjection,
   next: ImageOverlayProjection,
@@ -698,7 +705,6 @@ function projectionCanRebaseInPlace(
     previous.replayLease === next.replayLease &&
     previous.pairEpoch === next.pairEpoch &&
     previous.pairKey === next.pairKey &&
-    previous.pixelHash === next.pixelHash &&
     previous.bitmapWidth === next.bitmapWidth &&
     previous.bitmapHeight === next.bitmapHeight &&
     previous.cropOffsetXCss === next.cropOffsetXCss &&
