@@ -191,8 +191,8 @@ export class ImageScanScheduler {
    * result is kept and is shown again as it arrives (D167). It is recorded
    * as complete, so no job is queued, no queued peer is pushed out and no
    * active job is preempted for it. Anything else (another content, a rerun
-   * the reader asked for, an image the scheduler does not know) is applied
-   * as an ordinary change.
+   * the reader asked for, an image the scheduler does not know, an image
+   * with work still owed) is applied as an ordinary change.
    */
   applyAnswered(change: SourceImageChange): ImageScanUpdateResult {
     const parsed = readSourceImageChange(change);
@@ -204,7 +204,10 @@ export class ImageScanScheduler {
       previous.descriptor.contentRevision !==
         parsed.descriptor.contentRevision ||
       this.#manualOverrides.get(parsed.descriptor.nodeId) ===
-        parsed.descriptor.contentRevision
+        parsed.descriptor.contentRevision ||
+      // Work still owed for the image (a peer's label changed, a look was
+      // asked for) is not swallowed by the answer (D168).
+      !recordHasCurrentCompletion(previous)
     ) return this.apply(change);
     const result = this.#upsert(parsed.descriptor, true);
     this.#reconsiderOverflowed();
@@ -852,6 +855,7 @@ function sameDescriptor(
     left.sourceKind === right.sourceKind &&
     left.captureRevision === right.captureRevision &&
     left.pictureRevision === right.pictureRevision &&
+    left.admissionRevision === right.admissionRevision &&
     left.observationRevision === right.observationRevision &&
     left.visibility === right.visibility &&
     left.connected === right.connected &&

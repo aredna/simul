@@ -36,6 +36,7 @@ describe('SourceImageModel', () => {
     });
     const firstDescriptor = model.get(7)!;
     expect(Object.keys(firstDescriptor).sort()).toEqual([
+      'admissionRevision',
       'captureRevision',
       'connected',
       'contentRevision',
@@ -203,6 +204,62 @@ describe('SourceImageModel', () => {
     });
     for (const value of [0, 1, 'false', null]) {
       expect(model.upsert(upsert(7, { pictureChanged: value as never })))
+        .toEqual({ status: 'rejected' });
+    }
+  });
+
+  it('keeps the admission revision through a crop alone, and only then (D168)', () => {
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    model.upsert(upsert(7));
+    expect(model.get(7)).toMatchObject({ captureRevision: 1, admissionRevision: 1 });
+    const cropped = {
+      contentChanged: false,
+      observationChanged: true,
+      captureChanged: true,
+      pictureChanged: false,
+      admissionChanged: false,
+    };
+    expect(model.upsert(upsert(7, cropped))).toMatchObject({
+      change: { descriptor: { captureRevision: 2, pictureRevision: 1, admissionRevision: 1 } },
+    });
+    const returned = model.get(7)!;
+    expect(model.isCurrent(returned)).toBe(true);
+    expect(model.isCurrent({ ...returned, admissionRevision: 2 })).toBe(false);
+    // A control passed under on the way: the same picture, another admission.
+    expect(model.upsert(upsert(7, { ...cropped, admissionChanged: true })))
+      .toMatchObject({
+        change: { descriptor: { captureRevision: 3, pictureRevision: 1, admissionRevision: 2 } },
+      });
+    // A capture change that does not say, and every new picture, count.
+    expect(model.upsert(upsert(7, {
+      contentChanged: false,
+      observationChanged: true,
+      captureChanged: true,
+      pictureChanged: false,
+    }))).toMatchObject({
+      change: { descriptor: { captureRevision: 4, admissionRevision: 3 } },
+    });
+    expect(model.upsert(upsert(7, { ...cropped, renderedWidth: 201 })))
+      .toMatchObject({
+        change: { descriptor: { pictureRevision: 2, admissionRevision: 4 } },
+      });
+    expect(model.upsert(upsert(7, { ...cropped, renderedWidth: 201, contentChanged: true })))
+      .toMatchObject({
+        change: { descriptor: { contentRevision: 2, admissionRevision: 5 } },
+      });
+    // No capture change, no new admission.
+    expect(model.upsert(upsert(7, {
+      ...cropped,
+      captureChanged: false,
+      admissionChanged: true,
+      renderedWidth: 201,
+      visibility: 'near',
+    }))).toMatchObject({
+      change: { descriptor: { captureRevision: 6, admissionRevision: 5 } },
+    });
+    for (const value of [0, 1, 'false', null]) {
+      expect(model.upsert(upsert(7, { admissionChanged: value as never })))
         .toEqual({ status: 'rejected' });
     }
   });

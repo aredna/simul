@@ -514,6 +514,11 @@ interface SourceReadCut {
     tagName: string,
     budget: HtmlMirrorReadBudget,
   ) => number | undefined;
+  /**
+   * The preview: a node a box before it already stands for (D169), left
+   * out of the read.
+   */
+  readonly skip?: (node: Node) => boolean;
   /** A node was met a second time in this read: it moved while read. */
   metTwice: boolean;
 }
@@ -2210,6 +2215,7 @@ function serializeNode(
   live: Node,
   context: SerializeContext,
 ): HtmlMirrorNode | undefined {
+  if (context.cut?.skip?.(live)) return undefined;
   context.budget.inspectedNodes += 1;
   if (context.budget.inspectedNodes > MAX_HTML_MIRROR_NODES) {
     incrementRepresentability(context.representability, 'capacityOmissionCount');
@@ -3463,6 +3469,26 @@ function readSourceDocumentReadValues(
   });
 }
 
+/**
+ * Whether a sibling of a box may be left to it in the preview (D169): an
+ * HTML element that the read would cut, with something in it, and none of
+ * what the preview never makes a box of.
+ */
+function standsInRunOfBoxes(element: Element): boolean {
+  if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
+  const tagName = element.localName.toLowerCase();
+  if (
+    tagName === 'style' || tagName === 'link' || tagName === 'script' ||
+    tagName === 'template' || tagName === 'noscript' || tagName === 'meta' ||
+    tagName === 'slot' ||
+    isNativeSelectSemanticTag(tagName) ||
+    isVoidElement(tagName) ||
+    isSourceNativeTextControlTagName(tagName)
+  ) return false;
+  return element.childNodes.length > 0 ||
+    readSourceShadowRoot(element) !== undefined;
+}
+
 /** How many nodes a preview reads before every further box is a placeholder. */
 export const DEFAULT_HTML_MIRROR_PREVIEW_READ_NODES = 3_000;
 /** Past this many nodes, placeholders included, a page gets no preview. */
@@ -3542,14 +3568,75 @@ export function sanitizeSourcePreview(
           Math.round(rect.height),
         ))
       : 0;
-    if (budget.nodes >= maxReadNodes) return height;
+    if (budget.nodes >= maxReadNodes) {
+      return boxOfRun(element, rect, height, () => true);
+    }
     if (!sourceOuterDisplayIsBlock(element, sourceWindow)) return undefined;
-    const near = rect.bottom > -viewportHeight &&
-      rect.top < viewportHeight * 2 &&
-      rect.right > 0 && rect.left < viewportWidth;
-    return near ? undefined : height;
+    if (isNear(rect)) return undefined;
+    return boxOfRun(element, rect, height, (next, nextRect) =>
+      !isNear(nextRect) && sourceOuterDisplayIsBlock(next, sourceWindow));
   };
-  const cut: SourceReadCut = { placeholder, metTwice: false };
+  const isNear = (rect: DOMRect): boolean =>
+    rect.bottom > -viewportHeight &&
+    rect.top < viewportHeight * 2 &&
+    rect.right > 0 && rect.left < viewportWidth;
+  // One box stands for the siblings after it that would each be a box by
+  // the same rule (D169): on a page of 54,000–72,000 elements the preview
+  // made 6,000–8,000 boxes, one after another, each read, checked, given an
+  // id and sent, and took 64–90 ms of one task. Its height runs from its top
+  // to the lowest bottom of the run, so the page keeps its height. A run
+  // ends at what is not a box: text that shows, a style sheet, a script, a
+  // dropdown, a field, anything outside HTML.
+  const skipped = new Set<Node>();
+  const boxOfRun = (
+    first: Element,
+    firstRect: DOMRect,
+    firstHeight: number,
+    alsoBox: (next: Element, nextRect: DOMRect) => boolean,
+  ): number => {
+    if (!Number.isFinite(firstRect.top) || !Number.isFinite(firstRect.bottom)) {
+      return firstHeight;
+    }
+    const top = firstRect.top;
+    let bottom = firstRect.bottom;
+    let between: Node[] = [];
+    for (let next = first.nextSibling; next; next = next.nextSibling) {
+      if (next.nodeType === 3) {
+        if ((next.nodeValue ?? '').trim() !== '') break;
+        between.push(next);
+        continue;
+      }
+      if (next.nodeType === 8) {
+        between.push(next);
+        continue;
+      }
+      if (next.nodeType !== 1) break;
+      const element = next as Element;
+      if (!standsInRunOfBoxes(element)) break;
+      let nextRect: DOMRect;
+      try {
+        nextRect = element.getBoundingClientRect();
+      } catch {
+        break;
+      }
+      if (!Number.isFinite(nextRect.bottom) || !alsoBox(element, nextRect)) break;
+      const nextBottom = Math.max(bottom, nextRect.bottom);
+      if (nextBottom - top > MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT) break;
+      for (const node of between) skipped.add(node);
+      between = [];
+      skipped.add(element);
+      bottom = nextBottom;
+    }
+    return Math.max(firstHeight, Math.min(
+      MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT,
+      Math.round(bottom - top),
+    ));
+  };
+  const cut: SourceReadCut = {
+    placeholder,
+    skip: (node) => skipped.has(node),
+    metTwice: false,
+  };
   const budget = createHtmlMirrorReadBudget();
   const styleWork = createHtmlMirrorStyleWorkBudget();
   const fidelityPolicy = options.fidelityPolicy ?? 'conservative';

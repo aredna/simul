@@ -30,6 +30,21 @@ export function isImageSourceUnavailableError(
   return error instanceof Error && error.name === 'ImageSourceUnavailableError';
 }
 
+/**
+ * What a read of an image's label gives (D168): its text; `'none'` when the
+ * tab admitted the image and it has no label, which nothing but another
+ * content revision can change; `'refused'` when the tab did not admit the
+ * read (a protected element over the image, a control around it); or
+ * nothing, when the image had changed or the tab did not answer in time.
+ */
+export const NO_ACCESSIBILITY_TEXT = 'none' as const;
+export const ACCESSIBILITY_TEXT_REFUSED = 'refused' as const;
+export type SourceImageAccessibilityTextRead =
+  | SourceImageAccessibilityTextEvidence
+  | typeof NO_ACCESSIBILITY_TEXT
+  | typeof ACCESSIBILITY_TEXT_REFUSED
+  | undefined;
+
 export interface ImageSourceLease {
   /** Resolves after the source document's initial synchronous `<img>` scan. */
   readonly ready?: Promise<ImageSourceReadySummary | undefined>;
@@ -44,7 +59,7 @@ export interface ImageSourceLease {
     policyFingerprint: string,
     controlImages: boolean,
     signal?: AbortSignal,
-  ) => Promise<SourceImageAccessibilityTextEvidence | undefined>;
+  ) => Promise<SourceImageAccessibilityTextRead>;
   /**
    * File facts for one eligible image (see `SourceImageFileEvidence`), or
    * undefined when the tab refuses, the image changed, or it timed out.
@@ -118,9 +133,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
   readonly #pendingAccessibility = new Map<
     string,
     {
-      readonly resolve: (
-        value: SourceImageAccessibilityTextEvidence | undefined,
-      ) => void;
+      readonly resolve: (value: SourceImageAccessibilityTextRead) => void;
       readonly reject: (reason: unknown) => void;
       readonly timer: ReturnType<typeof setTimeout>;
       readonly signal?: AbortSignal;
@@ -235,7 +248,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
     policyFingerprint: string,
     controlImages: boolean,
     signal?: AbortSignal,
-  ): Promise<SourceImageAccessibilityTextEvidence | undefined> {
+  ): Promise<SourceImageAccessibilityTextRead> {
     if (
       this.#disposed ||
       this.#pendingCount() >= MAX_PENDING_MEASUREMENTS ||
@@ -412,7 +425,13 @@ class ChromeImageSourceLease implements ImageSourceLease {
       }
       this.#settlePendingAccessibility(
         message.requestId,
-        message.status === 'ready' ? message.evidence : undefined,
+        message.status === 'ready'
+          ? message.evidence
+          : message.status === 'none'
+            ? NO_ACCESSIBILITY_TEXT
+            : message.status === 'blocked'
+              ? ACCESSIBILITY_TEXT_REFUSED
+              : undefined,
       );
       return;
     }
@@ -458,7 +477,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
 
   #settlePendingAccessibility(
     requestId: string,
-    value: SourceImageAccessibilityTextEvidence | undefined,
+    value: SourceImageAccessibilityTextRead,
     error?: unknown,
   ): void {
     const pending = this.#pendingAccessibility.get(requestId);

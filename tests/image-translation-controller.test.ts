@@ -3849,13 +3849,15 @@ describe('ImageTranslationController', () => {
     expect(document.querySelector('[data-simul-image-overlay="12"]'))
       .toBe(overlayBefore);
     expect(controller.busy).toBe(false);
-    await vi.waitFor(() => expect(diagnostics).toContainEqual(
-      expect.objectContaining({
-        stage: 'image-final-cache',
-        access: 'rebind',
-      }),
-    ));
-    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    // The rebind is counted, not logged one line at a time (D168).
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      stage: 'image-final-cache',
+      access: 'rebind',
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(controller.busy).toBe(false);
+    expect(document.querySelector('[data-simul-image-overlay="12"]'))
+      .toBe(overlayBefore);
 
     expect(acquire).toHaveBeenCalledOnce();
     expect(recognize).toHaveBeenCalledOnce();
@@ -4105,7 +4107,8 @@ describe('ImageTranslationController', () => {
     }
     expect(acquire).toHaveBeenCalledTimes(3);
     expect(recognize).toHaveBeenCalledTimes(3);
-    expect(diagnostics).toContain('image-identity-reused');
+    // Answered from what is kept, words and "no text" alike (D167, D168).
+    expect(diagnostics).toContain('image-result-kept');
 
     // A change of what the image paints (a style, a cover that left) is
     // another picture: it is read again.
@@ -4276,13 +4279,14 @@ describe('ImageTranslationController', () => {
     expect(counts()).toEqual(before);
     expect(busy).toEqual([]);
 
-    // Image 13's kept "no text" is still put back by a job, which runs with
-    // no capture, recognition or translation, and so is not announced.
+    // Image 13's kept "no text" is the answer too: no job, nothing over it
+    // (D168).
     revision += 1;
     emitChange?.({ kind: 'upsert', descriptor: at(13, revision) });
-    expect(controller.busy).toBe(true);
+    expect(controller.busy).toBe(false);
+    expect(diagnostics.at(-1)).toBe('image-result-kept');
+    expect(document.querySelector('[data-simul-image-overlay="13"]')).toBeNull();
     await settle();
-    expect(diagnostics.at(-1)).toBe('no-text-found');
     expect(counts()).toEqual(before);
     expect(busy).toEqual([]);
 
@@ -4313,6 +4317,219 @@ describe('ImageTranslationController', () => {
     await settle();
     expect(acquire).toHaveBeenCalledTimes(before[0]! + 2);
     expect(busy).toEqual([true, false]);
+    controller.dispose();
+  });
+
+  it('keeps a label, "no label" and a refused label read on return while the label would be read as it was (D168)', async () => {
+    // 12 has a label that wins (the image is too small to read its pixels);
+    // 13 has no label and words in its pixels; the tab refused 14's label
+    // (a protected element lay over it) and its pixels were read.
+    const { document } = parseHTML(
+      '<html><body><img id="a"><img id="b"><img id="c"></body></html>',
+    );
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, id] of [[12, 'a'], [13, 'b'], [14, 'c']] as const) {
+      const image = document.getElementById(id) as unknown as HTMLImageElement;
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: `https://assets.example.test/${id}.png` },
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 0 },
+        naturalHeight: { configurable: true, value: 0 },
+      });
+      images.set(nodeId, image);
+    }
+    const sizes = new Map([[12, 24], [13, 200], [14, 200]]);
+    const at = (
+      nodeId: number,
+      revision: number,
+      more: Partial<SourceImageDescriptor> = {},
+    ): SourceImageDescriptor => ({
+      ...descriptor,
+      nodeId,
+      renderedWidth: sizes.get(nodeId)!,
+      renderedHeight: sizes.get(nodeId)! / 2,
+      captureRevision: revision,
+      observationRevision: revision,
+      pictureRevision: 1,
+      admissionRevision: 1,
+      ...more,
+    });
+    // What the tab answers for each label now.
+    const labels = new Map<number, string>([
+      [12, 'Lost keys at the desk'],
+      [13, 'none'],
+      [14, 'refused'],
+    ]);
+    const readAccessibilityText = vi.fn(async (current: SourceImageDescriptor) => {
+      const label = labels.get(current.nodeId);
+      if (label === 'none' || label === 'refused') return label;
+      return {
+        document: current.document,
+        nodeId: current.nodeId,
+        contentRevision: current.contentRevision,
+        observationRevision: current.observationRevision,
+        text: label,
+        source: 'alt' as const,
+        nearestElementLanguage: 'en' as const,
+      };
+    });
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(current, `${current.nodeId}`.padEnd(64, 'c')),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(`Headline ${pixels.descriptor.nodeId}`, 0.98),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const translate = vi.fn(async (text: string) => `ja:${text}`);
+    const busy: boolean[] = [];
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => {
+          for (const nodeId of [12, 13, 14]) {
+            onChange({ kind: 'upsert', descriptor: at(nodeId, 1) });
+          }
+        });
+        return {
+          measure: vi.fn(),
+          readAccessibilityText:
+            readAccessibilityText as unknown as NonNullable<ImageSourceLease['readAccessibilityText']>,
+          dispose: vi.fn(),
+        };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({ translate, destroy: vi.fn() }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      onBusyChange: (value) => busy.push(value),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-first-background-prescan',
+      skipSmallImages: true,
+      providerOrder: ['tesseract'],
+      methodOrder: ['accessibility-text', 'tesseract'],
+      disabledMethodIds: [],
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const overlay = (nodeId: number) =>
+      document.querySelector(`[data-simul-image-overlay="${nodeId}"]`);
+    const settle = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    const readsOf = (nodeId: number) => readAccessibilityText.mock.calls
+      .filter(([current]) => current.nodeId === nodeId).length;
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => {
+      expect(overlayText(overlay(12))).toBe('ja:Lost keys at the desk');
+      expect(overlayText(overlay(13))).toBe('ja:Headline 13');
+      expect(overlayText(overlay(14))).toBe('ja:Headline 14');
+    });
+    await settle();
+    const mounted = [12, 13, 14].map(overlay);
+    const reads = [12, 13, 14].map(readsOf);
+    const captures = acquire.mock.calls.length;
+    busy.length = 0;
+
+    // A crop alone: each is answered from what is kept, with no job, no read
+    // of its label and the same overlay.
+    let revision = 1;
+    for (const visibility of ['near', 'background', 'visible'] as const) {
+      revision += 1;
+      for (const nodeId of [12, 13, 14]) {
+        emitChange?.({
+          kind: 'upsert',
+          descriptor: at(nodeId, revision, { visibility }),
+        });
+        expect(controller.busy).toBe(false);
+      }
+      await settle();
+    }
+    expect([12, 13, 14].map(overlay)).toEqual(mounted);
+    expect([12, 13, 14].map(readsOf)).toEqual(reads);
+    expect(acquire).toHaveBeenCalledTimes(captures);
+    expect(busy).toEqual([]);
+
+    // A protected element passes over 12 on the scroll (a new admission):
+    // its job reads the label again, the tab refuses it, and its words go.
+    labels.set(12, 'refused');
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, { admissionRevision: 2 }),
+    });
+    expect(controller.busy).toBe(true);
+    await settle();
+    expect(readsOf(12)).toBe(reads[0]! + 1);
+    expect(overlay(12)).toBeNull();
+
+    // "No label" stays so whatever the admission: 13 is answered.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(13, revision, { admissionRevision: 2 }),
+    });
+    expect(controller.busy).toBe(false);
+    expect(overlay(13)).toBe(mounted[1]);
+    expect(readsOf(13)).toBe(reads[1]);
+
+    // The refused read of 14 is asked again once the admission changes; the
+    // tab now gives the label, which takes part in the ranking.
+    labels.set(14, 'Opening hours from nine to five');
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(14, revision, { admissionRevision: 2 }),
+    });
+    expect(controller.busy).toBe(true);
+    await settle();
+    expect(readsOf(14)).toBe(reads[2]! + 1);
+
+    // Another label (another content revision) is read and translated.
+    labels.set(12, 'Found keys at the desk');
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, { contentRevision: 2, admissionRevision: 3 }),
+    });
+    await vi.waitFor(() =>
+      expect(overlayText(overlay(12))).toBe('ja:Found keys at the desk'));
+    await settle();
+    // And kept: the next crop is answered with no read.
+    const readsAfter = readsOf(12);
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, { contentRevision: 2, admissionRevision: 3 }),
+    });
+    expect(controller.busy).toBe(false);
+    expect(overlayText(overlay(12))).toBe('ja:Found keys at the desk');
+    expect(readsOf(12)).toBe(readsAfter);
     controller.dispose();
   });
 
@@ -4834,7 +5051,8 @@ describe('ImageTranslationController', () => {
     // on its way: the next time the image returns to view it is looked at
     // once more, with one capture and no further look arranged.
     const reused = () =>
-      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+      diagnostics.filter((entry) =>
+        entry === 'image-identity-reused' || entry === 'image-result-kept').length;
     emitChange?.({
       kind: 'upsert',
       descriptor: { ...swapped, captureRevision: 2, observationRevision: 2 },
@@ -4966,7 +5184,8 @@ describe('ImageTranslationController', () => {
       document.querySelector('[data-simul-image-overlay="12"]'),
     );
     const reused = () =>
-      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+      diagnostics.filter((entry) =>
+        entry === 'image-identity-reused' || entry === 'image-result-kept').length;
     const settle = async () => {
       await vi.waitFor(() => expect(controller.busy).toBe(false));
     };
@@ -5429,7 +5648,7 @@ describe('ImageTranslationController', () => {
     lane = 600;
     comeBack();
     await vi.waitFor(() =>
-      expect(diagnostics).toContain('image-identity-reused'));
+      expect(diagnostics).toContain('image-result-kept'));
     await settle();
     expect(shown()).toBe('ja:Late picture');
     expect(acquire).toHaveBeenCalledTimes(7);
@@ -5580,7 +5799,7 @@ describe('ImageTranslationController', () => {
     });
     expect(shown()).toBe('ja:Sixth picture');
     await vi.waitFor(() =>
-      expect(diagnostics).toContain('image-identity-reused'));
+      expect(diagnostics).toContain('image-result-kept'));
     expect(acquire).toHaveBeenCalledTimes(2);
     controller.dispose();
   });
@@ -6123,14 +6342,14 @@ describe('ImageTranslationController', () => {
     expect(acquire).toHaveBeenCalledTimes(2);
     expect(recognize).toHaveBeenCalledTimes(2);
 
-    // The same picture returns: settled with no capture and no reading.
+    // The same picture returns: settled with no capture and no reading, and
+    // since D168 with no job.
     emitChange?.({
       kind: 'upsert',
       descriptor: { ...firstDescriptor, captureRevision: 2, observationRevision: 2 },
     });
-    await vi.waitFor(() =>
-      expect(diagnostics).toContain('image-identity-reused'));
-    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(diagnostics.at(-1)).toBe('image-result-kept');
+    expect(controller.busy).toBe(false);
     expect(acquire).toHaveBeenCalledTimes(2);
     expect(recognize).toHaveBeenCalledTimes(2);
 
@@ -6153,7 +6372,8 @@ describe('ImageTranslationController', () => {
     });
     await vi.waitFor(() =>
       expect(acquire.mock.calls.length).toBeGreaterThan(readsBeforeReturn));
-    expect(diagnostics.filter((entry) => entry === 'image-identity-reused'))
+    expect(diagnostics.filter((entry) =>
+      entry === 'image-identity-reused' || entry === 'image-result-kept'))
       .toHaveLength(1);
     controller.dispose();
   });

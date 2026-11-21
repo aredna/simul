@@ -631,6 +631,21 @@ describe('ImageScanScheduler', () => {
       captureRevision: 6,
       observationRevision: 1,
     })))).toEqual({ status: 'rejected' });
+
+    // Work still owed for an image (queued again because a peer's label
+    // changed, say) is not swallowed by an answer (D168).
+    const owing = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-first-background-prescan',
+      skipSmallImages: false,
+    });
+    owing.apply(upsert(descriptor(3, 'visible', { captureRevision: 1 })));
+    const third = owing.takeNext()!;
+    expect(owing.settle(third)).toBe(true);
+    expect(owing.requeueCurrent(third.descriptor)).toBe(true);
+    expect(owing.applyAnswered(upsert(descriptor(3, 'visible', {
+      captureRevision: 2,
+      observationRevision: 2,
+    })))).toEqual({ status: 'queued' });
   });
 });
 

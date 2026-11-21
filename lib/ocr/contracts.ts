@@ -51,6 +51,16 @@ export interface SourceImageDescriptor extends ImageDimensions {
    * result read before stays the image's own when it scrolls back.
    */
   readonly pictureRevision?: number;
+  /**
+   * Advances whenever what decides that the image may be read at all could
+   * differ: every capture change but a crop alone. Another file, style,
+   * size or CSS picture advances it, and so does a control or a protected
+   * element the image passes under or out from under while the page
+   * scrolls, which leaves the picture revision. The tab checks the image's
+   * label and pixels against those at the read; while this revision holds,
+   * a read made before would be refused or admitted as it was (D168).
+   */
+  readonly admissionRevision?: number;
   readonly observationRevision: number;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
@@ -194,6 +204,7 @@ export function readSourceImageDescriptor(
     'intrinsicHeight',
     'captureRevision',
     'pictureRevision',
+    'admissionRevision',
     'cssPicture',
   ])) {
     return undefined;
@@ -208,6 +219,8 @@ export function readSourceImageDescriptor(
       !isPositiveSafeInteger(input.captureRevision)) ||
     (Object.hasOwn(input, 'pictureRevision') &&
       !isPositiveSafeInteger(input.pictureRevision)) ||
+    (Object.hasOwn(input, 'admissionRevision') &&
+      !isPositiveSafeInteger(input.admissionRevision)) ||
     (Object.hasOwn(input, 'cssPicture') &&
       !isPositiveSafeInteger(input.cssPicture)) ||
     !isPositiveSafeInteger(input.observationRevision) ||
@@ -238,6 +251,9 @@ export function readSourceImageDescriptor(
       : {}),
     ...(Object.hasOwn(input, 'pictureRevision')
       ? { pictureRevision: input.pictureRevision as number }
+      : {}),
+    ...(Object.hasOwn(input, 'admissionRevision')
+      ? { admissionRevision: input.admissionRevision as number }
       : {}),
     observationRevision: input.observationRevision,
     visibility: input.visibility,

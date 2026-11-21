@@ -352,6 +352,8 @@ describe('SourceImageObserver', () => {
         observationChanged: true,
         captureChanged: true,
         pictureChanged: false,
+        // A crop alone admits or refuses a read as before (D168).
+        admissionChanged: false,
         visibility: 'visible',
       },
     });
@@ -388,7 +390,7 @@ describe('SourceImageObserver', () => {
 
     expect(events.map(eventNodeId)).toEqual([7]);
     // A control the image passes under on a scroll is a new capture of the
-    // same picture.
+    // same picture, and may refuse a read that was admitted (D168).
     expect(events[0]).toMatchObject({
       kind: 'upsert',
       input: {
@@ -396,6 +398,7 @@ describe('SourceImageObserver', () => {
         observationChanged: true,
         captureChanged: true,
         pictureChanged: false,
+        admissionChanged: true,
       },
     });
     stop();
@@ -1219,6 +1222,7 @@ describe('SourceImageObserver', () => {
         observationChanged: true,
         captureChanged: true,
         pictureChanged: true,
+        admissionChanged: true,
       },
     }]);
     stop();

@@ -1072,6 +1072,10 @@ export class SourceImageObserver {
     // A crop alone is the same picture seen through another part of the view.
     const pictureChanged = contentChanged || layoutChanged ||
       dimensionsChanged || (forceCaptureChange && forcedCaptureChangesPicture);
+    // A crop alone admits or refuses a read of the image as before; a
+    // control or protected element it passes under does not (D168).
+    const admissionChanged = contentChanged || layoutChanged ||
+      dimensionsChanged || forceCaptureChange;
     const observationChanged = forceObservationChange || cropChanged ||
       layoutChanged;
     state.sourceToken = token;
@@ -1087,6 +1091,7 @@ export class SourceImageObserver {
       captureChanged,
       facts,
       pictureChanged,
+      admissionChanged,
     );
   }
 
@@ -1097,6 +1102,7 @@ export class SourceImageObserver {
     captureChanged: boolean,
     facts: ImageFacts,
     pictureChanged = captureChanged,
+    admissionChanged = captureChanged,
   ): void {
     // IntersectionObserver reports an initial state for every observed image.
     // Wait for both tiers so an above-the-fold image is never first queued as
@@ -1110,6 +1116,7 @@ export class SourceImageObserver {
       observationChanged: initial || observationChanged,
       captureChanged: initial || captureChanged,
       pictureChanged: initial || pictureChanged,
+      admissionChanged: initial || admissionChanged,
       visibility: this.#visibility(state.image),
       connected: true,
       renderedWidth: facts.renderedWidth,

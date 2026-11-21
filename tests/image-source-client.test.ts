@@ -110,6 +110,23 @@ describe('Chrome image source client', () => {
       },
     });
     await expect(task).resolves.toMatchObject({ text: 'お知らせ' });
+
+    // An admitted image without a label says so, and so does a read the tab
+    // refused; a stale one says nothing (D168).
+    for (const [status, expected] of [
+      ['none', 'none'],
+      ['blocked', 'refused'],
+      ['stale', undefined],
+    ] as const) {
+      const read = lease.readAccessibilityText!(descriptor, 'read-v1-111000', true);
+      port.emitMessage({
+        kind: 'simul:image-source-v2:accessibility-text',
+        requestId: (port.messages.at(-1) as { requestId?: string })?.requestId,
+        descriptor,
+        status,
+      });
+      await expect(read).resolves.toBe(expected);
+    }
     lease.dispose();
   });
 

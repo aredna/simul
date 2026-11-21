@@ -618,9 +618,11 @@ describe('the preview (D163)', () => {
     })!;
     expect(preview).toBeDefined();
     const s3 = findElement(preview.root, 's3')!;
-    expect(s3.placeholder).toEqual({ height: 321 });
+    // One box for the far blocks in a row (D169): from the top of `s3` to
+    // the bottom of the article after it.
+    expect(s3.placeholder).toEqual({ height: 9000 + 2000 - 5000 });
     expect(s3.children).toEqual([]);
-    expect(findElement(preview.root, 'long')!.placeholder).toEqual({ height: 2000 });
+    expect(findElement(preview.root, 'long')).toBeUndefined();
     // Above the viewport by more than its height too.
     expect(findElement(preview.root, 'foot')!.placeholder).toEqual({ height: 10 });
     // Near blocks are read as the whole read reads them.
@@ -663,13 +665,61 @@ describe('the preview (D163)', () => {
       maxReadNodes: 30,
     })!;
     expect(preview).toBeDefined();
-    expect(findElement(preview.root, 'long')!.placeholder).toBeDefined();
+    // The article is a box, or in the box of the block before it (D169).
+    const long = findElement(preview.root, 'long');
+    expect(long === undefined || long.placeholder !== undefined).toBe(true);
+    const main = findElement(preview.root, 'main')!;
+    expect(main.children.some((child) =>
+      child.kind === 'element' && child.placeholder !== undefined)).toBe(true);
     expect(findElement(preview.root, 'para-0')).toBeUndefined();
     expect(sanitizeSourcePreview(target.document, viewport, new WeakNodeIdRegistry(), {
       maxReadNodes: 2, maxNodes: 3,
     })).toBeUndefined();
   });
 
+});
+
+describe('the preview stands one box for a run of boxes (D169)', () => {
+  function runPage(between = ''): Page {
+    const rows = Array.from({ length: 40 }, (_, index) =>
+      `<section id="r-${index}" data-top="${3000 + index * 100}" data-height="90">` +
+      `<p>Row ${index}</p></section>` + (index === 19 ? between : '')).join('\n');
+    const target = page('<!doctype html><html lang="en"><head><title>Run</title></head><body>' +
+      '<main id="main"><p id="near">Near text</p>' + rows + '</main>' +
+      '<x-open id="open"></x-open><x-closed id="closed"></x-closed></body></html>');
+    paint(target.document, target.window);
+    return target;
+  }
+
+  function preview(target: Page) {
+    const viewport = {
+      innerWidth: 1200, innerHeight: 800,
+      getComputedStyle: target.window.getComputedStyle,
+    } as unknown as Window;
+    return sanitizeSourcePreview(target.document, viewport, new WeakNodeIdRegistry())!;
+  }
+
+  it('makes one box as tall as the run, and leaves the rest of the run out', () => {
+    const graph = preview(runPage());
+    const first = findElement(graph.root, 'r-0')!;
+    expect(first.placeholder).toEqual({ height: 3000 + 39 * 100 + 90 - 3000 });
+    for (let index = 1; index < 40; index += 1) {
+      expect(findElement(graph.root, `r-${index}`)).toBeUndefined();
+    }
+    expect(JSON.stringify(graph)).not.toContain('Row 3');
+    // What is near is read as before.
+    expect(findElement(graph.root, 'near')!.placeholder).toBeUndefined();
+  });
+
+  it('ends a run at text that shows and at a style sheet', () => {
+    const text = preview(runPage('<b>shown words</b> loose text'));
+    expect(findElement(text.root, 'r-0')!.placeholder).toEqual({ height: 19 * 100 + 90 });
+    expect(findElement(text.root, 'r-20')!.placeholder).toEqual({ height: 19 * 100 + 90 });
+    const sheet = preview(runPage('<style>p { color: blue }</style>'));
+    expect(findElement(sheet.root, 'r-0')!.placeholder).toEqual({ height: 19 * 100 + 90 });
+    expect(JSON.stringify(sheet)).toContain('color: blue');
+    expect(findElement(sheet.root, 'r-20')!.placeholder).toBeDefined();
+  });
 });
 
 describe('a long list read over several fills (D163)', () => {

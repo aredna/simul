@@ -144,6 +144,12 @@ import {
   type SourceShadowRootReader,
 } from './source-shadow-root';
 
+/**
+ * The first slice of the credential scan, in the task that installs the
+ * page script (D169).
+ */
+const FIRST_SECRET_SCAN_SLICE_MS = 10;
+
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   readonly #ids = new WeakMap<Node, number>();
   readonly #nodes = new Map<number, WeakRef<Node>>();
@@ -383,9 +389,10 @@ export function installHtmlMirrorSourceBridge(
   // task on a page of 54,000 elements. A small page is scanned in this task.
   // The sessions below read nothing before it is done; meanwhile the
   // observer above keeps what the page changes in the ledger. The live
-  // passes' slice: the first one shares its task with the compiling of
-  // this script and the setup above, 50 ms in all with a slice of 35
-  // (D165).
+  // passes' slice, except the first: it shares its task with the compiling
+  // of this script and the setup above, 50–61 ms in all with a slice of 30
+  // on a page of 54,000 elements (D165), so it gets 10 ms, which a small
+  // page's scan still fits in (D169).
   const secretScan = startSourceDocumentSecretScan(
     sourceDocument,
     sourceWindow,
@@ -394,6 +401,7 @@ export function installHtmlMirrorSourceBridge(
       now: environment.now,
       yield: environment.yieldToMain ?? yieldToMain,
       budgetMs: LIVE_SLICE_BUDGET_MS,
+      firstBudgetMs: FIRST_SECRET_SCAN_SLICE_MS,
     }),
   );
   if (!secretObserver) {

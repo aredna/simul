@@ -895,7 +895,7 @@ describe('disabled OCR production profile', () => {
     expect(validation.pdfjs).toBe(true);
     expect(validation.manifest.version).toBe('0.6.7');
     expect(validation.manifest.version_name).toBe(
-      '0.6.7 beta v.20261121.2',
+      '0.6.7 beta v.20261121.3',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest.content_security_policy).toEqual({
@@ -1317,7 +1317,7 @@ describe('public and dev editions', () => {
     const publicManifest = JSON.parse(
       await readFile('dist/chrome-unpacked/manifest.json', 'utf8'),
     );
-    expect(publicManifest.version_name).toBe('0.6.7 beta v.20261121.2');
+    expect(publicManifest.version_name).toBe('0.6.7 beta v.20261121.3');
 
     const publicHtml = await readFile('dist/chrome-unpacked/sidepanel.html', 'utf8');
     for (const marker of PUBLIC_EDITION_FORBIDDEN_MARKERS) {
@@ -1343,7 +1343,7 @@ describe('public and dev editions', () => {
       const devManifest = JSON.parse(
         await readFile('dist/chrome-dev/manifest.json', 'utf8'),
       );
-      expect(devManifest.version_name).toBe('0.6.7 beta v.20261121.2 dev');
+      expect(devManifest.version_name).toBe('0.6.7 beta v.20261121.3 dev');
       expect(devManifest.permissions).toEqual(publicManifest.permissions);
       expect(devManifest.host_permissions)
         .toEqual(publicManifest.host_permissions);

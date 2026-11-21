@@ -116,6 +116,25 @@ function secretMarks(
 }
 
 describe('slice clock (D163)', () => {
+  it('gives a first slice its own budget, then the usual one (D169)', async () => {
+    let time = 0;
+    const clock = createSliceClock({
+      budgetMs: 30,
+      firstBudgetMs: 10,
+      now: () => time,
+      yield: async () => undefined,
+    });
+    time = 9;
+    expect(clock.expired()).toBe(false);
+    time = 10;
+    expect(clock.expired()).toBe(true);
+    await clock.next();
+    time = 39;
+    expect(clock.expired()).toBe(false);
+    time = 40;
+    expect(clock.expired()).toBe(true);
+  });
+
   it('runs out at its budget and starts again after each yield', async () => {
     let time = 100;
     const yields: number[] = [];

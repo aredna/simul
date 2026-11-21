@@ -105,6 +105,11 @@ export interface SliceClock {
 
 export interface SliceClockOptions {
   readonly budgetMs?: number;
+  /**
+   * The first slice's budget when it differs: a first slice that shares its
+   * task with other work (D169).
+   */
+  readonly firstBudgetMs?: number;
   /** `performance.now` by default; tests pass a clock they move. */
   readonly now?: () => number;
   /** `yieldToMain` by default; tests pass one they resolve. */
@@ -118,16 +123,18 @@ export function createSliceClock(options: SliceClockOptions = {}): SliceClock {
   const yieldOnce = options.yield ?? yieldToMain;
   let started = now();
   let yields = 0;
+  let sliceBudgetMs = options.firstBudgetMs ?? budgetMs;
   return {
     budgetMs,
     get yields() {
       return yields;
     },
-    expired: () => now() - started >= budgetMs,
+    expired: () => now() - started >= sliceBudgetMs,
     next: async () => {
       yields += 1;
       await yieldOnce();
       started = now();
+      sliceBudgetMs = budgetMs;
     },
   };
 }

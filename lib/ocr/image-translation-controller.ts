@@ -66,6 +66,8 @@ import {
 import { decideSmallImageEligibility } from './small-image-policy';
 import {
   isImageSourceUnavailableError,
+  ACCESSIBILITY_TEXT_REFUSED,
+  NO_ACCESSIBILITY_TEXT,
   type ImageSourceLease,
 } from './image-source-client';
 import type { ImageTextProviderId } from './known-provider-ids';
@@ -623,9 +625,24 @@ interface CachedLanguageDetection {
  * revisions, and whether it answers the image without a job (D167).
  */
 interface KeptWholeImageResult {
-  readonly projection: ImageOverlayProjection;
+  /** Absent for a confirmed "no text": nothing goes over the image (D168). */
+  readonly projection?: ImageOverlayProjection;
   readonly finalConfigurationKey: string;
   readonly answers: boolean;
+}
+
+/**
+ * What the last read of an image's label found, for its content revision
+ * and the admission revision it was read at (D168): its text (`label`), no
+ * label on an admitted image (`none`, which only another content revision
+ * changes), or a read the tab did not admit (`refused`). A read that was not
+ * answered is not kept.
+ */
+interface ImageLabelRead {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly contentRevision: number;
+  readonly admissionRevision: number | undefined;
+  readonly outcome: 'label' | 'none' | 'refused';
 }
 
 /** Capacity-one, opt-in orchestration from source image facts to replay overlays. */
@@ -639,6 +656,7 @@ export class ImageTranslationController {
   readonly #projectedOrdinals = new Map<number, number>();
   readonly #retainedProjections = new Map<number, ImageOverlayProjection>();
   readonly #retainedEvidence = new Map<number, RetainedImageEvidence>();
+  readonly #labelReads = new Map<number, ImageLabelRead>();
   readonly #retainedFinalAnalyses = new Map<
     number,
     RetainedFinalImageAnalysis
@@ -1548,7 +1566,19 @@ export class ImageTranslationController {
             this.#projectedOrdinals.delete(change.descriptor.nodeId);
             this.#retainedProjections.delete(change.descriptor.nodeId);
             this.#deleteRetainedFinalAnalysis(change.descriptor.nodeId);
-            if (!kept || !this.#showKeptProjection(kept.projection)) {
+            if (answered && kept && !kept.projection) {
+              // A confirmed "no text": nothing goes over the image, and no
+              // job reads it again (D168).
+              this.#projector.remove(
+                change.descriptor.document,
+                change.descriptor.nodeId,
+              );
+              this.#forgetClippedLook(change.descriptor.nodeId);
+              this.environment.onDiagnostic?.('image-result-kept');
+            } else if (
+              !kept?.projection ||
+              !this.#showKeptProjection(kept.projection)
+            ) {
               this.#projector.remove(
                 change.descriptor.document,
                 change.descriptor.nodeId,
@@ -1584,6 +1614,7 @@ export class ImageTranslationController {
         change.nodeId,
       ) || invalidatedAutoResolution;
       this.#descriptors.delete(change.nodeId);
+      this.#labelReads.delete(change.nodeId);
       this.#projectedHashes.delete(change.nodeId);
       this.#projectedOrdinals.delete(change.nodeId);
       this.#retainedProjections.delete(change.nodeId);
@@ -3283,7 +3314,20 @@ export class ImageTranslationController {
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Accessibility evidence became stale.', 'AbortError');
     }
-    if (!evidence) {
+    if (
+      !evidence ||
+      evidence === NO_ACCESSIBILITY_TEXT ||
+      evidence === ACCESSIBILITY_TEXT_REFUSED
+    ) {
+      // A read that was not answered says nothing of the label (D168).
+      if (evidence) {
+        this.#rememberLabelRead(
+          job.descriptor,
+          evidence === NO_ACCESSIBILITY_TEXT ? 'none' : 'refused',
+        );
+      } else {
+        this.#labelReads.delete(job.descriptor.nodeId);
+      }
       this.#rememberSemanticAbsence(job.descriptor);
       this.environment.onDiagnostic?.('accessibility-text-empty');
       return undefined;
@@ -3304,6 +3348,9 @@ export class ImageTranslationController {
       throw new DOMException('Accessibility evidence became stale.', 'AbortError');
     }
     if (!sourceLanguage) {
+      // A label whose language is not known now may be known later: what
+      // the read found is not kept (D168).
+      this.#labelReads.delete(job.descriptor.nodeId);
       this.#rememberSemanticAbsence(job.descriptor);
       this.environment.onDiagnostic?.('accessibility-text-empty');
       return undefined;
@@ -3358,7 +3405,49 @@ export class ImageTranslationController {
       }),
     });
     this.#rememberSemanticCandidate(job.descriptor, candidate);
+    this.#rememberLabelRead(job.descriptor, 'label');
     return candidate;
+  }
+
+  #rememberLabelRead(
+    descriptor: SourceImageDescriptor,
+    outcome: ImageLabelRead['outcome'],
+  ): void {
+    this.#labelReads.set(descriptor.nodeId, Object.freeze({
+      document: descriptor.document,
+      contentRevision: descriptor.contentRevision,
+      admissionRevision: descriptor.admissionRevision,
+      outcome,
+    }));
+  }
+
+  /**
+   * Whether the image's label would be read now as it was for its kept
+   * result (D168): the job reads it before it looks for that result, and a
+   * label found, lost or refused leads it elsewhere. A label read as text,
+   * or a read the tab refused, stays as it was only while the admission
+   * revision does (a protected element the scroll moves over the image
+   * refuses the label); "no label" stays while the content does. With the
+   * label method off nothing is read.
+   */
+  #labelReadUnchanged(
+    descriptor: SourceImageDescriptor,
+    steps: readonly ImageReadingExecutionStep[],
+    labelUsed: boolean,
+  ): boolean {
+    if (!steps.some((step) => step.kind === 'accessibility-text')) {
+      return !labelUsed;
+    }
+    const read = this.#labelReads.get(descriptor.nodeId);
+    if (
+      !read ||
+      !sameSourceDocument(read.document, descriptor.document) ||
+      read.contentRevision !== descriptor.contentRevision
+    ) return false;
+    if (read.outcome === 'none') return !labelUsed;
+    if ((read.outcome === 'label') !== labelUsed) return false;
+    return read.admissionRevision !== undefined &&
+      read.admissionRevision === descriptor.admissionRevision;
   }
 
   async #commitAccessibilityCandidate(
@@ -4122,6 +4211,7 @@ export class ImageTranslationController {
   #clearRetainedEvidence(): void {
     this.#retainedEvidence.clear();
     this.#retainedEvidenceWeight = 0;
+    this.#labelReads.clear();
   }
 
   #finalAnalysisConfigurationKey(
@@ -4129,12 +4219,24 @@ export class ImageTranslationController {
     semantic?: PendingSemanticImageEvidence,
   ): string {
     return [
+      this.#finalAnalysisSettingsKey(steps),
+      semantic?.identity ?? '',
+      semantic?.rankable.repeated ? 'repeated' : 'unique',
+    ].join('\u0001');
+  }
+
+  /**
+   * The part of a final analysis key that the settings in force decide, the
+   * rest being the image's label (D168).
+   */
+  #finalAnalysisSettingsKey(
+    steps: readonly ImageReadingExecutionStep[],
+  ): string {
+    return [
       ORIGIN_FINAL_ANALYSIS_SCHEMA_VERSION,
       this.#pairKey ?? '',
       this.#evidenceConfigurationKey(),
       flattenedReadingMethods(steps).join(','),
-      semantic?.identity ?? '',
-      semantic?.rankable.repeated ? 'repeated' : 'unique',
     ].join('\u0001');
   }
 
@@ -4289,56 +4391,92 @@ export class ImageTranslationController {
    * queued one that read its label, found this result and put it back, and
    * the panel showed "Recognizing visible image text" for it at each step of
    * the scroll. It answers only when the job could not decide otherwise: a
-   * confirmed result of the image read whole, under the reading settings,
-   * language pair and methods in force, made without an accessible label
-   * (a label is read by the job, and could rank differently); not a picture
-   * CSS gives (its looks are owed by jobs), not a sample of the Auto
-   * language probe (a new crop is forgotten as a sample), and not while the
-   * page's language still holds image work back. Everything that is not
-   * answered keeps its job as before.
+   * confirmed result for the reading settings, language pair and methods in
+   * force, and a label that would be read as it was (`#labelReadUnchanged`);
+   * not a sample of the Auto language probe (a new crop is forgotten as a
+   * sample), and not while the page's language still holds image work back.
+   * Since D168 that result may be the words read from the pixels, the
+   * image's label when it won, or a confirmed "no text"; a picture CSS
+   * gives is answered by its number as its job would answer it.
+   * Everything that is not answered keeps its job as before.
    */
   #keptWholeImageResult(
     descriptor: SourceImageDescriptor,
   ): KeptWholeImageResult | undefined {
-    const last = this.#retainedFinalAnalyses.get(descriptor.nodeId);
     const pairKey = this.#pairKey;
-    if (
-      !last ||
-      !pairKey ||
-      last.expiresAt <= this.#now() ||
-      !sameSourceDocument(last.document, descriptor.document) ||
-      last.contentRevision !== descriptor.contentRevision
-    ) return undefined;
+    if (!pairKey) return undefined;
+    const steps = imageReadingExecutionPlan(
+      this.#configuration.methodOrder ?? this.#configuration.providerOrder,
+      this.#configuration.disabledMethodIds ?? [],
+      this.#configuration.providerOrder,
+    );
+    const settingsKey = this.#finalAnalysisSettingsKey(steps);
+    const storedLast = this.#retainedFinalAnalyses.get(descriptor.nodeId);
+    const last = storedLast &&
+        storedLast.expiresAt > this.#now() &&
+        sameSourceDocument(storedLast.document, descriptor.document) &&
+        storedLast.contentRevision === descriptor.contentRevision
+      ? storedLast
+      : undefined;
     const anchor = this.environment.resolveAnchor(
       descriptor.document,
       descriptor.nodeId,
     );
+    if (!anchor) return undefined;
+    // An image with no words kept for it of its own may have a confirmed
+    // "no text" kept by its identity, which a read with no label made
+    // (D168). The key is the one such a read is kept under.
+    const finalConfigurationKey = last?.finalConfigurationKey ??
+      this.#finalAnalysisConfigurationKey(steps);
     const kept = this.#findImageIdentityAnalysis(this.#imageIdentityKeys(
       anchor,
       descriptor,
       descriptor.renderedWidth,
       descriptor.renderedHeight,
-      last.finalConfigurationKey,
+      finalConfigurationKey,
     ))?.analysis;
-    if (!anchor || !kept?.projection || kept.expiresAt <= this.#now()) {
-      return undefined;
-    }
-    const answers = !kept.unconfirmed &&
-      !last.unconfirmed &&
-      kept.projection.evidenceKind === 'ocr' &&
-      descriptor.cssPicture === undefined &&
+    const current = (kept?.expiresAt ?? 0) > this.#now() ? kept : undefined;
+    const labelUsed = !finalConfigurationKey.startsWith(
+      `${settingsKey}\u0001\u0001`,
+    );
+    const answerable = (): boolean =>
+      finalConfigurationKey.startsWith(`${settingsKey}\u0001`) &&
       !this.#probeSampleIdentities.has(descriptor.nodeId) &&
       !this.#pageLanguageResolutionBlocksWork() &&
-      last.finalConfigurationKey === this.#finalAnalysisConfigurationKey(
-        imageReadingExecutionPlan(
-          this.#configuration.methodOrder ?? this.#configuration.providerOrder,
-          this.#configuration.disabledMethodIds ?? [],
-          this.#configuration.providerOrder,
-        ),
-      );
+      this.#labelReadUnchanged(descriptor, steps, labelUsed);
+    let projection: ImageOverlayProjection | undefined;
+    let answers: boolean;
+    if (last && current?.projection) {
+      // The words read from the pixels, kept by the image's identity.
+      projection = current.projection;
+      answers = !current.unconfirmed && !last.unconfirmed && answerable();
+    } else if (
+      last?.projection.evidenceKind === 'semantic' &&
+      last.projection.regions.length > 0
+    ) {
+      // The image's label won: its translation is put back only as the
+      // answer, when the label would be read as it was (D168).
+      if (last.unconfirmed || !answerable()) return undefined;
+      projection = last.projection;
+      answers = true;
+    } else if (
+      !last &&
+      current &&
+      !current.projection &&
+      (current.returnLooks ?? 0) === 0
+    ) {
+      // A confirmed "no text". A picture CSS gives keeps its look on return
+      // (CSS_PICTURE_EMPTY_RETURN_LOOKS) until it has had it: its number
+      // is given before the tab has painted it, so the first read may have
+      // seen nothing yet.
+      if (!answerable()) return undefined;
+      return Object.freeze({ finalConfigurationKey, answers: true });
+    } else {
+      return undefined;
+    }
     return Object.freeze({
       projection: Object.freeze({
-        ...kept.projection,
+        ...projection,
         document: descriptor.document,
         nodeId: descriptor.nodeId,
         contentRevision: descriptor.contentRevision,
@@ -4347,7 +4485,7 @@ export class ImageTranslationController {
         pairEpoch: this.#pairEpoch,
         pairKey,
       }),
-      finalConfigurationKey: last.finalConfigurationKey,
+      finalConfigurationKey,
       answers,
     });
   }
@@ -5002,8 +5140,9 @@ export class ImageTranslationController {
       }));
     }
     if (this.#projector.project(projection)) {
+      // Counted, and carried by the next report of the cache; one line per
+      // image per scroll frame was only noise in the log (D168).
       this.#originFinalRebinds += 1;
-      this.#reportOriginFinalCache('rebind');
       return true;
     }
     this.#projectedHashes.delete(descriptor.nodeId);
