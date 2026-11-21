@@ -186,6 +186,31 @@ export class ImageScanScheduler {
     return result;
   }
 
+  /**
+   * An upsert the caller can already answer: the same content, whose whole
+   * result is kept and is shown again as it arrives (D167). It is recorded
+   * as complete, so no job is queued, no queued peer is pushed out and no
+   * active job is preempted for it. Anything else (another content, a rerun
+   * the reader asked for, an image the scheduler does not know) is applied
+   * as an ordinary change.
+   */
+  applyAnswered(change: SourceImageChange): ImageScanUpdateResult {
+    const parsed = readSourceImageChange(change);
+    if (!parsed || parsed.kind !== 'upsert') return this.apply(change);
+    const previous = this.#records.get(parsed.descriptor.nodeId);
+    if (
+      !previous ||
+      !sameSourceDocument(parsed.descriptor.document, this.#document) ||
+      previous.descriptor.contentRevision !==
+        parsed.descriptor.contentRevision ||
+      this.#manualOverrides.get(parsed.descriptor.nodeId) ===
+        parsed.descriptor.contentRevision
+    ) return this.apply(change);
+    const result = this.#upsert(parsed.descriptor, true);
+    this.#reconsiderOverflowed();
+    return result;
+  }
+
   overrideCurrent(
     document: ReplicaSourceDocumentIdentity,
     nodeId: number,
@@ -378,7 +403,10 @@ export class ImageScanScheduler {
     this.#dispatchOrder = 0;
   }
 
-  #upsert(descriptor: SourceImageDescriptor): ImageScanUpdateResult {
+  #upsert(
+    descriptor: SourceImageDescriptor,
+    answered = false,
+  ): ImageScanUpdateResult {
     const previous = this.#records.get(descriptor.nodeId);
     if (!previous && this.#records.size >= this.#maxRecords) {
       return { status: 'overflow' };
@@ -404,8 +432,10 @@ export class ImageScanScheduler {
         descriptor.contentRevision !== before.contentRevision;
       const captureChanged = descriptorCaptureRevision(descriptor) !==
         descriptorCaptureRevision(before);
-      const carryCompletedObservation = !contentChanged && !captureChanged &&
-        recordHasCurrentCompletion(previous);
+      const carryCompletedObservation = !contentChanged && (
+        answered ||
+        (!captureChanged && recordHasCurrentCompletion(previous))
+      );
       if (contentChanged) {
         this.#cancelNode(descriptor.nodeId, 'superseded');
         this.#manualOverrides.delete(descriptor.nodeId);

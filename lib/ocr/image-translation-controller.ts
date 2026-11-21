@@ -202,6 +202,7 @@ export type ImageTranslationDiagnosticStage =
   | 'accessibility-text-complete'
   | 'auto-language-probe-reopened'
   | 'image-identity-reused'
+  | 'image-result-kept'
   | 'projected';
 
 type ImageCaptureDeferralReason = Extract<
@@ -420,6 +421,12 @@ export interface ImageTranslationControllerEnvironment {
     signal?: AbortSignal,
   ) => Promise<EvidenceJudgeVerdict | undefined>;
   readonly onDiagnostic?: (diagnostic: ImageTranslationDiagnostic) => void;
+  /**
+   * True once a run recognizes or translates something, false when that run
+   * ends. A run that only puts kept results back is not announced (D167):
+   * the panel's "Recognizing visible image text" and its toolbar bar are for
+   * work the reader waits on, not for an image scrolled back into view.
+   */
   readonly onBusyChange?: (busy: boolean) => void;
   readonly detectLanguage?: (
     text: string,
@@ -611,6 +618,16 @@ interface CachedLanguageDetection {
   readonly expiresAt: number;
 }
 
+/**
+ * A whole image's kept result, as a projection for the image's current
+ * revisions, and whether it answers the image without a job (D167).
+ */
+interface KeptWholeImageResult {
+  readonly projection: ImageOverlayProjection;
+  readonly finalConfigurationKey: string;
+  readonly answers: boolean;
+}
+
 /** Capacity-one, opt-in orchestration from source image facts to replay overlays. */
 export class ImageTranslationController {
   readonly #projector: ImageOverlayProjector;
@@ -708,6 +725,8 @@ export class ImageTranslationController {
   #activeAbortController: AbortController | undefined;
   #quietTimer: ReturnType<typeof setTimeout> | undefined;
   #processing = false;
+  /** Whether this run has told the panel it is busy (D167). */
+  #workAnnounced = false;
   #disposed = false;
   #sourceVersion = 0;
   #processingVersion = 0;
@@ -1381,7 +1400,18 @@ export class ImageTranslationController {
       !imageTranslationSourceObservationEnabled(this.#configuration)
     ) return;
     const scheduler = this.#scheduler;
-    const scheduling = scheduler.apply(change);
+    // An image read whole that scrolls back into view (its crop changed, its
+    // content did not) is answered from its kept result before the
+    // scheduler sees it, so no job is queued for it (D167).
+    const kept = change.kind === 'upsert'
+      ? this.#keptResultForCaptureChange(change.descriptor)
+      : undefined;
+    const scheduling = kept?.answers
+      ? scheduler.applyAnswered(change)
+      : scheduler.apply(change);
+    // The scheduler applies it as an ordinary change when the reader asked
+    // for this image to be read again; then its job runs.
+    const answered = kept?.answers === true && scheduling.status === 'coalesced';
     if (change.kind === 'upsert') {
       this.environment.onDiagnostic?.('image-discovered');
       const schedulingStage = scheduling.status === 'queued'
@@ -1510,18 +1540,30 @@ export class ImageTranslationController {
           if (captureChanged) {
             // The image's crop moved, or something else about its capture.
             // What is kept for the whole image is still its text: it stays
-            // over the image while the job that confirms it waits its turn,
-            // which may be behind another image's capture.
-            const kept = this.#keptWholeImageProjection(change.descriptor);
+            // over the image, in the same overlay. When it is the result the
+            // image's job would end at, it is the answer and no job was
+            // queued (D167); otherwise the job that confirms it waits its
+            // turn, which may be behind another image's capture.
             this.#projectedHashes.delete(change.descriptor.nodeId);
             this.#projectedOrdinals.delete(change.descriptor.nodeId);
             this.#retainedProjections.delete(change.descriptor.nodeId);
             this.#deleteRetainedFinalAnalysis(change.descriptor.nodeId);
-            if (!kept || !this.#showKeptProjection(kept)) {
+            if (!kept || !this.#showKeptProjection(kept.projection)) {
               this.#projector.remove(
                 change.descriptor.document,
                 change.descriptor.nodeId,
               );
+              // It could not be put back over the image (its anchor in the
+              // mirror is gone, say): the image is read as before.
+              if (answered) scheduler.requeueCurrent(change.descriptor);
+            } else if (answered) {
+              this.#forgetClippedLook(change.descriptor.nodeId);
+              this.#rememberFinalAnalysis(
+                change.descriptor,
+                kept.projection,
+                kept.finalConfigurationKey,
+              );
+              this.environment.onDiagnostic?.('image-result-kept');
             }
           } else if (!this.#rebaseRetainedObservation(change.descriptor)) {
             // A missing/replaced replay anchor cannot inherit projection
@@ -3477,6 +3519,7 @@ export class ImageTranslationController {
           source,
           async () => {
             if (!session) {
+              this.#announceWork();
               onTranslationStarted();
               session = await this.environment.translationProvider.createSession(pair, {
                 signal,
@@ -4217,14 +4260,46 @@ export class ImageTranslationController {
   }
 
   /**
+   * What is kept for an image whose upsert changes its capture and not its
+   * content, the change `#onSourceChange` shows the kept words for; nothing
+   * for any other change. Read before the change is applied.
+   */
+  #keptResultForCaptureChange(
+    descriptor: SourceImageDescriptor,
+  ): KeptWholeImageResult | undefined {
+    const previous = this.#descriptors.get(descriptor.nodeId);
+    if (
+      !previous ||
+      previous.observationRevision === descriptor.observationRevision ||
+      previous.contentRevision !== descriptor.contentRevision ||
+      descriptorCaptureRevision(previous) ===
+        descriptorCaptureRevision(descriptor)
+    ) return undefined;
+    return this.#keptWholeImageResult(descriptor);
+  }
+
+  /**
    * The whole-image result kept for an image whose capture just changed and
    * whose content did not, as a projection for its new revisions. It is
-   * looked up as the image's next job will look it up, with the reading
-   * settings of the image's last result; that job still runs and decides.
+   * looked up as the image's next job would look it up, with the reading
+   * settings of the image's last result.
+   *
+   * `answers` says that it is the very result that job would end at, so no
+   * job is queued at all (D167): before, every image scrolled back into view
+   * queued one that read its label, found this result and put it back, and
+   * the panel showed "Recognizing visible image text" for it at each step of
+   * the scroll. It answers only when the job could not decide otherwise: a
+   * confirmed result of the image read whole, under the reading settings,
+   * language pair and methods in force, made without an accessible label
+   * (a label is read by the job, and could rank differently); not a picture
+   * CSS gives (its looks are owed by jobs), not a sample of the Auto
+   * language probe (a new crop is forgotten as a sample), and not while the
+   * page's language still holds image work back. Everything that is not
+   * answered keeps its job as before.
    */
-  #keptWholeImageProjection(
+  #keptWholeImageResult(
     descriptor: SourceImageDescriptor,
-  ): ImageOverlayProjection | undefined {
+  ): KeptWholeImageResult | undefined {
     const last = this.#retainedFinalAnalyses.get(descriptor.nodeId);
     const pairKey = this.#pairKey;
     if (
@@ -4248,15 +4323,32 @@ export class ImageTranslationController {
     if (!anchor || !kept?.projection || kept.expiresAt <= this.#now()) {
       return undefined;
     }
+    const answers = !kept.unconfirmed &&
+      !last.unconfirmed &&
+      kept.projection.evidenceKind === 'ocr' &&
+      descriptor.cssPicture === undefined &&
+      !this.#probeSampleIdentities.has(descriptor.nodeId) &&
+      !this.#pageLanguageResolutionBlocksWork() &&
+      last.finalConfigurationKey === this.#finalAnalysisConfigurationKey(
+        imageReadingExecutionPlan(
+          this.#configuration.methodOrder ?? this.#configuration.providerOrder,
+          this.#configuration.disabledMethodIds ?? [],
+          this.#configuration.providerOrder,
+        ),
+      );
     return Object.freeze({
-      ...kept.projection,
-      document: descriptor.document,
-      nodeId: descriptor.nodeId,
-      contentRevision: descriptor.contentRevision,
-      observationRevision: descriptor.observationRevision,
-      replayLease: anchor.replayLease,
-      pairEpoch: this.#pairEpoch,
-      pairKey,
+      projection: Object.freeze({
+        ...kept.projection,
+        document: descriptor.document,
+        nodeId: descriptor.nodeId,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        replayLease: anchor.replayLease,
+        pairEpoch: this.#pairEpoch,
+        pairKey,
+      }),
+      finalConfigurationKey: last.finalConfigurationKey,
+      answers,
     });
   }
 
@@ -5396,6 +5488,7 @@ export class ImageTranslationController {
   }
 
   #recognizer(): ImageRecognitionCoordinator {
+    this.#announceWork();
     if (!this.#recognition) {
       this.#recognition = this.environment.createRecognitionCoordinator(
         this.#configuration.resetEpoch,
@@ -6267,7 +6360,23 @@ export class ImageTranslationController {
   #setProcessing(value: boolean): void {
     if (this.#processing === value) return;
     this.#processing = value;
-    this.environment.onBusyChange?.(value);
+    if (!value && this.#workAnnounced) {
+      this.#workAnnounced = false;
+      this.environment.onBusyChange?.(false);
+    }
+  }
+
+  /**
+   * The run is about to recognize or translate: only now is the panel told
+   * it is busy. Before D167 every run was announced as it began, so a run
+   * that answered images scrolled back into view from what was kept, with
+   * no capture, recognition or translation, still flashed the progress bar
+   * and the Cancel button at each step of a scroll.
+   */
+  #announceWork(): void {
+    if (!this.#processing || this.#workAnnounced) return;
+    this.#workAnnounced = true;
+    this.environment.onBusyChange?.(true);
   }
 }
 

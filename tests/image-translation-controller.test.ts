@@ -3936,13 +3936,17 @@ describe('ImageTranslationController', () => {
     await vi.waitFor(() => expect(translate).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(controller.busy).toBe(false));
 
+    const beforeReturn = diagnostics.length;
     emitChange?.({
       kind: 'upsert',
       descriptor: { ...firstDescriptor, captureRevision: 2, observationRevision: 2 },
     });
-    await vi.waitFor(() =>
-      expect(diagnostics).toContain('image-identity-reused'));
-    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    // Answered from what is kept in the same turn, with no job (D167).
+    expect(diagnostics.slice(beforeReturn)).toContain('image-result-kept');
+    expect(controller.busy).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(controller.busy).toBe(false);
+    expect(diagnostics.slice(beforeReturn)).not.toContain('image-identity-reused');
     expect(document.querySelector('[data-simul-image-overlay="12"]')).not.toBeNull();
     expect(acquire).toHaveBeenCalledOnce();
     expect(recognize).toHaveBeenCalledOnce();
@@ -4122,6 +4126,193 @@ describe('ImageTranslationController', () => {
     });
     await vi.waitFor(() => expect(shown()).toBe('ja:Headline third'));
     expect(acquire).toHaveBeenCalledTimes(5);
+    controller.dispose();
+  });
+
+  it('keeps an image read whole over it when it scrolls back, with no job, no busy panel and the same overlay (D167)', async () => {
+    // The owner: scrolling over images already read looked like they were
+    // read again. Each new crop queued a job that found the kept result and
+    // put it back, and every run told the panel it was busy, which showed
+    // "Recognizing visible image text" and the toolbar's bar at each step.
+    const { document } = parseHTML('<html><body><img id="a"><img id="b"></body></html>');
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, id] of [[12, 'a'], [13, 'b']] as const) {
+      const image = document.getElementById(id) as unknown as HTMLImageElement;
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: `https://assets.example.test/${id}.png` },
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 0 },
+        naturalHeight: { configurable: true, value: 0 },
+      });
+      images.set(nodeId, image);
+    }
+    const at = (
+      nodeId: number,
+      revision: number,
+      more: Partial<SourceImageDescriptor> = {},
+    ): SourceImageDescriptor => ({
+      ...descriptor,
+      nodeId,
+      captureRevision: revision,
+      observationRevision: revision,
+      pictureRevision: 1,
+      ...more,
+    });
+    let picture = 'first';
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(
+          current,
+          `${current.nodeId}${['first', 'second'].indexOf(picture)}${current.renderedWidth}`
+            .padEnd(64, 'f'),
+        ),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    // Image 13 has no words; its "no text" is confirmed by a second read.
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(
+        pixels.descriptor.nodeId === 12 ? `Headline ${picture}` : '',
+        0.98,
+      ),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const translate = vi.fn(async (text: string) => `ja:${text}`);
+    const busy: boolean[] = [];
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => {
+          onChange({ kind: 'upsert', descriptor: at(12, 1) });
+          onChange({ kind: 'upsert', descriptor: at(13, 1) });
+        });
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({ translate, destroy: vi.fn() }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      onBusyChange: (value) => busy.push(value),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-first-background-prescan',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const overlay = () =>
+      document.querySelector('[data-simul-image-overlay="12"]');
+    const settle = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect(controller.busy).toBe(false));
+    };
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(3));
+    await settle();
+    expect(overlayText(overlay())).toBe('ja:Headline first');
+    // The first reads were work, and the panel was told so.
+    expect(busy[0]).toBe(true);
+    expect(busy.at(-1)).toBe(false);
+    busy.length = 0;
+    const mounted = overlay();
+    const counts = () => [
+      acquire.mock.calls.length,
+      recognize.mock.calls.length,
+      translate.mock.calls.length,
+    ];
+    const before = counts();
+
+    // Image 12 scrolls off the top of the view and comes back: cut, gone,
+    // cut, whole, each step a new crop of the same picture.
+    let revision = 1;
+    const steps: readonly SourceImageDescriptor['visibility'][] = [
+      'visible', 'near', 'background', 'near', 'visible', 'visible',
+    ];
+    const sinceSteps = diagnostics.length;
+    for (const visibility of steps) {
+      revision += 1;
+      emitChange?.({
+        kind: 'upsert',
+        descriptor: at(12, revision, { visibility }),
+      });
+      // Answered in the same turn: no job started, the same overlay, the
+      // same words.
+      expect(controller.busy).toBe(false);
+      expect(overlay()).toBe(mounted);
+      expect(overlayText(overlay())).toBe('ja:Headline first');
+      await settle();
+      expect(overlay()).toBe(mounted);
+    }
+    const sinceStepsDiagnostics = diagnostics.slice(sinceSteps);
+    expect(sinceStepsDiagnostics.filter((entry) => entry === 'image-result-kept'))
+      .toHaveLength(steps.length);
+    expect(sinceStepsDiagnostics).not.toContain('image-queued');
+    expect(sinceStepsDiagnostics).not.toContain('image-identity-reused');
+    expect(sinceStepsDiagnostics).not.toContain('projected');
+    expect(counts()).toEqual(before);
+    expect(busy).toEqual([]);
+
+    // Image 13's kept "no text" is still put back by a job, which runs with
+    // no capture, recognition or translation, and so is not announced.
+    revision += 1;
+    emitChange?.({ kind: 'upsert', descriptor: at(13, revision) });
+    expect(controller.busy).toBe(true);
+    await settle();
+    expect(diagnostics.at(-1)).toBe('no-text-found');
+    expect(counts()).toEqual(before);
+    expect(busy).toEqual([]);
+
+    // Another picture (a style, a cover that left) is read again, as work.
+    picture = 'second';
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, { pictureRevision: 2 }),
+    });
+    await vi.waitFor(() =>
+      expect(overlayText(overlay())).toBe('ja:Headline second'));
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(before[0]! + 1);
+    expect(busy).toEqual([true, false]);
+    busy.length = 0;
+    // So is the image at another size.
+    revision += 1;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: at(12, revision, {
+        pictureRevision: 2,
+        renderedWidth: descriptor.renderedWidth / 2,
+        renderedHeight: descriptor.renderedHeight / 2,
+      }),
+    });
+    expect(controller.busy).toBe(true);
+    await settle();
+    expect(acquire).toHaveBeenCalledTimes(before[0]! + 2);
+    expect(busy).toEqual([true, false]);
     controller.dispose();
   });
 
@@ -4345,8 +4536,12 @@ describe('ImageTranslationController', () => {
     const shown = () => overlayText(
       document.querySelector('[data-simul-image-overlay="12"]'),
     );
+    // Reused by a job, or answered with no job when the image has its own
+    // file again (D167).
     const reused = () =>
-      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+      diagnostics.filter((entry) =>
+        entry === 'image-identity-reused' || entry === 'image-result-kept'
+      ).length;
     const settle = async () => {
       await vi.waitFor(() => expect(controller.busy).toBe(false));
     };
@@ -5435,8 +5630,12 @@ describe('ImageTranslationController', () => {
     }));
     const readFile = vi.fn(async () => page);
     const diagnostics: unknown[] = [];
+    // Reused by the image's job, or answered with no job when only its crop
+    // changed (D167).
     const reused = () =>
-      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+      diagnostics.filter((entry) =>
+        entry === 'image-identity-reused' || entry === 'image-result-kept'
+      ).length;
     const controller = new ImageTranslationController({
       openSource: async (_request, onChange) => {
         emitChange = onChange;
@@ -5489,10 +5688,16 @@ describe('ImageTranslationController', () => {
       captureRevision: number,
       more: Partial<SourceImageDescriptor> = {},
     ) => {
+      const before = diagnostics.length;
       emitChange?.({
         kind: 'upsert',
         descriptor: { ...at(contentRevision, captureRevision), ...more },
       });
+      // An answer from what is kept comes in the same turn and runs no job.
+      if (diagnostics.slice(before).includes('image-result-kept')) {
+        expect(controller.busy).toBe(false);
+        return;
+      }
       await vi.waitFor(() => expect(controller.busy).toBe(true));
       await vi.waitFor(() => expect(controller.busy).toBe(false));
     };
@@ -5663,6 +5868,8 @@ describe('ImageTranslationController', () => {
     );
     const reused = () =>
       diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    const answered = () =>
+      diagnostics.filter((entry) => entry === 'image-result-kept').length;
     controller.activateReplica(request, 3, 1);
     await vi.waitFor(() => expect(shown(13)).toBe('ja:Captured words'));
     await vi.waitFor(() => expect(controller.busy).toBe(false));
@@ -5681,8 +5888,10 @@ describe('ImageTranslationController', () => {
       kind: 'upsert',
       descriptor: { ...kept, captureRevision: 2, observationRevision: 2 },
     });
-    // At once, in the same turn: the kept words are over the first image.
+    // At once, in the same turn: the kept words are over the first image,
+    // and they are its answer, with no job queued for it (D167).
     expect(shown(12)).toBe('ja:Kept words');
+    expect(answered()).toBe(1);
     // The image that has nothing kept is without words until it is read.
     expect(shown(13)).toBeUndefined();
     expect(reused()).toBe(0);
@@ -5690,11 +5899,12 @@ describe('ImageTranslationController', () => {
     expect(shown(12)).toBe('ja:Kept words');
     expect(controller.busy).toBe(true);
 
-    // The capture ends; the first image's own job then confirms its result,
-    // with no capture.
+    // The capture ends; the second image is read, and the first one has no
+    // job left to run.
     release();
-    await vi.waitFor(() => expect(reused()).toBe(1));
     await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(reused()).toBe(0);
+    expect(answered()).toBe(1);
     expect(shown(12)).toBe('ja:Kept words');
     expect(shown(13)).toBe('ja:Captured words');
     expect(acquire.mock.calls.filter(([current]) => current.nodeId === 12))

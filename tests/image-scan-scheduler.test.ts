@@ -580,6 +580,58 @@ describe('ImageScanScheduler', () => {
       observationRevision: 2,
     })))).toMatchObject({ status: 'queued' });
   });
+
+  it('records an image answered from its kept result as complete, without a job or a preemption (D167)', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-first-background-prescan',
+      skipSmallImages: false,
+    });
+    // Image 1 was read; image 2, near the view, is being read.
+    scheduler.apply(upsert(descriptor(1, 'visible', { captureRevision: 1 })));
+    expect(scheduler.settle(scheduler.takeNext()!)).toBe(true);
+    scheduler.apply(upsert(descriptor(2, 'near', { captureRevision: 1 })));
+    const reading = scheduler.takeNext()!;
+    expect(reading.descriptor.nodeId).toBe(2);
+
+    // Image 1 scrolls back into view with a new crop: an ordinary change
+    // would queue it ahead of image 2 and preempt image 2's job.
+    const back = descriptor(1, 'visible', {
+      captureRevision: 2,
+      observationRevision: 2,
+    });
+    expect(scheduler.applyAnswered(upsert(back))).toEqual({ status: 'coalesced' });
+    expect(scheduler.queued).toBe(0);
+    expect(scheduler.active).toBe(1);
+    expect(scheduler.drainCancellations()).toEqual([]);
+    expect(scheduler.settle(reading)).toBe(true);
+    expect(scheduler.takeNext()).toBeUndefined();
+
+    // A later crop with nothing kept is an ordinary change again.
+    expect(scheduler.apply(upsert(descriptor(1, 'visible', {
+      captureRevision: 3,
+      observationRevision: 3,
+    })))).toEqual({ status: 'queued' });
+
+    // Another content, or a read the reader asked for, is never answered.
+    expect(scheduler.applyAnswered(upsert(descriptor(1, 'visible', {
+      contentRevision: 2,
+      captureRevision: 4,
+      observationRevision: 4,
+    })))).toEqual({ status: 'queued' });
+    expect(scheduler.settle(scheduler.takeNext()!)).toBe(true);
+    expect(scheduler.overrideCurrent(documentIdentity, 1, 2)).toBe(true);
+    expect(scheduler.applyAnswered(upsert(descriptor(1, 'visible', {
+      contentRevision: 2,
+      captureRevision: 5,
+      observationRevision: 5,
+    })))).toEqual({ status: 'queued' });
+    // And a stale change is refused as by `apply`.
+    expect(scheduler.applyAnswered(upsert(descriptor(1, 'visible', {
+      contentRevision: 2,
+      captureRevision: 6,
+      observationRevision: 1,
+    })))).toEqual({ status: 'rejected' });
+  });
 });
 
 function descriptor(
