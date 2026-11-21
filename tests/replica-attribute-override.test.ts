@@ -34,6 +34,19 @@ describe('replica attribute overrides (D124)', () => {
     expect(pageAttribute(paragraph, 'lang')).toBe('fr');
   });
 
+  it('takes the page\'s attribute away while an override of nothing holds (D178)', () => {
+    const box = element('<div role="alert" class="a">Saved</div>');
+    setReplicaAttributeOverride(box, 'role', null);
+    expect(box.hasAttribute('role')).toBe(false);
+    expect(pageAttribute(box, 'role')).toBe('alert');
+    expect(pageAttributes(box)).toEqual([['class', 'a'], ['role', 'alert']]);
+    rewrite(box, [['role', 'status'], ['class', 'b']]);
+    expect(box.hasAttribute('role')).toBe(false);
+    expect(pageAttribute(box, 'role')).toBe('status');
+    clearReplicaAttributeOverride(box, 'role');
+    expect(box.getAttribute('role')).toBe('status');
+  });
+
   it('removes the attribute when the page had none', () => {
     const paragraph = element('<p>Hello</p>');
     setReplicaAttributeOverride(paragraph, 'lang', 'ja');

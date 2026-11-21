@@ -10,7 +10,8 @@
 interface AttributeOverride {
   /** What the page has for this attribute; `null` when it has none. */
   page: string | null;
-  value: string;
+  /** What shows; `null` takes the attribute away while the override holds. */
+  value: string | null;
   /** The namespace Simul writes the attribute in, if any. */
   namespace: string | null;
 }
@@ -25,7 +26,7 @@ const overrides = new WeakMap<Element, Map<string, AttributeOverride>>();
 export function setReplicaAttributeOverride(
   element: Element,
   name: string,
-  value: string,
+  value: string | null,
   namespace: string | null = null,
 ): void {
   let own = overrides.get(element);
@@ -101,8 +102,9 @@ function writeAttribute(
   element: Element,
   name: string,
   namespace: string | null,
-  value: string,
+  value: string | null,
 ): void {
-  if (namespace === null) element.setAttribute(name, value);
+  if (value === null) element.removeAttribute(name);
+  else if (namespace === null) element.setAttribute(name, value);
   else element.setAttributeNS(namespace, name, value);
 }

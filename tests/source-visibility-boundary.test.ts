@@ -700,6 +700,48 @@ describe('source visibility boundary index', () => {
     index.dispose();
   });
 
+  // D178: under a box declared hidden and painted, a panel that reopens.
+  it('takes a controlled panel put back on the page under a box declared hidden for a change', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <div id="wrap" aria-hidden="true">
+        <span id="toggle" class="shut"></span>
+        <button aria-controls="panel">Open</button>
+        <div id="panel">Reopened panel text</div>
+        <div id="plain">Not a panel</div>
+      </div></body></html>`);
+    const toggle = document.querySelector<HTMLElement>('#toggle')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const plain = document.querySelector<HTMLElement>('#plain')!;
+    installPositivePaintRects(document);
+    // `.shut ~ div { left: -9999px }`: both put off the page by the sibling.
+    for (const element of [panel, plain]) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => paintRectList(toggle.classList.contains('shut')
+          ? [{ left: -9999, right: -9899 }]
+          : [{ left: 0, right: 100 }]),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: () => paintedStyle(),
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+
+    toggle.classList.remove('shut');
+    expect(index.refreshMutations([attributeRecord(toggle, 'class')]))
+      .toEqual({ changedTargets: [panel], overflow: false });
+    toggle.classList.add('shut');
+    expect(index.refreshMutations([attributeRecord(toggle, 'class')]))
+      .toEqual({ changedTargets: [panel], overflow: false });
+    expect(plain.isConnected).toBe(true);
+    index.dispose();
+  });
+
   it('reads each element paint input once during a full mutation scan', () => {
     const { document, window } = parseHTML(`<html><body>
       <img id="slide"><section><span>Public panel text</span></section>

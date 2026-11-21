@@ -2,6 +2,7 @@ import {
   createSourcePaintScanCache,
   readSourceElementPathPaint,
   readSourceFlatTreeElementPath,
+  sourceControlledPanelBoxIsPlaced,
   sourceElementPaintInputsAreReadable,
   type SourcePaintScanCache,
 } from './source-privacy-policy';
@@ -482,6 +483,7 @@ export class SourceVisibilityBoundaryIndex {
     const changedTargets: Element[] = [];
     let inspected = options.inspected ?? 0;
     let overflow = false;
+    const controlled = new ControlledPanelIds();
     for (const root of roots) {
       if (
         !root.isConnected || root.ownerDocument !== this.document ||
@@ -530,13 +532,25 @@ export class SourceVisibilityBoundaryIndex {
           this.sourceWindow,
           context.paintCache,
         );
-        const state: SourceVisibilityState = paint.painted
+        let state: SourceVisibilityState = paint.painted
           ? 'painted'
           : paint.pathVisible
             ? 'shown'
             : paint.pathDisplayed
               ? paint.visibilityHidden ? 'veiled' : 'displayed'
               : 'hidden';
+        // Under a box declared hidden and painted all the same, every
+        // element is `displayed`: a panel a control names that reopens
+        // there (put back on the page, a class off a sibling) was no change
+        // (D178). Such a panel is told apart by its own box.
+        if (
+          state === 'displayed' && controlled.names(element) &&
+          sourceControlledPanelBoxIsPlaced(
+            element,
+            this.sourceWindow,
+            context.paintCache,
+          )
+        ) state = 'placed';
         const prior = previous.get(element);
         const changed = prior !== undefined && prior !== state;
         into.set(element, state);
@@ -583,13 +597,13 @@ export class SourceVisibilityBoundaryIndex {
       if (!current) break;
       inspected += 1;
       if (current.nodeType === 11) {
-        pending.push(...current.childNodes);
+        for (const item of current.childNodes) pending.push(item);
         continue;
       }
       if (current.nodeType !== 1) continue;
       const element = current as Element;
       this.#states.delete(element);
-      pending.push(...element.childNodes);
+      for (const item of element.childNodes) pending.push(item);
       const shadow = readSourceVisibilityShadowRoot(element);
       if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
         this.#complete = false;
@@ -652,9 +666,49 @@ export class SourceVisibilityBoundaryIndex {
 type SourceVisibilityState =
   | 'painted'
   | 'shown'
+  | 'placed'
   | 'displayed'
   | 'veiled'
   | 'hidden';
+
+/**
+ * The ids each tree's controls name in `aria-controls`, read once a walk
+ * and only for a tree in which a walk meets an element with an id that is
+ * `displayed` (D178). Structure only: no text is read.
+ */
+class ControlledPanelIds {
+  readonly #byRoot = new Map<Node, ReadonlySet<string> | undefined>();
+
+  names(element: Element): boolean {
+    let id: string | null;
+    let root: Node;
+    try {
+      id = element.getAttribute('id');
+      if (!id) return false;
+      root = element.getRootNode();
+    } catch {
+      return false;
+    }
+    if (!this.#byRoot.has(root)) this.#byRoot.set(root, readControlledIds(root));
+    return this.#byRoot.get(root)?.has(id) ?? false;
+  }
+}
+
+function readControlledIds(root: Node): ReadonlySet<string> | undefined {
+  const scope = root as Partial<ParentNode>;
+  if (typeof scope.querySelectorAll !== 'function') return undefined;
+  try {
+    const ids = new Set<string>();
+    for (const control of scope.querySelectorAll('[aria-controls]')) {
+      for (const token of (control.getAttribute('aria-controls') ?? '').split(/\s+/u)) {
+        if (token) ids.add(token);
+      }
+    }
+    return ids;
+  } catch {
+    return undefined;
+  }
+}
 
 interface AuthoredTextSubtreeProof {
   readonly mayContainText: boolean;
@@ -676,13 +730,13 @@ function subtreeMayContainAuthoredText(
   }
   const pending: Node[] = [];
   try {
-    pending.push(...slottedNodes(root));
-    pending.push(...root.childNodes);
+    for (const item of slottedNodes(root)) pending.push(item);
+    for (const item of root.childNodes) pending.push(item);
     const shadow = readSourceVisibilityShadowRoot(root);
     if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
       return Object.freeze({ mayContainText: true, inspected: 0, overflow: true });
     }
-    if (shadow) pending.push(...shadow.childNodes);
+    if (shadow) for (const item of shadow.childNodes) pending.push(item);
   } catch {
     return Object.freeze({ mayContainText: true, inspected: 0, overflow: true });
   }
@@ -699,8 +753,8 @@ function subtreeMayContainAuthoredText(
     }
     if (node.nodeType !== 1 && node.nodeType !== 11) continue;
     try {
-      if (node.nodeType === 1) pending.push(...slottedNodes(node as Element));
-      pending.push(...node.childNodes);
+      if (node.nodeType === 1) for (const item of slottedNodes(node as Element)) pending.push(item);
+      for (const item of node.childNodes) pending.push(item);
       if (node.nodeType === 1) {
         const shadow = readSourceVisibilityShadowRoot(node as Element);
         if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
@@ -710,7 +764,7 @@ function subtreeMayContainAuthoredText(
             overflow: true,
           });
         }
-        if (shadow) pending.push(...shadow.childNodes);
+        if (shadow) for (const item of shadow.childNodes) pending.push(item);
       }
     } catch {
       return Object.freeze({ mayContainText: true, inspected, overflow: true });

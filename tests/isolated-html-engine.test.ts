@@ -8727,12 +8727,14 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
     [...replica.body.children].map((child) =>
       `${child.localName}|${child.getAttribute('role')}|${child.getAttribute('aria-live')}`);
 
-  it('builds no live region into the mirror and keeps every role', async () => {
+  it('builds no live region into the mirror and keeps every role but an alert\'s', async () => {
     const { host } = await start(liveBody());
     const replica = host.iframe!.contentDocument!;
     expect(liveState(replica)).toEqual([
       'div|null|off',
-      'div|alert|off',
+      // D178: Chrome raises an alert event for the role whatever aria-live
+      // says; the page's role is kept beside it.
+      'div|null|off',
       'div|status|off',
       'div|log|off',
       'output|null|off',
@@ -8740,8 +8742,12 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
       'div|marquee|null',
       'div|timer|null',
       'p|null|null',
-      'div|Alert presentation|off',
+      'div|presentation|off',
     ]);
+    expect(replica.body.children[1]?.getAttribute('data-simul-page-role')).toBe('alert');
+    expect(replica.body.children[8]?.getAttribute('data-simul-page-role'))
+      .toBe('Alert presentation');
+    expect(replica.querySelectorAll('[data-simul-page-role]')).toHaveLength(2);
     // What the page says beside aria-live stays for its CSS.
     expect(replica.body.firstElementChild?.getAttribute('aria-atomic')).toBe('true');
     expect(replica.body.firstElementChild?.getAttribute('aria-relevant'))
@@ -8777,15 +8783,19 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
     expect(liveState(replica)).toEqual([
       'div|null|off',
       'div|null|null',
-      'div|alert|off',
+      'div|null|off',
       'div|log|off',
       'output|null|off',
       'div|marquee|null',
       'div|timer|null',
       'p|null|off',
-      'div|Alert presentation|off',
+      'div|presentation|off',
     ]);
     expect(replica.body.children[2]?.getAttribute('class')).toBe('urgent');
+    // The alert that stopped being one has nothing of Simul's left; the new
+    // one keeps the page's role beside it (D178).
+    expect(replica.body.children[1]?.hasAttribute('data-simul-page-role')).toBe(false);
+    expect(replica.body.children[2]?.getAttribute('data-simul-page-role')).toBe('alert');
 
     // A translation lands in a live region and goes again.
     engine.beginProjection(JA);
@@ -8806,7 +8816,7 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
     }]);
     expect([...replica.body.children[7]!.children].map(
       (child) => `${child.getAttribute('role')}|${child.getAttribute('aria-live')}`,
-    )).toEqual(['alert|off', 'null|off']);
+    )).toEqual(['null|off', 'null|off']);
   });
 
   it('stays silent after a patch is rolled back', async () => {
@@ -10279,6 +10289,155 @@ describe('a live patch at the cost of what it changed (D165)', () => {
         expect(fast!.commits).toEqual(full!.commits);
       }
       expect(runs[0]!.stream.acknowledged.length).toBeGreaterThan(30);
+    } finally {
+      isolatedEngineTestSwitches.recordsFromChanges = true;
+    }
+  });
+
+  // D178: a frame that removed or added text built every record again,
+  // and the delete copied the node and text maps whole. (No control text
+  // comes on this channel any more: the reader refuses it.)
+  it('makes the records of a frame that adds, removes and moves text as from all the text', async () => {
+    const paragraphs = Array.from({ length: 10 }, (_, index) => 100 + index * 2);
+    let fresh = 1000;
+    const made = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: elementNode(1, 'html', [], [
+          elementNode(2, 'head', []),
+          elementNode(3, 'body', [], paragraphs.map((id, index) =>
+            elementNode(id, 'p', [], [textNode(id + 1, `P${index}`)]))),
+        ]),
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const runs = [true, false].map((recordsFromChanges) => {
+      const stream = new FakeHtmlStream(made);
+      const commits: unknown[] = [];
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: new FakePresentationHost(),
+        openStream: async () => stream,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+        onSourceCommit: (commit) => commits.push(commit.changes.map((change) =>
+          change.kind === 'upsert'
+            ? ['upsert', change.record.nodeId, change.record.source,
+                change.record.revision]
+            : ['remove', change.nodeId, change.revision])),
+      });
+      return { recordsFromChanges, stream, engine, commits };
+    });
+    for (const run of runs) await run.engine.run(request);
+    // Each paragraph's children: a text first, then spans that hold one.
+    const held = new Map(paragraphs.map((id) => [id, {
+      children: [id + 1], text: id + 1 as number | undefined,
+    }]));
+    let seed = 11;
+    const next = (): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed / 2_147_483_648;
+    };
+    const pick = <T,>(values: readonly T[]): T =>
+      values[Math.floor(next() * values.length)]!;
+    const span = (): HtmlMirrorNode => {
+      const id = fresh += 2;
+      return elementNode(id, 'span', [], [{
+        kind: 'text', id: id + 1, text: pick(['same', 'other', 'P1']),
+        translatable: next() < 0.8,
+      }]);
+    };
+    let sent = 0;
+    try {
+      for (let sequence = 1; sequence <= 80; sequence += 1) {
+        const operations: HtmlMirrorPatchOperation[] = [];
+        const used = new Set<number>();
+        // A patch sends lists of children whole or reconciled, not both.
+        const whole = next() < 0.5;
+        for (let index = 0; index < 1 + Math.floor(next() * 3); index += 1) {
+          const id = pick(paragraphs);
+          if (used.has(id)) continue;
+          used.add(id);
+          const now = held.get(id)!;
+          const roll = next();
+          if (roll < 0.2) {
+            held.set(id, { children: [], text: undefined });
+            operations.push(whole
+              ? { kind: 'children', nodeId: id, children: [] }
+              : { kind: 'reconcile-children', nodeId: id, children: [] });
+          } else if (roll < 0.45 && whole) {
+            const text = fresh += 2;
+            const after = span();
+            held.set(id, { children: [text, after.id], text });
+            operations.push({
+              kind: 'children', nodeId: id, children: [{
+                kind: 'text', id: text, text: pick(['same', 'other', 'P1']),
+                translatable: next() < 0.8,
+              }, after],
+            });
+          } else if (roll < 0.6 && whole && now.children.length > 0) {
+            // The same nodes set again: their texts come last of the records.
+            operations.push({
+              kind: 'children', nodeId: id,
+              children: now.children.map((child) => child === now.text
+                ? textNode(child, `again ${sequence}`)
+                : elementNode(child, 'span', [], [
+                  textNode(child + 1, next() < 0.5 ? 'same' : `again ${sequence}`),
+                ])),
+            });
+          } else if (roll < 0.75 && !whole) {
+            // Kept, with one more after it.
+            const after = span();
+            held.set(id, { ...now, children: [...now.children, after.id] });
+            operations.push({
+              kind: 'reconcile-children', nodeId: id, children: [
+                ...now.children.map((child) => ({ kind: 'retain' as const, nodeId: child })),
+                { kind: 'graph' as const, node: after },
+              ],
+            });
+          } else if (now.text !== undefined) {
+            operations.push({
+              kind: 'text', nodeId: now.text, node: {
+                kind: 'text', id: now.text, text: pick(['same', 'other', 'P2']),
+                translatable: next() < 0.85,
+              },
+            });
+          }
+        }
+        if (operations.length === 0) continue;
+        sent += 1;
+        for (const run of runs) {
+          isolatedEngineTestSwitches.recordsFromChanges = run.recordsFromChanges;
+          run.stream.observer?.onPatch(batch(sent, operations));
+        }
+        const [fast, full] = runs;
+        expect(fast!.stream.requested).toEqual([]);
+        expect(fast!.stream.acknowledged).toEqual(full!.stream.acknowledged);
+        expect(fast!.engine.snapshot()!.records).toEqual(full!.engine.snapshot()!.records);
+        expect(fast!.commits).toEqual(full!.commits);
+      }
+      const acknowledged = runs[0]!.stream.acknowledged;
+      expect(acknowledged.at(-1)).toBe(sent);
+      expect(sent).toBeGreaterThan(60);
+      // A frame refused after it removed text puts the records back.
+      const before = runs[0]!.engine.snapshot()!.records;
+      const sequence = sent + 1;
+      runs[0]!.stream.observer?.onPatch(createHtmlMirrorPatchFrame([
+        batch(sequence, [{ kind: 'children', nodeId: paragraphs[0]!, children: [] }]),
+        batch(sequence, [{
+          kind: 'reconcile-children', nodeId: paragraphs[1]!,
+          children: [{ kind: 'retain', nodeId: 999_999 }],
+        }]),
+      ])!);
+      expect(runs[0]!.stream.requested).toHaveLength(1);
+      expect(runs[0]!.engine.snapshot()!.records).toEqual(before);
     } finally {
       isolatedEngineTestSwitches.recordsFromChanges = true;
     }

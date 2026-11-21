@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   RetainedReplicaLedger,
@@ -297,5 +297,49 @@ describe('journaled replica maps (D165)', () => {
     texts.rollbackJournal();
     expect(texts.bytes).toBe(sum());
     expect(texts.bytes).toBe(6 + 32 + 32);
+  });
+
+  // D178: a delete took a copy of the whole map, so removing one node cost
+  // as much as the mirror. The node map has no order to keep; the text maps
+  // put each key back in its place.
+  it('deletes from the node and text maps without copying them, and puts the order back', () => {
+    const texts = new ReplicaTextMap<{ text: string }>();
+    for (const key of [1, 2, 3, 4]) texts.set(key, { text: `t${key}` });
+    const places = () => [...texts.keys()].map((key) => texts.placeOf(key));
+    const before = places();
+    texts.beginJournal();
+    const copy = vi.spyOn(Map.prototype, 'entries');
+    texts.delete(2);
+    texts.delete(3);
+    texts.set(3, { text: 'moved' });
+    texts.set(5, { text: 'new' });
+    expect(copy).not.toHaveBeenCalled();
+    copy.mockRestore();
+    expect([...texts.keys()]).toEqual([1, 4, 3, 5]);
+    expect(texts.journalStartPlace(2)).toBe(before[1]);
+    expect(texts.journalStartPlace(3)).toBe(before[2]);
+    expect(texts.journalStartPlace(4)).toBe(before[3]);
+    expect(texts.journalStartPlace(5)).toBeUndefined();
+    expect(texts.journalTouchedKeys()).toEqual([
+      [2, { text: 't2' }], [3, { text: 't3' }], [5, undefined],
+    ]);
+    texts.rollbackJournal();
+    expect([...texts]).toEqual([1, 2, 3, 4].map((key) => [key, { text: `t${key}` }]));
+    expect(places()).toEqual(before);
+    expect(texts.bytes).toBe(4 * (4 + 32));
+
+    const { document } = parseHTML('<html><body></body></html>');
+    const nodes = new ReplicaNodeMap();
+    const elements = [1, 2, 3].map(() => document.createElement('p'));
+    elements.forEach((element, index) => nodes.set(index + 1, element));
+    nodes.beginJournal();
+    const nodeCopy = vi.spyOn(Map.prototype, 'entries');
+    nodes.delete(1);
+    expect(nodeCopy).not.toHaveBeenCalled();
+    nodeCopy.mockRestore();
+    expect(nodes.journalStartHasNode(elements[1]!)).toBe(true);
+    nodes.rollbackJournal();
+    expect(nodes.get(1)).toBe(elements[0]);
+    expect(nodes.idOf(elements[0]!)).toBe(1);
   });
 });

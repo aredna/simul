@@ -11,6 +11,10 @@
  * only set again, and the order of the text maps is the order of the
  * mirror's records: at such a delete the journal takes one copy of the map
  * as the patch found it, and a failure puts that copy back whole, as before.
+ * A map that puts its own order back (`keepsOwnOrder`) takes no copy: the
+ * node map has no order anyone reads, and the text maps keep each key's
+ * place (D178; the copy of the node map was most of what removing one node
+ * cost on a large page).
  */
 
 const ABSENT: unique symbol = Symbol('absent');
@@ -18,11 +22,25 @@ const ABSENT: unique symbol = Symbol('absent');
 export class JournaledMap<Key, Value> extends Map<Key, Value> {
   #journal: Map<Key, Value | typeof ABSENT> | undefined;
   #snapshot: Map<Key, Value> | undefined;
+  /** A key the map held when the journal began was deleted since. */
+  #reordered = false;
+
+  /**
+   * Whether the map puts its order back by itself after a rollback
+   * (`restoreJournalOrder`), so that deleting a key takes no copy of it.
+   */
+  protected get keepsOwnOrder(): boolean {
+    return false;
+  }
+
+  /** After a rollback that set keys deleted during the journal again. */
+  protected restoreJournalOrder(): void {}
 
   /** Starts keeping what the map held, until `endJournal` or a rollback. */
   beginJournal(): void {
     this.#journal = new Map();
     this.#snapshot = undefined;
+    this.#reordered = false;
   }
 
   get journaling(): boolean {
@@ -33,14 +51,17 @@ export class JournaledMap<Key, Value> extends Map<Key, Value> {
   endJournal(): void {
     this.#journal = undefined;
     this.#snapshot = undefined;
+    this.#reordered = false;
   }
 
   /** Puts the map back as it was at `beginJournal`, in its order. */
   rollbackJournal(): void {
     const journal = this.#journal;
     const snapshot = this.#snapshot;
+    const reordered = this.#reordered;
     this.#journal = undefined;
     this.#snapshot = undefined;
+    this.#reordered = false;
     if (snapshot) {
       this.clear();
       for (const [key, value] of snapshot) this.set(key, value);
@@ -51,21 +72,21 @@ export class JournaledMap<Key, Value> extends Map<Key, Value> {
       if (value === ABSENT) this.delete(key);
       else this.set(key, value);
     }
+    if (reordered) this.restoreJournalOrder();
   }
 
   /**
-   * The keys set since `beginJournal`, when no key was added or deleted, so
-   * that the map's order is the one it began with; otherwise undefined.
+   * Each key set or deleted since `beginJournal`, with what it held then
+   * (undefined when it was not there); undefined once the map was cleared.
    */
-  journalUpdatedKeys(): readonly Key[] | undefined {
+  journalTouchedKeys(): readonly (readonly [Key, Value | undefined])[] | undefined {
     const journal = this.#journal;
     if (!journal || this.#snapshot) return undefined;
-    const keys: Key[] = [];
+    const touched: (readonly [Key, Value | undefined])[] = [];
     for (const [key, start] of journal) {
-      if (start === ABSENT) return undefined;
-      keys.push(key);
+      touched.push([key, start === ABSENT ? undefined : start] as const);
     }
-    return keys;
+    return touched;
   }
 
   /** What the key held at `beginJournal` (its current value without one). */
@@ -94,8 +115,13 @@ export class JournaledMap<Key, Value> extends Map<Key, Value> {
   override delete(key: Key): boolean {
     if (!super.has(key)) return false;
     const journal = this.#journal;
-    if (journal && !this.#snapshot && journal.get(key) !== ABSENT) {
-      this.#snapshot = this.#startCopy(journal);
+    if (journal && !this.#snapshot) {
+      if (!this.keepsOwnOrder) {
+        if (journal.get(key) !== ABSENT) this.#snapshot = this.#startCopy(journal);
+      } else {
+        if (!journal.has(key)) journal.set(key, super.get(key)!);
+        if (journal.get(key) !== ABSENT) this.#reordered = true;
+      }
     }
     const previous = super.get(key)!;
     super.delete(key);
@@ -161,6 +187,11 @@ export class ReplicaNodeMap extends JournaledMap<number, Node> {
   #shadowRootCount = 0;
   #visuallyHiddenCount = 0;
   #selectedImageSourceCount = 0;
+
+  /** Nobody reads the order of the nodes (D178). */
+  protected override get keepsOwnOrder(): boolean {
+    return true;
+  }
 
   /** Each node's id. */
   get ids(): ReadonlyMap<Node, number> {
@@ -280,6 +311,52 @@ export class ReplicaTextMap<Value extends { readonly text: string }>
   /** Each key's place in the map's order: larger is later. */
   readonly #places = new Map<number, number>();
   #nextPlace = 0;
+  /** The place a key had when the journal began, kept when it is deleted. */
+  readonly #startPlaces = new Map<number, number>();
+
+  protected override get keepsOwnOrder(): boolean {
+    return true;
+  }
+
+  override beginJournal(): void {
+    super.beginJournal();
+    this.#startPlaces.clear();
+  }
+
+  override endJournal(): void {
+    super.endJournal();
+    this.#startPlaces.clear();
+  }
+
+  /** Where the key came in the map's order when the journal began. */
+  journalStartPlace(key: number): number | undefined {
+    const kept = this.#startPlaces.get(key);
+    if (kept !== undefined) return kept;
+    return this.journalStartValue(key) === undefined
+      ? undefined
+      : this.#places.get(key);
+  }
+
+  override delete(key: number): boolean {
+    if (
+      this.journaling && !this.#startPlaces.has(key) && super.has(key) &&
+      this.journalStartValue(key) !== undefined
+    ) this.#startPlaces.set(key, this.#places.get(key)!);
+    return super.delete(key);
+  }
+
+  /** Each key back in its place, and the map in the order of its places. */
+  protected override restoreJournalOrder(): void {
+    for (const [key, place] of this.#startPlaces) {
+      if (super.has(key)) this.#places.set(key, place);
+    }
+    this.#startPlaces.clear();
+    const entries = [...super.entries()].sort(
+      ([left], [right]) => this.#places.get(left)! - this.#places.get(right)!,
+    );
+    Map.prototype.clear.call(this);
+    for (const [key, value] of entries) Map.prototype.set.call(this, key, value);
+  }
 
   /** The sum of `text.length * 2 + 32` over the map's values. */
   get bytes(): number {

@@ -9,6 +9,7 @@ import {
   detectPaintedSemanticLabel,
   normalizePaintedSemanticLabelText,
   presentPaintedSemanticLabel,
+  readPaintedSemanticLabelOverlayText,
   removePaintedSemanticLabelPresentation,
   synchronizePaintedSemanticLabelPresentation,
   type PaintedSemanticLabelEnvironment,
@@ -284,6 +285,42 @@ describe('painted semantic labels', () => {
     )).toBeNull();
     expect(fixture.element.style.getPropertyValue('position')).toBe('static');
     expect(fixture.element.style.getPropertyValue('pointer-events')).toBe('');
+  });
+
+  // D178: a heading's label stands in a closed root of Simul's own, out of
+  // sight of the page's selectors; a link cannot have one.
+  it('puts the label of a host that can have a root in a closed root of its own', () => {
+    const fixture = createFixture('<h1 id="logo">毎日新聞<span>sub</span></h1>');
+    const heading = fixture.element;
+    const candidate = detectPaintedSemanticLabel(heading, fixture.environment)!;
+    const cleanup = presentPaintedSemanticLabel(candidate, 'Mainichi');
+    expect(cleanup).toBeTypeOf('function');
+    expect(heading.querySelector(`[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`))
+      .toBeNull();
+    expect(heading.lastElementChild?.localName).toBe('span');
+    expect(readPaintedSemanticLabelOverlayText(heading)).toBe('Mainichi');
+    expect(synchronizePaintedSemanticLabelPresentation(
+      heading, 'Mainichi Shimbun', fixture.environment,
+    )).toBe(true);
+    expect(readPaintedSemanticLabelOverlayText(heading)).toBe('Mainichi Shimbun');
+    removePaintedSemanticLabelPresentation(heading);
+    expect(readPaintedSemanticLabelOverlayText(heading)).toBeUndefined();
+    // Shown again, in the same root.
+    expect(synchronizePaintedSemanticLabelPresentation(
+      heading, 'Mainichi', fixture.environment,
+    )).toBe(true);
+    expect(readPaintedSemanticLabelOverlayText(heading)).toBe('Mainichi');
+    expect(heading.querySelector(`[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`))
+      .toBeNull();
+
+    const link = createFixture('<a id="logo">毎日新聞</a>');
+    presentPaintedSemanticLabel(
+      detectPaintedSemanticLabel(link.element, link.environment)!,
+      'Mainichi',
+    );
+    expect(link.element.lastElementChild?.getAttribute(PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE))
+      .toBe('v1');
+    expect(readPaintedSemanticLabelOverlayText(link.element)).toBe('Mainichi');
   });
 
   it('refuses forged, stale, and duplicate presentation proofs', () => {

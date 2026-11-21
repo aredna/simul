@@ -67,6 +67,23 @@ const candidateEnvironments = new WeakMap<
   ResolvedEnvironment
 >();
 const activePresentations = new WeakMap<HTMLElement, () => void>();
+/** The overlay each presentation shows, wherever it stands. */
+const activeOverlays = new WeakMap<HTMLElement, HTMLElement>();
+/**
+ * The closed root Simul gave a host to hold its label (D178), kept for the
+ * next presentation: a root cannot be taken off again, and with only a
+ * `<slot>` left in it the host draws as it did without one.
+ */
+const ownedLabelRoots = new WeakMap<HTMLElement, ShadowRoot>();
+/**
+ * The tags `attachShadow` accepts besides custom elements and `body`. A
+ * custom element is left alone: the page may give it a root later, which
+ * the mirror then builds on it.
+ */
+const LABEL_ROOT_HOST_TAGS: ReadonlySet<string> = new Set([
+  'article', 'aside', 'blockquote', 'div', 'footer', 'h1', 'h2', 'h3', 'h4',
+  'h5', 'h6', 'header', 'main', 'nav', 'p', 'section', 'span',
+]);
 
 /**
  * Normalizes only bounded, human-readable direct label text. This is not an
@@ -173,7 +190,12 @@ export function presentPaintedSemanticLabel(
   overlay.setAttribute('dir', 'auto');
   overlay.textContent = text;
   applyOverlayStyle(overlay.style);
-  element.append(overlay);
+  // Out of sight of the page's selectors where the host can have a root of
+  // its own (D178): appended to the host, the label was its last child, and
+  // a rule on its last or only child changed. A link cannot have one.
+  const labelRoot = ownedLabelRoot(element);
+  (labelRoot ?? element).append(overlay);
+  activeOverlays.set(element, overlay);
 
   let active = true;
   const cleanup = (): void => {
@@ -182,7 +204,10 @@ export function presentPaintedSemanticLabel(
     if (activePresentations.get(element) === cleanup) {
       activePresentations.delete(element);
     }
-    if (overlay.parentNode === element) overlay.remove();
+    if (activeOverlays.get(element) === overlay) activeOverlays.delete(element);
+    if (overlay.parentNode === element || overlay.parentNode === labelRoot) {
+      overlay.remove();
+    }
     if (element.getAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE) === 'v1') {
       element.removeAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE);
     }
@@ -238,9 +263,7 @@ export function synchronizePaintedSemanticLabelPresentation(
     return false;
   }
   const host = candidate.element;
-  const existing = [...host.children].find((child) =>
-    child.hasAttribute(PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE)
-  );
+  const existing = activeOverlays.get(host);
   if (
     activePresentations.has(host) &&
     host.getAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE) === 'v1' &&
@@ -565,6 +588,39 @@ function readDirectSemanticText(element: HTMLElement): string | undefined {
     if (value.length > remaining) return undefined;
   }
   return normalizePaintedSemanticLabelText(output);
+}
+
+/** The text of the label Simul shows over `element`, if it shows one. */
+export function readPaintedSemanticLabelOverlayText(
+  element: Element | null | undefined,
+): string | undefined {
+  if (!element || element.namespaceURI !== HTML_NAMESPACE) return undefined;
+  return activeOverlays.get(element as HTMLElement)?.textContent ?? undefined;
+}
+
+/**
+ * A closed root of Simul's own on the host, with a `<slot>` that draws the
+ * host's children as before; undefined where the host cannot have a root
+ * (a link, a list item) or already has one (a component of the page).
+ * Should the page give such a host a root later, the mirror cannot build it
+ * there: that patch fails and the mirror is read again whole.
+ */
+function ownedLabelRoot(element: HTMLElement): ShadowRoot | undefined {
+  const kept = ownedLabelRoots.get(element);
+  if (kept) return kept;
+  if (
+    !LABEL_ROOT_HOST_TAGS.has(element.localName.toLowerCase()) ||
+    element.shadowRoot
+  ) return undefined;
+  let root: ShadowRoot;
+  try {
+    root = element.attachShadow({ mode: 'closed' });
+  } catch {
+    return undefined;
+  }
+  root.append(element.ownerDocument.createElement('slot'));
+  ownedLabelRoots.set(element, root);
+  return root;
 }
 
 function hasOwnedOverlayChild(element: HTMLElement): boolean {

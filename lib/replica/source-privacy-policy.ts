@@ -469,7 +469,7 @@ implements SourceControlledContentPolicyBuilder {
     const pending = this.#pending;
     this.#visited += 1;
     if (node.nodeType === 11) {
-      pending.push(...node.childNodes);
+      for (const item of node.childNodes) pending.push(item);
       return;
     }
     if (node.nodeType !== 1) return;
@@ -496,7 +496,10 @@ implements SourceControlledContentPolicyBuilder {
     if (safelyHasSourceAttribute(element, 'aria-controls')) {
       this.#controllers.add(element);
     }
-    pending.push(...element.childNodes);
+    // One by one (D180): spread into one call, an element with more than
+    // about 125,000 children threw past the engine's limit on arguments,
+    // and the page was refused as too large.
+    for (const item of element.childNodes) pending.push(item);
     const shadowRoot = safelyReadSourceShadowRoot(element);
     if (shadowRoot) pending.push(shadowRoot);
   }
@@ -779,7 +782,7 @@ function controlledMutationNodesMayChange(
     if (!node) break;
     visited += 1;
     if (node.nodeType === 11) {
-      pending.push(...node.childNodes);
+      for (const item of node.childNodes) pending.push(item);
       continue;
     }
     if (node.nodeType !== 1) continue;
@@ -797,7 +800,7 @@ function controlledMutationNodesMayChange(
     ) return true;
     if (element.localName.toLowerCase() === 'style' &&
       (policy.controllers.size > 0 || policy.targets.size > 0)) return true;
-    pending.push(...element.childNodes);
+    for (const item of element.childNodes) pending.push(item);
     const shadowRoot = safelyReadSourceShadowRoot(element);
     if (shadowRoot) pending.push(shadowRoot);
   }
@@ -1427,6 +1430,21 @@ function readSourceTextPaintRects(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Whether a panel a control names has a box of its own that is painted and
+ * on the page, whatever is declared above it: the test the policy reopens a
+ * withheld panel by, for the index of what is painted to tell a change of it
+ * under a box that is declared hidden and painted all the same (D178).
+ */
+export function sourceControlledPanelBoxIsPlaced(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): boolean {
+  return sourceElementBoxIsPainted(element, sourceWindow, paintCache) &&
+    !sourceElementBoxIsOffPage(element, sourceWindow, paintCache);
 }
 
 /**

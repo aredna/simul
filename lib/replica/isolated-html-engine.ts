@@ -97,9 +97,11 @@ import {
   type ReplicaReadScope,
 } from './read-scope-policy';
 import {
+  clearReplicaAttributeOverride,
   pageAttribute,
   pageAttributes,
   reapplyReplicaAttributeOverrides,
+  setReplicaAttributeOverride,
 } from './replica-attribute-override';
 import type {
   SemanticSourceStreamFactory,
@@ -2472,9 +2474,41 @@ function replicaPageAttributes(
  * there over the page's value while a translation is up (D124).
  */
 function finishReplicaAttributes(element: Element): void {
-  silenceReplicaLiveRegion(element);
   reapplyReplicaAttributeOverrides(element);
+  quietReplicaAlertRole(element);
+  silenceReplicaLiveRegion(element);
 }
+
+/** The roles Chrome raises its alert event for, whatever `aria-live` says. */
+const ALERT_ROLES: ReadonlySet<string> = new Set(['alert', 'alertdialog']);
+
+/**
+ * Chrome raises its alert event for an element with `role="alert"` or
+ * `alertdialog` when it is made, shown again or given the role, and for every
+ * alert at each rebuild of the mirror, whatever `aria-live` says: the tab has
+ * announced it already. In the mirror the role is taken off (an
+ * `alertdialog` stays a `dialog`) and the page's value kept in
+ * `data-simul-page-role` (D178). Both are overrides: a rollback and a patch
+ * see the page's own role. Page rules on `[role="alert"]` no longer match
+ * there: the mirrored sheets are written by the page reader.
+ */
+function quietReplicaAlertRole(element: Element): void {
+  const role = pageAttribute(element, 'role');
+  const tokens = role?.trim().toLowerCase().split(/\s+/u) ?? [];
+  if (role === null || !tokens.some((token) => ALERT_ROLES.has(token))) {
+    clearReplicaAttributeOverride(element, 'role');
+    clearReplicaAttributeOverride(element, PAGE_ROLE_ATTRIBUTE);
+    return;
+  }
+  const quiet = tokens
+    .filter((token) => token !== 'alert')
+    .map((token) => token === 'alertdialog' ? 'dialog' : token)
+    .join(' ');
+  setReplicaAttributeOverride(element, 'role', quiet || null);
+  setReplicaAttributeOverride(element, PAGE_ROLE_ATTRIBUTE, role);
+}
+
+const PAGE_ROLE_ATTRIBUTE = 'data-simul-page-role';
 
 /** Roles that are live regions without saying so; `output` is a status. */
 const IMPLICIT_LIVE_REGION_ROLES: ReadonlySet<string> = new Set([
@@ -2495,7 +2529,7 @@ function silenceReplicaLiveRegion(element: Element): void {
     element.hasAttribute('aria-live') ||
     (element.namespaceURI === NAMESPACE_URIS.html &&
       element.localName.toLowerCase() === 'output') ||
-    element.getAttribute('role')?.trim().toLowerCase().split(/\s+/u)
+    pageAttribute(element, 'role')?.trim().toLowerCase().split(/\s+/u)
       .some((token) => IMPLICIT_LIVE_REGION_ROLES.has(token))
   ) element.setAttribute('aria-live', 'off');
 }
@@ -4547,8 +4581,8 @@ function applyPatchFrame(
     if (update) {
       if (replicaDocument) assignIsolatedManualSlots(replicaDocument, state.nodes);
       // Last, when nothing can fail: the frame's records are the map the
-      // frame started from, with its changed records replaced in place.
-      for (const record of update.records) state.records.set(record.nodeId, record);
+      // frame started from, changed in place.
+      update.apply(state.records);
       return Object.freeze({
         changes: update.changes,
         retainedNodeCount,
@@ -4607,14 +4641,18 @@ function applyPatchFrame(
 export const isolatedEngineTestSwitches = { recordsFromChanges: true };
 
 /**
- * The records of a frame that changed text in place, read from what it
- * changed instead of from every text of the mirror (D165). A frame that
- * added or removed text, or changed whether a text is translated, changes
- * the order of the records: for those, undefined, and the records are built
- * again from all the text, as before. The changed records are made in the
- * order `buildRecords` meets them (texts, then controls, each in its map's
- * order), which numbers their revisions and orders the changes.
- * `records`: what replaces the frame's records in place.
+ * The records of a frame, read from what it changed instead of from every
+ * text of the mirror (D165; D178 for text added and removed). The records
+ * are the texts in the order of their map, then the controls in theirs: a
+ * removed record leaves its place, a record kept where it was is replaced
+ * in place, and a text or control set again or added comes last of its
+ * kind, as a fresh build would put it. A text added while the mirror has
+ * controls would come before them, and a text that became translated
+ * keeps its place among the others: for those, undefined, and the records
+ * are built again from all the text, as before. The changed records are
+ * made in the order `buildRecords` meets them, which numbers their
+ * revisions, and the removed ones after, in the order of the records.
+ * `apply`: what makes the frame's records these, in place.
  */
 function recordUpdateOfFrame(
   state: HtmlMirrorDomState,
@@ -4622,82 +4660,115 @@ function recordUpdateOfFrame(
   forceUpserts: ReadonlySet<number>,
 ): {
   readonly changes: readonly ReplicaSourceTextChange[];
-  readonly records: readonly ReplicaSourceTextRecord[];
+  readonly apply: (records: Map<number, ReplicaSourceTextRecord>) => void;
 } | undefined {
   if (!isolatedEngineTestSwitches.recordsFromChanges) return undefined;
-  const textIds = state.textMetadata.journalUpdatedKeys();
-  const controlIds = state.controlMetadata.journalUpdatedKeys();
-  if (!textIds || !controlIds) return undefined;
-  const touched = new Set([...textIds, ...controlIds]);
-  if (touched.size !== textIds.length + controlIds.length) return undefined;
+  const texts = state.textMetadata;
+  const controls = state.controlMetadata;
+  const touchedTexts = texts.journalTouchedKeys();
+  const touchedControls = controls.journalTouchedKeys();
+  if (!touchedTexts || !touchedControls) return undefined;
+  const touched = new Set<number>();
+  for (const [id] of touchedTexts) touched.add(id);
+  for (const [id] of touchedControls) touched.add(id);
   for (const id of forceUpserts) if (!touched.has(id)) return undefined;
-  const changedTexts: number[] = [];
-  for (const id of textIds) {
-    if (state.controlMetadata.has(id)) return undefined;
-    const node = state.textMetadata.get(id)!;
+  interface Placed {
+    readonly id: number;
+    readonly text: boolean;
+    readonly place: number;
+    readonly moved: boolean;
+  }
+  const placed: Placed[] = [];
+  const removed: Array<{ readonly id: number; readonly text: boolean; readonly place: number }> = [];
+  let textComesLast = false;
+  for (const id of touched) {
+    const text = texts.get(id);
+    const control = controls.get(id);
+    if (text && control) return undefined;
     const old = previous.get(id);
-    if (node.translatable !== (old !== undefined)) return undefined;
-    if (!old) continue;
-    const reused = old.nodeType === 3 && old.source === node.text &&
-      old.document === state.document;
-    if (!reused || forceUpserts.has(id)) changedTexts.push(id);
-  }
-  const changedControls: number[] = [];
-  for (const id of controlIds) {
-    if (state.textMetadata.has(id) || !previous.has(id)) return undefined;
-    const control = state.controlMetadata.get(id)!;
-    const old = previous.get(id)!;
-    const reused = old.nodeType === 1 && old.controlTarget === control.kind &&
-      old.source === control.text && old.document === state.document;
-    if (!reused || forceUpserts.has(id)) changedControls.push(id);
-  }
-  const byPlace = (map: ReplicaTextMap<{ readonly text: string }>) =>
-    (left: number, right: number): number =>
-      (map.placeOf(left) ?? 0) - (map.placeOf(right) ?? 0);
-  changedTexts.sort(byPlace(state.textMetadata));
-  changedControls.sort(byPlace(state.controlMetadata));
-  const changes: ReplicaSourceTextChange[] = [];
-  const records: ReplicaSourceTextRecord[] = [];
-  const settle = (old: ReplicaSourceTextRecord, record: ReplicaSourceTextRecord) => {
-    if (record !== old) records.push(record);
-    if (!sameReplicaTextRecord(old, record) || forceUpserts.has(record.nodeId)) {
-      changes.push(Object.freeze({ kind: 'upsert' as const, record }));
+    const isText = text?.translatable === true;
+    const isControl = control !== undefined;
+    if (!isText && !isControl) {
+      if (!old) continue;
+      const place = (old.nodeType === 3 ? texts : controls).journalStartPlace(id);
+      if (place === undefined) return undefined;
+      removed.push({ id, text: old.nodeType === 3, place });
+      continue;
     }
-  };
+    if (old && old.nodeType !== (isText ? 3 : 1)) return undefined;
+    const map = isText ? texts : controls;
+    const place = map.placeOf(id)!;
+    const moved = map.journalStartPlace(id) !== place;
+    if (!old && !moved) return undefined;
+    if (isText && moved) textComesLast = true;
+    placed.push({ id, text: isText, place, moved });
+  }
+  if (textComesLast && controls.size > 0) return undefined;
+  const inRecordOrder = (
+    left: { readonly text: boolean; readonly place: number },
+    right: { readonly text: boolean; readonly place: number },
+  ): number => left.text === right.text
+    ? left.place - right.place
+    : left.text ? -1 : 1;
+  placed.sort(inRecordOrder);
+  removed.sort(inRecordOrder);
+  const upserts: ReplicaSourceTextChange[] = [];
+  const made: Array<{ readonly record: ReplicaSourceTextRecord; readonly moved: boolean }> = [];
   // As `buildRecords` makes each.
-  for (const id of changedTexts) {
-    const old = previous.get(id)!;
-    const text = state.textMetadata.get(id)!;
-    settle(old, old.nodeType === 3 && old.source === text.text &&
-        old.document === state.document
-      ? old
-      : Object.freeze({
-          document: state.document,
-          nodeId: id,
-          nodeType: 3 as const,
-          revision: old.source === text.text
-            ? old.revision
-            : nextRevision(state.revisions, id),
-          source: text.text,
-        }));
+  for (const { id, text: isText, moved } of placed) {
+    const old = previous.get(id);
+    let record: ReplicaSourceTextRecord;
+    if (isText) {
+      const text = texts.get(id)!;
+      record = old?.nodeType === 3 && old.source === text.text &&
+          old.document === state.document
+        ? old
+        : Object.freeze({
+            document: state.document,
+            nodeId: id,
+            nodeType: 3 as const,
+            revision: old?.source === text.text
+              ? old.revision
+              : nextRevision(state.revisions, id),
+            source: text.text,
+          });
+    } else {
+      const control = controls.get(id)!;
+      const same = old?.nodeType === 1 && old.controlTarget === control.kind &&
+        old.source === control.text;
+      record = same && old.document === state.document
+        ? old
+        : Object.freeze({
+            document: state.document,
+            nodeId: id,
+            nodeType: 1 as const,
+            controlTarget: control.kind,
+            revision: same ? old.revision : nextRevision(state.revisions, id),
+            source: control.text,
+          });
+    }
+    if (record !== old || moved) made.push({ record, moved });
+    if (!sameReplicaTextRecord(old, record) || forceUpserts.has(id)) {
+      upserts.push(Object.freeze({ kind: 'upsert' as const, record }));
+    }
   }
-  for (const id of changedControls) {
-    const old = previous.get(id)!;
-    const control = state.controlMetadata.get(id)!;
-    const same = old.nodeType === 1 && old.controlTarget === control.kind &&
-      old.source === control.text;
-    settle(old, same && old.document === state.document
-      ? old
-      : Object.freeze({
-          document: state.document,
-          nodeId: id,
-          nodeType: 1 as const,
-          controlTarget: control.kind,
-          revision: same ? old.revision : nextRevision(state.revisions, id),
-          source: control.text,
-        }));
-  }
-  return { changes: Object.freeze(changes), records };
+  const changes: ReplicaSourceTextChange[] = removed.map(({ id }) => Object.freeze({
+    kind: 'remove' as const,
+    document: state.document,
+    nodeId: id,
+    revision: nextRevision(state.revisions, id),
+  }));
+  changes.push(...upserts);
+  return {
+    changes: Object.freeze(changes),
+    apply: (records) => {
+      for (const { id } of removed) records.delete(id);
+      for (const { record, moved } of made) {
+        if (moved) records.delete(record.nodeId);
+        records.set(record.nodeId, record);
+      }
+    },
+  };
 }
 
 interface PatchRollbackSnapshot {
