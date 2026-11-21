@@ -1278,10 +1278,11 @@ function sourceControlledLookThrough(
     const known = looked.get(element);
     if (known !== undefined) return known;
     looked.set(element, false);
-    const held = depth > MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH
+    const holding = depth > MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH
       ? undefined
       : readSourceElementsHeldWithoutBox(element, sourceWindow, paintCache);
-    if (!held || held.length > budget.left) return false;
+    if (!holding || holding.elements.length > budget.left) return false;
+    const held = holding.elements;
     budget.left -= held.length;
     const readable = held.map((child) => {
       const own = targets.get(child);
@@ -1293,8 +1294,9 @@ function sourceControlledLookThrough(
         : (own !== 'withheld' || lookThrough(child, 0, paintCache)) &&
           !sourceElementBoxIsOffPage(child, sourceWindow, paintCache);
     });
-    // Nothing it holds is painted: it stays the boundary it was.
-    if (!readable.includes(true)) return false;
+    // Nothing it holds is painted: it stays the boundary it was. Text of its
+    // own that the page paints counts (D173).
+    if (!holding.paintedText && !readable.includes(true)) return false;
     held.forEach((child, index) => {
       if (!readable[index]) targets.set(child, 'withheld');
       else if ((targets.get(child) ?? 'withheld') === 'withheld') {
@@ -1313,29 +1315,48 @@ function sourceControlledLookThrough(
 
 /**
  * What an element without a box of its own holds, when it can be looked
- * through: it is shown and clips nothing away, and has no text of its own.
- * Its element children and its root's; a `<slot>` among them stands for its
- * fallback content (what is slotted into it is the host's own children,
- * which are in the list already).
+ * through: it is shown and clips nothing away, and any text of its own is
+ * painted on the page. Its element children and its root's; a `<slot>` among
+ * them stands for its fallback content (what is slotted into it is the
+ * host's own children, which are in the list already).
+ *
+ * No box vouches for text straight in it, in its root or in such a slot:
+ * since D173 each such text is judged by its own boxes (`Range`), by the
+ * tests a held element gets (some of it survives what clips it, and it is
+ * not wholly left of the page or above it). Text that fails leaves the
+ * whole target withheld, as all such text did before: it cannot be withheld
+ * apart from the element that holds it.
  */
 function readSourceElementsHeldWithoutBox(
   element: Element,
   sourceWindow: Window | null | undefined,
   paintCache: SourcePaintScanCache,
-): readonly Element[] | undefined {
+): { readonly elements: readonly Element[]; readonly paintedText: boolean } | undefined {
   if (!sourceElementPathShowsWithoutBox(element, sourceWindow, paintCache)) {
     return undefined;
   }
   try {
     const held: Element[] = [];
-    const pending: Node[] = [element];
+    let paintedText = false;
+    const pending: (Element | ShadowRoot)[] = [element];
     const root = safelyReadSourceShadowRoot(element);
     if (root) pending.push(root);
     while (pending.length > 0) {
       const holder = pending.pop()!;
+      // The element whose box would hold the text: a root's is its host.
+      const textHolder = holder === root ? element : holder as Element;
       for (const node of holder.childNodes) {
         if (node.nodeType === 3) {
-          if ((node.nodeValue ?? '').trim() !== '') return undefined;
+          if ((node.nodeValue ?? '').trim() === '') continue;
+          if (
+            !sourceTextIsPaintedOnPage(
+              node as Text,
+              textHolder,
+              sourceWindow,
+              paintCache,
+            )
+          ) return undefined;
+          paintedText = true;
           continue;
         }
         if (node.nodeType !== 1) continue;
@@ -1345,7 +1366,64 @@ function readSourceElementsHeldWithoutBox(
         if (held.length + pending.length > MAX_SOURCE_PAINT_RECTS) return undefined;
       }
     }
-    return held;
+    return { elements: held, paintedText };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Text straight in an element without a box (D173): its own boxes, read with
+ * a `Range`, are of positive size, some of them survive what the element and
+ * its ancestors clip to, and they are not all left of the page or above it.
+ * The element itself was already found shown (`sourceElementPathShowsWithoutBox`
+ * for the target; a slot is asked here). Unreadable geometry fails closed.
+ */
+function sourceTextIsPaintedOnPage(
+  text: Text,
+  holder: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): boolean {
+  const memo = sourcePaintedPathMemo(holder, sourceWindow, paintCache);
+  if (!memo.pathVisible) return false;
+  const rects = readSourceTextPaintRects(text);
+  if (!rects || rects.length === 0 || !rectsSurviveClip(rects, memo.childClip)) {
+    return false;
+  }
+  // In the window, or right of it or below it: on the page.
+  if (rects.some((rect) => rect.right > 0 && rect.bottom > 0)) return true;
+  try {
+    const fixed = sourceWindow!.getComputedStyle(holder).position
+      .trim().toLowerCase() === 'fixed';
+    const x = fixed ? 0 : finiteScrollOffset(sourceWindow!.scrollX);
+    const y = fixed ? 0 : finiteScrollOffset(sourceWindow!.scrollY);
+    return rects.some((rect) => rect.right + x > 0 && rect.bottom + y > 0);
+  } catch {
+    return false;
+  }
+}
+
+function readSourceTextPaintRects(
+  text: Text,
+): readonly SourcePaintBounds[] | undefined {
+  try {
+    const range = text.ownerDocument.createRange();
+    range.selectNodeContents(text);
+    const rects = range.getClientRects();
+    if (rects.length > MAX_SOURCE_PAINT_RECTS) return undefined;
+    const painted: SourcePaintBounds[] = [];
+    for (let index = 0; index < rects.length; index += 1) {
+      const rect = rects.item(index);
+      if (!rect) continue;
+      const { left, top, right, bottom, width, height } = rect;
+      if (
+        Number.isFinite(left) && Number.isFinite(top) &&
+        Number.isFinite(right) && Number.isFinite(bottom) &&
+        width > 0 && height > 0
+      ) painted.push(Object.freeze({ left, top, right, bottom }));
+    }
+    return painted;
   } catch {
     return undefined;
   }

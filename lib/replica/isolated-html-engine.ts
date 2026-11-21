@@ -162,7 +162,7 @@ export const ISOLATED_MEDIA_CONTROLS_CSS = 'video::-webkit-media-controls,video:
  * page's own language (D124).
  */
 const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{pointer-events:none}body{font-family:inherit;font-size:inherit}*{pointer-events:none!important}[data-simul-replica-disclosure-trigger="v1"],[data-simul-replica-disclosure-panel="v1"],[data-simul-replica-disclosure-overlay="v1"]{pointer-events:auto!important}${ISOLATED_MEDIA_CONTROLS_CSS}</style></head><body></body></html>`;
-const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}[data-simul-owned-select-trigger="v1"]{all:unset!important;box-sizing:border-box!important;color:inherit!important;cursor:default!important;display:block!important;font:inherit!important;overflow:hidden!important;text-align:inherit!important;text-overflow:ellipsis!important;white-space:nowrap!important;width:100%!important}:host([data-simul-select-transparent="v1"]) [data-simul-owned-select-trigger="v1"]{opacity:0!important}[data-simul-owned-select-options="v1"]{background:Canvas!important;box-sizing:border-box!important;color:CanvasText!important;max-height:min(18rem,70vh)!important;min-width:100%!important;overflow:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;width:max-content!important;z-index:2147483647!important}[data-simul-owned-select-option="v1"],[data-simul-owned-select-optgroup-label="v1"]{box-sizing:border-box!important;display:block!important;min-height:1.5em!important;padding-inline:.5rem!important;pointer-events:none!important;white-space:normal!important}[data-simul-owned-select-optgroup-label="v1"]{font-weight:600!important}select[data-simul-select-facsimile="v1"]{display:none!important;pointer-events:none!important}`;
+const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}[data-simul-owned-select-trigger="v1"]{all:unset!important;box-sizing:border-box!important;color:inherit!important;cursor:default!important;display:block!important;font:inherit!important;overflow:hidden!important;text-align:inherit!important;text-overflow:ellipsis!important;white-space:nowrap!important;width:100%!important}:host([data-simul-select-transparent="v1"]) [data-simul-owned-select-trigger="v1"]{opacity:0!important}[data-simul-owned-select-options="v1"]{background:Canvas!important;box-sizing:border-box!important;color:CanvasText!important;max-height:min(18rem,70vh)!important;min-width:100%!important;overflow:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;width:max-content!important;z-index:2147483647!important}[data-simul-owned-select-option="v1"],[data-simul-owned-select-optgroup-label="v1"]{box-sizing:border-box!important;display:block!important;min-height:1.5em!important;padding-inline:.5rem!important;pointer-events:none!important;white-space:normal!important}[data-simul-owned-select-optgroup-label="v1"]{font-weight:600!important}select[data-simul-select-facsimile="v1"]{display:none!important;pointer-events:none!important}[data-simul-owned-select-sizer="v1"]{display:none!important}:host([data-simul-select-unsized="v1"][data-simul-select-presentation="popup"]) [data-simul-owned-select-sizer="v1"]{display:block!important;height:0!important;overflow:hidden!important;visibility:hidden!important;white-space:nowrap!important;padding-inline:4px 16px!important;pointer-events:none!important}:host([data-simul-select-unsized="v1"][data-simul-select-presentation="popup"]) [data-simul-owned-select-trigger="v1"]{padding-block:1px!important;padding-inline:4px 16px!important}`;
 const ISOLATED_DISCLOSURE_IFRAME_MARKER = 'css-disclosure-v1';
 const ISOLATED_DISCLOSURE_BLOCKED_EVENTS = Object.freeze([
   'auxclick', 'beforeinput', 'change', 'click', 'contextmenu', 'dblclick',
@@ -1246,6 +1246,20 @@ export class IsolatedHtmlReplicaEngine
       this.#projections,
       retainedPaintedLabelIds,
     );
+    // An element whose attributes the patch changed (a class that gives a
+    // logo its picture) may have become a painted label: its translated text
+    // is looked at when the layout is next settled (D173).
+    for (const operation of operations) {
+      if (operation.kind !== 'attributes') continue;
+      const target = state.nodes.get(operation.nodeId);
+      for (const child of target?.childNodes ?? []) {
+        if (child.nodeType !== Node.TEXT_NODE) continue;
+        const nodeId = state.nodes.idOf(child);
+        if (nodeId !== undefined && this.#projections.has(nodeId)) {
+          state.pendingPaintedLabels.add(nodeId);
+        }
+      }
+    }
     this.#notifySourceCommit(
       state,
       'batch',
@@ -2756,7 +2770,14 @@ function wrapNativeSelectFacsimile(node: Node): Node {
   panel.style.setProperty('min-width', '100%', 'important');
   panel.style.setProperty('width', 'max-content', 'important');
   panel.style.setProperty('z-index', '2147483647', 'important');
-  shadow.append(style, trigger, panel, select);
+  // A dropdown the page gave no size (it had no box when read: in a menu's
+  // panel collapsed by `display`) is as wide as Chrome draws one: its widest
+  // label and 20px, one line and 2px high (D173). The labels stand here, out
+  // of sight and of no height, only to give that width.
+  const sizer = document.createElement('div');
+  sizer.setAttribute('data-simul-owned-select-sizer', 'v1');
+  sizer.setAttribute('aria-hidden', 'true');
+  shadow.append(style, trigger, sizer, panel, select);
   for (const type of ISOLATED_DISCLOSURE_BLOCKED_EVENTS) {
     shadow.addEventListener(type, blockIsolatedDisclosureActivation, true);
   }
@@ -2829,6 +2850,13 @@ function syncNativeSelectFacsimileHost(element: Element): void {
     host.setAttribute('data-simul-select-transparent', 'v1');
   } else {
     host.removeAttribute('data-simul-select-transparent');
+  }
+  // No width from the page: it had no box to measure (D173).
+  const width = host.style.getPropertyValue('width').trim().toLowerCase();
+  if (width === '' || width === 'auto') {
+    host.setAttribute('data-simul-select-unsized', 'v1');
+  } else {
+    host.removeAttribute('data-simul-select-unsized');
   }
   host.style.setProperty('pointer-events', 'auto', 'important');
   host.style.setProperty('background-image', 'none', 'important');
@@ -3201,6 +3229,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   panel.replaceChildren();
 
   const selectedLabels: string[] = [];
+  const labels: string[] = [];
   let firstSelected: Element | undefined;
   const appendOption = (
     option: HTMLOptionElement,
@@ -3231,6 +3260,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       .replace(/\s+/gu, ' ')
       .trim();
     row.textContent = label || '\u00a0';
+    if (label) labels.push(label);
     // A translated label carries its language on the option (D124).
     copyTranslatedLanguage(option, row);
     if (selected && label) {
@@ -3283,6 +3313,12 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     panel.scrollTop = scrollTop;
     panel.scrollLeft = scrollLeft;
   }
+  const sizer = host.shadowRoot?.querySelector('[data-simul-owned-select-sizer="v1"]');
+  sizer?.replaceChildren(...labels.map((label) => {
+    const line = select.ownerDocument.createElement('div');
+    line.textContent = label;
+    return line;
+  }));
   const triggerText = exposesSelection
     ? semanticSelection || selectedLabels.join(', ') || '\u2014'
     : 'Options';

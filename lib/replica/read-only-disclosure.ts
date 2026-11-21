@@ -891,16 +891,15 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     setImportant(this.panel, 'content-visibility', 'visible');
     setImportant(this.panel, 'pointer-events', 'auto');
     if (!view) return;
-    let descendants: NodeListOf<Element>;
+    let descendants: readonly Element[];
     try {
-      descendants = this.panel.querySelectorAll('*');
+      descendants = composedRevealDescendants(this.panel);
     } catch {
       return;
     }
-    const limit = Math.min(descendants.length, MAX_INLINE_REVEAL_DESCENDANTS);
-    for (let index = 0; index < limit; index += 1) {
-      const element = descendants.item(index) as HTMLElement | null;
-      if (!element || !('style' in element)) continue;
+    for (const candidate of descendants) {
+      const element = candidate as HTMLElement;
+      if (!('style' in element)) continue;
       try {
         const style = view.getComputedStyle(element);
         const faded = style.opacity === '0';
@@ -1484,4 +1483,39 @@ function tryHidePopover(panel: HTMLElement): void {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
+}
+
+/**
+ * The panel's descendants in tree order, into the mirror's open roots of
+ * components too: a dropdown in a component's root inside a menu the reader
+ * opens is faded in as one in the light tree is (D173). Simul's own select
+ * facsimile keeps its root to itself. Bounded by the same count as before.
+ */
+function composedRevealDescendants(panel: Element): readonly Element[] {
+  const found: Element[] = [];
+  const pending: Node[] = [];
+  const pushChildrenOf = (parent: Element | ShadowRoot): void => {
+    for (
+      let child = parent.lastElementChild;
+      child;
+      child = child.previousElementSibling
+    ) pending.push(child);
+  };
+  const pushRootAndChildren = (element: Element): void => {
+    // The root's content comes first, then the light children (pushed in
+    // reverse: the stack pops the root's content first).
+    pushChildrenOf(element);
+    // `shadowRoot` is null for a closed root: only open ones are entered.
+    const root = element.shadowRoot;
+    if (root && !element.hasAttribute('data-simul-owned-select-host')) {
+      pushChildrenOf(root);
+    }
+  };
+  pushRootAndChildren(panel);
+  while (pending.length > 0 && found.length < MAX_INLINE_REVEAL_DESCENDANTS) {
+    const element = pending.pop() as Element;
+    found.push(element);
+    pushRootAndChildren(element);
+  }
+  return found;
 }

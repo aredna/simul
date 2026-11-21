@@ -366,6 +366,67 @@ describe('read-only replica disclosure placement', () => {
     expect(echo('mousedown', 'trigger')).toBe(false);
   });
 
+  // D173: a dropdown in a component's root inside the panel is faded in too.
+  it('reveals what the page fades inside a component root in an inline menu', () => {
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(
+      '<html><body><ul><li id="item"><span id="trigger">Deposits</span>' +
+      '<div id="panel"><x-picker id="picker"></x-picker>' +
+      '<simul-owned-select-x id="owned" data-simul-owned-select-host="v1"></simul-owned-select-x>' +
+      '</div></li></ul></body></html>',
+    );
+    const picker = document.querySelector<HTMLElement>('#picker')!;
+    const root = picker.attachShadow({ mode: 'open' });
+    root.innerHTML = '<label id="label" class="fade">Currency</label>' +
+      '<x-inner id="inner"></x-inner>';
+    const inner = root.querySelector<HTMLElement>('#inner')!;
+    inner.attachShadow({ mode: 'open' }).innerHTML =
+      '<select id="deep" class="hide"><option>Yen</option></select>';
+    const deep = inner.shadowRoot!.querySelector<HTMLElement>('#deep')!;
+    const label = root.querySelector<HTMLElement>('#label')!;
+    // Simul's own select facsimile keeps its root to itself.
+    const owned = document.querySelector<HTMLElement>('#owned')!;
+    owned.attachShadow({ mode: 'open' }).innerHTML =
+      '<button id="ownedTrigger" class="fade"></button>';
+    const ownedTrigger = owned.shadowRoot!.querySelector<HTMLElement>('#ownedTrigger')!;
+    // linkedom windows share this property, so it is restored below.
+    const pageStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle');
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: element.id === 'panel' ? 'none' : 'block',
+        visibility: element.classList.contains('hide') ? 'hidden' : 'visible',
+        opacity: element.classList.contains('fade') ? '0' : '1',
+      }),
+    });
+    try {
+      const trigger = document.querySelector<HTMLElement>('#trigger')!;
+      const panel = document.querySelector<HTMLElement>('#panel')!;
+      const controller = installReadOnlyReplicaDisclosure({
+        anchor: trigger,
+        trigger,
+        panel,
+        presentation: 'inline',
+        manageTriggerExpanded: true,
+      });
+      trigger.dispatchEvent(new window.Event('pointerenter'));
+      expect(controller.isOpen()).toBe(true);
+      expect(label.style.getPropertyValue('opacity')).toBe('1');
+      expect(deep.style.getPropertyValue('visibility')).toBe('visible');
+      expect(ownedTrigger.getAttribute('style')).toBeNull();
+
+      trigger.dispatchEvent(new window.Event('pointerleave'));
+      vi.advanceTimersByTime(100);
+      expect(controller.isOpen()).toBe(false);
+      expect(label.getAttribute('style')).toBeNull();
+      expect(deep.getAttribute('style')).toBeNull();
+      controller.dispose();
+    } finally {
+      if (pageStyle) Object.defineProperty(window, 'getComputedStyle', pageStyle);
+      else delete (window as { getComputedStyle?: unknown }).getComputedStyle;
+    }
+  });
+
   it('reveals an inline menu where the page draws it and restores it on close', () => {
     // A CSS or scripted hover menu (D82): the page's own panel opens in place
     // with the page's styles, including content the page fades in once open,

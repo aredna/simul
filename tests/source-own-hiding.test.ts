@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import {
   sourceElementHidesItselfByVisibility,
@@ -8,6 +8,9 @@ import {
 
 interface FakeRule {
   readonly selectorText?: string;
+  readonly conditionText?: string;
+  readonly containerName?: string;
+  readonly name?: string;
   readonly style?: { getPropertyValue(name: string): string };
   readonly media?: { readonly mediaText: string };
   readonly cssRules?: readonly FakeRule[];
@@ -25,7 +28,12 @@ const declarations = (text: string) => {
     const [name, value] = part.split(':');
     return [name!.trim(), value!.trim()] as const;
   }));
-  return { getPropertyValue: (name: string) => values.get(name) ?? '' };
+  const plain = (name: string) => (values.get(name) ?? '').replace(/\s*!important$/u, '');
+  return {
+    getPropertyValue: plain,
+    getPropertyPriority: (name: string) =>
+      (values.get(name) ?? '').endsWith('!important') ? 'important' : '',
+  };
 };
 const rule = (selectorText: string, text: string, cssRules?: readonly FakeRule[]): FakeRule => ({
   selectorText,
@@ -38,11 +46,21 @@ const rule = (selectorText: string, text: string, cssRules?: readonly FakeRule[]
  * that fades does: every dropdown in it computes to hidden, and only what
  * the page wrote says which of them the page hides itself.
  */
-function page(body: string, sheets: FakeSheet[]) {
+function page(body: string, sheets: FakeSheet[], supported?: (condition: string) => boolean) {
   const { document, window } = parseHTML(
     `<html><body><div id="panel">${body}</div></body></html>`,
   );
   Object.defineProperty(document, 'styleSheets', { configurable: true, value: sheets });
+  // The test window is one object for every page: put `CSS` back.
+  const css = Object.getOwnPropertyDescriptor(window, 'CSS');
+  onTestFinished(() => {
+    delete (window as unknown as Record<string, unknown>).CSS;
+    if (css) Object.defineProperty(window, 'CSS', css);
+  });
+  Object.defineProperty(window, 'CSS', {
+    configurable: true,
+    value: supported ? { supports: supported } : undefined,
+  });
   Object.defineProperty(window, 'getComputedStyle', {
     configurable: true,
     value: () => ({ visibility: 'hidden' }),
@@ -53,6 +71,7 @@ function page(body: string, sheets: FakeSheet[]) {
   });
   const select = (id: string) => document.querySelector(`#${id}`)! as unknown as Element;
   return {
+    document,
     hides: (id: string, fresh = false) =>
       sourceElementHidesItselfByVisibility(select(id), fresh),
     scales: (id: string, fresh = false) =>
@@ -435,5 +454,170 @@ describe('what the page itself wrote for a dropdown under something hidden', () 
     expect(hides('late')).toBe(true);
     await nextRun();
     expect(hides('late')).toBe(false);
+  });
+  // D173: the cascade between a rule that hides and one that shows (f1, f2).
+  it('lets a later or more specific rule that shows the dropdown win', () => {
+    const { hides, scales } = page(
+      `<div class="menu"><select id="later" class="backing shown"></select>
+         <select id="earlier" class="backing first"></select>
+         <select id="weaker" class="backing weak"></select>
+         <select id="even" class="even"></select>
+         <select id="listed" class="backing listed"></select>
+         <select id="where" class="backing where"></select>
+         <select id="unscaled" class="shrunk grown"></select>
+         <select id="other-axis" class="shrunk flat"></select></div>`,
+      [{
+        cssRules: [
+          rule('.menu .first', 'visibility:visible'),
+          rule('.menu .backing', 'visibility:hidden'),
+          rule('.menu .backing.shown', 'visibility:visible'),
+          rule('.weak', 'visibility:visible'),
+          rule('.even', 'visibility:hidden'),
+          rule('.even', 'visibility:visible'),
+          // A list counts the selector of it that names the dropdown.
+          rule('.nothing, .menu select.listed', 'visibility:visible'),
+          rule(':where(.menu) .where', 'visibility:visible'),
+          rule('.shrunk', 'transform:scale(0)'),
+          rule('.menu .grown', 'transform:none'),
+          // `scale` and `transform` are two properties: one does not undo
+          // the other.
+          rule('.menu .flat', 'scale:1'),
+        ],
+      }],
+    );
+    expect(hides('later')).toBe(false);
+    // The rule that shows comes first and weighs the same: it loses.
+    expect(hides('earlier')).toBe(true);
+    // Later but less specific: it loses.
+    expect(hides('weaker')).toBe(true);
+    expect(hides('even')).toBe(false);
+    expect(hides('listed')).toBe(false);
+    // `:where()` weighs nothing: `.where` alone loses to `.menu .backing`.
+    expect(hides('where')).toBe(true);
+    expect(scales('unscaled')).toBe(false);
+    expect(scales('other-axis')).toBe(true);
+  });
+
+  it('weighs `!important` and the style attribute as the page does', () => {
+    const { hides } = page(
+      `<select id="beaten" class="must" style="visibility:hidden"></select>
+       <select id="attribute" class="backing" style="visibility:visible"></select>
+       <select id="forced" class="forced" style="visibility:visible"></select>
+       <select id="both" class="both" style="visibility:hidden !important"></select>`,
+      [{
+        cssRules: [
+          rule('.must', 'visibility:visible !important'),
+          rule('.backing', 'visibility:hidden'),
+          rule('.forced', 'visibility:hidden !important'),
+          rule('#both.both', 'visibility:visible !important'),
+        ],
+      }],
+    );
+    expect(hides('beaten')).toBe(false);
+    expect(hides('attribute')).toBe(false);
+    expect(hides('forced')).toBe(true);
+    // `!important` in the attribute beats `!important` in a sheet.
+    expect(hides('both')).toBe(true);
+  });
+
+  it('lets nothing show the dropdown that is not worked out here', () => {
+    const many = Array.from(
+      { length: 1_025 },
+      (_unused, index) => rule(`.v${index}`, 'visibility:visible'),
+    );
+    const { hides } = page(
+      `<select id="layered" class="backing layered"></select>
+       <select id="contained" class="backing contained"></select>
+       <select id="variable" class="variable"></select>
+       <select id="crowded" class="crowded v3"></select>`,
+      [
+        {
+          cssRules: [
+            rule('.backing', 'visibility:hidden'),
+            // A cascade layer, a container query.
+            { name: 'base', cssRules: [rule('.backing.layered', 'visibility:visible')] },
+            {
+              conditionText: '(min-width: 1px)',
+              containerName: '',
+              cssRules: [rule('.backing.contained', 'visibility:visible')],
+            },
+            rule('.variable', 'visibility:hidden'),
+            rule('.variable', 'visibility:var(--shown)'),
+            rule('.crowded', 'visibility:hidden'),
+          ],
+        },
+        { cssRules: many },
+      ],
+    );
+    expect(hides('layered')).toBe(true);
+    expect(hides('contained')).toBe(true);
+    expect(hides('variable')).toBe(true);
+    // More rules that show than are kept: none of them is asked.
+    expect(hides('crowded')).toBe(true);
+  });
+
+  it('honours an `@supports` around a rule (f4)', () => {
+    const sheets = (): FakeSheet[] => [{
+      cssRules: [
+        { conditionText: '(display: frob)', cssRules: [rule('.unheld', 'visibility:hidden')] },
+        { conditionText: '(display: grid)', cssRules: [rule('.held', 'visibility:hidden')] },
+        rule('.shown-later', 'visibility:hidden'),
+        { conditionText: '(display: grid)', cssRules: [rule('.shown-later', 'visibility:visible')] },
+      ],
+    }];
+    const markup = `<select id="unheld" class="unheld"></select>
+      <select id="held" class="held"></select>
+      <select id="shown-later" class="shown-later"></select>`;
+    const asked = page(markup, sheets(), (condition) => condition.includes('grid'));
+    expect(asked.hides('unheld')).toBe(false);
+    expect(asked.hides('held')).toBe(true);
+    expect(asked.hides('shown-later')).toBe(false);
+  });
+
+  it('hides by a rule under an `@supports` it cannot ask, and never shows by one', () => {
+    const { hides } = page(
+      '<select id="unheld" class="unheld"></select><select id="shown-later" class="shown-later"></select>',
+      [{
+        cssRules: [
+          { conditionText: '(display: frob)', cssRules: [rule('.unheld', 'visibility:hidden')] },
+          rule('.shown-later', 'visibility:hidden'),
+          { conditionText: '(display: grid)', cssRules: [rule('.shown-later', 'visibility:visible')] },
+        ],
+      }],
+    );
+    expect(hides('unheld')).toBe(true);
+    expect(hides('shown-later')).toBe(true);
+  });
+
+  it('asks the `::slotted` rules of the roots the dropdown is slotted into (f15)', () => {
+    const { document, hides } = page(
+      `<x-outer id="outer"><select id="slotted"></select><select id="shown" class="shown"></select>
+         <select id="plain" class="plain"></select></x-outer>`,
+      [{ cssRules: [rule('select.shown', 'visibility:visible')] }],
+    );
+    const outer = document.querySelector('#outer')!;
+    const root = outer.attachShadow({ mode: 'open' });
+    root.innerHTML = '<div class="wrap"><slot id="s1"></slot></div>';
+    const slot = root.querySelector('#s1')!;
+    Object.defineProperty(root, 'styleSheets', {
+      configurable: true,
+      value: [{
+        cssRules: [
+          rule('.wrap ::slotted(select)', 'visibility:hidden'),
+          // A selector without `::slotted` in the root names nothing outside.
+          rule('select.plain', 'visibility:hidden'),
+        ],
+      }],
+    });
+    for (const id of ['slotted', 'shown', 'plain']) {
+      Object.defineProperty(document.querySelector(`#${id}`)!, 'assignedSlot', {
+        configurable: true,
+        value: slot,
+      });
+    }
+    expect(hides('slotted', true)).toBe(true);
+    // Normal declarations of the tree outside win over the root's.
+    expect(hides('shown', true)).toBe(false);
+    expect(hides('plain', true)).toBe(true);
   });
 });

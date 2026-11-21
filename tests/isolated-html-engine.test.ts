@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
 import {
@@ -1286,6 +1286,21 @@ describe('IsolatedHtmlReplicaEngine', () => {
       expect(selectHost.style.getPropertyValue('display')).toBe('inline-block');
       expect(selectHost.hasAttribute('data-simul-select-hidden')).toBe(false);
       expect(trigger.getAttribute('aria-expanded')).toBe('false');
+
+      // D173: with no box when read, the page gives no width: the dropdown
+      // takes Chrome's own width from its labels, which stand out of sight.
+      expect(selectHost.hasAttribute('data-simul-select-unsized')).toBe(false);
+      patch(3, 'visibility:hidden;width:auto');
+      expect(selectHost.getAttribute('data-simul-select-unsized')).toBe('v1');
+      const sizer = selectHost.shadowRoot!.querySelector(
+        '[data-simul-owned-select-sizer="v1"]',
+      );
+      expect(sizer?.getAttribute('aria-hidden')).toBe('true');
+      expect(selectHost.shadowRoot!.querySelector('style')?.textContent).toContain(
+        ':host([data-simul-select-unsized="v1"][data-simul-select-presentation="popup"]) [data-simul-owned-select-sizer="v1"]{display:block!important;height:0!important',
+      );
+      patch(4, 'visibility:visible;width:120px');
+      expect(selectHost.hasAttribute('data-simul-select-unsized')).toBe(false);
     } finally {
       if (!hadItem) delete styleProto.item;
     }
@@ -2287,6 +2302,94 @@ describe('IsolatedHtmlReplicaEngine', () => {
         `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
       )?.textContent).toBe('Mainichi Digital');
     });
+  });
+
+  // D173: looked at again on a patch, a label stays while its logo is only
+  // scrolled away, and a logo that takes the painted shape later gets one.
+  it('keeps a painted label scrolled out of view and gives one to a logo restyled later', async () => {
+    const stream = new FakeHtmlStream(makePaintedLogoCheckpoint('毎日新聞', 0));
+    const host = new FakePresentationHost();
+    const layout = { top: 0, scrollY: 0 };
+    let view: Window | undefined;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const parsed = parseHTML(shell);
+        installPaintedLogoLayout(parsed.document, false, layout);
+        view = parsed.document.defaultView as unknown as Window;
+        const original = Object.getOwnPropertyDescriptor(view, 'scrollY');
+        onTestFinished(() => {
+          delete (view as { scrollY?: number }).scrollY;
+          if (original) Object.defineProperty(view, 'scrollY', original);
+        });
+        Object.defineProperty(view, 'scrollY', {
+          configurable: true,
+          get: () => layout.scrollY,
+        });
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parsed.document,
+        });
+        return parsed.document;
+      },
+    });
+
+    await engine.run(request);
+    const snapshot = engine.snapshot()!;
+    const record = snapshot.records.find(({ nodeId }) => nodeId === 5)!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'ja\0en' });
+    // Below the first screen: in the document all the same.
+    layout.top = 4_000;
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: record.revision,
+      source: record.source,
+      translationEpoch: 1,
+      pairKey: 'ja\0en',
+      translated: 'Mainichi',
+    })).toBe(true);
+    await Promise.resolve();
+    const logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
+      '.header-logo',
+    )!;
+    const overlay = (): string | null | undefined => logo.querySelector(
+      `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+    )?.textContent;
+    expect(overlay()).toBe('Mainichi');
+
+    // Scrolled past it, then a patch elsewhere: the label stays.
+    layout.top = -1_990;
+    layout.scrollY = 2_000;
+    let sequence = 1;
+    const patchAttributes = (
+      nodeId: number,
+      tagName: string,
+      attributes: readonly (readonly [string, string])[],
+    ): void => {
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }),
+        sequence,
+        sequence,
+        [{
+          kind: 'attributes', nodeId, namespace: 'html', tagName,
+          attributes: attributes.map(([name, value]) => [name, value] as [string, string]),
+        }],
+      )!);
+      sequence += 1;
+    };
+    patchAttributes(3, 'body', [['data-state', 'busy']]);
+    expect(overlay()).toBe('Mainichi');
+
+    // It loses the painted shape, then takes it again with a class change.
+    patchAttributes(4, 'a', [['class', 'plain']]);
+    expect(overlay()).toBeUndefined();
+    patchAttributes(4, 'a', [['class', 'header-logo']]);
+    await Promise.resolve();
+    expect(overlay()).toBe('Mainichi');
   });
 
   it('presents every translated direct fragment of one painted label in order', async () => {
@@ -9182,6 +9285,7 @@ function makePaintedLogoCheckpoint(
 function installPaintedLogoLayout(
   document: Document,
   sanitizedBackground: boolean,
+  layout: { readonly top: number } = { top: 0 },
 ): void {
   const view = document.defaultView!;
   Object.defineProperty(document, 'baseURI', {
@@ -9200,15 +9304,16 @@ function installPaintedLogoLayout(
       const painted = this.classList.contains('header-logo');
       const width = painted ? 130 : 800;
       const height = painted ? 24 : 600;
+      const top = painted ? layout.top : 0;
       return {
         left: 0,
-        top: 0,
+        top,
         right: width,
-        bottom: height,
+        bottom: top + height,
         width,
         height,
         x: 0,
-        y: 0,
+        y: top,
         toJSON: () => ({}),
       } as DOMRectReadOnly;
     },

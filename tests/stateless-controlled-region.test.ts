@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import { sanitizeSourceDocument } from '../lib/replica/html-mirror-sanitizer';
 import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
@@ -360,7 +360,7 @@ describe('painted controlled regions', () => {
           const computed = base(element) as unknown as Record<string, unknown> & {
             getPropertyValue: (name: string) => string;
           };
-          const clips = has(element, 'clip0');
+          const clips = has(element, 'clip0') || has(element, 'clipbox');
           return {
             ...computed,
             display: has(element, 'dn') || element.localName === 'style'
@@ -452,8 +452,9 @@ describe('painted controlled regions', () => {
       for (const id of ['seen5', 'seen6', 'seen9']) expect(targets.has(page.find(id)), id).toBe(false);
     });
 
-    it('does not vouch for text of its own', () => {
-      // Text straight in the target has no box to be judged by.
+    it('does not vouch for text of its own whose boxes cannot be read', () => {
+      // Text straight in the target has no box of an element to be judged
+      // by; here no `Range` gives its own boxes either (D173).
       const loose = shaped(
         `${button('1')}<div id="t1" class="contents">LOOSE1<span id="seen1">SEEN1</span></div>`,
       );
@@ -473,6 +474,72 @@ describe('painted controlled regions', () => {
         `${button('4')}<div id="t4" class="contents">\n  <span id="seen4">SEEN4</span>\n</div>`,
       );
       expect(spaced.state('t4')).toBe('controlled-region');
+    });
+
+    // D173: text straight in the target is judged by its own boxes.
+    it('reads text of its own that the page paints on the page', () => {
+      /**
+       * The boxes of a text, as a `Range` gives them: none for `NOBOX`, left
+       * of the page for `AWAY`, below a 40px clip for `BELOW`, else in view.
+       */
+      const textBoxes = (document: Document) => {
+        const original = Object.getOwnPropertyDescriptor(document, 'createRange');
+        onTestFinished(() => {
+          delete (document as unknown as Record<string, unknown>).createRange;
+          if (original) Object.defineProperty(document, 'createRange', original);
+        });
+        Object.defineProperty(document, 'createRange', {
+          configurable: true,
+          value: () => {
+            let node: Node | undefined;
+            return {
+              selectNodeContents: (target: Node) => { node = target; },
+              getClientRects: () => {
+                const text = node?.nodeValue ?? '';
+                if (text.includes('NOBOX')) {
+                  return Object.assign([], { item: () => null }) as unknown as DOMRectList;
+                }
+                if (text.includes('AWAY')) return rectList({ left: -9000, top: 10, width: 80, height: 20 });
+                if (text.includes('BELOW')) return rectList({ left: 0, top: 500, width: 80, height: 20 });
+                return rectList({ left: 0, top: 0, width: 80, height: 20 });
+              },
+            };
+          },
+        });
+      };
+      const page = shaped(
+        `${button('1')}<div id="t1" class="contents">LOOSE1${closed('1')}</div>` +
+        `${button('2')}<span id="t2" class="contents"></span>` +
+        `${button('3')}<span id="t3" class="contents"></span>` +
+        `${button('4')}<div id="t4" class="contents">AWAY4<span id="seen4">SEEN4</span></div>` +
+        `${button('5')}<div id="t5" class="contents">NOBOX5<span id="seen5">SEEN5</span></div>` +
+        `<div class="clipbox">${button('6')}<div id="t6" class="contents">BELOW6</div></div>` +
+        `<div class="clipbox">${button('7')}<div id="t7" class="contents">INSIDE7</div></div>`,
+        {
+          t2: `LOOSE2${closed('2')}`,
+          t3: '<slot>LOOSE3</slot>',
+        },
+      );
+      textBoxes(page.document);
+      const targets = page.policy().targets;
+      const sent = page.sent();
+      for (const n of ['1', '2', '3', '7']) {
+        expect(targets.get(page.find(`t${n}`)), n).toBe('controlled-region');
+      }
+      for (const text of ['LOOSE1', 'LOOSE2', 'LOOSE3', 'INSIDE7']) expect(sent, text).toContain(text);
+      // What sits beside the painted text stays shut.
+      for (const n of ['1', '2']) {
+        for (const id of closedIds(n)) expect(targets.get(page.find(id)), id).toBe('withheld');
+        for (const text of closedText(n)) expect(sent, text).not.toContain(text);
+      }
+      // Off the page, of no box, or clipped away: the whole target stays
+      // withheld, the painted element beside the text too.
+      for (const n of ['4', '5', '6']) {
+        expect(targets.get(page.find(`t${n}`)), n).toBe('withheld');
+      }
+      for (const text of ['AWAY4', 'SEEN4', 'NOBOX5', 'SEEN5', 'BELOW6']) {
+        expect(sent, text).not.toContain(text);
+      }
     });
 
     it('judges what its root holds, and what is slotted where it is drawn', () => {

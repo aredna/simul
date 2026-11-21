@@ -102,7 +102,7 @@ describe('painted semantic labels', () => {
     )).toBeUndefined();
   });
 
-  it('rejects tiny, oversized, and off-viewport boxes', () => {
+  it('rejects tiny, oversized, and off-page boxes', () => {
     const zero = createFixture(
       '<a id="logo">Label</a>',
       {},
@@ -121,15 +121,53 @@ describe('painted semantic labels', () => {
       oversized.environment,
     )).toBeUndefined();
 
-    const offscreen = createFixture(
+    const leftOfPage = createFixture(
+      '<a id="logo">Label</a>',
+      {},
+      { left: -9_999, right: -9_869 },
+    );
+    expect(detectPaintedSemanticLabel(
+      leftOfPage.element,
+      leftOfPage.environment,
+    )).toBeUndefined();
+  });
+
+  // D173: out of the mirror's view is not off the page.
+  it('admits a box outside the view that is on the page, in document terms', () => {
+    const belowFirstScreen = createFixture(
+      '<a id="logo">Label</a>',
+      {},
+      { top: 4_800, bottom: 4_824 },
+    );
+    expect(detectPaintedSemanticLabel(
+      belowFirstScreen.element,
+      belowFirstScreen.environment,
+    )?.sourceText).toBe('Label');
+
+    const rightOfView = createFixture(
       '<a id="logo">Label</a>',
       {},
       { left: 801, right: 931 },
     );
     expect(detectPaintedSemanticLabel(
-      offscreen.element,
-      offscreen.environment,
-    )).toBeUndefined();
+      rightOfView.element,
+      rightOfView.environment,
+    )?.sourceText).toBe('Label');
+
+    // Scrolled past: above the view, but not above the document.
+    const scrolledPast = createFixture(
+      '<a id="logo">Label</a>',
+      {},
+      { top: -990, bottom: -966 },
+    );
+    expect(detectPaintedSemanticLabel(scrolledPast.element, {
+      ...scrolledPast.environment,
+      scrollY: 1_000,
+    })?.sourceText).toBe('Label');
+    expect(detectPaintedSemanticLabel(scrolledPast.element, {
+      ...scrolledPast.environment,
+      scrollY: 0,
+    })).toBeUndefined();
   });
 
   it('requires direct text rather than harvesting a hidden descendant label', () => {
@@ -355,8 +393,8 @@ function createFixture(
     environment: {
       getComputedStyle: () => styleFor(values),
       getBoundingClientRect: () => rect,
-      viewportWidth: 800,
-      viewportHeight: 600,
+      scrollX: 0,
+      scrollY: 0,
     },
   };
 }

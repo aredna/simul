@@ -32,8 +32,12 @@ const SENSITIVE_ROLES = new Set([
 export interface PaintedSemanticLabelEnvironment {
   readonly getComputedStyle?: (element: Element) => CSSStyleDeclaration;
   readonly getBoundingClientRect?: (element: HTMLElement) => DOMRectReadOnly;
-  readonly viewportWidth?: number;
-  readonly viewportHeight?: number;
+  /**
+   * How far the document is scrolled, to place a box in document terms
+   * (D173). The element's own window is asked when these are absent.
+   */
+  readonly scrollX?: number;
+  readonly scrollY?: number;
 }
 
 export interface PaintedSemanticLabelCandidate {
@@ -46,8 +50,8 @@ export interface PaintedSemanticLabelCandidate {
 interface ResolvedEnvironment {
   readonly getComputedStyle: (element: Element) => CSSStyleDeclaration;
   readonly getBoundingClientRect: (element: HTMLElement) => DOMRectReadOnly;
-  readonly viewportWidth?: number;
-  readonly viewportHeight?: number;
+  readonly scrollX: number;
+  readonly scrollY: number;
 }
 
 interface InspectedPaintedLabel {
@@ -261,15 +265,11 @@ function resolveEnvironment(
   if (!getComputedStyle) return undefined;
   const getBoundingClientRect = environment.getBoundingClientRect ??
     ((element: HTMLElement) => element.getBoundingClientRect());
-  const viewportWidth = positiveFinite(environment.viewportWidth) ??
-    positiveFinite(view?.innerWidth);
-  const viewportHeight = positiveFinite(environment.viewportHeight) ??
-    positiveFinite(view?.innerHeight);
   return {
     getComputedStyle,
     getBoundingClientRect,
-    ...(viewportWidth === undefined ? {} : { viewportWidth }),
-    ...(viewportHeight === undefined ? {} : { viewportHeight }),
+    scrollX: finiteOrZero(environment.scrollX ?? view?.scrollX),
+    scrollY: finiteOrZero(environment.scrollY ?? view?.scrollY),
   };
 }
 
@@ -345,15 +345,13 @@ function isVisiblePaintedBox(
     const parsedOpacity = Number(opacity);
     if (!Number.isFinite(parsedOpacity) || parsedOpacity <= 0) return false;
   }
+  // Off the page, not out of view (D173): a logo below the first screen, or
+  // scrolled away when a patch makes its label be looked at again, keeps its
+  // label. Only a box placed left of the document or above it (the way a page
+  // hides a skip link) is passed over; the mirror is never scrolled to it.
   if (
-    environment.viewportWidth !== undefined &&
-    environment.viewportHeight !== undefined &&
-    (
-      rect.right <= 0 ||
-      rect.bottom <= 0 ||
-      rect.left >= environment.viewportWidth ||
-      rect.top >= environment.viewportHeight
-    )
+    rect.right + environment.scrollX <= 0 ||
+    rect.bottom + environment.scrollY <= 0
   ) return false;
   return true;
 }
@@ -671,8 +669,6 @@ function styleValue(
   }
 }
 
-function positiveFinite(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? value
-    : undefined;
+function finiteOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
