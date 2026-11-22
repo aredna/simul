@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createPassShareLedger,
+  TYPING_PASS_MAX_WAIT_MS,
   PASS_HELD_RECHECK_MS,
   PASS_HOLD_LIMIT_MS,
   type PassShareLedger,
@@ -641,7 +642,7 @@ describe('semantic scan in slices (D164)', () => {
       .toContain('Grace');
     harness.session.dispose();
   });
-  it('reads what a person typed without waiting for the share (D165)', async () => {
+  it('reads a choice at once and what a person typed after at most a short wait (D165, D230)', async () => {
     const page = loadPage();
     let time = 0;
     const now = () => time;
@@ -657,22 +658,49 @@ describe('semantic scan in slices (D164)', () => {
     harness.start();
     expect(harness.port.messages).toHaveLength(1);
     harness.ack();
-    expect(passShare.waitMs()).toBeGreaterThan(0);
-
+    const EventClass = (page.window as unknown as { Event: typeof Event }).Event;
     const field = page.byId<HTMLInputElement>('name');
+
+    // A choice is read in this task: no timer for the share.
+    expect(passShare.waitMs()).toBeGreaterThan(0);
     field.value = 'Margaret';
-    field.dispatchEvent(new (page.window as unknown as { Event: typeof Event }).Event('input', { bubbles: true }));
-    // Read in this task: no timer for the share.
+    field.dispatchEvent(new EventClass('change', { bubbles: true }));
     expect(harness.port.messages).toHaveLength(2);
     expect(harness.port.messages[1]!.records.map((record) => record.text))
       .toContain('Margaret');
     harness.ack();
-    // A change that is not a person's input waits as before.
+
+    // The page owes far more than the cap: a key waits for the cap only.
+    time += 1;
+    const owed = passShare.waitMs();
+    expect(owed).toBeGreaterThan(0);
+    // Owed more than the cap after a long scan.
+    passShare.note(TYPING_PASS_MAX_WAIT_MS);
     const before = harness.timers.length;
     field.value = 'Grace';
-    harness.session.refresh();
+    field.dispatchEvent(new EventClass('input', { bubbles: true }));
     expect(harness.port.messages).toHaveLength(2);
     expect(harness.timers).toHaveLength(before + 1);
+    const wait = harness.timers.at(-1)!;
+    expect(wait.delayMs).toBe(TYPING_PASS_MAX_WAIT_MS);
+    // Later keys set no second timer: they are read with the first.
+    time += 100;
+    field.value = 'Grace H';
+    field.dispatchEvent(new EventClass('input', { bubbles: true }));
+    expect(harness.timers).toHaveLength(before + 1);
+    time += TYPING_PASS_MAX_WAIT_MS - 100;
+    harness.timers.splice(harness.timers.indexOf(wait), 1);
+    wait.callback();
+    expect(harness.port.messages).toHaveLength(3);
+    expect(harness.port.messages[2]!.records.map((record) => record.text))
+      .toContain('Grace H');
+    harness.ack();
+
+    // A key once the share is paid is read in this task.
+    time += 100 * TYPING_PASS_MAX_WAIT_MS;
+    field.value = 'Ada';
+    field.dispatchEvent(new EventClass('input', { bubbles: true }));
+    expect(harness.port.messages).toHaveLength(4);
     harness.session.dispose();
   });
 

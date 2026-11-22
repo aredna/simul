@@ -184,6 +184,15 @@ export interface PassShareLedger {
    * after start).
    */
   waitMs(owner?: object, ignoreShare?: boolean): number;
+  /**
+   * How long a pass a person's typing asked for waits (D230): for its share
+   * as any pass does, but at most until `TYPING_PASS_MAX_WAIT_MS` after
+   * `typedSince` (the first key not yet read, on `clock()`), and for a pass
+   * that holds the page.
+   */
+  typingWaitMs(owner: object, typedSince: number): number;
+  /** The ledger's clock, for `typedSince` and for when a wait is over. */
+  clock(): number;
   /** A pass of `owner` begins: it holds the page until `note` or `release`. */
   begin(owner: object): void;
   /**
@@ -221,6 +230,15 @@ export const PASS_HELD_RECHECK_MS = 50;
  */
 export const PASS_HOLD_LIMIT_MS = 10_000;
 
+/**
+ * How long a pass a person's typing asked for waits at most for the share
+ * of the tab's time (D230). The first key after a pause is read at once;
+ * while a person keeps typing into a large page, a pass every so often and
+ * not one at each key: the mirror's field trails by this and a pass at
+ * most, about a second, against all of the tab's time.
+ */
+export const TYPING_PASS_MAX_WAIT_MS = 700;
+
 export function createPassShareLedger(
   options: PassShareLedgerOptions = {},
 ): PassShareLedger {
@@ -245,6 +263,12 @@ export function createPassShareLedger(
       if (heldByOther(owner)) return PASS_HELD_RECHECK_MS;
       return ignoreShare ? 0 : Math.max(0, notBefore - now());
     },
+    typingWaitMs: (owner, typedSince) => {
+      if (heldByOther(owner)) return PASS_HELD_RECHECK_MS;
+      const at = now();
+      return Math.max(0, Math.min(notBefore, typedSince + TYPING_PASS_MAX_WAIT_MS) - at);
+    },
+    clock: () => now(),
     begin: (owner) => {
       holder = owner;
       heldSince = now();

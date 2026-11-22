@@ -830,6 +830,8 @@ const VISIBILITY_INTERACTION_EVENTS = Object.freeze([
  * share of the passes after it (D164, the owner's choice). Pointer moves,
  * focus changes and key releases come too often to skip the wait.
  */
+/** The input events of a person typing (D230). */
+const TYPING_INPUT_EVENTS: ReadonlySet<string> = new Set(['keydown', 'beforeinput', 'input']);
 const USER_INPUT_EVENTS: ReadonlySet<string> = new Set([
   'click',
   'keydown',
@@ -1313,6 +1315,14 @@ export class HtmlMirrorSourceSession {
   #comparisonGeneration = 0;
   /** The comparison waits for its share of the tab's time (D164). */
   #comparisonShareTimer: unknown;
+  /** When the comparison's share timer is due, on the ledger's clock. */
+  #comparisonShareTimerDue = Number.POSITIVE_INFINITY;
+  /**
+   * When the first key not yet compared was pressed, on the ledger's
+   * clock: a comparison typing asks for waits at most a little for its
+   * share (D230).
+   */
+  #typedSince: number | undefined;
   /**
    * The names the page's style sheets mention, as the style poll reads
    * them: a change no rule names is not compared (D164).
@@ -1503,6 +1513,7 @@ export class HtmlMirrorSourceSession {
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
     this.#userInputPending = false;
+    this.#typedSince = undefined;
     this.#hidingClassPending = false;
     this.#visibilityFullRefreshPending = false;
     this.#layoutChangePending = false;
@@ -3137,6 +3148,7 @@ export class HtmlMirrorSourceSession {
       )
     ) return;
     this.#userInputPending = false;
+    this.#typedSince = undefined;
     this.#hidingClassPending = false;
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
@@ -3400,11 +3412,25 @@ export class HtmlMirrorSourceSession {
     // that much at most and keeps to the fifth over time.
     const ahead = hidingClass &&
       share.waitMs(this) <= HIDING_CLASS_MAX_ADVANCE_MS;
-    const wait = share.waitMs(this, userInput || ahead);
+    const typedSince = this.#typedSince;
+    const wait = !userInput && !ahead && typedSince !== undefined
+      ? share.typingWaitMs(this, typedSince)
+      : share.waitMs(this, userInput || ahead);
     if (!(wait > 0)) return false;
+    // A timer set for a longer wait gives way to one typing asked for.
+    const due = share.clock() + wait;
+    if (
+      this.#comparisonShareTimer !== undefined &&
+      due < this.#comparisonShareTimerDue - 1
+    ) {
+      this.environment.clearTimer(this.#comparisonShareTimer);
+      this.#comparisonShareTimer = undefined;
+    }
     if (this.#comparisonShareTimer === undefined) {
+      this.#comparisonShareTimerDue = due;
       this.#comparisonShareTimer = this.environment.setTimer(() => {
         this.#comparisonShareTimer = undefined;
+        this.#comparisonShareTimerDue = Number.POSITIVE_INFINITY;
         this.#scheduleFlush(true);
       }, wait);
     }
@@ -4199,6 +4225,7 @@ export class HtmlMirrorSourceSession {
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
     this.#userInputPending = false;
+    this.#typedSince = undefined;
     this.#hidingClassPending = false;
     this.#visibilityFullRefreshPending = false;
   }
@@ -4877,7 +4904,17 @@ export class HtmlMirrorSourceSession {
       return;
     }
     this.#visibilityInteractionTargets.add(target as Element);
-    if (USER_INPUT_EVENTS.has(event.type)) this.#userInputPending = true;
+    if (TYPING_INPUT_EVENTS.has(event.type)) {
+      // Typing waits a little for the share (D230); a click is compared at once.
+      try {
+        this.#typedSince ??= this.environment.passShare?.clock();
+      } catch {
+        // No clock: the key is compared at once, as before.
+      }
+      if (this.#typedSince === undefined) this.#userInputPending = true;
+    } else if (USER_INPUT_EVENTS.has(event.type)) {
+      this.#userInputPending = true;
+    }
     this.#scheduleFlush();
   };
 

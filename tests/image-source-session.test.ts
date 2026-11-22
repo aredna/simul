@@ -165,6 +165,8 @@ describe('image source capture safety', () => {
         return shared.notBefore;
       },
       waitMs: (owner, ignoreShare) => shared.waitMs(owner, ignoreShare),
+      typingWaitMs: (owner, typedSince) => shared.typingWaitMs(owner, typedSince),
+      clock: () => shared.clock(),
       begin: (owner) => {
         order.push('pass begins');
         shared.begin(owner);

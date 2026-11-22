@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import {
   createPassShareLedger,
+  TYPING_PASS_MAX_WAIT_MS,
   PASS_HELD_RECHECK_MS,
   PASS_HOLD_LIMIT_MS,
   type PassShareLedger,
@@ -509,20 +510,30 @@ describe('the comparison of what the page paints, in slices (D164)', () => {
     // Its work counts: the share after it is longer still.
     expect(share.waitMs()).toBeGreaterThan(0);
 
-    // While another pass holds the page, a key waits all the same.
+    // A key waits for the share, but no longer than the cap (D230); while
+    // another pass holds the page, for it all the same.
     compared = target.probe();
     const other = {};
     share.begin(other);
+    const typed = target.time();
     target.event('keydown', first);
     target.flushFrames();
     expect(target.probe()).toBe(compared);
     // The wait set for the hover is still armed; once the page is free,
-    // it brings the comparison.
+    // it asks again, and what is left of the key's wait follows.
     expect(target.timers).toHaveLength(1);
     share.release(other);
     target.timers.splice(0)[0]!.callback();
     target.flushFrames();
+    while (target.probe() === compared && target.timers.length > 0) {
+      const timer = target.timers.splice(0)[0]!;
+      expect(timer.delay).toBeLessThanOrEqual(TYPING_PASS_MAX_WAIT_MS);
+      target.advance(timer.delay);
+      timer.callback();
+      target.flushFrames();
+    }
     expect(target.probe()).toBe(compared + 1);
+    expect(target.time() - typed).toBeLessThanOrEqual(TYPING_PASS_MAX_WAIT_MS + 100);
   });
 
   it('answers a comparison of text changes from the styles kept, only where text cannot restyle (D186)', () => {

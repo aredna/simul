@@ -446,6 +446,8 @@ const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
 const SEMANTIC_DOM_CHANGE_EVENTS = Object.freeze([
   'beforeinput', 'input', 'change', 'beforetoggle', 'toggle',
 ] as const);
+/** The events of a person typing (D230). */
+const TYPING_EVENTS: ReadonlySet<string> = new Set(['beforeinput', 'input']);
 /** The events that change one field's value or choice (D228). */
 const FIELD_VALUE_EVENTS: ReadonlySet<string> = new Set([
   'beforeinput', 'input', 'change',
@@ -592,6 +594,13 @@ export class SemanticSourceSession {
   /** The first scan after start runs at once; later ones wait their share. */
   #scannedOnce = false;
   #shareTimer: unknown;
+  /** When the share timer is due, on the ledger's clock. */
+  #shareTimerDue = Number.POSITIVE_INFINITY;
+  /**
+   * When the first key not yet read was typed, on the ledger's clock: a
+   * scan typing asks for waits at most a little for its share (D230).
+   */
+  #typedSince: number | undefined;
   /** A person's input asked for the next scan: it skips the share (D165). */
   #userInputPending = false;
   readonly #revisions = new Map<number, RevisionState>();
@@ -1020,7 +1029,15 @@ export class SemanticSourceSession {
     }
     // What a person typed or chose is read without waiting for the share
     // of time (D165): the value is what they look at in the mirror.
-    this.#userInputPending = true;
+    // Typing waits a little for the share, so a long run of keys on a
+    // large page is read every so often and not at each key (D230); a
+    // choice, a toggle and the first key after a pause are read at once.
+    if (TYPING_EVENTS.has(event.type)) {
+      this.#typedSince ??= safelyRead(() => this.environment.passShare?.clock());
+      if (this.#typedSince === undefined) this.#userInputPending = true;
+    } else {
+      this.#userInputPending = true;
+    }
     // Typing into a field, or choosing in one, changes that field (D228):
     // only it is read again, and the menus and classifications of the rest
     // are kept unless a rule of the page reads a field's value. What the
@@ -1602,6 +1619,7 @@ export class SemanticSourceSession {
     // pass that holds the page, not for the share (D164, D165).
     if (this.#waitForShare(!this.#scannedOnce || this.#userInputPending)) return;
     this.#userInputPending = false;
+    this.#typedSince = undefined;
     this.#dirty = false;
     // What the observer has queued comes before the page is read, and the
     // roots that left the page go before the roots still in it are watched
@@ -1641,13 +1659,22 @@ export class SemanticSourceSession {
   #waitForShare(ignoreShare: boolean): boolean {
     const share = this.environment.passShare;
     if (!share) return false;
-    const wait = share.waitMs(this, ignoreShare);
+    const wait = !ignoreShare && this.#typedSince !== undefined
+      ? share.typingWaitMs(this, this.#typedSince)
+      : share.waitMs(this, ignoreShare);
     if (!(wait > 0)) return false;
+    // A timer set for a longer wait gives way to one typing asked for.
+    const due = share.clock() + wait;
+    if (this.#shareTimer !== undefined && due < this.#shareTimerDue - 1) {
+      this.#cancelShareTimer();
+    }
     if (this.#shareTimer === undefined) {
       const setTimer = this.environment.setTimer ?? ((callback, delayMs) =>
         setTimeout(callback, delayMs));
+      this.#shareTimerDue = due;
       this.#shareTimer = setTimer(() => {
         this.#shareTimer = undefined;
+        this.#shareTimerDue = Number.POSITIVE_INFINITY;
         this.#scheduleScan();
       }, wait);
     }
@@ -1660,6 +1687,7 @@ export class SemanticSourceSession {
       timer as ReturnType<typeof setTimeout>,
     )))(this.#shareTimer);
     this.#shareTimer = undefined;
+    this.#shareTimerDue = Number.POSITIVE_INFINITY;
   }
 
   #beginScanAttempt(run: SemanticScanRun): SemanticScanAttempt {

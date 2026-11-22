@@ -5,6 +5,7 @@ import {
   createPassShareLedger,
   PASS_HELD_RECHECK_MS,
   PASS_HOLD_LIMIT_MS,
+  TYPING_PASS_MAX_WAIT_MS,
   receiverSafeAnimationFrameCanceller,
   receiverSafeAnimationFrameScheduler,
   receiverSafeTimeoutCanceller,
@@ -159,6 +160,30 @@ describe('a turn for the page between slices (D180)', () => {
 });
 
 describe('share ledger of the live passes (D164)', () => {
+  it('lets typing wait for the share, but no longer than the cap after the first key (D230)', () => {
+    let time = 1_000;
+    const ledger = createPassShareLedger({ now: () => time });
+    const scan = {};
+    expect(ledger.clock()).toBe(1_000);
+    // Nothing owed: the first key is read at once.
+    expect(ledger.typingWaitMs(scan, time)).toBe(0);
+    // Owed less than the cap: the share's wait.
+    ledger.note(50);
+    expect(ledger.typingWaitMs(scan, time)).toBe(200);
+    // Owed more: the cap from the first key, less what has passed since.
+    ledger.note(1_000);
+    const typed = time;
+    expect(ledger.typingWaitMs(scan, typed)).toBe(TYPING_PASS_MAX_WAIT_MS);
+    time += 300;
+    expect(ledger.typingWaitMs(scan, typed)).toBe(TYPING_PASS_MAX_WAIT_MS - 300);
+    time += 1_000;
+    expect(ledger.typingWaitMs(scan, typed)).toBe(0);
+    // A pass that holds the page is waited for all the same.
+    const other = {};
+    ledger.begin(other);
+    expect(ledger.typingWaitMs(scan, typed)).toBe(PASS_HELD_RECHECK_MS);
+  });
+
   it('lets the first pass run at once and the next after four times its busy time', () => {
     let time = 1_000;
     const ledger = createPassShareLedger({ now: () => time });
