@@ -1677,6 +1677,53 @@ describe('semantic source receiver', () => {
     expect(text.nodeValue).toBe('Startup School');
   });
 
+  it('walks a menu panel of more children than the engine takes as arguments (D211)', () => {
+    const { document } = parseHTML(`<html><body><nav>
+      <div id="wrapper"><button id="trigger">Resources</button>
+      <div id="panel" class="hidden"><a id="item" href="/school">***</a></div>
+      </div></nav><iframe id="frame"></iframe></body></html>`);
+    const container = document.querySelector<HTMLElement>('#wrapper')!;
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const text = document.querySelector('#item')!.firstChild!;
+    for (let index = 0; index < 130_000; index += 1) panel.appendChild(document.createElement('i'));
+    const frame = document.querySelector('#frame') as unknown as HTMLIFrameElement;
+    const nodes = new Map<number, Node>([
+      [16, container], [17, trigger], [18, panel], [19, text],
+    ]);
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: frame,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    const record: SemanticSourceRecord = {
+      bridge: 'isolated-html',
+      recordId: semanticSourceRecordId(19, 'text')!,
+      nodeId: 19,
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'disclosureContent',
+      tagName: 'a',
+      type: '',
+      autocomplete: '',
+      role: '',
+      contentEditable: '',
+      text: 'Startup School',
+      presentation: 'text',
+      classifierVersion: 1,
+    };
+    // Past the walk's bound: the menu is not taken, and the batch is.
+    expect(() => receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [record], [structuralMenuProof()],
+    ))).not.toThrow();
+    expect(trigger.hasAttribute('aria-controls')).toBe(false);
+  });
+
   it('takes no tab state for a panel that holds an editor, however the editor is written (D145)', () => {
     // A panel that holds an editor is no panel the mirror shows or hides by
     // a proof. A bare attribute was no editor here.

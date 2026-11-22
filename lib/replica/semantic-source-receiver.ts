@@ -301,19 +301,19 @@ export function changedReplicaRegion(
       inside.add(node);
       if (inside.size > MAX_CHANGED_REGION_NODES) return undefined;
       if (sourceNodeType(node) === 11) {
-        pending.push(...sourceChildNodeList(node));
+        pushEach(pending, sourceChildNodeList(node));
         continue;
       }
       if (sourceNodeType(node) !== 1) continue;
       const element = node as Element;
       const tagName = sourceLocalName(element).toLowerCase();
       if (STYLE_ELEMENT_TAGS.has(tagName)) return undefined;
-      pending.push(...sourceChildNodeList(element));
+      pushEach(pending, sourceChildNodeList(element));
       const shadowRoot = sourceProperty(element, 'shadowRoot');
       if (shadowRoot) pending.push(shadowRoot);
       if (tagName === 'slot') {
         const assigned = (element as Partial<HTMLSlotElement>).assignedNodes;
-        if (typeof assigned === 'function') pending.push(...assigned.call(element));
+        if (typeof assigned === 'function') pushEach(pending, assigned.call(element));
       }
     }
   } catch {
@@ -2085,6 +2085,15 @@ function receiverTabRelationshipIsSafe(
     safeAttribute(panel, 'role').trim().toLowerCase() === 'tabpanel';
 }
 
+/**
+ * Adds each node of a list, not each as an argument (D211): a list of more
+ * than about 125,000 nodes passes the engine's limit on arguments, as in
+ * D180 and D186.
+ */
+function pushEach(pending: Node[], nodes: Iterable<Node>): void {
+  for (const node of nodes) pending.push(node);
+}
+
 function receiverUniqueBoundedPanelId(panel: Element): string | undefined {
   const id = safeAttribute(panel, 'id');
   if (
@@ -2096,7 +2105,7 @@ function receiverUniqueBoundedPanelId(panel: Element): string | undefined {
   }
   const root = sourceCall(panel, 'getRootNode');
   const pending: Node[] = sourceNodeType(root) === 9
-    ? [((root as Document).documentElement as Node | null)].filter(
+    ? [(sourceProperty(root as Document, 'documentElement') as Node | null)].filter(
         (node): node is Node => Boolean(node),
       )
     : [...sourceChildNodeList(root)];
@@ -2111,7 +2120,7 @@ function receiverUniqueBoundedPanelId(panel: Element): string | undefined {
       if (match) return undefined;
       match = element;
     }
-    pending.push(...sourceChildNodeList(element));
+    pushEach(pending, sourceChildNodeList(element));
   }
   return match === panel ? id : undefined;
 }
@@ -2148,7 +2157,7 @@ function receiverDisclosureSubtreeIsSafe(
       return false;
     }
     if (sourceNodeType(node) === 11) {
-      pending.push(...sourceChildNodeList(node));
+      pushEach(pending, sourceChildNodeList(node));
       continue;
     }
     if (sourceNodeType(node) !== 1) continue;
@@ -2164,7 +2173,7 @@ function receiverDisclosureSubtreeIsSafe(
         (contentEditable !== '' && contentEditable !== 'false')
       )
     ) return false;
-    pending.push(...sourceChildNodeList(element));
+    pushEach(pending, sourceChildNodeList(element));
     try {
       const shadowRoot = sourceProperty(element, 'shadowRoot');
       if (shadowRoot?.mode === 'open') pending.push(shadowRoot);
@@ -2172,7 +2181,7 @@ function receiverDisclosureSubtreeIsSafe(
       // host's (D179): it is asked as the panel's own nodes are.
       if (tagName === 'slot') {
         const assigned = (element as Partial<HTMLSlotElement>).assignedNodes;
-        if (typeof assigned === 'function') pending.push(...assigned.call(element));
+        if (typeof assigned === 'function') pushEach(pending, assigned.call(element));
       }
     } catch {
       return false;
