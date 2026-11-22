@@ -85,6 +85,9 @@ const LARGE_MOVE = 160;
 // report follows at once); a scroll that stops near a page top is told
 // apart by this margin.
 const PAGE_TOP_EXACT = 0.1;
+// A page top this far (screen px) from a whole pixel is snapped by Chrome,
+// which sends a second report (D196).
+const SNAPPED_TOP = 0.01;
 // The snapped report of a jump to the next page (ArrowRight) follows its
 // first report within this time; a held key repeats more slowly (about every
 // 30 ms). So does the second report of a jump to the place the report
@@ -1128,6 +1131,25 @@ export class PdfViewerTracker {
         this.#jumpInstead = true;
         this.#guess();
       }
+      return documentTop;
+    }
+    // Home where Chrome does not animate scrolling sends one report at the
+    // top of the PDF, which on a PDF of one page size fits the next page's
+    // top too. Where that top is not a whole pixel on screen, ArrowRight and
+    // a jump report the place again at once, snapped (D146); Home's top is
+    // whole and is not. There the top, unless the snap report comes (D196):
+    // a guess either way, which a look settles. On whole pixels nothing
+    // tells them apart, and ArrowRight is the likelier.
+    const nextTop = next ? next.y * next.zoom : 0;
+    if (
+      documentTop &&
+      next &&
+      next !== documentTop &&
+      fromTop > 1e-6 &&
+      Math.abs(nextTop - Math.round(nextTop)) > SNAPPED_TOP
+    ) {
+      this.#jumpInstead = true;
+      this.#guess();
       return documentTop;
     }
     // ArrowRight goes here; so do the page box, an outline entry and a link

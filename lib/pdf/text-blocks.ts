@@ -43,7 +43,7 @@ export interface PdfTextBlock {
    * in reading order. They are translated as one text, laid out across the
    * pieces. Absent on a line that was not cut, or kept one piece only. The
    * block below a cut line that runs on into it is the flow's last part
-   * (D189).
+   * (D189), and the block above that runs on into the line its first (D196).
    */
   readonly flow?: { readonly id: number; readonly part: number };
 }
@@ -258,37 +258,53 @@ export function pdfOcrBlocks(
  * Makes the block below a line cut around typed text the last part of the
  * line's flow, where the line runs on into it (D189): the line does not
  * end a sentence and reaches the right of that block, which starts at once
- * below it where the line starts. Only one block may fit: two (columns, a
- * caption beside) leave the reading order open, and the line stays alone.
+ * below it where the line starts. And the block above it the first part,
+ * where that block runs on into the line (D196). Only one block may fit on
+ * either side: two (columns, a caption beside) leave the reading order
+ * open, and the line stays alone on that side.
  */
 function flowOn(blocks: PdfTextBlock[], flows: number): PdfTextBlock[] {
   for (let id = 1; id <= flows; id += 1) {
     const pieces = blocks.filter((block) => block.flow?.id === id);
     if (pieces.length < 2) continue;
     const last = pieces.reduce((a, b) => (b.flow!.part > a.flow!.part ? b : a));
-    if (SENTENCE_END.test(last.text.trim())) continue;
     const top = Math.min(...pieces.map((piece) => piece.box.top));
     const bottom = Math.max(...pieces.map((piece) => piece.box.top + piece.box.height));
     const left = Math.min(...pieces.map((piece) => piece.box.left));
     const right = Math.max(...pieces.map((piece) => piece.box.left + piece.box.width));
     const height = bottom - top;
-    const below = blocks.filter((block) => {
-      if (block.flow) return false;
-      const gap = block.box.top - bottom;
-      return gap >= -FLOW_ON_GAP * height / 2 &&
-        gap <= FLOW_ON_GAP * height &&
-        block.box.left < right &&
-        block.box.left + block.box.width > left;
-    });
-    if (below.length !== 1) continue;
-    const next = below[0]!;
-    const nextRight = next.box.left + next.box.width;
+    const edge = FLOW_ON_EDGE * height;
+    const across = (block: PdfTextBlock) =>
+      !block.flow && block.box.left < right && block.box.left + block.box.width > left;
+    const near = (gap: number) => gap >= -FLOW_ON_GAP * height / 2 && gap <= FLOW_ON_GAP * height;
+    const below = blocks.filter((block) => across(block) && near(block.box.top - bottom));
+    const next = below.length === 1 ? below[0]! : undefined;
     if (
-      Math.abs(next.box.left - left) > FLOW_ON_EDGE * height ||
-      nextRight > right + FLOW_ON_EDGE * height
-    ) continue;
-    const index = blocks.indexOf(next);
-    blocks[index] = { ...next, flow: { id, part: last.flow!.part + 1 } };
+      next &&
+      !SENTENCE_END.test(last.text.trim()) &&
+      Math.abs(next.box.left - left) <= edge &&
+      next.box.left + next.box.width <= right + edge
+    ) blocks[blocks.indexOf(next)] = { ...next, flow: { id, part: last.flow!.part + 1 } };
+    // The mirror (D196): the one block above runs on into the cut line when
+    // it does not end a sentence, starts where the line starts, ends no
+    // further left, and its last line reaches its right.
+    const above = blocks.filter((block) =>
+      across(block) && near(top - (block.box.top + block.box.height)));
+    const before = above.length === 1 ? above[0]! : undefined;
+    const lastLine = before?.lines.at(-1);
+    if (
+      before &&
+      lastLine &&
+      !SENTENCE_END.test(before.text.trim()) &&
+      Math.abs(before.box.left - left) <= edge &&
+      before.box.left + before.box.width >= right - edge &&
+      lastLine.left + lastLine.width >= before.box.left + before.box.width - edge
+    ) {
+      blocks.forEach((block, index) => {
+        if (block.flow?.id === id) blocks[index] = { ...block, flow: { id, part: block.flow.part + 1 } };
+      });
+      blocks[blocks.indexOf(before)] = { ...before, flow: { id, part: 0 } };
+    }
   }
   return blocks;
 }

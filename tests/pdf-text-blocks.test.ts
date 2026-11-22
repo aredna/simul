@@ -628,9 +628,10 @@ describe('pdfOcrBlocks', () => {
       ocrLine('1702, dont un seul toucha les', 100, 334, 640),
     ], 2, 612, typed);
     // The line below, which the cut line runs on into, is the flow's last
-    // part since D189.
+    // part since D189, and the line above, which runs on into it, its first
+    // since D196.
     expect(blocks.map((block) => block.flow)).toEqual([
-      undefined, { id: 1, part: 0 }, { id: 1, part: 1 }, { id: 1, part: 2 },
+      { id: 1, part: 0 }, { id: 1, part: 1 }, { id: 1, part: 2 }, { id: 1, part: 3 },
     ]);
     // A line cut down to one piece is a block like any other.
     const footer = pdfOcrBlocks([ocrWords([
@@ -671,6 +672,40 @@ describe('pdfOcrBlocks', () => {
     // A block starting far below is another paragraph.
     expect(flows([ocrLine('1702, dont un seul toucha les', 100, 400, 640)])
       .map(([, part]) => part)).toEqual([0, 1, undefined]);
+  });
+
+  it('takes the one block above a cut line into its flow where it runs on into the line (D196)', () => {
+    const typed = [{ left: 212, top: 150, width: 100, height: 11 }];
+    const cut = ocrWords([
+      ['Les', 100, 44], ['registres', 152, 120], ['mentionnent', 280, 130],
+      ['COPIE', 426, 80], ['CONFORME', 514, 110],
+      ['1640', 660, 60], ['et.', 728, 24],
+    ], 302);
+    const parts = (above: PdfOcrLine[]) =>
+      pdfOcrBlocks([...above, cut], 2, 612, typed).map((block) => [block.text, block.flow?.part]);
+    // A paragraph's two lines above: one block, the flow's first part. The
+    // cut line ends a sentence, so nothing below would join.
+    expect(parts([
+      ocrLine('Après chaque incendie, le conseil vota de nouveaux', 100, 238, 660),
+      ocrLine('impôts pour rebâtir les halles en pierre, et', 100, 270, 650),
+    ])).toEqual([
+      ['Après chaque incendie, le conseil vota de nouveaux impôts pour rebâtir les halles en pierre, et', 0],
+      ['Les registres mentionnent', 1],
+      ['1640 et.', 2],
+    ]);
+    // A block that ends a sentence, a heading narrower than the line, a
+    // last line that stops short, and two columns: none joins.
+    for (const above of [
+      [ocrLine('Le conseil vota de nouveaux impôts.', 100, 270, 660)],
+      [ocrLine('Les registres de la mairie', 100, 270, 400)],
+      [
+        ocrLine('Après chaque incendie, le conseil vota de nouveaux', 100, 238, 660),
+        ocrLine('impôts pour', 100, 270, 200),
+      ],
+      [ocrLine('Après chaque', 100, 270, 260), ocrLine('incendie, le', 560, 270, 190)],
+    ]) {
+      expect(parts(above).filter(([, part]) => part !== undefined).map(([, part]) => part)).toEqual([0, 1]);
+    }
   });
 
   it('splits a translation across a line\'s pieces by their room, at word boundaries (D184)', () => {

@@ -242,6 +242,39 @@ describe('PdfViewerTracker', () => {
     expect(moved(send(tracker, viewer, 500))).toEqual({ index: 0, fraction: 0 });
   });
 
+  it('reads Home without animation from far down as the top, ArrowRight by its snapped report (D196)', () => {
+    // 1,070 px × 0.7058 is not a whole number: ArrowRight's landing is
+    // snapped at once, Home's top of the PDF is not.
+    const start = () => {
+      const viewer = new FakeViewer(pages(60), 0.7058, 757);
+      const tracker = new PdfViewerTracker(pages(60));
+      viewer.scrollTo(viewer.pages[40]!.top * viewer.zoom + 100);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 40);
+      return { viewer, tracker };
+    };
+    // Home: one report, nothing after it.
+    const home = start();
+    home.viewer.scrollTo(0);
+    expect(moved(send(home.tracker, home.viewer, 800))).toEqual({ index: 0, fraction: 0 });
+    expect(home.tracker.doubt).toBeDefined();
+    // ArrowRight: the next page's top, then the snapped report 3 ms on.
+    const arrow = start();
+    arrow.viewer.scrollTo((arrow.viewer.pages[41]!.top - 3) * arrow.viewer.zoom);
+    send(arrow.tracker, arrow.viewer, 800);
+    arrow.viewer.scrollTo(Math.round(arrow.viewer.scroll));
+    expect(moved(send(arrow.tracker, arrow.viewer, 3)).index).toBe(41);
+    expect(arrow.tracker.doubt).toBeDefined();
+    // On whole pixels (100%) there is no snapped report: ArrowRight, as before.
+    const viewer = new FakeViewer(pages(60), 1, 757);
+    const tracker = new PdfViewerTracker(pages(60));
+    viewer.scrollTo(viewer.pages[40]!.top + 100);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 40);
+    viewer.scrollTo(viewer.pages[41]!.top - 3);
+    expect(moved(send(tracker, viewer, 800)).index).toBe(41);
+  });
+
   it('waits for more frames before reading a small move as a page key step', () => {
     // 0.875 × 862 ≈ one page pitch (755 px): PageDown looks like a 1 px scroll.
     const viewer = new FakeViewer(pages(20), 0.7058, 862.5);
