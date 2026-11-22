@@ -1,4 +1,4 @@
-import { sourceNodeType } from './source-node-accessors';
+import { sourceCall, sourceNodeType, sourceProperty } from './source-node-accessors';
 
 export interface ReplicaPatchTarget {
   readonly target: Node;
@@ -46,13 +46,17 @@ export function hasStructuralPatchTargetConflict(
   return false;
 }
 
+/** A mirror form answers `parentNode`, `getRootNode` and `host` with a
+ * field of that id, and the field's parent is the form: read past them, or
+ * the walk goes round the two forever (D195). */
 function composedParent(node: Node): Node | undefined {
-  if (node.parentNode) return node.parentNode;
-  if ('host' in node && (node as ShadowRoot).host) {
+  const parent = sourceProperty(node, 'parentNode');
+  if (parent) return parent;
+  if (sourceNodeType(node) === 11 && (node as ShadowRoot).host) {
     return (node as ShadowRoot).host;
   }
-  const root = node.getRootNode();
-  return root !== node && 'host' in root
+  const root = sourceCall(node, 'getRootNode');
+  return root !== node && sourceNodeType(root) === 11
     ? (root as ShadowRoot).host
     : undefined;
 }

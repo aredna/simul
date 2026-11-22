@@ -13,6 +13,11 @@
  * the panes that moved, D122).
  */
 
+import {
+  sourceCall,
+  sourceProperty,
+} from './source-node-accessors';
+
 /** Pixels a line of a wheel that counts in lines moves, as Chrome does. */
 const WHEEL_LINE_PX = 16;
 /**
@@ -54,7 +59,7 @@ export class ReplicaPaneWheelLatch {
     this.#last = now;
     const latched = sameGesture ? this.#target : undefined;
     if (latched === 'mirror') return false;
-    if (latched && latched.isConnected) {
+    if (latched && sourceProperty(latched, 'isConnected')) {
       // Held to the end of the gesture, moved or not.
       scrollPaneBy(latched, wheel);
       return true;
@@ -97,7 +102,7 @@ function paneTakingWheel(
   for (const pane of panes) {
     let rect: DOMRect;
     try {
-      rect = pane.getBoundingClientRect();
+      rect = sourceCall(pane, 'getBoundingClientRect');
     } catch {
       continue;
     }
@@ -110,7 +115,7 @@ function paneTakingWheel(
   if (under.length === 0) return undefined;
   // The innermost first: a pane inside another goes before it.
   under.sort((left, right) =>
-    left.contains(right) ? 1 : right.contains(left) ? -1 : 0);
+    sourceCall(left, 'contains', right) ? 1 : sourceCall(right, 'contains', left) ? -1 : 0);
   for (const pane of under) {
     if (scrollPaneBy(pane, wheel)) return pane;
   }

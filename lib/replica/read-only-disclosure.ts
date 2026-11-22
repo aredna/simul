@@ -3,7 +3,7 @@
  * page's own panel where the page draws it, as a CSS or scripted hover menu
  * does; `list` keeps a select's options inline.
  */
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+import { sourceCall, sourceLocalName, sourceNodeType, sourceProperty } from './source-node-accessors';
 
 export type ReplicaDisclosurePresentation = 'inline' | 'list' | 'popup';
 
@@ -661,12 +661,14 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       depth += 1
     ) {
       if (current === this.panel) return true;
-      if (current.parentNode) {
-        current = current.parentNode;
+      // Past a mirror form's fields named for these (D195).
+      const parent: Node | null = sourceProperty(current, 'parentNode');
+      if (parent) {
+        current = parent;
         continue;
       }
-      const root: Node = current.getRootNode();
-      current = root !== current && sourceNodeType(root) === 11 && 'host' in root
+      const root: Node = sourceCall(current, 'getRootNode');
+      current = root !== current && sourceNodeType(root) === 11
         ? (root as ShadowRoot).host
         : null;
     }

@@ -1,3 +1,5 @@
+import { sourceNodeType, sourceProperty } from './source-node-accessors';
+
 /**
  * Removes disconnected and descendant targets while preserving insertion order.
  * Walking each target's ancestor chain avoids pairwise subtree containment scans.
@@ -7,14 +9,14 @@ export function minimizeConnectedComposedTargets(
 ): Node[] {
   const connectedTargets = new Set<Node>();
   for (const target of targets) {
-    if (target.isConnected) connectedTargets.add(target);
+    if (sourceProperty(target, 'isConnected')) connectedTargets.add(target);
   }
 
   const minimal: Node[] = [];
   for (const target of connectedTargets) {
     // A shadow root is not among its host's children: reading those again
     // does not read the root, so its own host does not cover it (D132).
-    const ownHost = 'host' in target ? (target as ShadowRoot).host : undefined;
+    const ownHost = sourceNodeType(target) === 11 ? (target as ShadowRoot).host : undefined;
     let covered = false;
     for (
       let ancestor = composedParent(target);
@@ -30,8 +32,10 @@ export function minimizeConnectedComposedTargets(
   return minimal;
 }
 
+/** Past a mirror form's fields named `parentNode` or `host` (D195). */
 function composedParent(node: Node): Node | undefined {
-  if (node.parentNode) return node.parentNode;
-  if ('host' in node) return (node as ShadowRoot).host ?? undefined;
+  const parent = sourceProperty(node, 'parentNode');
+  if (parent) return parent;
+  if (sourceNodeType(node) === 11) return (node as ShadowRoot).host ?? undefined;
   return undefined;
 }

@@ -7,7 +7,7 @@
  * back, not what shows.
  */
 
-import { sourceAttributeList } from './source-node-accessors';
+import { sourceAttributeList, sourceCall } from './source-node-accessors';
 
 interface AttributeOverride {
   /** What the page has for this attribute; `null` when it has none. */
@@ -40,9 +40,9 @@ export function setReplicaAttributeOverride(
   if (existing) {
     existing.value = value;
   } else {
-    own.set(name, { page: element.getAttribute(name), value, namespace });
+    own.set(name, { page: sourceCall(element, 'getAttribute', name), value, namespace });
   }
-  if (element.getAttribute(name) !== value) {
+  if (sourceCall(element, 'getAttribute', name) !== value) {
     writeAttribute(element, name, namespace, value);
   }
 }
@@ -54,14 +54,14 @@ export function clearReplicaAttributeOverride(element: Element, name: string): v
   if (!own || !existing) return;
   own.delete(name);
   if (own.size === 0) overrides.delete(element);
-  if (existing.page === null) element.removeAttribute(name);
+  if (existing.page === null) sourceCall(element, 'removeAttribute', name);
   else writeAttribute(element, name, existing.namespace, existing.page);
 }
 
 /** The page's own value of `name`, whatever Simul shows in its place. */
 export function pageAttribute(element: Element, name: string): string | null {
   const existing = overrides.get(element)?.get(name);
-  return existing ? existing.page : element.getAttribute(name);
+  return existing ? existing.page : sourceCall(element, 'getAttribute', name);
 }
 
 /**
@@ -96,18 +96,19 @@ export function reapplyReplicaAttributeOverrides(element: Element): void {
   const own = overrides.get(element);
   if (!own) return;
   for (const [name, existing] of own) {
-    existing.page = element.getAttribute(name);
+    existing.page = sourceCall(element, 'getAttribute', name);
     writeAttribute(element, name, existing.namespace, existing.value);
   }
 }
 
+/** Through the prototype: a mirror form answers these names with its field (D195). */
 function writeAttribute(
   element: Element,
   name: string,
   namespace: string | null,
   value: string | null,
 ): void {
-  if (value === null) element.removeAttribute(name);
-  else if (namespace === null) element.setAttribute(name, value);
-  else element.setAttributeNS(namespace, name, value);
+  if (value === null) sourceCall(element, 'removeAttribute', name);
+  else if (namespace === null) sourceCall(element, 'setAttribute', name, value);
+  else sourceCall(element, 'setAttributeNS', namespace, name, value);
 }

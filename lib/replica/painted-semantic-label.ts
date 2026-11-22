@@ -15,6 +15,8 @@ const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
 const MAX_STRUCTURAL_DESCENDANTS = 256;
 const MAX_STRUCTURAL_ANCESTORS = 64;
 const MIN_LARGE_NEGATIVE_INDENT_PX = 64;
+/** The hosts passed over kept per document, the latest looked at (D204). */
+export const MAX_PAINTED_SEMANTIC_LABEL_PASSED_OVER = 4_096;
 const CLIPPING_VALUES = new Set(['clip', 'hidden']);
 const SENSITIVE_INPUT_TYPES = new Set(['file', 'hidden', 'password']);
 const SENSITIVE_AUTOCOMPLETE_TOKENS = new Set([
@@ -68,6 +70,13 @@ const candidateEnvironments = new WeakMap<
   ResolvedEnvironment
 >();
 const activePresentations = new WeakMap<HTMLElement, () => void>();
+/**
+ * Per document, the elements with a translated text of their own that were
+ * looked at and are no painted label (D204), oldest first: a class on an
+ * element above one, or a sheet, may give it the painted shape later, and
+ * nothing of its own changes then.
+ */
+const passedOverHosts = new WeakMap<Document, Set<HTMLElement>>();
 /** The overlay each presentation shows, wherever it stands. */
 const activeOverlays = new WeakMap<HTMLElement, HTMLElement>();
 /**
@@ -261,9 +270,11 @@ export function synchronizePaintedSemanticLabelPresentation(
   const candidate = detectPaintedSemanticLabel(element, environment);
   if (!candidate) {
     removePaintedSemanticLabelPresentation(element);
+    notePassedOverHost(element);
     return false;
   }
   const host = candidate.element;
+  passedOverHosts.get(host.ownerDocument)?.delete(host);
   const existing = activeOverlays.get(host);
   if (
     activePresentations.has(host) &&
@@ -275,6 +286,70 @@ export function synchronizePaintedSemanticLabelPresentation(
   }
   removePaintedSemanticLabelPresentation(host);
   return Boolean(presentPaintedSemanticLabel(candidate, text));
+}
+
+/**
+ * The elements passed over as no painted label (`synchronize…` answered
+ * false for their text) that a change may have made one (D204): those
+ * inside one of `changed` (an element whose attributes changed: a class on
+ * `body` that gives a logo its picture), through shadow roots, or every one
+ * of `document` when a sheet of it changed. Whoever shows the translations
+ * looks at each again (`synchronize…`) once the layout is settled. Read
+ * from the tree alone; hosts no longer in the page are forgotten.
+ */
+export function paintedSemanticLabelHostsToLookAgain(
+  changed: Iterable<Element>,
+  sheetsChangedIn?: Document,
+): HTMLElement[] {
+  const found = new Set<HTMLElement>();
+  if (sheetsChangedIn) {
+    const hosts = passedOverHosts.get(sheetsChangedIn);
+    for (const host of hosts ?? []) {
+      if (host.isConnected) found.add(host);
+      else hosts!.delete(host);
+    }
+  }
+  const byDocument = new Map<Document, Set<Element>>();
+  for (const element of changed) {
+    const document = element.ownerDocument;
+    if (!document || document === sheetsChangedIn) continue;
+    if (!passedOverHosts.get(document)?.size) continue;
+    let elements = byDocument.get(document);
+    if (!elements) byDocument.set(document, elements = new Set());
+    elements.add(element);
+  }
+  for (const [document, elements] of byDocument) {
+    const hosts = passedOverHosts.get(document)!;
+    for (const host of hosts) {
+      if (!host.isConnected) {
+        hosts.delete(host);
+        continue;
+      }
+      let current: Node | null = host;
+      for (let depth = 0; current && depth <= MAX_STRUCTURAL_ANCESTORS; depth += 1) {
+        if (elements.has(current as Element)) {
+          found.add(host);
+          break;
+        }
+        current = current.parentNode && sourceNodeType(current.parentNode) === 11
+          ? (current.parentNode as ShadowRoot).host ?? null
+          : current.parentNode;
+      }
+    }
+  }
+  return [...found];
+}
+
+function notePassedOverHost(element: Element): void {
+  if (!isConnectedHtmlElement(element)) return;
+  const document = element.ownerDocument;
+  let hosts = passedOverHosts.get(document);
+  if (!hosts) passedOverHosts.set(document, hosts = new Set());
+  hosts.delete(element);
+  hosts.add(element);
+  if (hosts.size > MAX_PAINTED_SEMANTIC_LABEL_PASSED_OVER) {
+    hosts.delete(hosts.values().next().value!);
+  }
 }
 
 function resolveEnvironment(
@@ -312,17 +387,19 @@ function inspectPaintedSemanticLabel(
   } catch {
     return undefined;
   }
+  // The element's own shape first: most elements looked at are no painted
+  // label, and the walks above and below it read the most (D204).
   if (
     !style ||
-    !isVisiblePaintedBox(style, rect, environment) ||
-    hasHiddenOrMaskedAncestor(element, environment) ||
-    hasSensitiveStructuralBoundary(element) ||
     !safePaintedBackgroundImage(
       styleValue(style, 'background-image', 'backgroundImage'),
       element.ownerDocument.baseURI,
     ) ||
     !hasHorizontalOverflowClipping(style) ||
-    !hasLargeNegativeTextIndent(style, rect.width)
+    !hasLargeNegativeTextIndent(style, rect.width) ||
+    !isVisiblePaintedBox(style, rect, environment) ||
+    hasHiddenOrMaskedAncestor(element, environment) ||
+    hasSensitiveStructuralBoundary(element)
   ) return undefined;
 
   const sourceText = readDirectSemanticText(element);

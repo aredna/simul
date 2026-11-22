@@ -7,6 +7,11 @@ import {
   PRIMARY_SCROLL_MAX,
   VISUAL_SCALE_MAX,
 } from '../primary-scroll';
+import {
+  sourceCall,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 export const STATIC_REPLAY_LABEL = 'Replica reconnecting';
 export const LIVE_REPLAY_LABEL = 'Live page replica';
@@ -196,7 +201,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     // An iframe's browsing context may be discarded and its srcdoc reloaded
     // when a connected ancestor is moved between parents. Stage candidates in
     // their final preview parent and reveal them in place at commit time.
-    this.#previewSurface.append(candidate.root);
+    sourceCall(this.#previewSurface, 'append', candidate.root);
     return candidate;
   }
 
@@ -244,13 +249,13 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     );
     const viewportWidth = boundedExtent(visibleWidth * scale);
     const viewportHeight = boundedExtent(visibleHeight * scale);
-    committed.mount.style.width = `${committed.dimensions.viewportWidth}px`;
-    committed.mount.style.height = `${committed.dimensions.viewportHeight}px`;
-    committed.scaleLayer.style.width = `${committed.dimensions.viewportWidth}px`;
-    committed.scaleLayer.style.height = `${committed.dimensions.viewportHeight}px`;
+    sourceProperty(committed.mount, 'style').width = `${committed.dimensions.viewportWidth}px`;
+    sourceProperty(committed.mount, 'style').height = `${committed.dimensions.viewportHeight}px`;
+    sourceProperty(committed.scaleLayer, 'style').width = `${committed.dimensions.viewportWidth}px`;
+    sourceProperty(committed.scaleLayer, 'style').height = `${committed.dimensions.viewportHeight}px`;
     this.#applyScale(committed);
-    committed.stickyViewport.style.width = `${viewportWidth}px`;
-    committed.stickyViewport.style.height = `${viewportHeight}px`;
+    sourceProperty(committed.stickyViewport, 'style').width = `${viewportWidth}px`;
+    sourceProperty(committed.stickyViewport, 'style').height = `${viewportHeight}px`;
     const availableHeight =
       committed.scroller.clientHeight ||
       this.#previewSurface.clientHeight ||
@@ -259,11 +264,11 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     // track so the iframe can still reach the replica's final offset. When it
     // is larger, the content extent preserves panning across the clipped
     // portion of that zoomed viewport after internal scroll clamps.
-    committed.stage.style.width = `${boundedExtent(Math.max(
+    sourceProperty(committed.stage, 'style').width = `${boundedExtent(Math.max(
       contentWidth * scale,
       maximumSourceScrollX(committed) * scale + availableWidth,
     ))}px`;
-    committed.stage.style.height = `${boundedExtent(Math.max(
+    sourceProperty(committed.stage, 'style').height = `${boundedExtent(Math.max(
       contentHeight * scale,
       maximumSourceScrollY(committed) * scale + availableHeight,
     ))}px`;
@@ -284,7 +289,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #applyScale(committed: CandidateLease): void {
     const visual = this.#sourceVisual;
     const magnified = committed.scale * visual.scale;
-    committed.scaleLayer.style.transform = visual === NO_VISUAL_ZOOM
+    sourceProperty(committed.scaleLayer, 'style').transform = visual === NO_VISUAL_ZOOM
       ? `scale(${committed.scale})`
       : `translate(${-visual.offsetX * magnified}px, ${-visual.offsetY * magnified}px) ` +
         `scale(${magnified})`;
@@ -504,14 +509,14 @@ export class VisibleReplayHost implements ReplayPresentationHost {
    * it as it reads the page (D118). A candidate stays hidden until this runs.
    */
   #exposeToAssistiveTechnology(committed: CandidateLease): void {
-    this.#previewSurface.removeAttribute('aria-hidden');
-    committed.root.removeAttribute('aria-hidden');
+    sourceCall(this.#previewSurface, 'removeAttribute', 'aria-hidden');
+    sourceCall(committed.root, 'removeAttribute', 'aria-hidden');
     committed.iframe.removeAttribute('aria-hidden');
   }
 
   clearPresentation(): void {
     this.#previewSurface.hidden = true;
-    this.#previewSurface.setAttribute('aria-hidden', 'true');
+    sourceCall(this.#previewSurface, 'setAttribute', 'aria-hidden', 'true');
     this.#badge.textContent = '';
     this.#badge.hidden = true;
   }
@@ -539,8 +544,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       this.#disposed ||
       this.#candidate !== candidate ||
       candidate.released ||
-      candidate.root.parentElement !== this.#previewSurface ||
-      !candidate.mount.contains(iframe) ||
+      sourceProperty(candidate.root, 'parentElement') !== this.#previewSurface ||
+      !sourceCall(candidate.mount, 'contains', iframe) ||
       !isProtectedReplayIframe(iframe)
     ) {
       throw new Error('The replay candidate is not eligible for presentation.');
@@ -586,10 +591,10 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     // Reveal the already-connected candidate synchronously. Never move its
     // iframe subtree: Chrome can reload srcdoc during a connected DOM move and
     // erase the constructed replica back to Simul's empty shell.
-    candidate.root.classList.remove('replica-replay-root--candidate');
-    candidate.root.classList.add('replica-replay-root--committed');
-    candidate.root.removeAttribute('inert');
-    candidate.root.removeAttribute('style');
+    sourceProperty(candidate.root, 'classList').remove('replica-replay-root--candidate');
+    sourceProperty(candidate.root, 'classList').add('replica-replay-root--committed');
+    sourceCall(candidate.root, 'removeAttribute', 'inert');
+    sourceCall(candidate.root, 'removeAttribute', 'style');
     candidate.applyCanvasBackground();
     this.#candidate = undefined;
     this.#committed = candidate;
@@ -609,7 +614,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     if (this.#committed === candidate) {
       const wasVisible = !this.#previewSurface.hidden;
       this.#committed = undefined;
-      this.#previewSurface.replaceChildren();
+      sourceCall(this.#previewSurface, 'replaceChildren');
       if (wasVisible) this.clearPresentation();
     }
   }
@@ -868,19 +873,19 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.canvasBackgroundColor = dimensions.canvasBackgroundColor;
     this.root = targetDocument.createElement('div');
     this.root.className = 'replica-replay-root replica-replay-root--candidate';
-    this.root.dataset.simulReplicaCandidate = 'v2';
-    this.root.setAttribute('aria-hidden', 'true');
-    this.root.setAttribute('inert', '');
-    this.root.style.position = 'fixed';
-    this.root.style.left = '-1000000px';
-    this.root.style.top = '0';
-    this.root.style.width = `${dimensions.viewportWidth}px`;
-    this.root.style.height = `${dimensions.viewportHeight}px`;
-    this.root.style.visibility = 'hidden';
-    this.root.style.opacity = '0';
-    this.root.style.pointerEvents = 'none';
-    this.root.style.overflow = 'hidden';
-    this.root.style.contain = 'strict';
+    sourceProperty(this.root, 'dataset').simulReplicaCandidate = 'v2';
+    sourceCall(this.root, 'setAttribute', 'aria-hidden', 'true');
+    sourceCall(this.root, 'setAttribute', 'inert', '');
+    sourceProperty(this.root, 'style').position = 'fixed';
+    sourceProperty(this.root, 'style').left = '-1000000px';
+    sourceProperty(this.root, 'style').top = '0';
+    sourceProperty(this.root, 'style').width = `${dimensions.viewportWidth}px`;
+    sourceProperty(this.root, 'style').height = `${dimensions.viewportHeight}px`;
+    sourceProperty(this.root, 'style').visibility = 'hidden';
+    sourceProperty(this.root, 'style').opacity = '0';
+    sourceProperty(this.root, 'style').pointerEvents = 'none';
+    sourceProperty(this.root, 'style').overflow = 'hidden';
+    sourceProperty(this.root, 'style').contain = 'strict';
 
     this.scroller = targetDocument.createElement('div');
     this.scroller.className = 'replica-replay-scroll';
@@ -892,13 +897,13 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.scaleLayer.className = 'replica-replay-scale-layer';
     this.mount = targetDocument.createElement('div');
     this.mount.className = 'replica-replay-mount';
-    this.mount.style.width = `${dimensions.viewportWidth}px`;
-    this.mount.style.height = `${dimensions.viewportHeight}px`;
-    this.scaleLayer.append(this.mount);
-    this.stickyViewport.append(this.scaleLayer);
-    this.stage.append(this.stickyViewport);
-    this.scroller.append(this.stage);
-    this.root.append(this.scroller);
+    sourceProperty(this.mount, 'style').width = `${dimensions.viewportWidth}px`;
+    sourceProperty(this.mount, 'style').height = `${dimensions.viewportHeight}px`;
+    sourceCall(this.scaleLayer, 'append', this.mount);
+    sourceCall(this.stickyViewport, 'append', this.scaleLayer);
+    sourceCall(this.stage, 'append', this.stickyViewport);
+    sourceCall(this.scroller, 'append', this.stage);
+    sourceCall(this.root, 'append', this.scroller);
     this.applyCanvasBackground();
   }
 
@@ -918,8 +923,8 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.iframe = iframe;
     this.replayExtent = extent;
     this.resolveNode = resolveNode;
-    delete this.root.dataset.simulReplicaCandidate;
-    this.root.dataset.simulReplicaViewport = 'v2';
+    delete sourceProperty(this.root, 'dataset').simulReplicaCandidate;
+    sourceProperty(this.root, 'dataset').simulReplicaViewport = 'v2';
   }
 
   applyCanvasBackground(): void {
@@ -955,9 +960,9 @@ class CandidateLease implements VisibleReplayCandidateLease {
       return undefined;
     }
     if (
-      !replica || !node || node.nodeType !== 1 ||
-      node.ownerDocument !== replica ||
-      node.isConnected === false ||
+      !replica || !node || sourceNodeType(node) !== 1 ||
+      sourceProperty(node, 'ownerDocument') !== replica ||
+      sourceProperty(node, 'isConnected') === false ||
       node === replica.documentElement ||
       node === replica.scrollingElement
     ) return undefined;
@@ -966,7 +971,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
 
   installScrollListener(listener: () => void): void {
     this.#scrollListener = listener;
-    this.scroller.addEventListener('scroll', listener, { passive: true });
+    sourceCall(this.scroller, 'addEventListener', 'scroll', listener, { passive: true });
   }
 
   /**
@@ -984,7 +989,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
     if (this.released) return;
     this.released = true;
     if (this.#scrollListener) {
-      this.scroller.removeEventListener('scroll', this.#scrollListener);
+      sourceCall(this.scroller, 'removeEventListener', 'scroll', this.#scrollListener);
       this.#scrollListener = undefined;
     }
     if (this.#wheelListener) {
@@ -999,7 +1004,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.resolveNode = undefined;
     this.placedPanes.clear();
     this.host.detach(this);
-    this.root.remove();
+    sourceCall(this.root, 'remove');
   }
 }
 

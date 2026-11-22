@@ -84,3 +84,77 @@ export function sourceChildNodeList(node: Node): NodeListOf<ChildNode> {
     ? readSourceOwnAccessor(node, 'childNodes') as NodeListOf<ChildNode>
     : node.childNodes;
 }
+
+/**
+ * The methods the prototypes of a node define, looked up once a prototype
+ * (D195): a form answers for its fields' ids and names before its methods
+ * too ([LegacyOverrideBuiltIns]).
+ */
+const SOURCE_OWN_METHODS = new WeakMap<
+  object,
+  Map<string, ((this: object, ...args: unknown[]) => unknown) | null>
+>();
+
+function readSourceOwnMethod(
+  node: object,
+  name: string,
+): ((this: object, ...args: unknown[]) => unknown) | null {
+  const prototype: object | null = Object.getPrototypeOf(node);
+  if (!prototype) return null;
+  let methods = SOURCE_OWN_METHODS.get(prototype);
+  if (!methods) {
+    methods = new Map();
+    SOURCE_OWN_METHODS.set(prototype, methods);
+  }
+  let method = methods.get(name);
+  if (method === undefined) {
+    method = null;
+    for (
+      let current: object | null = prototype;
+      current;
+      current = Object.getPrototypeOf(current)
+    ) {
+      const found = Object.getOwnPropertyDescriptor(current, name)?.value;
+      if (typeof found === 'function') {
+        method = found as (this: object, ...args: unknown[]) => unknown;
+        break;
+      }
+    }
+    methods.set(name, method);
+  }
+  return method;
+}
+
+type MethodName<T> = {
+  [K in keyof T]: T[K] extends (...args: never[]) => unknown ? K : never
+}[keyof T];
+
+/**
+ * Calls a method of a node past a form's fields (D195). What a field stands
+ * in front of is never a function, so a function found is the node's own.
+ */
+export function sourceCall<T extends object, K extends MethodName<T>>(
+  node: T,
+  name: K,
+  ...args: T[K] extends (...args: infer A) => unknown ? A : never
+): T[K] extends (...args: never[]) => infer R ? R : never {
+  type Result = T[K] extends (...args: never[]) => infer R ? R : never;
+  const own = node[name] as unknown;
+  if (typeof own === 'function') {
+    return (own as (...values: unknown[]) => unknown).apply(node, args) as Result;
+  }
+  const method = readSourceOwnMethod(node, String(name));
+  if (!method) throw new TypeError(`${String(name)} is not a method of the node.`);
+  return method.apply(node, args) as Result;
+}
+
+/**
+ * A property of a node past a form's fields (D195). A field is itself a
+ * node, so what it stands in front of cannot be told by its kind: a form's
+ * properties are read by the prototypes' accessors.
+ */
+export function sourceProperty<T extends object, K extends keyof T>(node: T, name: K): T[K] {
+  return sourceAnswersFieldNames(node as unknown as Node)
+    ? readSourceOwnAccessor(node, String(name)) as T[K]
+    : node[name];
+}

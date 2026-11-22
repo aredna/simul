@@ -10758,3 +10758,130 @@ describe('a live patch at the cost of what it changed (D165)', () => {
     expect(isolatedAriaIndexMatchesReplica(replica)).toBe(true);
   });
 });
+
+describe('a mirror form whose fields are named for its own properties (D195)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  /**
+   * A form answers `form.<id or name of one of its fields>` before every property
+   * of its prototypes ([LegacyOverrideBuiltIns]), methods too. linkedom
+   * keeps some on the element: those move to a prototype here, as Chrome
+   * has them, and the field stands in front of each name. Chrome's own DOM
+   * code never meets the field, so linkedom's reads still get the property.
+   */
+  const SHADOWED = [
+    'localName', 'nodeType', 'nodeName', 'tagName', 'namespaceURI', 'id', 'attributes',
+    'childNodes', 'children', 'firstChild', 'lastChild', 'nextSibling', 'previousSibling',
+    'parentNode', 'parentElement', 'ownerDocument', 'isConnected', 'shadowRoot',
+    'getAttribute', 'setAttribute', 'removeAttribute', 'hasAttribute', 'getAttributeNames',
+    'textContent', 'style', 'contains', 'closest', 'matches', 'querySelector',
+    'querySelectorAll', 'getRootNode', 'firstElementChild', 'lastElementChild',
+    'nextElementSibling', 'previousElementSibling', 'insertBefore', 'appendChild',
+    'removeChild', 'replaceChildren', 'remove', 'append', 'before', 'after',
+  ] as const;
+
+  function shadow(form: Element, names: readonly string[]): () => void {
+    const field = form.querySelector('input')!;
+    const original = Object.getPrototypeOf(form) as object;
+    const moved: PropertyDescriptorMap = {};
+    for (const name of names) {
+      const own = Object.getOwnPropertyDescriptor(form, name);
+      if (own) {
+        moved[name] = own.get || own.set
+          ? { ...own, configurable: true }
+          : { configurable: true, get() { return own.value; } };
+      }
+    }
+    const prototype = Object.create(original, moved) as object;
+    Object.setPrototypeOf(form, prototype);
+    for (const name of names) {
+      Object.defineProperty(form, name, {
+        configurable: true,
+        get() {
+          const caller = new Error().stack?.split('\n')[2] ?? '';
+          return caller.includes('/node_modules/') ? Reflect.get(prototype, name, form) : field;
+        },
+      });
+    }
+    return () => {
+      for (const name of names) delete (form as unknown as Record<string, unknown>)[name];
+      Object.setPrototypeOf(form, original);
+      for (const [name, descriptor] of Object.entries(moved)) {
+        Object.defineProperty(form, name, descriptor);
+      }
+    };
+  }
+
+  function formCheckpoint(): HtmlMirrorCheckpoint {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+              { kind: 'element', id: 5, namespace: 'html', tagName: 'form', attributes: [['class', 'a']], children: [
+                { kind: 'element', id: 6, namespace: 'html', tagName: 'input', attributes: [['id', 'localName']], children: [] },
+                { kind: 'element', id: 7, namespace: 'html', tagName: 'p', attributes: [], children: [
+                  { kind: 'text', id: 8, text: 'Booking', translatable: true },
+                ] },
+              ] },
+              { kind: 'element', id: 9, namespace: 'html', tagName: 'p', attributes: [], children: [
+                { kind: 'text', id: 10, text: 'After', translatable: true },
+              ] },
+            ] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    );
+    if (!checkpoint) throw new Error('Form fixture rejected.');
+    return checkpoint;
+  }
+
+  it('patches it, and what it holds, past the fields', async () => {
+    const names = (process.env.D195_NAMES?.split(',') ?? SHADOWED) as readonly string[];
+    const stream = new FakeHtmlStream(formCheckpoint());
+    const host = new FakePresentationHost();
+    const recoveries: unknown[] = [];
+    const engine = makeEngine(stream, host, (info) => {
+      if (info.stage === 'recovery') recoveries.push([info.recoveryCause, info.refusal, info.code]);
+    });
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+    const form = replica.querySelector('form')!;
+    onTestFinished(shadow(form, names));
+    let sequence = 0;
+    const patch = (operations: Parameters<typeof createHtmlMirrorPatch>[3]) => {
+      sequence += 1;
+      stream.observer?.onPatch(createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence }), sequence, sequence, operations,
+      )!);
+    };
+    patch([{ kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'form', attributes: [['class', 'b']] }]);
+    patch([{ kind: 'text', nodeId: 8, node: { kind: 'text', id: 8, text: 'Booked', translatable: true } }]);
+    patch([{ kind: 'children', nodeId: 5, children: [
+      { kind: 'element', id: 11, namespace: 'html', tagName: 'input', attributes: [['id', 'localName']], children: [] },
+      { kind: 'element', id: 12, namespace: 'html', tagName: 'p', attributes: [], children: [
+        { kind: 'text', id: 13, text: 'Again', translatable: true },
+      ] },
+    ] }]);
+    patch([{ kind: 'text', nodeId: 10, node: { kind: 'text', id: 10, text: 'Later', translatable: true } }]);
+    expect(stream.requested, JSON.stringify(recoveries)).toEqual([]);
+    expect(Element.prototype.getAttribute.call(form, 'class')).toBe('b');
+    expect(replica.body.textContent).toBe('AgainLater');
+  });
+});

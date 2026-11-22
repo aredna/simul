@@ -19,7 +19,7 @@
  * ledger slower, never let it keep a replica the walk would refuse.
  */
 
-import { sourceAttributeList, sourceLocalName, sourceNodeType } from './source-node-accessors';
+import { sourceAttributeList, sourceLocalName, sourceNodeType, sourceProperty } from './source-node-accessors';
 
 /** The walk's measure of one node, without what is counted when asked. */
 export function retainedNodeBytes(node: Node): number {
@@ -234,14 +234,15 @@ export class RetainedReplicaLedger {
     let current: Node = node;
     for (;;) {
       if (current === this.#root) return true;
-      const parent = current.parentNode;
+      // A mirror form's field named `parentNode` would loop here (D195).
+      const parent: Node | null = sourceProperty(current, 'parentNode');
       if (parent) {
         current = parent;
         continue;
       }
       if (sourceNodeType(current) !== 11 || !('host' in current)) return false;
       const host = (current as ShadowRoot).host;
-      if (!host || host.shadowRoot !== current) return false;
+      if (!host || sourceProperty(host, 'shadowRoot') !== current) return false;
       current = host;
     }
   }

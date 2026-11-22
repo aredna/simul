@@ -8,6 +8,7 @@ import {
   aggregatePaintedSemanticLabelText,
   detectPaintedSemanticLabel,
   normalizePaintedSemanticLabelText,
+  paintedSemanticLabelHostsToLookAgain,
   presentPaintedSemanticLabel,
   readPaintedSemanticLabelOverlayText,
   removePaintedSemanticLabelPresentation,
@@ -396,6 +397,61 @@ describe('painted semantic labels', () => {
     expect(fixture.element.querySelector(
       `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
     )).toBeNull();
+  });
+
+  // D204: a logo that takes its picture through a class above it, or a
+  // sheet, changes nothing of its own; the hosts passed over are kept so
+  // the mirror can look at them again after such a change.
+  it('names the hosts passed over that a change above them or of a sheet may have painted', () => {
+    const { document } = parseHTML(`<html><head><base href="https://news.example.test/"></head><body>
+      <header id="top"><a id="logo" href="/">Daily Example News</a></header>
+      <main id="main"><p id="plain">Plain words</p></main></body></html>`);
+    const logo = document.querySelector('#logo') as unknown as HTMLElement;
+    const plain = document.querySelector('#plain') as unknown as HTMLElement;
+    const header = document.querySelector('#top') as unknown as Element;
+    const main = document.querySelector('#main') as unknown as Element;
+    const body = document.body as unknown as Element;
+    let painted = false;
+    const rect = {
+      left: 10, top: 10, right: 140, bottom: 34, width: 130, height: 24,
+      x: 10, y: 10, toJSON: () => ({}),
+    } as DOMRectReadOnly;
+    const environment: PaintedSemanticLabelEnvironment = {
+      getComputedStyle: (element) => styleFor(
+        painted && element === (logo as unknown as Element)
+          ? visibleLogoStyle
+          : { ...visibleLogoStyle, 'background-image': 'none' },
+      ),
+      getBoundingClientRect: () => rect,
+      scrollX: 0,
+      scrollY: 0,
+    };
+    for (const element of [logo, plain]) {
+      expect(synchronizePaintedSemanticLabelPresentation(
+        element, `«${element.textContent}»`, environment,
+      )).toBe(false);
+    }
+
+    // A class on body paints the logo: both hosts under body are named, one
+    // under main only the paragraph, and the label is given when looked at.
+    painted = true;
+    expect(paintedSemanticLabelHostsToLookAgain([main])).toEqual([plain]);
+    expect(new Set(paintedSemanticLabelHostsToLookAgain([header, main])))
+      .toEqual(new Set([logo, plain]));
+    expect(new Set(paintedSemanticLabelHostsToLookAgain([body])))
+      .toEqual(new Set([logo, plain]));
+    expect(synchronizePaintedSemanticLabelPresentation(
+      logo, '«Daily Example News»', environment,
+    )).toBe(true);
+    expect(readPaintedSemanticLabelOverlayText(logo)).toBe('«Daily Example News»');
+    // A labelled host is no longer passed over; a sheet changed names every
+    // one left, and one taken out of the page is forgotten.
+    expect(paintedSemanticLabelHostsToLookAgain([body])).toEqual([plain]);
+    expect(paintedSemanticLabelHostsToLookAgain([], document as unknown as Document))
+      .toEqual([plain]);
+    plain.remove();
+    expect(paintedSemanticLabelHostsToLookAgain([], document as unknown as Document))
+      .toEqual([]);
   });
 });
 

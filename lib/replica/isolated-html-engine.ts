@@ -15,6 +15,7 @@ import {
 } from './html-mirror-client';
 import {
   aggregatePaintedSemanticLabelText,
+  paintedSemanticLabelHostsToLookAgain,
   removePaintedSemanticLabelPresentation,
   synchronizePaintedSemanticLabelPresentation,
 } from './painted-semantic-label';
@@ -23,6 +24,7 @@ import {
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
   type HtmlMirrorPatchOperation,
+  type HtmlMirrorReconcileChild,
   type HtmlMirrorScrollState,
   type HtmlMirrorScrollUpdate,
 } from './html-mirror-protocol';
@@ -144,6 +146,14 @@ import {
 } from './translated-language';
 import type { TextLayoutMode } from '../preferences';
 import { registerTrustedShells, trustedShellHtml } from '../trusted-types';
+import {
+  sourceAttributeList,
+  sourceCall,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
 const ISOLATED_SECRET_PLACEHOLDER_CSS =
@@ -619,9 +629,9 @@ export class IsolatedHtmlReplicaEngine
     state.languages.release();
     for (const record of state.records.values()) {
       const node = state.nodes.get(record.nodeId);
-      if (record.nodeType === 3 && node?.nodeType === Node.TEXT_NODE) {
+      if (record.nodeType === 3 && (node != null && sourceNodeType(node) === Node.TEXT_NODE)) {
         node.nodeValue = record.source;
-      } else if (record.nodeType === 1 && node?.nodeType === Node.ELEMENT_NODE) {
+      } else if (record.nodeType === 1 && (node != null && sourceNodeType(node) === Node.ELEMENT_NODE)) {
         applyControlText(node as Element, {
           kind: record.controlTarget,
           text: record.source,
@@ -723,7 +733,7 @@ export class IsolatedHtmlReplicaEngine
       record.source !== projection.source
     ) return false;
     if (projection.nodeType === 3) {
-      if (node?.nodeType !== Node.TEXT_NODE) return false;
+      if (node == null || sourceNodeType(node) !== Node.TEXT_NODE) return false;
       node.nodeValue = projection.translated;
       state.languages.show(
         projection.nodeId,
@@ -733,7 +743,7 @@ export class IsolatedHtmlReplicaEngine
       state.pendingPaintedLabels.add(projection.nodeId);
     } else {
       if (
-        node?.nodeType !== Node.ELEMENT_NODE ||
+        (node == null || sourceNodeType(node) !== Node.ELEMENT_NODE) ||
         record.nodeType !== 1 ||
         record.controlTarget !== projection.controlTarget
       ) return false;
@@ -764,13 +774,13 @@ export class IsolatedHtmlReplicaEngine
       );
     }
     const node = state.nodes.get(nodeId);
-    if (node?.nodeType === Node.TEXT_NODE) {
+    if (node != null && sourceNodeType(node) === Node.TEXT_NODE) {
       // A slotted text takes its style from the slot, not from the host.
       return elementShowsLineBreaks(
         (node as Text).assignedSlot ?? composedParentElement(node),
       );
     }
-    return node?.nodeType === Node.ELEMENT_NODE &&
+    return (node != null && sourceNodeType(node) === Node.ELEMENT_NODE) &&
       elementShowsLineBreaks(node as Element);
   }
 
@@ -785,10 +795,10 @@ export class IsolatedHtmlReplicaEngine
     const node = state.nodes.get(nodeId);
     if (
       !node ||
-      node.nodeType !== Node.ELEMENT_NODE ||
-      (node as Element).localName.toLowerCase() !== 'img' ||
-      !node.isConnected ||
-      node.ownerDocument !== state.iframe.contentDocument
+      sourceNodeType(node) !== Node.ELEMENT_NODE ||
+      sourceLocalName((node as Element)).toLowerCase() !== 'img' ||
+      !sourceProperty(node, 'isConnected') ||
+      sourceProperty(node, 'ownerDocument') !== state.iframe.contentDocument
     ) return undefined;
     return Object.freeze({
       document: state.document,
@@ -853,7 +863,7 @@ export class IsolatedHtmlReplicaEngine
         : {}),
     });
     this.#stagingLease = lease;
-    const iframe = lease.mount.ownerDocument.createElement('iframe');
+    const iframe = sourceProperty(lease.mount, 'ownerDocument').createElement('iframe');
     protectIframe(iframe);
     let disposeStagedDisclosureGuards: (() => void) | undefined;
     const documentMode = checkpoint.payload.documentMode;
@@ -866,7 +876,7 @@ export class IsolatedHtmlReplicaEngine
       let iframeDocument: Document;
       if (this.options.initializeIframe) {
         iframe.srcdoc = trustedShellHtml(iframeShell);
-        lease.mount.append(iframe);
+        sourceCall(lease.mount, 'append', iframe);
         iframeDocument = await this.options.initializeIframe(
           iframe,
           iframeShell,
@@ -1272,18 +1282,40 @@ export class IsolatedHtmlReplicaEngine
     );
     // An element whose attributes the patch changed (a class that gives a
     // logo its picture) may have become a painted label: its translated text
-    // is looked at when the layout is next settled (D173).
-    for (const operation of operations) {
-      if (operation.kind !== 'attributes') continue;
-      const target = state.nodes.get(operation.nodeId);
-      for (const child of target?.childNodes ?? []) {
-        if (child.nodeType !== Node.TEXT_NODE) continue;
+    // is looked at when the layout is next settled (D173). So may an element
+    // passed over as no label inside one of those, or anywhere in the replica
+    // when a sheet changed (D204).
+    const lookAgain = (element: Node): void => {
+      for (const child of sourceChildNodeList(element)) {
+        if (sourceNodeType(child) !== Node.TEXT_NODE) continue;
         const nodeId = state.nodes.idOf(child);
         if (nodeId !== undefined && this.#projections.has(nodeId)) {
           state.pendingPaintedLabels.add(nodeId);
         }
       }
+    };
+    const changedElements: Element[] = [];
+    let sheetsChanged = false;
+    for (const operation of operations) {
+      if (operation.kind === 'dimensions') continue;
+      const target = state.nodes.get(operation.nodeId);
+      if (!target) continue;
+      if (
+        holdsReplicaSheet(target) ||
+        holdsReplicaSheet(sourceProperty(target, 'parentNode'))
+      ) sheetsChanged = true;
+      if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
+        if (operation.children.some(bringsReplicaSheet)) sheetsChanged = true;
+        continue;
+      }
+      if (operation.kind !== 'attributes') continue;
+      lookAgain(target);
+      if (sourceNodeType(target) === Node.ELEMENT_NODE) changedElements.push(target as Element);
     }
+    for (const host of paintedSemanticLabelHostsToLookAgain(
+      changedElements,
+      sheetsChanged ? replicaDocument ?? undefined : undefined,
+    )) lookAgain(host);
     this.#notifySourceCommit(
       state,
       'batch',
@@ -1564,7 +1596,7 @@ export class IsolatedHtmlReplicaEngine
         projection.pairKey !== this.#projectionContext.pairKey
       ) continue;
       if (projection.nodeType === 3) {
-        if (node?.nodeType !== Node.TEXT_NODE) continue;
+        if (node == null || sourceNodeType(node) !== Node.TEXT_NODE) continue;
         node.nodeValue = projection.translated;
         state.languages.show(
           projection.nodeId,
@@ -1574,7 +1606,7 @@ export class IsolatedHtmlReplicaEngine
         state.pendingPaintedLabels.add(projection.nodeId);
       } else {
         if (
-          node?.nodeType !== Node.ELEMENT_NODE ||
+          (node == null || sourceNodeType(node) !== Node.ELEMENT_NODE) ||
           record.nodeType !== 1 ||
           record.controlTarget !== projection.controlTarget
         ) continue;
@@ -1821,7 +1853,7 @@ export class IsolatedHtmlReplicaEngine
         record.revision !== projection.sourceRevision
       ) continue;
       if (projection.nodeType === 3) {
-        if (node.nodeType !== Node.TEXT_NODE) continue;
+        if (sourceNodeType(node) !== Node.TEXT_NODE) continue;
         // The language tag stays where it is: the element is drawn by the
         // page's language with it or without it (D124).
         entries.push({
@@ -1830,7 +1862,7 @@ export class IsolatedHtmlReplicaEngine
           showTranslation: () => { node.nodeValue = projection.translated; },
         });
       } else if (
-        node.nodeType === Node.ELEMENT_NODE &&
+        sourceNodeType(node) === Node.ELEMENT_NODE &&
         record.nodeType === 1 &&
         record.controlTarget === projection.controlTarget
       ) {
@@ -1998,7 +2030,7 @@ function applyDocumentGraph(
       if (built) head.append(built);
     }
   }
-  body.replaceChildren();
+  sourceCall(body, 'replaceChildren');
   if (sourceBody) {
     setAttributes(body, sourceBody.attributes);
     applyElementHints(body, sourceBody);
@@ -2012,7 +2044,7 @@ function applyDocumentGraph(
         controlMetadata,
         ownedAdoptedStyles,
       );
-      if (built) body.append(built);
+      if (built) sourceCall(body, 'append', built);
     }
     // A page may hang its whole content in a root on `<body>` (D135).
     if (sourceBody.shadowRoot) {
@@ -2054,8 +2086,8 @@ function applyDocumentGraph(
   let anchor: Node | null = null;
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const child = ordered[index]!;
-    if (child.parentNode !== html || child.nextSibling !== anchor) {
-      html.insertBefore(child, anchor);
+    if (sourceProperty(child, 'parentNode') !== html || sourceProperty(child, 'nextSibling') !== anchor) {
+      sourceCall(html, 'insertBefore', child, anchor);
     }
     anchor = child;
   }
@@ -2110,9 +2142,9 @@ function splitDocumentShellReplacement(
     const children = [...operation.children];
     const following: HtmlMirrorPatchOperation[] = [];
     const pairs: Array<readonly [number, number]> = [];
-    for (const element of replicaDocumentShell(html!.childNodes)) {
+    for (const element of replicaDocumentShell(sourceChildNodeList(html!))) {
       const oldId = state.nodes.idOf(element);
-      const tagName = (element as Element).localName;
+      const tagName = sourceLocalName((element as Element));
       const at = children.findIndex((entry) =>
         entry.kind === 'graph' && isDocumentShellChild(entry.node) &&
         entry.node.tagName === tagName);
@@ -2122,7 +2154,7 @@ function splitDocumentShellReplacement(
         children.some((entry) => entry.kind === 'retain' && entry.nodeId === oldId) ||
         children.some((entry, other) => other !== at && entry.kind === 'graph' &&
           isDocumentShellChild(entry.node) && entry.node.tagName === tagName) ||
-        node.shadowRoot || (element as Element).shadowRoot ||
+        node.shadowRoot || sourceProperty((element as Element), 'shadowRoot') ||
         node.childrenFollow || node.placeholder || node.opaquePlaceholder ||
         state.nodes.has(node.id)
       ) continue;
@@ -2179,9 +2211,9 @@ function replicaDocumentShell(children: Iterable<Node>): Node[] {
   for (const tagName of ['head', 'body']) {
     for (const child of children) {
       if (
-        child.nodeType === Node.ELEMENT_NODE &&
-        (child as Element).namespaceURI === NAMESPACE_URIS.html &&
-        (child as Element).localName === tagName
+        sourceNodeType(child) === Node.ELEMENT_NODE &&
+        sourceProperty((child as Element), 'namespaceURI') === NAMESPACE_URIS.html &&
+        sourceLocalName((child as Element)) === tagName
       ) {
         shell.push(child);
         break;
@@ -2192,8 +2224,8 @@ function replicaDocumentShell(children: Iterable<Node>): Node[] {
 }
 
 function isReplicaDocumentElement(node: Node): boolean {
-  return node.nodeType === Node.ELEMENT_NODE &&
-    node === node.ownerDocument?.documentElement;
+  return sourceNodeType(node) === Node.ELEMENT_NODE &&
+    node === sourceProperty(node, 'ownerDocument')?.documentElement;
 }
 
 /**
@@ -2297,7 +2329,7 @@ function buildNode(
       controlMetadata,
       ownedAdoptedStyles,
     );
-    if (built) node.append(built);
+    if (built) sourceCall(node, 'append', built);
   }
   applySelectedOptionIndexes(node, input.selectedOptionIndexes);
   configureNativeSelectFacsimile(node);
@@ -2333,7 +2365,7 @@ function assignIsolatedManualSlots(
   const roots = ISOLATED_MANUAL_SLOT_ROOTS.get(target);
   if (!roots || roots.size === 0) return;
   for (const root of [...roots]) {
-    if (!root.host.isConnected) {
+    if (!sourceProperty(root.host, 'isConnected')) {
       roots.delete(root);
       continue;
     }
@@ -2345,7 +2377,7 @@ function assignIsolatedManualSlots(
         const node = nodes.get(id);
         // A dropdown is drawn by the box Simul puts around it.
         const drawn = node && presentationNodeForMirrorNode(node);
-        if (drawn?.parentNode === root.host) held.push(drawn as Element | Text);
+        if (drawn && sourceProperty(drawn, 'parentNode') === root.host) held.push(drawn as Element | Text);
       }
       try {
         const now = (slot as HTMLSlotElement).assignedNodes();
@@ -2373,12 +2405,12 @@ export function protectIsolatedOpaquePlaceholder(node: Element): void {
   };
   const shadow = host.attachShadow?.({ mode: 'closed' });
   if (!shadow) throw new Error('Secret placeholder isolation unavailable.');
-  const style = node.ownerDocument.createElement('style');
+  const style = sourceProperty(node, 'ownerDocument').createElement('style');
   style.textContent = ISOLATED_SECRET_PLACEHOLDER_CSS;
   shadow.append(style);
-  node.setAttribute('aria-hidden', 'true');
-  node.setAttribute('inert', '');
-  node.setAttribute('tabindex', '-1');
+  sourceCall(node, 'setAttribute', 'aria-hidden', 'true');
+  sourceCall(node, 'setAttribute', 'inert', '');
+  sourceCall(node, 'setAttribute', 'tabindex', '-1');
 }
 
 /**
@@ -2408,7 +2440,7 @@ function adoptOwnedSheets(
   owner: Document | ShadowRoot,
   texts: readonly string[],
 ): boolean {
-  const target = owner.nodeType === Node.DOCUMENT_NODE
+  const target = sourceNodeType(owner) === Node.DOCUMENT_NODE
     ? owner as Document
     : owner.ownerDocument;
   const Sheet = (target?.defaultView as (Window & typeof globalThis) | null)
@@ -2479,13 +2511,13 @@ function appendOwnedAdoptedStyles(
   ownedAdoptedStyles: Set<HTMLStyleElement>,
   scope: 'document' | 'shadow',
 ): void {
-  const target = owner.ownerDocument;
+  const target = sourceProperty(owner, 'ownerDocument');
   if (!target) throw new Error('Adopted stylesheet owner has no document.');
   for (const cssText of adoptedStyleSheets) {
     const style = target.createElement('style');
     style.setAttribute('data-simul-adopted-style', scope);
     style.textContent = cssText;
-    owner.appendChild(style);
+    sourceCall(owner, 'appendChild', style);
     ownedAdoptedStyles.add(style);
   }
 }
@@ -2498,36 +2530,36 @@ function setAttributes(
   // A `<link>` fetches its sheet again when `rel` or `href` is taken off
   // and put back, and the mirror is without the sheet meanwhile: what did
   // not change on a link stays (D143).
-  const link = element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
-    element.localName.toLowerCase() === 'link';
+  const link = sourceProperty(element, 'namespaceURI') === 'http://www.w3.org/1999/xhtml' &&
+    sourceLocalName(element).toLowerCase() === 'link';
   if (link) {
     attributes = replicaLinkAttributes(attributes, resolvedStyleSheetText);
     const wanted = new Map(attributes);
-    for (const attribute of [...element.attributes]) {
+    for (const attribute of [...sourceAttributeList(element)]) {
       if (wanted.get(attribute.name) !== attribute.value) {
-        element.removeAttribute(attribute.name);
+        sourceCall(element, 'removeAttribute', attribute.name);
       }
     }
     attributes = attributes.filter(
-      ([name, value]) => element.getAttribute(name) !== value,
+      ([name, value]) => sourceCall(element, 'getAttribute', name) !== value,
     );
   } else {
-    for (const attribute of [...element.attributes]) {
-      element.removeAttribute(attribute.name);
+    for (const attribute of [...sourceAttributeList(element)]) {
+      sourceCall(element, 'removeAttribute', attribute.name);
     }
   }
   forgetPageXmlLanguage(element);
   for (const [name, value] of inWriteOrder(attributes)) {
     writeReplicaAttribute(element, name, value);
   }
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (
-    element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    sourceProperty(element, 'namespaceURI') === 'http://www.w3.org/1999/xhtml' &&
     (tagName === 'link' || tagName === 'style')
   ) {
     try {
       const sheetOwner = element as Element & { disabled: boolean };
-      const disabled = element.hasAttribute('disabled');
+      const disabled = sourceCall(element, 'hasAttribute', 'disabled');
       if (sheetOwner.disabled !== disabled) sheetOwner.disabled = disabled;
     } catch {
       // The content attribute remains the browser-owned fallback.
@@ -2571,9 +2603,9 @@ function switchesReplicaLinkOff(
   element: Element,
   attributes: readonly (readonly [string, string])[],
 ): boolean {
-  return element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
-    element.localName.toLowerCase() === 'link' &&
-    !element.hasAttribute('disabled') &&
+  return sourceProperty(element, 'namespaceURI') === 'http://www.w3.org/1999/xhtml' &&
+    sourceLocalName(element).toLowerCase() === 'link' &&
+    !sourceCall(element, 'hasAttribute', 'disabled') &&
     attributes.some(([name]) => name === 'disabled');
 }
 
@@ -2614,28 +2646,21 @@ function writeReplicaAttribute(
   value: string,
 ): void {
   if (name === PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE) {
-    const document = element.ownerDocument;
+    const document = sourceProperty(element, 'ownerDocument');
     if (document?.documentElement === element) {
       showDocumentLanguage(document, value);
     }
   } else if (name === PAGE_XML_LANGUAGE_ATTRIBUTE) {
     writePageXmlLanguage(element, value);
   } else if (
-    element.namespaceURI === 'http://www.w3.org/2000/svg' &&
+    sourceProperty(element, 'namespaceURI') === 'http://www.w3.org/2000/svg' &&
     name === 'xlink:href'
   ) {
-    element.setAttributeNS(
-      'http://www.w3.org/1999/xlink',
-      'xlink:href',
-      value,
-    );
+    sourceCall(element, 'setAttributeNS', 'http://www.w3.org/1999/xlink', 'xlink:href', value);
   } else {
-    element.setAttribute(
-      element.namespaceURI === 'http://www.w3.org/2000/svg'
+    sourceCall(element, 'setAttribute', sourceProperty(element, 'namespaceURI') === 'http://www.w3.org/2000/svg'
         ? canonicalSvgAttributeName(name)
-        : name,
-      value,
-    );
+        : name, value);
   }
 }
 
@@ -2657,7 +2682,7 @@ function replicaPageAttributes(
     attributes.push([PAGE_XML_LANGUAGE_ATTRIBUTE, xmlLanguage] as const);
   }
   // So does the document's language, on the root.
-  const document = element.ownerDocument;
+  const document = sourceProperty(element, 'ownerDocument');
   const language = document?.documentElement === element
     ? documentContentLanguage(document)
     : undefined;
@@ -2725,12 +2750,12 @@ const IMPLICIT_LIVE_REGION_ROLES: ReadonlySet<string> = new Set([
  */
 function silenceReplicaLiveRegion(element: Element): void {
   if (
-    element.hasAttribute('aria-live') ||
-    (element.namespaceURI === NAMESPACE_URIS.html &&
-      element.localName.toLowerCase() === 'output') ||
+    sourceCall(element, 'hasAttribute', 'aria-live') ||
+    (sourceProperty(element, 'namespaceURI') === NAMESPACE_URIS.html &&
+      sourceLocalName(element).toLowerCase() === 'output') ||
     pageAttribute(element, 'role')?.trim().toLowerCase().split(/\s+/u)
       .some((token) => IMPLICIT_LIVE_REGION_ROLES.has(token))
-  ) element.setAttribute('aria-live', 'off');
+  ) sourceCall(element, 'setAttribute', 'aria-live', 'off');
 }
 
 /**
@@ -2824,67 +2849,65 @@ function applyElementHints(
   }
   applyControlText(element, hints.controlText);
   applySelectedOptionIndexes(element, hints.selectedOptionIndexes);
-  if (element.localName.toLowerCase() === 'select') {
+  if (sourceLocalName(element).toLowerCase() === 'select') {
     if (hints.selectPresentationStyle) {
-      element.setAttribute(
-        'data-simul-select-presentation-style',
-        hints.selectPresentationStyle,
-      );
+      sourceCall(element, 'setAttribute', 'data-simul-select-presentation-style', hints.selectPresentationStyle);
     } else {
-      element.removeAttribute('data-simul-select-presentation-style');
+      sourceCall(element, 'removeAttribute', 'data-simul-select-presentation-style');
     }
     if (hints.selectPickerOpen) {
-      element.setAttribute('data-simul-source-picker-open', 'v1');
+      sourceCall(element, 'setAttribute', 'data-simul-source-picker-open', 'v1');
     } else {
-      element.removeAttribute('data-simul-source-picker-open');
+      sourceCall(element, 'removeAttribute', 'data-simul-source-picker-open');
     }
   }
   if (
     hints.canvasBackgroundColor &&
-    element.localName.toLowerCase() === 'html'
+    sourceLocalName(element).toLowerCase() === 'html'
   ) {
     // This is the source browser's resolved canvas color (html first, then
     // body), not an authored declaration. Keep it authoritative even when a
     // transported stylesheet contains a light-theme `!important` fallback.
     applyReplicaCanvasBackground(element, hints.canvasBackgroundColor);
   }
-  if (hints.selectedImageSource && element.localName.toLowerCase() === 'img') {
-    element.setAttribute('src', hints.selectedImageSource);
-    element.removeAttribute('srcset');
-    element.setAttribute('data-simul-selected-image-source', 'v1');
+  if (hints.selectedImageSource && sourceLocalName(element).toLowerCase() === 'img') {
+    sourceCall(element, 'setAttribute', 'src', hints.selectedImageSource);
+    sourceCall(element, 'removeAttribute', 'srcset');
+    sourceCall(element, 'setAttribute', 'data-simul-selected-image-source', 'v1');
   }
   const styled = element as Element & { readonly style?: CSSStyleDeclaration };
+  const style = sourceProperty(styled, 'style');
   if (
-    element.namespaceURI === 'http://www.w3.org/2000/svg' &&
-    styled.style
+    sourceProperty(element, 'namespaceURI') === 'http://www.w3.org/2000/svg' &&
+    style
   ) {
     // Static SVG is part of the current fidelity contract. Simul-owned inline
     // declarations outrank retained author stylesheets (including unreadable
     // cross-origin sheets), so CSS cannot turn the reconstructed SVG tree into
     // an animation channel while the saved animation option is absent/off.
-    styled.style.setProperty('animation', 'none', 'important');
-    styled.style.setProperty('transition', 'none', 'important');
+    style.setProperty('animation', 'none', 'important');
+    style.setProperty('transition', 'none', 'important');
   }
-  if (hints.visuallyHidden && styled.style) {
-    element.setAttribute('data-simul-visually-hidden', 'v1');
+  if (hints.visuallyHidden && style) {
+    sourceCall(element, 'setAttribute', 'data-simul-visually-hidden', 'v1');
     if (
-      element.localName.toLowerCase() === 'option' ||
-      element.localName.toLowerCase() === 'optgroup'
+      sourceLocalName(element).toLowerCase() === 'option' ||
+      sourceLocalName(element).toLowerCase() === 'optgroup'
     ) {
-      element.setAttribute('hidden', '');
-      styled.style.setProperty('display', 'none', 'important');
+      sourceCall(element, 'setAttribute', 'hidden', '');
+      style.setProperty('display', 'none', 'important');
     }
-    styled.style.setProperty('position', 'absolute', 'important');
-    styled.style.setProperty('width', '1px', 'important');
-    styled.style.setProperty('height', '1px', 'important');
-    styled.style.setProperty('padding', '0', 'important');
-    styled.style.setProperty('margin', '-1px', 'important');
-    styled.style.setProperty('overflow', 'hidden', 'important');
-    styled.style.setProperty('clip', 'rect(0, 0, 0, 0)', 'important');
-    styled.style.setProperty('clip-path', 'inset(50%)', 'important');
-    styled.style.setProperty('white-space', 'nowrap', 'important');
+    style.setProperty('position', 'absolute', 'important');
+    style.setProperty('width', '1px', 'important');
+    style.setProperty('height', '1px', 'important');
+    style.setProperty('padding', '0', 'important');
+    style.setProperty('margin', '-1px', 'important');
+    style.setProperty('overflow', 'hidden', 'important');
+    style.setProperty('clip', 'rect(0, 0, 0, 0)', 'important');
+    style.setProperty('clip-path', 'inset(50%)', 'important');
+    style.setProperty('white-space', 'nowrap', 'important');
   }
-  if (element.localName.toLowerCase() === 'select') {
+  if (sourceLocalName(element).toLowerCase() === 'select') {
     configureNativeSelectFacsimile(element);
   }
 }
@@ -2898,13 +2921,14 @@ function applyElementHints(
  */
 function applyPlaceholderBox(element: Element, height: number): void {
   const styled = element as Element & { readonly style?: CSSStyleDeclaration };
-  if (!styled.style || !Number.isFinite(height)) return;
+  const style = sourceProperty(styled, 'style');
+  if (!style || !Number.isFinite(height)) return;
   const pixels = `${Math.min(Math.max(0, height), MAX_HTML_MIRROR_PLACEHOLDER_HEIGHT)}px`;
-  styled.style.setProperty('box-sizing', 'border-box', 'important');
-  styled.style.setProperty('height', pixels, 'important');
-  styled.style.setProperty('min-height', pixels, 'important');
-  styled.style.setProperty('max-height', pixels, 'important');
-  styled.style.setProperty('overflow', 'clip', 'important');
+  style.setProperty('box-sizing', 'border-box', 'important');
+  style.setProperty('height', pixels, 'important');
+  style.setProperty('min-height', pixels, 'important');
+  style.setProperty('max-height', pixels, 'important');
+  style.setProperty('overflow', 'clip', 'important');
 }
 
 /**
@@ -2915,13 +2939,13 @@ function applyPlaceholderBox(element: Element, height: number): void {
  * elements that already have it (D83).
  */
 function defineReplicaCustomElement(element: Element): void {
-  const name = element.localName;
+  const name = sourceLocalName(element);
   if (
-    element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    sourceProperty(element, 'namespaceURI') !== 'http://www.w3.org/1999/xhtml' ||
     !isAutonomousCustomElementName(name)
   ) return;
   try {
-    const view = element.ownerDocument?.defaultView;
+    const view = sourceProperty(element, 'ownerDocument')?.defaultView;
     const registry = view?.customElements;
     if (!view || !registry || registry.get(name)) return;
     registry.define(name, class extends view.HTMLElement {});
@@ -2934,7 +2958,7 @@ function applySelectedOptionIndexes(
   element: Element,
   selectedOptionIndexes: readonly number[] | undefined,
 ): void {
-  if (element.localName.toLowerCase() !== 'select') return;
+  if (sourceLocalName(element).toLowerCase() !== 'select') return;
   const select = element as HTMLSelectElement;
   if (selectedOptionIndexes === undefined) {
     select.selectedIndex = -1;
@@ -2955,12 +2979,12 @@ function applySelectedOptionIndexes(
 }
 
 function configureNativeSelectFacsimile(element: Element): void {
-  if (element.localName.toLowerCase() !== 'select') return;
-  element.setAttribute('data-simul-select-facsimile', 'v1');
-  element.setAttribute('inert', '');
-  element.setAttribute('aria-hidden', 'true');
-  element.setAttribute('aria-disabled', 'true');
-  element.setAttribute('tabindex', '-1');
+  if (sourceLocalName(element).toLowerCase() !== 'select') return;
+  sourceCall(element, 'setAttribute', 'data-simul-select-facsimile', 'v1');
+  sourceCall(element, 'setAttribute', 'inert', '');
+  sourceCall(element, 'setAttribute', 'aria-hidden', 'true');
+  sourceCall(element, 'setAttribute', 'aria-disabled', 'true');
+  sourceCall(element, 'setAttribute', 'tabindex', '-1');
   syncNativeSelectFacsimileHost(element);
 }
 
@@ -2972,8 +2996,8 @@ function configureNativeSelectFacsimile(element: Element): void {
  */
 function wrapNativeSelectFacsimile(node: Node): Node {
   if (
-    node.nodeType !== Node.ELEMENT_NODE ||
-    (node as Element).localName.toLowerCase() !== 'select'
+    sourceNodeType(node) !== Node.ELEMENT_NODE ||
+    sourceLocalName((node as Element)).toLowerCase() !== 'select'
   ) return node;
   const select = node as HTMLSelectElement;
   const document = select.ownerDocument;
@@ -2983,8 +3007,8 @@ function wrapNativeSelectFacsimile(node: Node): Node {
     .toLowerCase() ?? isolatedSelectHostSequence.toString(36);
   const host = document.createElement(`simul-owned-select-${entropy}`);
   ISOLATED_SELECT_HOSTS.add(host);
-  host.setAttribute('data-simul-owned-select-host', 'v1');
-  const shadow = host.attachShadow({ mode: 'open' });
+  sourceCall(host, 'setAttribute', 'data-simul-owned-select-host', 'v1');
+  const shadow = sourceCall(host, 'attachShadow', { mode: 'open' });
   const style = document.createElement('style');
   style.setAttribute('data-simul-owned-select-style', 'v1');
   style.textContent = ISOLATED_SELECT_SHADOW_CSS;
@@ -3028,16 +3052,16 @@ function wrapNativeSelectFacsimile(node: Node): Node {
 function syncNativeSelectFacsimileHost(element: Element): void {
   const host = isolatedSelectFacsimileHost(element);
   if (!host) return;
-  for (const attribute of [...host.attributes]) {
+  for (const attribute of [...sourceAttributeList(host)]) {
     if (!attribute.name.startsWith('data-simul-')) {
-      host.removeAttribute(attribute.name);
+      sourceCall(host, 'removeAttribute', attribute.name);
     }
   }
-  host.setAttribute('data-simul-owned-select-host', 'v1');
-  if (element.getAttribute('data-simul-source-picker-open') === 'v1') {
-    host.setAttribute('data-simul-source-picker-open', 'v1');
+  sourceCall(host, 'setAttribute', 'data-simul-owned-select-host', 'v1');
+  if (sourceCall(element, 'getAttribute', 'data-simul-source-picker-open') === 'v1') {
+    sourceCall(host, 'setAttribute', 'data-simul-source-picker-open', 'v1');
   } else {
-    host.removeAttribute('data-simul-source-picker-open');
+    sourceCall(host, 'removeAttribute', 'data-simul-source-picker-open');
   }
   // The page's own attributes: a `lang` Simul put on the select for a
   // translated choice goes to the trigger's text instead (D124).
@@ -3048,20 +3072,18 @@ function syncNativeSelectFacsimileHost(element: Element): void {
       name === 'aria-hidden'
     ) continue;
     try {
-      host.setAttribute(name, value);
+      sourceCall(host, 'setAttribute', name, value);
     } catch {
       // Sanitized presentation attributes are optional on the random host.
     }
   }
-  element.removeAttribute('style');
-  host.style.setProperty('all', 'initial', 'important');
+  sourceCall(element, 'removeAttribute', 'style');
+  sourceProperty(host, 'style').setProperty('all', 'initial', 'important');
   let hasPresentationDisplay = false;
   let transparent = false;
-  const presentation = element.getAttribute(
-    'data-simul-select-presentation-style',
-  );
+  const presentation = sourceCall(element, 'getAttribute', 'data-simul-select-presentation-style');
   if (presentation) {
-    const parser = element.ownerDocument.createElement('span');
+    const parser = sourceProperty(element, 'ownerDocument').createElement('span');
     parser.setAttribute('style', presentation);
     for (let index = 0; index < parser.style.length; index += 1) {
       const property = parser.style.item(index);
@@ -3075,72 +3097,72 @@ function syncNativeSelectFacsimileHost(element: Element): void {
         transparent = true;
         continue;
       }
-      host.style.setProperty(property, value, 'important');
+      sourceProperty(host, 'style').setProperty(property, value, 'important');
       if (property === 'display') hasPresentationDisplay = true;
     }
   }
   if (transparent) {
-    host.setAttribute('data-simul-select-transparent', 'v1');
+    sourceCall(host, 'setAttribute', 'data-simul-select-transparent', 'v1');
   } else {
-    host.removeAttribute('data-simul-select-transparent');
+    sourceCall(host, 'removeAttribute', 'data-simul-select-transparent');
   }
   // No width from the page: it had no box to measure (D173).
-  const width = host.style.getPropertyValue('width').trim().toLowerCase();
+  const width = sourceProperty(host, 'style').getPropertyValue('width').trim().toLowerCase();
   if (width === '' || width === 'auto') {
-    host.setAttribute('data-simul-select-unsized', 'v1');
+    sourceCall(host, 'setAttribute', 'data-simul-select-unsized', 'v1');
   } else {
-    host.removeAttribute('data-simul-select-unsized');
+    sourceCall(host, 'removeAttribute', 'data-simul-select-unsized');
   }
-  host.style.setProperty('pointer-events', 'auto', 'important');
-  host.style.setProperty('background-image', 'none', 'important');
-  host.style.setProperty('border-image-source', 'none', 'important');
-  host.style.setProperty('clip-path', 'none', 'important');
-  host.style.setProperty('content', 'normal', 'important');
-  host.style.setProperty('cursor', 'default', 'important');
-  host.style.setProperty('filter', 'none', 'important');
-  host.style.setProperty('list-style-image', 'none', 'important');
-  host.style.setProperty('mask-image', 'none', 'important');
-  host.style.setProperty('-webkit-mask-image', 'none', 'important');
-  if (element.getAttribute('data-simul-visually-hidden') === 'v1') {
+  sourceProperty(host, 'style').setProperty('pointer-events', 'auto', 'important');
+  sourceProperty(host, 'style').setProperty('background-image', 'none', 'important');
+  sourceProperty(host, 'style').setProperty('border-image-source', 'none', 'important');
+  sourceProperty(host, 'style').setProperty('clip-path', 'none', 'important');
+  sourceProperty(host, 'style').setProperty('content', 'normal', 'important');
+  sourceProperty(host, 'style').setProperty('cursor', 'default', 'important');
+  sourceProperty(host, 'style').setProperty('filter', 'none', 'important');
+  sourceProperty(host, 'style').setProperty('list-style-image', 'none', 'important');
+  sourceProperty(host, 'style').setProperty('mask-image', 'none', 'important');
+  sourceProperty(host, 'style').setProperty('-webkit-mask-image', 'none', 'important');
+  if (sourceCall(element, 'getAttribute', 'data-simul-visually-hidden') === 'v1') {
     ISOLATED_SELECT_FACSIMILES.get(host)?.controller?.close();
-    host.setAttribute('data-simul-select-hidden', 'v1');
-    host.style.setProperty('display', 'none', 'important');
+    sourceCall(host, 'setAttribute', 'data-simul-select-hidden', 'v1');
+    sourceProperty(host, 'style').setProperty('display', 'none', 'important');
     return;
   }
-  host.removeAttribute('data-simul-select-hidden');
+  sourceCall(host, 'removeAttribute', 'data-simul-select-hidden');
   if (!hasPresentationDisplay) {
-    host.style.setProperty('display', 'inline-block', 'important');
+    sourceProperty(host, 'style').setProperty('display', 'inline-block', 'important');
   }
   // A dropdown under something hidden is not marked hidden: it keeps its
   // box, out of sight, for when the mirror opens what hides it (a site
   // menu's panel). A list left open has nothing to hang from then.
-  if (host.style.getPropertyValue('visibility') === 'hidden') {
+  if (sourceProperty(host, 'style').getPropertyValue('visibility') === 'hidden') {
     ISOLATED_SELECT_FACSIMILES.get(host)?.controller?.close();
   }
   syncIsolatedNativeSelectFacsimile(host);
 }
 
 function isIsolatedOwnedHostConnected(host: HTMLElement): boolean {
-  const document = host.ownerDocument;
+  const document = sourceProperty(host, 'ownerDocument');
   let current: Node = host;
   for (let depth = 0; depth <= 64; depth += 1) {
     if (current === document || document.documentElement?.contains(current)) {
       return true;
     }
-    const root = current.getRootNode();
+    const root = sourceCall(current, 'getRootNode');
     if (
-      root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE ||
+      sourceNodeType(root) !== Node.DOCUMENT_FRAGMENT_NODE ||
       !('host' in root)
     ) return false;
     const shadow = root as ShadowRoot;
-    if (shadow.host.shadowRoot !== shadow) return false;
+    if (sourceProperty(shadow.host, 'shadowRoot') !== shadow) return false;
     current = shadow.host;
   }
   return false;
 }
 
 function registerIsolatedSelectHost(host: HTMLElement): void {
-  const document = host.ownerDocument;
+  const document = sourceProperty(host, 'ownerDocument');
   let hosts = ISOLATED_SELECT_HOSTS_BY_DOCUMENT.get(document);
   if (!hosts) {
     hosts = new Set();
@@ -3178,9 +3200,9 @@ function selectHostsInChangedRoots(
   const registered = isolatedSelectHosts(document);
   for (const root of roots) {
     let element: Element | undefined;
-    if (root.nodeType === Node.ELEMENT_NODE) element = root as Element;
-    else if (root.nodeType === Node.TEXT_NODE) {
-      element = root.parentElement ?? undefined;
+    if (sourceNodeType(root) === Node.ELEMENT_NODE) element = root as Element;
+    else if (sourceNodeType(root) === Node.TEXT_NODE) {
+      element = sourceProperty(root, 'parentElement') ?? undefined;
     }
     if (!element) continue;
     const containing = containingIsolatedSelectFacsimileHost(element);
@@ -3213,7 +3235,7 @@ function registerIsolatedAriaIndexElement(
   index: IsolatedAriaIndex,
   element: Element,
 ): void {
-  const id = element.getAttribute('id')?.trim();
+  const id = sourceCall(element, 'getAttribute', 'id')?.trim();
   const listed = index.listedIds.get(element);
   if (listed !== undefined && listed !== id) {
     unregisterIsolatedAriaIndexElement(index, element);
@@ -3226,7 +3248,7 @@ function registerIsolatedAriaIndexElement(
       existing.push(element as HTMLElement);
     }
   }
-  const controls = element.getAttribute('aria-controls')?.trim();
+  const controls = sourceCall(element, 'getAttribute', 'aria-controls')?.trim();
   if (controls) index.triggers.add(element as HTMLElement);
 }
 
@@ -3345,7 +3367,7 @@ function registerIsolatedAriaIndexNodes(
   const index = ISOLATED_ARIA_INDEXES.get(document);
   if (!index || index.dirty) return;
   for (const node of nodes) {
-    if (node.nodeType === Node.ELEMENT_NODE) {
+    if (sourceNodeType(node) === Node.ELEMENT_NODE) {
       registerIsolatedAriaIndexElement(index, node as Element);
     }
   }
@@ -3357,18 +3379,19 @@ function isolatedComposedRoleElements(
   expectedRole: 'listbox' | 'menu',
 ): HTMLElement[] {
   const candidates: HTMLElement[] = [];
-  const pending: Node[] = [...root.childNodes];
+  const pending: Node[] = [...sourceChildNodeList(root)];
   while (pending.length > 0) {
     const node = pending.pop();
     if (!node) continue;
-    if (node.nodeType === Node.ELEMENT_NODE) {
+    if (sourceNodeType(node) === Node.ELEMENT_NODE) {
       const element = node as HTMLElement;
       if (isolatedPublicMenuRole(element) === expectedRole) {
         candidates.push(element);
       }
-      if (element.shadowRoot) pending.push(element.shadowRoot);
+      const shadowRoot = sourceProperty(element, 'shadowRoot');
+      if (shadowRoot) pending.push(shadowRoot);
     }
-    for (const child of node.childNodes) pending.push(child);
+    for (const child of sourceChildNodeList(node)) pending.push(child);
   }
   return candidates;
 }
@@ -3379,20 +3402,21 @@ function collectIsolatedElements(root: Node): HTMLElement[] {
   while (pending.length > 0) {
     const node = pending.pop();
     if (!node) continue;
-    if (node.nodeType === Node.ELEMENT_NODE) {
+    if (sourceNodeType(node) === Node.ELEMENT_NODE) {
       const element = node as HTMLElement;
       elements.push(element);
-      if (element.shadowRoot) pending.push(element.shadowRoot);
+      const shadowRoot = sourceProperty(element, 'shadowRoot');
+      if (shadowRoot) pending.push(shadowRoot);
     }
-    for (const child of node.childNodes) pending.push(child);
+    for (const child of sourceChildNodeList(node)) pending.push(child);
   }
   return elements;
 }
 
 function isolatedSelectFacsimileHost(element: Element): HTMLElement | undefined {
-  const root = element.getRootNode();
+  const root = sourceCall(element, 'getRootNode');
   if (
-    root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE ||
+    sourceNodeType(root) !== Node.DOCUMENT_FRAGMENT_NODE ||
     !(root as ShadowRoot).host
   ) return undefined;
   const host = (root as ShadowRoot).host as HTMLElement;
@@ -3402,7 +3426,7 @@ function isolatedSelectFacsimileHost(element: Element): HTMLElement | undefined 
 function isolatedPublicMenuRole(
   element: Element,
 ): 'listbox' | 'menu' | undefined {
-  for (const token of element.getAttribute('role')?.trim().toLowerCase()
+  for (const token of sourceCall(element, 'getAttribute', 'role')?.trim().toLowerCase()
     .split(/\s+/u) ?? []) {
     if (token === 'listbox' || token === 'menu') return token;
   }
@@ -3429,7 +3453,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     'data-simul-source-selection-state',
   ) === 'v1';
   const presentation = isolatedSelectPresentation(select);
-  host.setAttribute('data-simul-select-presentation', presentation);
+  sourceCall(host, 'setAttribute', 'data-simul-select-presentation', presentation);
   if (presentation === 'list') {
     trigger.setAttribute('hidden', '');
     trigger.style.setProperty('display', 'none', 'important');
@@ -3437,12 +3461,12 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     trigger.removeAttribute('hidden');
     trigger.style.removeProperty('display');
   }
-  panel.setAttribute('role', 'listbox');
-  panel.setAttribute('aria-disabled', 'true');
+  sourceCall(panel, 'setAttribute', 'role', 'listbox');
+  sourceCall(panel, 'setAttribute', 'aria-disabled', 'true');
   if (select.multiple || select.hasAttribute('multiple')) {
-    panel.setAttribute('aria-multiselectable', 'true');
+    sourceCall(panel, 'setAttribute', 'aria-multiselectable', 'true');
   } else {
-    panel.removeAttribute('aria-multiselectable');
+    sourceCall(panel, 'removeAttribute', 'aria-multiselectable');
   }
 
   const semanticSelection = exposesSelection
@@ -3459,7 +3483,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   // list keeps its place.
   const scrollTop = panel.scrollTop;
   const scrollLeft = panel.scrollLeft;
-  panel.replaceChildren();
+  sourceCall(panel, 'replaceChildren');
 
   const selectedLabels: string[] = [];
   const labels: string[] = [];
@@ -3500,18 +3524,18 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       firstSelected ??= option;
       selectedLabels.push(label);
     }
-    parent.append(row);
+    sourceCall(parent, 'append', row);
   };
 
   for (const child of [...select.children]) {
     // No row for an option, and nothing for a group, that the page's own
     // list leaves out (D145; each was a blank row between the others).
     if (isolatedSelectEntryIsLeftOut(child)) continue;
-    if (child.localName.toLowerCase() === 'option') {
+    if (sourceLocalName(child).toLowerCase() === 'option') {
       appendOption(child as HTMLOptionElement, panel, false);
       continue;
     }
-    if (child.localName.toLowerCase() !== 'optgroup') continue;
+    if (sourceLocalName(child).toLowerCase() !== 'optgroup') continue;
     const groupElement = child as HTMLOptGroupElement;
     const group = select.ownerDocument.createElement('div');
     group.setAttribute('data-simul-owned-select-optgroup', 'v1');
@@ -3534,19 +3558,19 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     }
     for (const option of [...groupElement.children]) {
       if (
-        option.localName.toLowerCase() === 'option' &&
+        sourceLocalName(option).toLowerCase() === 'option' &&
         !isolatedSelectEntryIsLeftOut(option)
       ) {
         appendOption(option as HTMLOptionElement, group, groupDisabled);
       }
     }
-    panel.append(group);
+    sourceCall(panel, 'append', group);
   }
   if (scrollTop || scrollLeft) {
     panel.scrollTop = scrollTop;
     panel.scrollLeft = scrollLeft;
   }
-  const sizer = host.shadowRoot?.querySelector('[data-simul-owned-select-sizer="v1"]');
+  const sizer = sourceProperty(host, 'shadowRoot')?.querySelector('[data-simul-owned-select-sizer="v1"]');
   if (sizer) {
     // One fragment, not an argument a label: a dropdown of tens of
     // thousands of options passes the engine's limit on arguments (D186).
@@ -3556,7 +3580,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       line.textContent = label;
       lines.append(line);
     }
-    sizer.replaceChildren(lines);
+    sourceCall(sizer, 'replaceChildren', lines);
   }
   const triggerText = exposesSelection
     ? semanticSelection || selectedLabels.join(', ') || '\u2014'
@@ -3585,7 +3609,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
  * that follows every patch when a patch changes it.
  */
 function isolatedSelectEntryIsLeftOut(entry: Element): boolean {
-  return entry.getAttribute('data-simul-visually-hidden') === 'v1';
+  return sourceCall(entry, 'getAttribute', 'data-simul-visually-hidden') === 'v1';
 }
 
 function isolatedSelectContentSignature(
@@ -3610,7 +3634,7 @@ function isolatedSelectContentSignature(
     ]);
   };
   for (const child of [...select.children]) {
-    const tagName = child.localName.toLowerCase();
+    const tagName = sourceLocalName(child).toLowerCase();
     if (tagName === 'option') {
       appendOption(child as HTMLOptionElement);
       continue;
@@ -3628,10 +3652,10 @@ function isolatedSelectContentSignature(
       isolatedSelectEntryIsLeftOut(group),
     ]);
     for (const option of [...group.children]) {
-      if (option.localName.toLowerCase() === 'option') {
+      if (sourceLocalName(option).toLowerCase() === 'option') {
         appendOption(option as HTMLOptionElement);
       } else {
-        entries.push(['other', option.localName.toLowerCase()]);
+        entries.push(['other', sourceLocalName(option).toLowerCase()]);
       }
     }
   }
@@ -3646,9 +3670,9 @@ function syncContainingIsolatedSelectFacsimile(element: Element): void {
 function containingIsolatedSelectFacsimileHost(
   element: Element,
 ): HTMLElement | undefined {
-  const select = element.localName.toLowerCase() === 'select'
+  const select = sourceLocalName(element).toLowerCase() === 'select'
     ? element as HTMLSelectElement
-    : element.closest('select');
+    : sourceCall(element, 'closest', 'select');
   return select ? isolatedSelectFacsimileHost(select) : undefined;
 }
 
@@ -3658,7 +3682,7 @@ function syncIsolatedSelectFacsimilesShowing(
 ): void {
   const hosts = new Set<HTMLElement>();
   for (const element of elements) {
-    if (!isNativeSelectSemanticGraphTag(element.localName.toLowerCase())) continue;
+    if (!isNativeSelectSemanticGraphTag(sourceLocalName(element).toLowerCase())) continue;
     const host = containingIsolatedSelectFacsimileHost(element);
     if (host) hosts.add(host);
   }
@@ -3777,7 +3801,7 @@ function installValidatedIsolatedAriaDisclosuresInOrder(
 ): void {
   const ids = new Map<string, HTMLElement[]>();
   for (const element of elements) {
-    const id = element.getAttribute('id')?.trim();
+    const id = sourceCall(element, 'getAttribute', 'id')?.trim();
     if (!id) continue;
     const existing = ids.get(id);
     if (existing) existing.push(element);
@@ -3786,18 +3810,18 @@ function installValidatedIsolatedAriaDisclosuresInOrder(
   const usedPanels = new Set<HTMLElement>();
   for (const trigger of elements) {
     if (ISOLATED_SELECT_HOSTS.has(trigger)) continue;
-    const controls = trigger.getAttribute('aria-controls')?.trim() ?? '';
+    const controls = sourceCall(trigger, 'getAttribute', 'aria-controls')?.trim() ?? '';
     if (!controls || /\s/u.test(controls) || controls.length > 256) continue;
     const targets = ids.get(controls);
     if (targets?.length !== 1) continue;
     const target = targets[0]!;
-    if (target.ownerDocument !== document || target === trigger) continue;
-    const hasPopup = trigger.getAttribute('aria-haspopup')?.trim().toLowerCase();
+    if (sourceProperty(target, 'ownerDocument') !== document || target === trigger) continue;
+    const hasPopup = sourceCall(trigger, 'getAttribute', 'aria-haspopup')?.trim().toLowerCase();
     const expectedRole = hasPopup === 'true' ? 'menu' : hasPopup;
     if (expectedRole !== 'menu' && expectedRole !== 'listbox') continue;
     if (
-      !isSourceActivationTagName(trigger.localName) &&
-      !isSourceActivationRoleValue(trigger.getAttribute('role'))
+      !isSourceActivationTagName(sourceLocalName(trigger)) &&
+      !isSourceActivationRoleValue(sourceCall(trigger, 'getAttribute', 'role'))
     ) continue;
 
     let panel: HTMLElement | undefined =
@@ -3821,7 +3845,7 @@ function installValidatedIsolatedAriaDisclosuresInOrder(
       panel,
       presentation: 'inline',
       manageTriggerExpanded: false,
-      shownByPage: trigger.getAttribute('aria-expanded') === 'true',
+      shownByPage: sourceCall(trigger, 'getAttribute', 'aria-expanded') === 'true',
     });
   }
 }
@@ -3844,18 +3868,18 @@ function installValidatedIsolatedAriaDisclosures(
       ISOLATED_SELECT_HOSTS.has(trigger) ||
       !isIsolatedOwnedHostConnected(trigger)
     ) continue;
-    const controls = trigger.getAttribute('aria-controls')?.trim() ?? '';
+    const controls = sourceCall(trigger, 'getAttribute', 'aria-controls')?.trim() ?? '';
     if (!controls || /\s/u.test(controls) || controls.length > 256) continue;
     const targets = index.ids.get(controls);
     if (targets?.length !== 1) continue;
     const target = targets[0]!;
-    if (target.ownerDocument !== document || target === trigger) continue;
-    const hasPopup = trigger.getAttribute('aria-haspopup')?.trim().toLowerCase();
+    if (sourceProperty(target, 'ownerDocument') !== document || target === trigger) continue;
+    const hasPopup = sourceCall(trigger, 'getAttribute', 'aria-haspopup')?.trim().toLowerCase();
     const expectedRole = hasPopup === 'true' ? 'menu' : hasPopup;
     if (expectedRole !== 'menu' && expectedRole !== 'listbox') continue;
     if (
-      !isSourceActivationTagName(trigger.localName) &&
-      !isSourceActivationRoleValue(trigger.getAttribute('role'))
+      !isSourceActivationTagName(sourceLocalName(trigger)) &&
+      !isSourceActivationRoleValue(sourceCall(trigger, 'getAttribute', 'role'))
     ) continue;
 
     let panel: HTMLElement | undefined =
@@ -3875,14 +3899,14 @@ function installValidatedIsolatedAriaDisclosures(
       panel,
       presentation: 'inline',
       manageTriggerExpanded: false,
-      shownByPage: trigger.getAttribute('aria-expanded') === 'true',
+      shownByPage: sourceCall(trigger, 'getAttribute', 'aria-expanded') === 'true',
     });
   }
   return true;
 }
 
 function roleHasToken(element: Element, token: string): boolean {
-  return element.getAttribute('role')?.trim().toLowerCase()
+  return sourceCall(element, 'getAttribute', 'role')?.trim().toLowerCase()
     .split(/\s+/u).includes(token) ?? false;
 }
 
@@ -3890,12 +3914,13 @@ function composedElementContains(container: Element, candidate: Element): boolea
   let current: Node | null = candidate;
   for (let depth = 0; current && depth <= 128; depth += 1) {
     if (current === container) return true;
-    if (current.parentNode) {
-      current = current.parentNode;
+    const parent: Node | null = sourceProperty(current, 'parentNode');
+    if (parent) {
+      current = parent;
       continue;
     }
-    const root = current.getRootNode();
-    current = root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+    const root: Node = sourceCall(current, 'getRootNode');
+    current = sourceNodeType(root) === Node.DOCUMENT_FRAGMENT_NODE &&
         'host' in root
       ? (root as ShadowRoot).host
       : null;
@@ -3909,12 +3934,12 @@ function composedElementContains(container: Element, candidate: Element): boolea
  * element inside the style is no part of it.
  */
 function heldResolvedStyleSheetText(element: Element): string | undefined {
-  if (element.getAttribute('data-simul-resolved-stylesheet') !== 'v1') {
+  if (sourceCall(element, 'getAttribute', 'data-simul-resolved-stylesheet') !== 'v1') {
     return undefined;
   }
   let text = '';
-  for (const child of element.childNodes) {
-    if (child.nodeType === Node.TEXT_NODE) text += child.nodeValue ?? '';
+  for (const child of sourceChildNodeList(element)) {
+    if (sourceNodeType(child) === Node.TEXT_NODE) text += child.nodeValue ?? '';
   }
   return text;
 }
@@ -3923,17 +3948,17 @@ function applyResolvedStyleSheetText(
   element: Element,
   cssText: string | undefined,
 ): void {
-  if (cssText === undefined || element.localName.toLowerCase() !== 'style') return;
-  const textNodes = [...element.childNodes].filter(
-    (node) => node.nodeType === Node.TEXT_NODE,
+  if (cssText === undefined || sourceLocalName(element).toLowerCase() !== 'style') return;
+  const textNodes = [...sourceChildNodeList(element)].filter(
+    (node) => sourceNodeType(node) === Node.TEXT_NODE,
   );
   if (textNodes.length === 0) {
-    element.append(element.ownerDocument.createTextNode(cssText));
+    sourceCall(element, 'append', sourceProperty(element, 'ownerDocument').createTextNode(cssText));
   } else {
     textNodes[0]!.nodeValue = cssText;
     for (const extra of textNodes.slice(1)) extra.nodeValue = '';
   }
-  element.setAttribute('data-simul-resolved-stylesheet', 'v1');
+  sourceCall(element, 'setAttribute', 'data-simul-resolved-stylesheet', 'v1');
 }
 
 function applyReplicaCanvasBackground(
@@ -3942,26 +3967,26 @@ function applyReplicaCanvasBackground(
 ): void {
   const styled = element as HTMLElement;
   if (color) {
-    styled.style.setProperty('background-color', color, 'important');
-    element.setAttribute('data-simul-canvas-background', 'v1');
+    sourceProperty(styled, 'style').setProperty('background-color', color, 'important');
+    sourceCall(element, 'setAttribute', 'data-simul-canvas-background', 'v1');
     return;
   }
-  if (element.getAttribute('data-simul-canvas-background') !== 'v1') return;
-  styled.style.removeProperty('background-color');
-  if (!element.getAttribute('style')?.trim()) element.removeAttribute('style');
-  element.removeAttribute('data-simul-canvas-background');
+  if (sourceCall(element, 'getAttribute', 'data-simul-canvas-background') !== 'v1') return;
+  sourceProperty(styled, 'style').removeProperty('background-color');
+  if (!sourceCall(element, 'getAttribute', 'style')?.trim()) sourceCall(element, 'removeAttribute', 'style');
+  sourceCall(element, 'removeAttribute', 'data-simul-canvas-background');
 }
 
 function applyControlText(
   element: Element,
   controlText: HtmlMirrorControlText | undefined,
 ): void {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (
     (tagName === 'option' || tagName === 'optgroup') &&
     controlText?.kind === 'label'
   ) {
-    element.setAttribute('label', controlText.text);
+    sourceCall(element, 'setAttribute', 'label', controlText.text);
     return;
   }
   if (tagName !== 'input' && tagName !== 'textarea') return;
@@ -3981,7 +4006,7 @@ function applyControlText(
 function isNativeReplicaTextControl(
   element: Element,
 ): element is HTMLInputElement | HTMLTextAreaElement {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   return tagName === 'input' || tagName === 'textarea';
 }
 
@@ -4190,8 +4215,8 @@ function applyPatchFrame(
       const target = state.nodes.get(operation.nodeId);
       if (!target) return refusePatch('target-missing');
       if (
-        target.nodeType === Node.ELEMENT_NODE &&
-        isSourceSecretPlaceholderTagName((target as Element).localName)
+        sourceNodeType(target) === Node.ELEMENT_NODE &&
+        isSourceSecretPlaceholderTagName(sourceLocalName((target as Element)))
       ) {
         // The placeholder is immutable for its document lifetime. Any source
         // mutation at that ID requires a fresh graph so no descendant/resource
@@ -4202,12 +4227,12 @@ function applyPatchFrame(
       if (
         (operation.kind === 'children' ||
           operation.kind === 'reconcile-children') &&
-        target.nodeType === Node.ELEMENT_NODE
+        sourceNodeType(target) === Node.ELEMENT_NODE
       ) {
         const targetElement = target as Element;
-        const select = targetElement.localName.toLowerCase() === 'select'
+        const select = sourceLocalName(targetElement).toLowerCase() === 'select'
           ? targetElement
-          : targetElement.closest('select');
+          : sourceCall(targetElement, 'closest', 'select');
         // Native select structure is transported whole at the select root; a
         // patch for one of its groups or options is never sent. The new options
         // come without a selection: the current choice arrives on the semantic
@@ -4230,7 +4255,7 @@ function applyPatchFrame(
           state.fidelityPolicy,
         );
         if (
-          target.nodeType !== Node.TEXT_NODE ||
+          sourceNodeType(target) !== Node.TEXT_NODE ||
           !node || node.kind !== 'text' || node.id !== operation.nodeId ||
           !validTextForContext(
             node,
@@ -4243,9 +4268,9 @@ function applyPatchFrame(
       }
       if (operation.kind === 'attributes') {
         if (
-          target.nodeType !== Node.ELEMENT_NODE ||
-          (target as Element).namespaceURI !== NAMESPACE_URIS[operation.namespace] ||
-          (target as Element).localName.toLowerCase() !== operation.tagName
+          sourceNodeType(target) !== Node.ELEMENT_NODE ||
+          sourceProperty((target as Element), 'namespaceURI') !== NAMESPACE_URIS[operation.namespace] ||
+          sourceLocalName((target as Element)).toLowerCase() !== operation.tagName
         ) return refusePatch('attribute-target');
         const currentContext = containerContext(target);
         const prospectiveContext = batchContainerContext(
@@ -4256,7 +4281,7 @@ function applyPatchFrame(
         if (
           privacyContextChanges(currentContext, prospectiveContext) &&
           (
-            (target as Element).shadowRoot ||
+            sourceProperty((target as Element), 'shadowRoot') ||
             !childReplacementNodeIds.has(operation.nodeId)
           )
         ) return refusePatch('attribute-shadow-host');
@@ -4265,7 +4290,7 @@ function applyPatchFrame(
           hasPrivateHtmlMirrorAttribute(operation.tagName, operation.attributes)
         ) return refusePatch('attribute-private');
         try {
-          const sentinelDocument = target.ownerDocument;
+          const sentinelDocument = sourceProperty(target, 'ownerDocument');
           if (!sentinelDocument) return refusePatch('attribute-document');
           const sentinel = createMirrorElement(
             sentinelDocument,
@@ -4294,8 +4319,8 @@ function applyPatchFrame(
       }
       if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
         if (
-          target.nodeType !== Node.ELEMENT_NODE &&
-          target.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
+          sourceNodeType(target) !== Node.ELEMENT_NODE &&
+          sourceNodeType(target) !== Node.DOCUMENT_FRAGMENT_NODE
         ) return refusePatch('children-target');
         if (!isConnectedReplicaNode(state, target)) return refusePatch('children-disconnected');
         // A style the mirror holds by its sheet's text keeps that text when
@@ -4303,8 +4328,8 @@ function applyPatchFrame(
         // the page's own text, which is not always the sheet's (a rule put
         // in through the sheet is in the sheet's text only), and the page
         // reader sends the sheet again only when the sheet changed.
-        const held = target.nodeType === Node.ELEMENT_NODE &&
-            (target as Element).localName.toLowerCase() === 'style'
+        const held = sourceNodeType(target) === Node.ELEMENT_NODE &&
+            sourceLocalName((target as Element)).toLowerCase() === 'style'
           ? heldResolvedStyleSheetText(target as Element)
           : undefined;
         if (held !== undefined) keptSheetTexts.set(operation.nodeId, held);
@@ -4349,7 +4374,7 @@ function applyPatchFrame(
     const oldChildren = new Map<number, readonly Node[]>();
     for (const operation of structuralOperations) {
       const target = state.nodes.get(operation.nodeId) as Node;
-      const mirrored = [...target.childNodes].filter(
+      const mirrored = [...sourceChildNodeList(target)].filter(
         (child) => isMirrorPresentationNode(state.nodes, child),
       );
       oldChildren.set(operation.nodeId, mirrored);
@@ -4394,8 +4419,8 @@ function applyPatchFrame(
           if (
             !retained || retainedIds.has(entry.nodeId) ||
             reconcileGraphIds.has(entry.nodeId) ||
-            retained.parentNode !== target || !directChildren.has(retained) ||
-            retained.ownerDocument !== target.ownerDocument ||
+            sourceProperty(retained, 'parentNode') !== target || !directChildren.has(retained) ||
+            sourceProperty(retained, 'ownerDocument') !== sourceProperty(target, 'ownerDocument') ||
             !isConnectedReplicaNode(state, retained)
           ) return refusePatch('retain');
           retainedIds.add(entry.nodeId);
@@ -4486,7 +4511,7 @@ function applyPatchFrame(
             state.fidelityPolicy,
           )
         ) return refusePatch('children-sheet');
-        const ownerDocument = target.ownerDocument;
+        const ownerDocument = sourceProperty(target, 'ownerDocument');
         if (!ownerDocument) return refusePatch('children-document');
         const fragment = ownerDocument.createDocumentFragment();
         const nodes = new Map<number, Node>();
@@ -4528,7 +4553,7 @@ function applyPatchFrame(
             if (entry.kind === 'retain') {
               const retained = state.nodes.get(entry.nodeId);
               if (!retained) return refusePatch('reconcile-sheet-retain');
-              parts.push(retained.textContent ?? '');
+              parts.push(sourceProperty(retained, 'textContent') ?? '');
             } else {
               collectStyleSheetText([entry.node], parts);
             }
@@ -4538,7 +4563,7 @@ function applyPatchFrame(
             state.fidelityPolicy,
           )) return refusePatch('reconcile-sheet');
         }
-        const ownerDocument = target.ownerDocument;
+        const ownerDocument = sourceProperty(target, 'ownerDocument');
         if (!ownerDocument) return refusePatch('reconcile-document');
         const nodes = new Map<number, Node>();
         const textMetadata = new Map<
@@ -4654,7 +4679,7 @@ function applyPatchFrame(
         let element = target as Element;
         if (switchesReplicaLinkOff(element, operation.attributes)) {
           const replacement = createMirrorElement(
-            element.ownerDocument,
+            sourceProperty(element, 'ownerDocument'),
             operation.namespace,
             operation.tagName,
           );
@@ -4663,7 +4688,7 @@ function applyPatchFrame(
             operation.attributes,
             operation.resolvedStyleSheetText,
           );
-          element.replaceWith(replacement);
+          sourceCall(element, 'replaceWith', replacement);
           setCurrentNode(operation.nodeId, replacement);
           element = replacement;
           markIsolatedAriaIndexDirty(state.iframe.contentDocument ?? undefined);
@@ -4672,15 +4697,15 @@ function applyPatchFrame(
           // that drops an `id` or `aria-controls` changes the index just as
           // one that adds it does (R3; a stale id resolved a panel that no
           // longer has one).
-          const indexedBefore = element.hasAttribute('id') ||
-            element.hasAttribute('aria-controls');
+          const indexedBefore = sourceCall(element, 'hasAttribute', 'id') ||
+            sourceCall(element, 'hasAttribute', 'aria-controls');
           setAttributes(
             element,
             operation.attributes,
             operation.resolvedStyleSheetText,
           );
           if (
-            !RETAINED_LEDGERS.has(element.ownerDocument) && (
+            !RETAINED_LEDGERS.has(sourceProperty(element, 'ownerDocument')) && (
               indexedBefore || operation.attributes.some(
                 ([name]) => name === 'id' || name === 'aria-controls',
               )
@@ -4699,19 +4724,20 @@ function applyPatchFrame(
       if (operation.kind === 'children') {
         const plan = childrenPlans.get(operation);
         if (!plan) throw new Error('Missing children replacement plan.');
-        const retainedShellStyles = [...plan.target.childNodes].filter(
+        const retainedShellStyles = [...sourceChildNodeList(plan.target)].filter(
           (child) => ISOLATED_OWNED_SHADOW_SHELL_STYLES.has(child),
         );
         const retainedAdoptedStyles = [...state.ownedAdoptedStyles].filter(
-          (style) => style.parentNode === plan.target,
+          (style) => sourceProperty(style, 'parentNode') === plan.target,
         );
         for (const child of plan.oldChildren) {
           removeDomTree(state, child);
-          child.parentNode?.removeChild(child);
+          const parent = sourceProperty(child, 'parentNode');
+          if (parent) sourceCall(parent, 'removeChild', child);
         }
-        plan.target.appendChild(plan.fragment);
-        for (const style of retainedShellStyles) plan.target.appendChild(style);
-        for (const style of retainedAdoptedStyles) plan.target.appendChild(style);
+        sourceCall(plan.target, 'appendChild', plan.fragment);
+        for (const style of retainedShellStyles) sourceCall(plan.target, 'appendChild', style);
+        for (const style of retainedAdoptedStyles) sourceCall(plan.target, 'appendChild', style);
         for (const style of plan.ownedAdoptedStyles) {
           state.ownedAdoptedStyles.add(style);
         }
@@ -4733,7 +4759,8 @@ function applyPatchFrame(
       for (const child of plan.oldChildren) {
         if (plan.retainedChildren.has(child)) continue;
         removeDomTree(state, child);
-        child.parentNode?.removeChild(child);
+        const parent = sourceProperty(child, 'parentNode');
+        if (parent) sourceCall(parent, 'removeChild', child);
       }
       for (const style of plan.ownedAdoptedStyles) {
         state.ownedAdoptedStyles.add(style);
@@ -4746,7 +4773,7 @@ function applyPatchFrame(
         state.controlMetadata.set(id, control);
       }
       insertedNodeCount += plan.insertedNodeCount;
-      let anchor: ChildNode | null = [...plan.target.childNodes].find(
+      let anchor: ChildNode | null = [...sourceChildNodeList(plan.target)].find(
         (child) => state.ownedAdoptedStyles.has(child as HTMLStyleElement) ||
           ISOLATED_OWNED_SHADOW_SHELL_STYLES.has(child),
       ) ?? null;
@@ -4754,10 +4781,10 @@ function applyPatchFrame(
         const child = plan.desiredChildren[index]!;
         if (
           !plan.stableRetainedChildren.has(child) &&
-          (child.parentNode !== plan.target || child.nextSibling !== anchor)
+          (sourceProperty(child, 'parentNode') !== plan.target || sourceProperty(child, 'nextSibling') !== anchor)
         ) {
           if (plan.retainedChildren.has(child)) movedNodeCount += 1;
-          plan.target.insertBefore(child, anchor);
+          sourceCall(plan.target, 'insertBefore', child, anchor);
         }
         anchor = child as ChildNode;
       }
@@ -5072,7 +5099,7 @@ function capturePatchRollback(
   const canvasElement = state.iframe.contentDocument?.documentElement;
   for (const { operation, target } of targets) {
     if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
-      childLists.set(target, Object.freeze([...target.childNodes]));
+      childLists.set(target, Object.freeze([...sourceChildNodeList(target)]));
     } else if (operation.kind === 'attributes') {
       const element = target as Element;
       // The page's attributes: a restore writes them back as a patch does,
@@ -5085,21 +5112,21 @@ function capturePatchRollback(
       );
       // A link that is switched off is replaced by a new element: its
       // parent's list puts the old one back.
-      const parent = element.parentNode;
+      const parent = sourceProperty(element, 'parentNode');
       if (
         parent && !childLists.has(parent) &&
         switchesReplicaLinkOff(element, operation.attributes)
-      ) childLists.set(parent, Object.freeze([...parent.childNodes]));
+      ) childLists.set(parent, Object.freeze([...sourceChildNodeList(parent)]));
       if (
         operation.resolvedStyleSheetText !== undefined &&
-        element.localName.toLowerCase() === 'style'
+        sourceLocalName(element).toLowerCase() === 'style'
       ) {
         // The sheet's text is written into the element's text nodes.
         if (!childLists.has(element)) {
-          childLists.set(element, Object.freeze([...element.childNodes]));
+          childLists.set(element, Object.freeze([...sourceChildNodeList(element)]));
         }
-        for (const child of element.childNodes) {
-          if (child.nodeType === Node.TEXT_NODE) {
+        for (const child of sourceChildNodeList(element)) {
+          if (sourceNodeType(child) === Node.TEXT_NODE) {
             textValues.set(child, child.nodeValue);
           }
         }
@@ -5109,7 +5136,7 @@ function capturePatchRollback(
           value: element.value,
           placeholder: element.placeholder,
         }));
-      } else if (element.localName.toLowerCase() === 'select') {
+      } else if (sourceLocalName(element).toLowerCase() === 'select') {
         const select = element as HTMLSelectElement;
         const selectedIndexes: number[] = [];
         for (let index = 0; index < select.options.length; index += 1) {
@@ -5121,7 +5148,7 @@ function capturePatchRollback(
           ...(host
             ? {
                 host,
-                hostAttributes: Object.freeze([...host.attributes].map(
+                hostAttributes: Object.freeze([...sourceAttributeList(host)].map(
                   ({ name, value }) => Object.freeze([name, value] as const),
                 )),
               }
@@ -5208,8 +5235,8 @@ function restoreOptionalAttribute(
   value: string | null,
 ): void {
   try {
-    if (value === null) element.removeAttribute(name);
-    else element.setAttribute(name, value);
+    if (value === null) sourceCall(element, 'removeAttribute', name);
+    else sourceCall(element, 'setAttribute', name, value);
   } catch {
     // Continue restoring independent state before requesting recovery.
   }
@@ -5219,17 +5246,17 @@ function restoreChildList(target: ParentNode, children: readonly Node[]): void {
   try {
     // A fragment, not an argument a child (D186): a list of more than about
     // 125,000 children passes the engine's limit on arguments.
-    const fragment = (target.ownerDocument ?? (target as Document)).createDocumentFragment();
+    const fragment = (sourceProperty(target, 'ownerDocument') ?? (target as Document)).createDocumentFragment();
     for (const child of children) fragment.appendChild(child);
-    target.replaceChildren(fragment);
+    sourceCall(target, 'replaceChildren', fragment);
     return;
   } catch {
     // Fall through to primitive operations so a host-level replaceChildren
     // failure cannot prevent restoration of this or later independent targets.
   }
   try {
-    for (const child of [...target.childNodes]) target.removeChild(child);
-    for (const child of children) target.appendChild(child);
+    for (const child of [...sourceChildNodeList(target)]) sourceCall(target, 'removeChild', child);
+    for (const child of children) sourceCall(target, 'appendChild', child);
   } catch {
     // A recovery checkpoint remains authoritative if the host DOM refuses
     // both restoration strategies.
@@ -5246,9 +5273,9 @@ function restoreAttributeList(
   } catch {
     // Try every primitive independently before allowing checkpoint recovery.
   }
-  for (const attribute of [...target.attributes]) {
+  for (const attribute of [...sourceAttributeList(target)]) {
     try {
-      target.removeAttribute(attribute.name);
+      sourceCall(target, 'removeAttribute', attribute.name);
     } catch {
       // Continue with remaining attributes and targets.
     }
@@ -5286,15 +5313,15 @@ function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
     state.iframe.contentDocument ?? state.iframe.ownerDocument,
   );
   if (
-    ariaIndex && !ariaIndex.dirty && node.nodeType === Node.ELEMENT_NODE
+    ariaIndex && !ariaIndex.dirty && sourceNodeType(node) === Node.ELEMENT_NODE
   ) {
     unregisterIsolatedAriaIndexElement(ariaIndex, node as Element);
   }
-  for (const child of [...node.childNodes]) {
+  for (const child of [...sourceChildNodeList(node)]) {
     removeDomTree(state, child);
   }
-  if (node.nodeType === Node.ELEMENT_NODE) {
-    const shadow = (node as Element).shadowRoot;
+  if (sourceNodeType(node) === Node.ELEMENT_NODE) {
+    const shadow = sourceProperty((node as Element), 'shadowRoot');
     if (shadow) removeDomTree(state, shadow);
   }
   if (state.ownedAdoptedStyles.has(node as HTMLStyleElement)) {
@@ -5318,21 +5345,21 @@ function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
 function isMirrorPresentationNode(nodes: ReplicaNodeMap, child: Node): boolean {
   if (nodes.hasNode(child)) return true;
   if (
-    child.nodeType !== Node.ELEMENT_NODE ||
+    sourceNodeType(child) !== Node.ELEMENT_NODE ||
     !ISOLATED_SELECT_HOSTS.has(child as Element)
   ) return false;
-  const shadow = (child as Element).shadowRoot;
+  const shadow = sourceProperty((child as Element), 'shadowRoot');
   if (!shadow) return false;
   // The selects of the box's own tree, not of a root inside it.
-  const pending: Node[] = [...shadow.childNodes];
+  const pending: Node[] = [...sourceChildNodeList(shadow)];
   while (pending.length > 0) {
     const node = pending.pop()!;
-    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    if (sourceNodeType(node) !== Node.ELEMENT_NODE) continue;
     if (
-      (node as Element).localName.toLowerCase() === 'select' &&
+      sourceLocalName((node as Element)).toLowerCase() === 'select' &&
       nodes.hasNode(node)
     ) return true;
-    for (const inner of node.childNodes) pending.push(inner);
+    for (const inner of sourceChildNodeList(node)) pending.push(inner);
   }
   return false;
 }
@@ -5409,34 +5436,34 @@ const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
 });
 
 function presentationNodeForMirrorNode(node: Node): Node {
-  if (node.nodeType === Node.ELEMENT_NODE) {
-    const root = node.getRootNode();
+  if (sourceNodeType(node) === Node.ELEMENT_NODE) {
+    const root = sourceCall(node, 'getRootNode');
     if (
-      root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+      sourceNodeType(root) === Node.DOCUMENT_FRAGMENT_NODE &&
       'host' in root &&
       ISOLATED_SELECT_HOSTS.has((root as ShadowRoot).host)
     ) {
       const host = (root as ShadowRoot).host;
-      if ((node as Element).localName.toLowerCase() === 'select') return host;
+      if (sourceLocalName((node as Element)).toLowerCase() === 'select') return host;
     }
   }
   return node;
 }
 
 function isConnectedReplicaNode(state: HtmlMirrorDomState, node: Node): boolean {
-  if (node.ownerDocument !== state.iframe.contentDocument) return false;
+  if (sourceProperty(node, 'ownerDocument') !== state.iframe.contentDocument) return false;
   let current = node;
   for (let depth = 0; depth <= 64; depth += 1) {
-    if (current.isConnected) return true;
-    const root = current.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+    if (sourceProperty(current, 'isConnected')) return true;
+    const root = sourceNodeType(current) === Node.DOCUMENT_FRAGMENT_NODE &&
       'host' in current
       ? current as ShadowRoot
-      : current.getRootNode();
-    if (root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE || !('host' in root)) {
+      : sourceCall(current, 'getRootNode');
+    if (sourceNodeType(root) !== Node.DOCUMENT_FRAGMENT_NODE || !('host' in root)) {
       return false;
     }
     const shadow = root as ShadowRoot;
-    if (shadow.host.shadowRoot !== shadow) return false;
+    if (sourceProperty(shadow.host, 'shadowRoot') !== shadow) return false;
     current = shadow.host;
   }
   return false;
@@ -5493,7 +5520,7 @@ const LINE_BREAKS_SHOWN = new Set([
 
 /** Whether the mirror shows the line breaks of the text in `element`. */
 function elementShowsLineBreaks(element: Element | null | undefined): boolean {
-  const view = element?.ownerDocument.defaultView;
+  const view = element ? sourceProperty(element, 'ownerDocument').defaultView : undefined;
   if (!element || !view) return false;
   const style = view.getComputedStyle(element);
   const value = style.getPropertyValue('white-space-collapse') ||
@@ -5502,9 +5529,10 @@ function elementShowsLineBreaks(element: Element | null | undefined): boolean {
 }
 
 function composedParentElement(node: Node): Element | undefined {
-  if (node.parentElement) return node.parentElement;
-  const root = node.getRootNode();
-  return root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in root
+  const parentElement = sourceProperty(node, 'parentElement');
+  if (parentElement) return parentElement;
+  const root = sourceCall(node, 'getRootNode');
+  return sourceNodeType(root) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in root
     ? (root as ShadowRoot).host
     : undefined;
 }
@@ -5513,17 +5541,17 @@ function containerContext(
   target: Node,
   pendingAttributes?: readonly (readonly [string, string])[],
 ): DomContentContext {
-  if (target.nodeType === Node.ELEMENT_NODE) {
+  if (sourceNodeType(target) === Node.ELEMENT_NODE) {
     const element = target as Element;
     if (!pendingAttributes) return domElementContext(element);
     const inherited = composedParentElement(element)
       ? domElementContext(composedParentElement(element) as Element)
       : PUBLIC_DOM_CONTEXT;
     const attributes = Object.fromEntries(pendingAttributes);
-    const tagName = element.localName.toLowerCase();
+    const tagName = sourceLocalName(element).toLowerCase();
     return extendDomContentContext(inherited, tagName, attributes);
   }
-  const host = target.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in target
+  const host = sourceNodeType(target) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in target
     ? (target as ShadowRoot).host
     : undefined;
   return host ? domElementContext(host) : PUBLIC_DOM_CONTEXT;
@@ -5537,9 +5565,9 @@ function batchContainerContext(
   >,
   nodeIds: ReadonlyMap<Node, number>,
 ): DomContentContext {
-  let element = target.nodeType === Node.ELEMENT_NODE
+  let element = sourceNodeType(target) === Node.ELEMENT_NODE
     ? target as Element
-    : target.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in target
+    : sourceNodeType(target) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in target
       ? (target as ShadowRoot).host
       : undefined;
   if (!element) return PUBLIC_DOM_CONTEXT;
@@ -5554,9 +5582,9 @@ function batchContainerContext(
     const values = attributes
       ? Object.fromEntries(attributes)
       : Object.fromEntries(
-          [...current.attributes].map(({ name, value }) => [name, value]),
+          [...sourceAttributeList(current)].map(({ name, value }) => [name, value]),
         );
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     context = extendDomContentContext(context, tagName, values);
   }
   return context;
@@ -5586,9 +5614,9 @@ function domElementContext(element: Element): DomContentContext {
   ) chain.push(current);
   let context = PUBLIC_DOM_CONTEXT;
   for (const current of chain.reverse()) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     const attributes = Object.fromEntries(
-      [...current.attributes].map(({ name, value }) => [name, value]),
+      [...sourceAttributeList(current)].map(({ name, value }) => [name, value]),
     );
     context = extendDomContentContext(context, tagName, attributes);
   }
@@ -5634,6 +5662,19 @@ function nextDomNativeSelectParent(
     (parent === 'select' || parent === 'optgroup')
   ) return 'option';
   return false;
+}
+
+/** A `<style>`, `<link>` or `<head>` of the replica: a change in it may change a sheet (D204). */
+function holdsReplicaSheet(node: Node | null | undefined): boolean {
+  if (!node || sourceNodeType(node) !== Node.ELEMENT_NODE) return false;
+  const name = sourceLocalName(node as Element);
+  return name === 'style' || name === 'link' || name === 'head';
+}
+
+/** Whether a child a patch brings is a `<style>` or `<link>` (D204). */
+function bringsReplicaSheet(child: HtmlMirrorNode | HtmlMirrorReconcileChild): boolean {
+  const node = child.kind === 'graph' ? child.node : child;
+  return node.kind === 'element' && (node.tagName === 'style' || node.tagName === 'link');
 }
 
 /**
@@ -5693,13 +5734,13 @@ function validStyleSheetTextInGraph(
  */
 function owningStyleElement(node: Node): Element | undefined {
   for (
-    let current: Node | null = node.parentNode;
+    let current: Node | null = sourceProperty(node, 'parentNode');
     current;
-    current = current.parentNode
+    current = sourceProperty(current, 'parentNode')
   ) {
     if (
-      current.nodeType === Node.ELEMENT_NODE &&
-      (current as Element).localName.toLowerCase() === 'style'
+      sourceNodeType(current) === Node.ELEMENT_NODE &&
+      sourceLocalName((current as Element)).toLowerCase() === 'style'
     ) return current as Element;
   }
   return undefined;
@@ -5711,8 +5752,8 @@ function collectStyleSheetDomText(
   replacements: ReadonlyMap<Text, string>,
   parts: string[],
 ): void {
-  for (const child of parent.childNodes) {
-    if (child.nodeType === Node.TEXT_NODE) {
+  for (const child of sourceChildNodeList(parent)) {
+    if (sourceNodeType(child) === Node.TEXT_NODE) {
       parts.push(replacements.get(child as Text) ?? child.nodeValue ?? '');
     } else {
       collectStyleSheetDomText(child, replacements, parts);
@@ -5736,7 +5777,7 @@ function validFrameStyleSheetText(
     for (const operation of operations) {
       if (operation.kind !== 'text') continue;
       const target = state.nodes.get(operation.nodeId);
-      if (target?.nodeType === Node.TEXT_NODE) {
+      if (target != null && sourceNodeType(target) === Node.TEXT_NODE) {
         replacements.set(target as Text, operation.node.text);
       }
     }
@@ -5777,8 +5818,8 @@ function noteFrameStyleSheetTargets(
   }
   const element = state.nodes.get(node.id);
   if (
-    element?.nodeType === Node.ELEMENT_NODE &&
-    (element as Element).localName.toLowerCase() === 'style'
+    (element != null && sourceNodeType(element) === Node.ELEMENT_NODE) &&
+    sourceLocalName((element as Element)).toLowerCase() === 'style'
   ) styles.add(element as Element);
   for (const child of node.children) {
     noteFrameStyleSheetTargets(state, child, styles);
@@ -5811,15 +5852,15 @@ function validFrameStyleSheetTextAfterApply(
       }
       if (
         operation.kind === 'attributes' &&
-        target?.nodeType === Node.ELEMENT_NODE &&
-        (target as Element).localName.toLowerCase() === 'style'
+        (target != null && sourceNodeType(target) === Node.ELEMENT_NODE) &&
+        sourceLocalName((target as Element)).toLowerCase() === 'style'
       ) {
         styles.add(target as Element);
         continue;
       }
       if (operation.kind === 'children') {
-        if (target?.nodeType === Node.ELEMENT_NODE &&
-            (target as Element).localName.toLowerCase() === 'style') {
+        if ((target != null && sourceNodeType(target) === Node.ELEMENT_NODE) &&
+            sourceLocalName((target as Element)).toLowerCase() === 'style') {
           styles.add(target as Element);
         }
         for (const child of operation.children) {
@@ -5828,8 +5869,8 @@ function validFrameStyleSheetTextAfterApply(
         continue;
       }
       if (operation.kind === 'reconcile-children') {
-        if (target?.nodeType === Node.ELEMENT_NODE &&
-            (target as Element).localName.toLowerCase() === 'style') {
+        if ((target != null && sourceNodeType(target) === Node.ELEMENT_NODE) &&
+            sourceLocalName((target as Element)).toLowerCase() === 'style') {
           styles.add(target as Element);
         }
         for (const entry of operation.children) {
@@ -5940,9 +5981,9 @@ function collectDomIds(
 ): void {
   const id = nodeIds.get(node);
   if (id !== undefined) ids.add(id);
-  for (const child of [...node.childNodes]) collectDomIds(nodeIds, child, ids);
-  if (node.nodeType === Node.ELEMENT_NODE) {
-    const shadow = (node as Element).shadowRoot;
+  for (const child of [...sourceChildNodeList(node)]) collectDomIds(nodeIds, child, ids);
+  if (sourceNodeType(node) === Node.ELEMENT_NODE) {
+    const shadow = sourceProperty((node as Element), 'shadowRoot');
     if (shadow) collectDomIds(nodeIds, shadow, ids);
   }
 }
@@ -6020,7 +6061,7 @@ function hideTranslatedLanguage(state: HtmlMirrorDomState, nodeId: number): void
   // The select facsimile draws an option's label with the option's language.
   if (
     element &&
-    isNativeSelectSemanticGraphTag(element.localName.toLowerCase())
+    isNativeSelectSemanticGraphTag(sourceLocalName(element).toLowerCase())
   ) syncContainingIsolatedSelectFacsimile(element);
 }
 
@@ -6036,7 +6077,7 @@ function patchedPageLanguages(
   for (const operation of operations) {
     if (operation.kind !== 'attributes') continue;
     const target = state.nodes.get(operation.nodeId);
-    if (target?.nodeType !== Node.ELEMENT_NODE) continue;
+    if (target == null || sourceNodeType(target) !== Node.ELEMENT_NODE) continue;
     const element = target as Element;
     languages.push([
       element,
@@ -6100,7 +6141,7 @@ function reconcileIsolatedPaintedLabels(
     const node = state.nodes.get(nodeId);
     if (
       !projection || !record || projection.nodeType !== 3 ||
-      record.nodeType !== 3 || node?.nodeType !== Node.TEXT_NODE ||
+      record.nodeType !== 3 || (node == null || sourceNodeType(node) !== Node.TEXT_NODE) ||
       record.source !== projection.source ||
       record.revision !== projection.sourceRevision
     ) continue;
@@ -6336,7 +6377,7 @@ function writeQuirksIframeDocument(
   shell: string,
   mode: 'quirks' | 'limited-quirks',
 ): Document {
-  mount.append(iframe);
+  sourceCall(mount, 'append', iframe);
   const iframeDocument = iframe.contentDocument;
   if (!iframeDocument) throw new Error('Isolated iframe document unavailable.');
   iframeDocument.open();
@@ -6345,7 +6386,7 @@ function writeQuirksIframeDocument(
   if (
     !isTrustedIsolatedShellDocument(
       iframeDocument,
-      mount.ownerDocument.location.href,
+      sourceProperty(mount, 'ownerDocument').location.href,
     ) ||
     (mode === 'quirks'
       ? iframeDocument.compatMode !== 'BackCompat'
@@ -6396,7 +6437,7 @@ async function initializeIframeDocument(
     iframe.addEventListener('load', onLoad);
     signal?.addEventListener('abort', onAbort, { once: true });
     iframe.srcdoc = trustedShellHtml(shell);
-    mount.append(iframe);
+    sourceCall(mount, 'append', iframe);
   });
   return iframeDocument;
 }
@@ -6437,8 +6478,8 @@ async function settleReplicaStyles(
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = (): void => {
         for (const link of pending) {
-          link.removeEventListener('load', onLoad);
-          link.removeEventListener('error', onError);
+          sourceCall(link, 'removeEventListener', 'load', onLoad);
+          sourceCall(link, 'removeEventListener', 'error', onError);
         }
         signal?.removeEventListener('abort', onAbort);
         if (timer !== undefined) clearTimeout(timer);
@@ -6463,8 +6504,8 @@ async function settleReplicaStyles(
         signal?.reason ?? new DOMException('Style settling cancelled.', 'AbortError'),
       );
       for (const link of pending) {
-        link.addEventListener('load', onLoad, { once: true });
-        link.addEventListener('error', onError, { once: true });
+        sourceCall(link, 'addEventListener', 'load', onLoad, { once: true });
+        sourceCall(link, 'addEventListener', 'error', onError, { once: true });
       }
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) {
@@ -6515,7 +6556,7 @@ function collectReplicaStylesheetLinks(target: Document): Element[] {
       links.add(link);
     }
     for (const element of root.querySelectorAll('*')) {
-      const shadow = element.shadowRoot;
+      const shadow = sourceProperty(element, 'shadowRoot');
       if (shadow) visit(shadow);
     }
   };
@@ -6777,7 +6818,7 @@ function readPatchMetrics(
       );
       const target = state.nodes.get(operation.nodeId);
       const outgoingCount = target
-        ? [...target.childNodes].reduce(
+        ? [...sourceChildNodeList(target)].reduce(
             (total, child) => total + domMirrorNodeCount(child, known),
             0,
           )
@@ -6827,11 +6868,11 @@ function domMirrorNodeCount(
   known: (node: Node) => boolean,
 ): number {
   let count = known(node) ? 1 : 0;
-  for (const child of [...node.childNodes]) {
+  for (const child of [...sourceChildNodeList(node)]) {
     count += domMirrorNodeCount(child, known);
   }
-  if (node.nodeType === Node.ELEMENT_NODE) {
-    const shadowRoot = (node as Element).shadowRoot;
+  if (sourceNodeType(node) === Node.ELEMENT_NODE) {
+    const shadowRoot = sourceProperty((node as Element), 'shadowRoot');
     if (shadowRoot) count += domMirrorNodeCount(shadowRoot, known);
   }
   return count;

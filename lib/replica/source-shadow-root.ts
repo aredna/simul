@@ -27,7 +27,7 @@
  * (`probeSourceShadowRoot`).
  */
 
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+import { sourceLocalName, sourceNodeType, sourceProperty } from './source-node-accessors';
 
 /** `chrome.dom.openOrClosedShadowRoot`, or a stand-in under test. */
 export type SourceShadowRootReader = (
@@ -256,7 +256,7 @@ export function askAboutSourceShadowRootsAbove(
       }
     } else if (sourceNodeType(current) === 1) {
       const element = current as Element;
-      const ledger = sourceShadowRootLedger(element.ownerDocument);
+      const ledger = sourceShadowRootLedger(sourceProperty(element, 'ownerDocument'));
       const at = ledger?.absent.get(element);
       // Inside a fresh walk an element it has asked about needs no second call.
       const askedInThisWalk = freshSince !== 0 && at !== undefined &&
@@ -266,7 +266,8 @@ export function askAboutSourceShadowRootsAbove(
         if (root) found.push(root);
       }
     }
-    current = current.parentNode ??
+    // Past a mirror form's field named `parentNode` (D195).
+    current = sourceProperty(current, 'parentNode') ??
       (isSourceShadowRoot(current) ? current.host : null);
   }
   // A chain this long is not climbed to its end: the sender treats it as
@@ -303,7 +304,7 @@ export function askAboutSourceShadowRootsWithin(
       if (root) {
         if (!activeLedger?.noted.has(root)) noteOwnSourceShadowRoot(element, root);
       } else {
-        const ledger = sourceShadowRootLedger(element.ownerDocument);
+        const ledger = sourceShadowRootLedger(sourceProperty(element, 'ownerDocument'));
         root = ledger?.closed.get(element);
         if (ledger && !root) {
           root = readClosedSourceShadowRoot(element, true);
@@ -340,13 +341,13 @@ export function readSourceAssignedSlot(node: Node): Element | null | undefined {
     readonly assignedSlot?: Element | null;
   }).assignedSlot;
   if (own !== null || installedLedgers === 0) return own;
-  const parent = node.parentNode;
+  const parent = sourceProperty(node, 'parentNode');
   if (!parent || sourceNodeType(parent) !== 1) return null;
   const host = parent as Element;
   // The common case: the parent is known to have no closed root.
   const at = activeLedger?.absent.get(host);
   if (at !== undefined && at >= freshSince) return null;
-  if (host.shadowRoot) return null;
+  if (sourceProperty(host, 'shadowRoot')) return null;
   const root = readClosedSourceShadowRoot(host, false);
   if (!root) return null;
   const slots = readClosedRootSlots(root);
@@ -430,7 +431,7 @@ function noteSourceShadowRoot(root: ShadowRoot, late: boolean): boolean {
  * before without one, as for a closed root.
  */
 function noteOwnSourceShadowRoot(element: Element, root: ShadowRoot): boolean {
-  const ledger = sourceShadowRootLedger(element.ownerDocument);
+  const ledger = sourceShadowRootLedger(sourceProperty(element, 'ownerDocument'));
   if (!ledger) return false;
   const late = ledger.absent.has(element);
   if (late) ledger.absent.delete(element);
@@ -441,7 +442,7 @@ function readClosedSourceShadowRoot(
   element: Element,
   askAgain: boolean,
 ): ShadowRoot | undefined {
-  const ledger = sourceShadowRootLedger(element.ownerDocument);
+  const ledger = sourceShadowRootLedger(sourceProperty(element, 'ownerDocument'));
   if (!ledger) return undefined;
   const known = ledger.closed.get(element);
   if (known) return known;

@@ -17,7 +17,11 @@
  * cost on a large page).
  */
 
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
 
 const ABSENT: unique symbol = Symbol('absent');
 
@@ -293,10 +297,10 @@ function nodeKinds(node: Node): number {
   if (sourceNodeType(node) !== 1) return 0;
   const element = node as Element;
   let kinds = sourceLocalName(element).toLowerCase() === 'img' ? IMAGE : 0;
-  if (element.getAttribute('data-simul-visually-hidden') === 'v1') {
+  if (sourceCall(element, 'getAttribute', 'data-simul-visually-hidden') === 'v1') {
     kinds |= VISUALLY_HIDDEN;
   }
-  if (element.getAttribute('data-simul-selected-image-source') === 'v1') {
+  if (sourceCall(element, 'getAttribute', 'data-simul-selected-image-source') === 'v1') {
     kinds |= SELECTED_IMAGE_SOURCE;
   }
   return kinds;
