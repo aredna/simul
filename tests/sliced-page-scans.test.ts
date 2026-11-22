@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import {
   createSliceClock,
@@ -279,6 +279,94 @@ describe('sliced credential scan (D163)', () => {
     );
     await scan.finished;
     expect(classifier.isSecret(added)).toBe(true);
+  });
+
+  it('reads a parent of many children one child at a time (D217)', async () => {
+    // Under the node budget this file sets (300).
+    const children = 250;
+    const { document } = parseHTML(
+      `<html><body><div id="box">${'<i></i>'.repeat(children - 1)}` +
+        '<input id="last-pw" type="password"></div></body></html>',
+    );
+    const page = document as unknown as Document;
+    const sourceWindow = {
+      getComputedStyle: () => ({ getPropertyValue: () => 'none' }),
+    } as unknown as Window;
+    const box = page.querySelector('#box')!;
+    // Every child the walk reads of the box's list, by index or iterator.
+    const read = new Set<Node>();
+    const list = box.childNodes;
+    const counted = new Proxy(list, {
+      get(target, property) {
+        if (property === Symbol.iterator) {
+          return function* () {
+            for (const node of target) {
+              read.add(node);
+              yield node;
+            }
+          };
+        }
+        const value = Reflect.get(target, property) as unknown;
+        if (typeof property === 'string' && /^\d+$/u.test(property) && value) {
+          read.add(value as Node);
+        }
+        return typeof value === 'function'
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value;
+      },
+    });
+    Object.defineProperty(box, 'childNodes', {
+      configurable: true,
+      get: () => counted,
+    });
+    onTestFinished(() => {
+      delete (box as unknown as Record<string, unknown>).childNodes;
+    });
+    const classifier = new StickySourceSecretClassifier();
+    const scan = startSourceDocumentSecretScan(
+      page,
+      sourceWindow,
+      classifier,
+      steppingClock(8),
+    );
+    // The first slice met the box and a few of its children, not all of
+    // them: copying 131,000 onto the stack in one step kept that slice at
+    // twice its budget.
+    expect(scan.done).toBe(false);
+    expect(read.size).toBeLessThan(10);
+    await scan.finished;
+    expect(classifier.isSecret(page.querySelector('#last-pw')!)).toBe(true);
+    expect(classifier.isSecret(page.documentElement)).toBe(false);
+  });
+
+  it('walks a list again when the page takes out the child it was at (D217)', async () => {
+    const { document } = parseHTML(
+      '<html><body><div id="box"><p id="first">a</p><p id="second">b</p>' +
+        '<input id="later-pw" type="password"></div></body></html>',
+    );
+    const page = document as unknown as Document;
+    const sourceWindow = {
+      getComputedStyle: () => ({ getPropertyValue: () => 'none' }),
+    } as unknown as Window;
+    const first = page.querySelector('#first')!;
+    const classifier = new StickySourceSecretClassifier();
+    let reached = false;
+    const scan = startSourceDocumentSecretScan(
+      page,
+      sourceWindow,
+      classifier,
+      steppingClock(1, () => {
+        // Once the walk has given the first child, the page takes it out.
+        if (!reached && first.firstChild && classifier.isSecret(first) === false) {
+          reached = true;
+          first.remove();
+        }
+      }),
+    );
+    await scan.finished;
+    expect(reached).toBe(true);
+    expect(classifier.isSecret(page.querySelector('#later-pw')!)).toBe(true);
+    expect(classifier.isSecret(page.documentElement)).toBe(false);
   });
 
   it('marks the whole document secret past the node budget, sliced or not', async () => {

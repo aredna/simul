@@ -533,6 +533,8 @@ export function installHtmlMirrorSourceBridge(
       secretScan,
       structuralMenus,
       getNodeId: (node) => registry.getId(node),
+      // Containers no change touches reuse their last menu read (D217).
+      styleNames: () => liveMirror?.mentionedStyleNames(),
       createMutationObserver: environment.createMutationObserver,
       schedule: (callback) => queueMicrotask(callback),
       // Read in slices with a turn for the page between them, and at most

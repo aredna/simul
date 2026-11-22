@@ -44,10 +44,17 @@ import {
   type SemanticAriaRelation,
   MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS,
 } from './semantic-source-protocol';
-import { readPageLinkedSheets, type PageLinkedSheets } from './style-sheet-reach';
+import {
+  readPageLinkedSheets,
+  sourceSheetsMayClassify,
+  type PageLinkedSheets,
+} from './style-sheet-reach';
 import {
   readCrossOriginSheetFromPageCache,
+  sourceTextChangeMayRestyle,
+  sourceVisibilityMutationMaySkip,
   type SourceCrossOriginSheetReader,
+  type SourceStyleNames,
 } from './source-style-names';
 import {
   SOURCE_SECRET_CLASSIFIER_VERSION,
@@ -191,6 +198,44 @@ export interface SemanticSourceSessionEnvironment {
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (timer: unknown) => void;
   readonly onDispose?: () => void;
+  /**
+   * The names the page's sheets mention, from the page reader's census
+   * (D201, D217): undefined while they are not all known. With it, a change
+   * no rule reads (an `aria-label` the sheets never name) leaves what the
+   * last scan found of the menus for every container it is not in or
+   * around. Without it every change counts, as before.
+   */
+  readonly styleNames?: () => SourceStyleNames | undefined;
+}
+
+/**
+ * What the page changed since the last scan whose batch was posted, or
+ * found unchanged (D217). `all` asks every element again: a change heard
+ * as an event, not a record, or more roots than are kept. `paint` asks
+ * every container's menu again: a record that may change what any rule
+ * matches. `roots` are what each record names, the host at the top of its
+ * shadow trees for a node inside one: an element whose attributes changed,
+ * the elements a change put in; with `touched`, the parents of changed
+ * text, they are what a menu around them is read again for.
+ */
+interface SemanticChangeJournal {
+  all: boolean;
+  paint: boolean;
+  readonly roots: Set<Node>;
+  readonly touched: Set<Node>;
+}
+
+/** Roots a journal keeps; past it every element is read again (D217). */
+const MAX_SEMANTIC_CHANGE_ROOTS = 1_024;
+
+function freshSemanticChangeJournal(all: boolean): SemanticChangeJournal {
+  return { all, paint: all, roots: new Set(), touched: new Set() };
+}
+
+/** What one container's menu read gave, kept for the next scan (D217). */
+interface KeptStructuralMenuRead {
+  readonly write: { readonly trigger: Element; readonly panel: Element } | undefined;
+  readonly menu: ValidatedStructuralMenu | undefined;
 }
 
 interface ElementClassification {
@@ -231,6 +276,8 @@ interface StagedSemanticSourceScan {
     readonly trigger: Element;
     readonly panel: Element;
   } | undefined>;
+  /** What each container's menu read gave, every container read (D217). */
+  readonly structuralMenuReads?: ReadonlyMap<Element, KeptStructuralMenuRead>;
   readonly pollCandidates: readonly Element[] | undefined;
   readonly pollFingerprints: WeakMap<Element, string>;
   readonly presentationCandidates: WeakSet<Element>;
@@ -270,6 +317,11 @@ interface SemanticScanAttempt {
   policy: SourceControlledContentPolicy | undefined;
   /** How far the run's records were checked against the policy. */
   policyCheckedTo: number;
+  /**
+   * Whether the walk began with no sheet that may mask text and nothing new
+   * in the ledger (D217): the seal then asks only what changed since.
+   */
+  classificationsKept: boolean;
 }
 
 /**
@@ -550,6 +602,26 @@ export class SemanticSourceSession {
   #popoverOpenOrder = new WeakMap<Element, number>();
   #popoverOpenCount = 0;
   #disposed = false;
+  /** What the page changed since the last scan began (D217). */
+  #journal: SemanticChangeJournal = freshSemanticChangeJournal(true);
+  /**
+   * What a scan took from the journal, kept until its batch is posted or
+   * found unchanged: a scan that ends otherwise gives it to the next (D217).
+   */
+  #uncommittedJournal: SemanticChangeJournal | undefined;
+  /**
+   * What each element was classified as when it was last read (D217). An
+   * element no change is in or under keeps it while no sheet of the page
+   * may mask text and the ledger of secrets learned nothing new.
+   */
+  #classifications = new WeakMap<Element, ElementClassification>();
+  /** The ledger's revision when the last whole walk ended (D217). */
+  #classifiedAtRevision: number | undefined;
+  /** The shadow roots the last whole walk met (D217). */
+  #walkedShadowRoots: readonly ShadowRoot[] = [];
+  #walkedShadowRootSet = new WeakSet<ShadowRoot>();
+  /** What each container's menu read gave in the last posted scan (D217). */
+  #structuralMenuReads = new WeakMap<Element, KeptStructuralMenuRead>();
 
   constructor(private readonly environment: SemanticSourceSessionEnvironment) {
     const identity = readSemanticSourcePortIdentity(
@@ -575,7 +647,12 @@ export class SemanticSourceSession {
     // DOM: the page reader's style poll tells of it (D179).
     this.#stopListeningForStyleSheets = listenForStyleSheetChanges(
       environment.document,
-      () => this.#scanSoonForWhatIsShown(),
+      () => {
+        // A rule put in may mask text or show a menu anywhere (D217).
+        this.#journal.all = true;
+        this.#journal.paint = true;
+        this.#scanSoonForWhatIsShown();
+      },
     );
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
@@ -668,9 +745,149 @@ export class SemanticSourceSession {
   }
 
   refresh(): void {
+    // Heard as an event or asked from outside: anything may have changed,
+    // with no record to say where (D217).
+    this.#journal.all = true;
+    this.#journal.paint = true;
+    this.#requestScan();
+  }
+
+  #requestScan(): void {
     if (!this.#documentIdentity || this.#disposed) return;
     this.#dirty = true;
     this.#scheduleScan();
+  }
+
+  /**
+   * Notes where `records` changed the page, for the scan that follows
+   * (D217): see `SemanticChangeJournal`.
+   */
+  #noteChangeRecords(records: readonly MutationRecord[]): void {
+    const journal = this.#journal;
+    if (journal.all) return;
+    let names: SourceStyleNames | undefined | null = null;
+    const styleNames = (): SourceStyleNames | undefined => {
+      if (names === null) {
+        names = safelyRead(() => this.environment.styleNames?.()) ?? undefined;
+      }
+      return names;
+    };
+    for (const record of records) {
+      const type = safelyRead(() => record.type);
+      const target = safelyRead(() => record.target);
+      if (!target) {
+        journal.all = true;
+        break;
+      }
+      // A sheet put in, taken out or rewritten may mask text anywhere.
+      if (holdsSourceStyleSheet(target) || (
+        type === 'childList' && safelyRead(() =>
+          [...record.addedNodes, ...record.removedNodes].some(holdsSourceStyleSheet)) !== false
+      )) {
+        journal.all = true;
+        break;
+      }
+      if (type === 'attributes') {
+        journal.roots.add(outermostSourceHost(target));
+        if (
+          !journal.paint &&
+          safelyRead(() => sourceVisibilityMutationMaySkip(record, styleNames)) !== true
+        ) journal.paint = true;
+      } else if (type === 'characterData') {
+        const parent = safelyRead(() => target.parentNode);
+        if (parent) journal.touched.add(outermostSourceHost(parent));
+        if (
+          !journal.paint &&
+          safelyRead(() => sourceTextChangeMayRestyle(styleNames(), [record])) !== false
+        ) journal.paint = true;
+      } else {
+        // A node put in or taken out moves what any rule of the tree may
+        // match: every menu is read again, and what came in is classified.
+        journal.paint = true;
+        const added = safelyRead(() => Array.from(record.addedNodes));
+        if (!added) {
+          journal.all = true;
+          break;
+        }
+        // What left is a root too: the seal asks it again (`#sealScan`).
+        const removed = safelyRead(() => Array.from(record.removedNodes)) ?? [];
+        for (const node of [...added, ...removed]) {
+          if (sourceNodeType(node) === ELEMENT_NODE) {
+            journal.roots.add(outermostSourceHost(node));
+          }
+        }
+        journal.touched.add(outermostSourceHost(target));
+      }
+      if (journal.roots.size + journal.touched.size > MAX_SEMANTIC_CHANGE_ROOTS) {
+        journal.all = true;
+        break;
+      }
+    }
+    if (journal.all) {
+      journal.paint = true;
+      journal.roots.clear();
+      journal.touched.clear();
+    }
+  }
+
+  /**
+   * The journal a scan's walk reads, with what an earlier scan took and did
+   * not post (D217); the session's own starts afresh for what comes next.
+   */
+  #takeJournal(): SemanticChangeJournal {
+    const taken = this.#journal;
+    const earlier = this.#uncommittedJournal;
+    this.#journal = freshSemanticChangeJournal(false);
+    if (earlier && !taken.all) {
+      if (earlier.all) {
+        taken.all = true;
+        taken.roots.clear();
+        taken.touched.clear();
+      } else {
+        for (const root of earlier.roots) taken.roots.add(root);
+        for (const node of earlier.touched) taken.touched.add(node);
+      }
+      taken.paint ||= earlier.paint;
+    }
+    if (taken.all) taken.paint = true;
+    this.#uncommittedJournal = taken;
+    return taken;
+  }
+
+  /**
+   * Whether an element classified before may keep it (D217): no sheet of
+   * the page may mask text, and the ledger learned no secret since. A
+   * sheet of another origin the page has not read yet counts as one that
+   * may; its read asks for a scan.
+   */
+  #classificationsMayBeKept(): boolean {
+    if (this.#classifiedAtRevision !== this.#classifier.revision) return false;
+    if (this.#crossOriginSheetReader === null) {
+      this.#crossOriginSheetReader = safelyRead(() =>
+        this.environment.readCrossOriginStyleSheet ??
+          readCrossOriginSheetFromPageCache(this.environment.window));
+    }
+    return safelyRead(() => !sourceSheetsMayClassify(
+      this.environment.document,
+      this.#walkedShadowRoots,
+      this.#crossOriginSheetReader ?? undefined,
+      () => {
+        if (!this.#disposed) this.refresh();
+      },
+    )) === true;
+  }
+
+  /** What `element` was classified as, if it may keep it (D217). */
+  #keptClassification(element: Element): ElementClassification | undefined {
+    const kept = this.#classifications.get(element);
+    if (!kept) return undefined;
+    // An editor the page made without the attribute is marked when the
+    // page edits it, with no record (D192): it is classified again then.
+    if (
+      !kept.facts.contentEditable &&
+      safelyRead(() => sourceElementIsEditorWithoutAttribute(element)) !== false
+    ) return undefined;
+    return kept;
   }
 
   readonly #onMessage = (input: unknown): void => {
@@ -815,8 +1032,9 @@ export class SemanticSourceSession {
         // A scan that runs goes on; what changed meanwhile decides whether
         // its policy is still good, and the batch is sealed (D164).
         this.#noteScanRecords(records);
+        this.#noteChangeRecords(records);
         if (!records.some(sourceMutationMayChangeCurrentValue)) return;
-        this.refresh();
+        this.#requestScan();
       });
       this.#observeSemanticRoot(this.environment.document);
       safelyRead(() => this.environment.window.addEventListener?.(
@@ -962,6 +1180,7 @@ export class SemanticSourceSession {
       this.#classifier,
       { freshRoots: true },
     );
+    this.#noteChangeRecords(records);
     // Taken records never reach the observer's callback, nor its refresh.
     // Before a scan begins the scan reads what they changed; once it runs,
     // part of the page was read before them, so another scan follows (D164):
@@ -1336,6 +1555,7 @@ export class SemanticSourceSession {
       watchingPolicy: false,
       policy: undefined,
       policyCheckedTo: 0,
+      classificationsKept: false,
     };
     attempt.steps = this.#scan(attempt, run);
     return attempt;
@@ -1489,7 +1709,7 @@ export class SemanticSourceSession {
       // afresh.
       if (run.yielded) {
         this.#rememberPendingMutationSecrets();
-        scan = this.#sealScan(staged);
+        scan = this.#sealScan(staged, run.attempt.classificationsKept);
       }
       // Before a new text or value is sent, every element above its node
       // is asked about its root again: one attached since it was last read
@@ -1621,16 +1841,29 @@ export class SemanticSourceSession {
    * Leaves out every record and proof whose node is secret now: by the
    * sticky ledger, or below a credential, asked afresh (D164).
    */
-  #sealScan(staged: StagedSemanticSourceScan): StagedSemanticSourceScan {
+  #sealScan(
+    staged: StagedSemanticSourceScan,
+    classificationsKept = false,
+  ): StagedSemanticSourceScan {
     const memo = createSourceSecretAncestorMemo();
+    // Only what a change since the walk began is in or under can have
+    // turned secret, while no sheet may mask text and the ledger learned
+    // nothing new (D217): everything else is as the walk classified it. A
+    // sheet changed since is a change for all (`#noteChangeRecords`, and
+    // the style poll's word).
+    const changes = this.#journal;
+    const sinceWalk = classificationsKept && !changes.all &&
+      this.#classifiedAtRevision === this.#classifier.revision
+      ? sourceNodesUnderChanges(changes.roots)
+      : undefined;
     const secretNow = (node: Node | undefined): boolean => !node ||
       this.#classifier.isSecret(node) ||
-      hasSourceCredentialSecretAncestor(
+      (sinceWalk?.(node) !== false && hasSourceCredentialSecretAncestor(
         node,
         this.#classifier,
         this.environment.window,
         memo,
-      );
+      ));
     const records: SemanticSourceRecord[] = [];
     const recordNodes: Node[] = [];
     const recordChanged: boolean[] = [];
@@ -1675,6 +1908,16 @@ export class SemanticSourceSession {
   #commitScan(scan: StagedSemanticSourceScan): void {
     this.#scanAskedWhatIsShown = scan.askedWhatIsShown;
     if (scan.empty) return;
+    // What the scan took of the journal is read now (D217); the menu reads
+    // it gave stand for the next, or none when it gave none.
+    this.#uncommittedJournal = undefined;
+    if (scan.structuralMenuReads) {
+      const reads = new WeakMap<Element, KeptStructuralMenuRead>();
+      for (const [container, read] of scan.structuralMenuReads) reads.set(container, read);
+      this.#structuralMenuReads = reads;
+    } else {
+      this.#structuralMenuReads = new WeakMap();
+    }
     for (const [container, menu] of scan.structuralMenuWrites) {
       if (menu) this.#structuralMenus.set(container, menu);
       else this.#structuralMenus.delete(container);
@@ -1762,54 +2005,115 @@ export class SemanticSourceSession {
     const expired = (): boolean => run.clock.expired();
     const elements: Element[] = [];
     const classifications = new WeakMap<Element, ElementClassification>();
-    const stack: Array<{ node: Node; secretAncestor: boolean }> = [
-      { node: root, secretAncestor: false },
-    ];
+    // What changed since the last posted scan, and whether what an element
+    // was classified as before may stand where nothing changed (D217).
+    const journal = this.#takeJournal();
+    const classifyAll = journal.all || !this.#classificationsMayBeKept();
+    attempt.classificationsKept = !classifyAll;
+    const pending = this.#journal;
+    // The elements in or under a change, and those around one: a menu read
+    // is kept only for a container that is neither (D217).
+    const changedElements = new WeakSet<Element>();
+    const walkedShadowRoots: ShadowRoot[] = [];
+    const walkedShadowRootSet = new WeakSet<ShadowRoot>();
+    // The elements the walk found a shadow root on (D217).
+    const shadowHosts = new WeakSet<Element>();
+    // Each list carries whether what it holds is in or under a change; the
+    // lists are read one node at a time (D217).
+    const frames: SourceChildFrame<boolean>[] = [rootSourceChildFrame(root, classifyAll)];
+    // A list read again after the page changed it gives what it gave
+    // before: an element is read once a walk.
+    const given = new WeakSet<Element>();
     let visited = 0;
-    while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
-      if (turn()) yield 'turn';
-      const current = stack.pop();
-      if (!current) break;
+    let walked = false;
+    while (visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
+      if (turn()) {
+        yield 'turn';
+        steadySourceChildFrames(frames);
+      }
+      const current = nextSourceChildNode(frames);
+      if (!current) {
+        walked = true;
+        break;
+      }
       visited += 1;
       const node = current.node;
       if (sourceNodeType(node) !== ELEMENT_NODE) continue;
       const element = node as Element;
-      const classification = this.#classifyElement(
-        element,
-        current.secretAncestor,
-        false,
-      );
+      if (given.has(element)) continue;
+      given.add(element);
+      const changed = current.context || journal.roots.has(element) ||
+        pending.roots.has(element);
+      let classification = changed ? undefined : this.#keptClassification(element);
+      if (!classification) {
+        classification = this.#classifyElement(element, false, false);
+        this.#classifications.set(element, classification);
+      }
+      if (changed) changedElements.add(element);
       classifications.set(element, classification);
       elements.push(element);
       const secret = classification.category === 'secret';
       if (secret) continue;
-      const children: Node[] = Array.from(sourceChildNodeList(element));
       const shadowRoot = safelyReadShadowRoot(element);
       if (shadowRoot) {
         this.#observeSemanticRoot(shadowRoot);
-        appendAll(children, shadowRoot.childNodes);
+        shadowHosts.add(element);
+        walkedShadowRoots.push(shadowRoot);
+        walkedShadowRootSet.add(shadowRoot);
       }
-      for (let index = children.length - 1; index >= 0; index -= 1) {
-        stack.push({ node: children[index]!, secretAncestor: secret });
-      }
+      // A root attached since the last walk fires nothing, and may slot
+      // what the host holds under a masking box: all of it is read anew.
+      pushSourceChildFrames(
+        frames,
+        element,
+        shadowRoot,
+        changed || (shadowRoot !== undefined && !this.#walkedShadowRootSet.has(shadowRoot)),
+      );
+    }
+    if (walked) {
+      this.#classifiedAtRevision = this.#classifier.revision;
+      this.#walkedShadowRoots = walkedShadowRoots;
+      this.#walkedShadowRootSet = walkedShadowRootSet;
+    } else {
+      // Past the node budget: what was not reached keeps an older reading.
+      this.#journal.all = true;
+      this.#journal.paint = true;
     }
 
     const validatedDisclosures: ValidatedDisclosure[] = [];
     const validatedStructuralMenus: ValidatedStructuralMenu[] = [];
-    if (scope.disclosureContent && stack.length === 0) {
+    let menuReadsComplete = false;
+    const deepMenuReads = new Set<Element>();
+    if (scope.disclosureContent && walked) {
       yield* this.#validatedDisclosures(
         elements,
         classifications,
         turn,
         validatedDisclosures,
       );
+      // A container no change is in, under or around keeps what its menu
+      // read gave in the last posted scan, while no change since may move
+      // what any rule matches (D217): the read asks the paint of the
+      // container and of everything above it, as it was.
+      const keepMenus = !classifyAll && !journal.paint && !pending.paint;
+      const aroundChange = keepMenus
+        ? sourceElementsAroundChanges([journal.roots, journal.touched])
+        : undefined;
+      const keptReads = this.#structuralMenuReads;
       yield* this.#validatedStructuralMenus(
         elements,
         classifications,
         turn,
         structuralMenuWrites,
         validatedStructuralMenus,
+        aroundChange
+          ? (container) => changedElements.has(container) || aroundChange.has(container)
+            ? undefined
+            : keptReads.get(container)
+          : () => undefined,
+        deepMenuReads,
       );
+      menuReadsComplete = true;
     }
     // A dropdown in a menu's collapsed panel is read as the mirror shows it
     // once the reader opens the menu there. Its options had no labels until
@@ -1853,7 +2157,7 @@ export class SemanticSourceSession {
       if (this.#scanPolicyIsStale(run)) yield 'restart';
     }
     if (
-      controlledContent && scope.controlSemantics && stack.length === 0 &&
+      controlledContent && scope.controlSemantics && walked &&
       !controlledContent.overflow
     ) {
       yield* this.#validatedTabs(
@@ -1995,7 +2299,7 @@ export class SemanticSourceSession {
       return true;
     };
 
-    if (scope.controlSemantics && stack.length === 0) {
+    if (scope.controlSemantics && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (classification?.facts.tagName !== 'select' ||
@@ -2023,7 +2327,7 @@ export class SemanticSourceSession {
       }
     }
 
-    if (scope.formValues && stack.length === 0) {
+    if (scope.formValues && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (classification?.facts.tagName !== 'select' ||
@@ -2052,7 +2356,7 @@ export class SemanticSourceSession {
       }
     }
 
-    if (scope.formValues && stack.length === 0) {
+    if (scope.formValues && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         const type = normalizedToken(classification?.facts.type);
@@ -2080,7 +2384,7 @@ export class SemanticSourceSession {
       }
     }
 
-    if (scope.formValues && stack.length === 0) {
+    if (scope.formValues && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (!classification) continue;
@@ -2103,7 +2407,7 @@ export class SemanticSourceSession {
       }
     }
 
-    if ((scope.formValues || scope.controlSemantics) && stack.length === 0) {
+    if ((scope.formValues || scope.controlSemantics) && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (classification?.category !== 'public-semantic') continue;
@@ -2134,7 +2438,7 @@ export class SemanticSourceSession {
       }
     }
 
-    if (scope.controlSemantics && stack.length === 0) {
+    if (scope.controlSemantics && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (classification?.category !== 'public-semantic') continue;
@@ -2375,14 +2679,26 @@ export class SemanticSourceSession {
         // A light-DOM Text node may render through a default slot beneath a
         // secret shadow ancestor. Classify that flat-tree path before any
         // content accessor is evaluated, and keep the node decision sticky.
+        // Under an element that holds no shadow root the path is the
+        // element's, which the walk classified with its own (D217): only
+        // the node's own entry in the ledger is left to ask.
+        const textParent = safelyRead(() => current.node.parentNode);
+        const parentClassification = textParent &&
+          sourceNodeType(textParent) === ELEMENT_NODE &&
+          !shadowHosts.has(textParent as Element)
+          ? classifications.get(textParent as Element)
+          : undefined;
         if (
           current.secret ||
-          hasSourceCredentialSecretAncestor(
-            current.node,
-            this.#classifier,
-            this.environment.window,
-            this.#scanSecretAncestors,
-          )
+          (parentClassification
+            ? parentClassification.category === 'secret' ||
+              this.#classifier.isSecret(current.node)
+            : hasSourceCredentialSecretAncestor(
+                current.node,
+                this.#classifier,
+                this.environment.window,
+                this.#scanSecretAncestors,
+              ))
         ) continue;
         // Text the page does not paint straight in a boxless `aria-controls`
         // target whose painted elements are read (D212): the mirror sends
@@ -2552,7 +2868,7 @@ export class SemanticSourceSession {
     // of links and buttons they would fill the proof and byte budgets. They
     // come last, after the tab, disclosure and menu proofs and the labels and
     // text that let the replica open a dropdown and show its options.
-    if (scope.controlSemantics && stack.length === 0) {
+    if (scope.controlSemantics && walked) {
       for (const element of elements) {
         const classification = classifications.get(element);
         if (!classification ||
@@ -2624,7 +2940,7 @@ export class SemanticSourceSession {
     // its own `aria-expanded`, which its stylesheet may test, and a popover
     // the Popover API has opened. They come after the menus, whose triggers
     // carry their own open state.
-    if (scope.controlSemantics && stack.length === 0) {
+    if (scope.controlSemantics && walked) {
       const openPopovers: Array<{
         readonly nodeId: number;
         readonly order: number;
@@ -2684,7 +3000,7 @@ export class SemanticSourceSession {
 
     // The fields and dropdowns polled for changes no event tells of, with
     // what they say now; they replace the last ones with the batch.
-    const complete = stack.length === 0;
+    const complete = walked;
     let pollCandidates: Element[] | undefined;
     const pollFingerprints = new WeakMap<Element, string>();
     if (complete && (scope.formValues || scope.controlSemantics)) {
@@ -2761,6 +3077,9 @@ export class SemanticSourceSession {
       nodesById: attempt.nodesById,
       askedWhatIsShown,
       structuralMenuWrites,
+      structuralMenuReads: menuReadsComplete
+        ? structuralMenuReadsOf(structuralMenuWrites, validatedStructuralMenus, deepMenuReads)
+        : undefined,
       pollCandidates,
       pollFingerprints,
       presentationCandidates,
@@ -2850,9 +3169,18 @@ export class SemanticSourceSession {
       readonly panel: Element;
     } | undefined>,
     menus: ValidatedStructuralMenu[],
+    kept: (container: Element) => KeptStructuralMenuRead | undefined,
+    deepReads: Set<Element>,
   ): Generator<SemanticScanPause, void, void> {
     for (const container of elements) {
       if (turn()) yield 'turn';
+      const keptRead = kept(container);
+      if (keptRead) {
+        writes.set(container, keptRead.write);
+        if (keptRead.menu) menus.push(keptRead.menu);
+        deepReads.add(container);
+        continue;
+      }
       const retained = this.#structuralMenus.get(container);
       // The child count is the cheapest test, so it runs before the context
       // and painted-path walks that every list item would otherwise pay for:
@@ -2861,7 +3189,15 @@ export class SemanticSourceSession {
       const children = safelyRead(() => [...container.children]);
       if (
         !children || children.length < 2 ||
-        children.length > MAX_STRUCTURAL_MENU_TRIGGERS + 1 ||
+        children.length > MAX_STRUCTURAL_MENU_TRIGGERS + 1
+      ) {
+        writes.set(container, undefined);
+        continue;
+      }
+      // Past the child count the read asks paint and the tree: what it
+      // gives is kept for the next scan (D217).
+      deepReads.add(container);
+      if (
         classifications.get(container)?.category !== 'public-semantic' ||
         // Outside navigation, a header or a list only a button beside a list
         // is a menu, which tags and roles alone say.
@@ -3269,16 +3605,16 @@ const FINISHED_SOURCE_DOCUMENT_SECRET_SCAN: SourceDocumentSecretScan =
  * runs before this returns: a page that fits it is scanned in the caller's
  * task, as before, and the scan it returns is done already.
  *
- * Between slices only the cursor is kept, the nodes still to visit and
- * whether each lies below a secret. Every slice opens its own walk and
+ * Between slices only the cursor is kept: the lists of children it walks,
+ * how far, and whether each lies below a secret (D217). Every slice opens its own walk and
  * secret-ancestor memo and closes them before it yields. What the page does
  * meanwhile is the lifetime observer's (`rememberSourceMutationSecrets`):
  * an added or moved node is classified there, through its subtree; an
  * attribute's old credential value is remembered; and what leaves a secret
- * ancestor is remembered secret. A node removed after it was put on the
- * stack is still classified, where its ancestry now places it; one whose
- * inherited secrecy no longer holds is marked anyway, which only hides
- * more. Over the node budget, or on a throw, the whole document is secret,
+ * ancestor is remembered secret. A list the page changed between slices
+ * is walked again from its start (`steadySourceChildFrames`); a node
+ * taken out of it before the scan reached it is not read until it is put
+ * back, when the observer reads it. Over the node budget, or on a throw, the whole document is secret,
  * as in the one-task scan.
  */
 export function startSourceDocumentSecretScan(
@@ -3320,19 +3656,111 @@ export function startSourceDocumentSecretScan(
   };
 }
 
+/**
+ * One list of children a walk of the page reads (D217): a parent's own
+ * children, or its shadow root's. The list is the live one, read one node
+ * at a time, so a parent of 131,000 children costs no more than one node
+ * in the slice that meets it: copying them all onto a stack in one step
+ * kept the first slice of the credential scan of such a page at twice its
+ * budget, and a unit of the semantic scan's walk as long.
+ */
+interface SourceChildFrame<T> {
+  /** The live list; or, after the page changed it between slices, a copy. */
+  readonly list: ArrayLike<Node>;
+  /** The node or shadow root whose children they are; none for a walk's root. */
+  readonly owner: Node | undefined;
+  index: number;
+  /** The node the frame gave last, to tell whether the list moved. */
+  last: Node | undefined;
+  /** What the walk carries down from the owner. */
+  readonly context: T;
+  /** A copy, which the page's changes do not move. */
+  readonly copied: boolean;
+}
+
+function rootSourceChildFrame<T>(root: Node, context: T): SourceChildFrame<T> {
+  return { list: [root], owner: undefined, index: 0, last: undefined, context, copied: true };
+}
+
+/**
+ * A walk's live lists, made good for a slice that follows a turn of the
+ * page (D217). A list whose last node given is no longer where it was (a
+ * node was put in before it or taken out) is copied as the page has it now
+ * and read from its start: what it gave already is read once more, which
+ * only costs. A node taken out before the walk reached it is not read.
+ */
+function steadySourceChildFrames<T>(frames: SourceChildFrame<T>[]): void {
+  for (let index = 0; index < frames.length; index += 1) {
+    const frame = frames[index]!;
+    if (frame.copied || !frame.last || !frame.owner) continue;
+    if (
+      sourceProperty(frame.last, 'parentNode') === frame.owner &&
+      frame.list[frame.index - 1] === frame.last
+    ) continue;
+    frames[index] = {
+      list: Array.from(sourceChildNodeList(frame.owner)),
+      owner: frame.owner,
+      index: 0,
+      last: undefined,
+      context: frame.context,
+      copied: true,
+    };
+  }
+}
+
+/** The next node a walk's frames give, with its context; none when all are read. */
+function nextSourceChildNode<T>(
+  frames: SourceChildFrame<T>[],
+): { readonly node: Node; readonly context: T } | undefined {
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1]!;
+    const node = frame.index < frame.list.length ? frame.list[frame.index] : undefined;
+    if (!node) {
+      frames.pop();
+      continue;
+    }
+    frame.index += 1;
+    frame.last = node;
+    return { node, context: frame.context };
+  }
+  return undefined;
+}
+
+/**
+ * Puts a node's children on the walk, its shadow root's after its own:
+ * the own list goes on top (D217).
+ */
+function pushSourceChildFrames<T>(
+  frames: SourceChildFrame<T>[],
+  node: Node,
+  shadowRoot: ShadowRoot | undefined,
+  context: T,
+): void {
+  if (shadowRoot) pushSourceChildFrame(frames, shadowRoot.childNodes, shadowRoot, context);
+  pushSourceChildFrame(frames, sourceChildNodeList(node), node, context);
+}
+
+function pushSourceChildFrame<T>(
+  frames: SourceChildFrame<T>[],
+  list: ArrayLike<Node>,
+  owner: Node,
+  context: T,
+): void {
+  if (list.length === 0) return;
+  frames.push({ list, owner, index: 0, last: undefined, context, copied: false });
+}
+
 /** Where a credential scan stands: what is left to visit, and below what. */
 interface SourceSecretScanCursor {
   /** Marked secret, with all it holds, when the scan cannot finish. */
   readonly root: Node;
-  readonly stack: Array<{
-    readonly node: Node;
-    readonly secretAncestor: boolean;
-  }>;
+  /** The lists of children it walks; each carries whether it lies below a secret. */
+  readonly frames: SourceChildFrame<boolean>[];
   visited: number;
 }
 
 function createSourceSecretScanCursor(root: Node): SourceSecretScanCursor {
-  return { root, stack: [{ node: root, secretAncestor: false }], visited: 0 };
+  return { root, frames: [rootSourceChildFrame(root, false)], visited: 0 };
 }
 
 /**
@@ -3350,16 +3778,18 @@ function classifySourceSecretScanSlice(
     readonly expired?: () => boolean;
   } = {},
 ): boolean {
-  const { stack } = cursor;
+  const { frames } = cursor;
   const secretAncestors = createSourceSecretAncestorMemo();
   const rootWalk = beginSourceShadowRootWalk({ fresh: options.freshRoots });
   try {
+    steadySourceChildFrames(frames);
     let first = true;
-    while (stack.length > 0 && cursor.visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
+    while (frames.length > 0 && cursor.visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
       if (!first && options.expired?.()) return false;
       first = false;
-      const current = stack.pop();
-      if (!current) break;
+      const next = nextSourceChildNode(frames);
+      if (!next) break;
+      const current = { node: next.node, secretAncestor: next.context };
       cursor.visited += 1;
       // Do not short-circuit on inherited secrecy: every visited identity
       // must become sticky before a later move can detach it from the secret
@@ -3375,14 +3805,14 @@ function classifySourceSecretScanSlice(
         rememberSourceNodeSecret(current.node, classifier);
       }
       const secret = current.secretAncestor || flatTreeSecret;
-      const children = Array.from(sourceChildNodeList(current.node));
-      if (sourceNodeType(current.node) === ELEMENT_NODE) {
-        const shadowRoot = safelyReadShadowRoot(current.node as Element);
-        if (shadowRoot) appendAll(children, shadowRoot.childNodes);
-      }
-      for (let index = children.length - 1; index >= 0; index -= 1) {
-        stack.push({ node: children[index]!, secretAncestor: secret });
-      }
+      pushSourceChildFrames(
+        frames,
+        current.node,
+        sourceNodeType(current.node) === ELEMENT_NODE
+          ? safelyReadShadowRoot(current.node as Element)
+          : undefined,
+        secret,
+      );
     }
   } catch {
     rememberSourceNodeSecret(cursor.root, classifier);
@@ -3390,7 +3820,7 @@ function classifySourceSecretScanSlice(
   } finally {
     rootWalk.end();
   }
-  if (stack.length > 0) rememberSourceNodeSecret(cursor.root, classifier);
+  if (nextSourceChildNode(frames)) rememberSourceNodeSecret(cursor.root, classifier);
   return true;
 }
 
@@ -3796,6 +4226,120 @@ function safelyRead<T>(read: () => T): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Whether a node is at or under one of `roots`, through the hosts of
+ * shadow trees (D217); what each node above was found to be is kept.
+ */
+function sourceNodesUnderChanges(roots: ReadonlySet<Node>): (node: Node) => boolean {
+  const known = new Map<Node, boolean>();
+  return (node) => {
+    if (roots.size === 0) return false;
+    const path: Node[] = [];
+    let current: Node | null | undefined = node;
+    let under = false;
+    for (let depth = 0; current && depth < 4_096; depth += 1) {
+      const answer = known.get(current);
+      if (answer !== undefined) {
+        under = answer;
+        break;
+      }
+      path.push(current);
+      if (roots.has(current)) {
+        under = true;
+        break;
+      }
+      const at: Node = current;
+      const parent = safelyRead(() => sourceProperty(at, 'parentNode') as Node | null);
+      current = parent && sourceNodeType(parent) === 11
+        ? safelyRead(() => sourceProperty(parent as ShadowRoot, 'host') as Element | null)
+        : parent;
+      // A node that cannot be followed up is asked.
+      if (current === undefined) {
+        under = true;
+        break;
+      }
+    }
+    for (const step of path) known.set(step, under);
+    return under;
+  };
+}
+
+/** What each container's menu read gave, from a scan's writes and menus (D217). */
+function structuralMenuReadsOf(
+  writes: ReadonlyMap<Element, KeptStructuralMenuRead['write']>,
+  menus: readonly ValidatedStructuralMenu[],
+  containers: ReadonlySet<Element>,
+): Map<Element, KeptStructuralMenuRead> {
+  const byContainer = new Map<Element, ValidatedStructuralMenu>();
+  for (const menu of menus) byContainer.set(menu.container, menu);
+  const reads = new Map<Element, KeptStructuralMenuRead>();
+  for (const container of containers) {
+    reads.set(container, Object.freeze({
+      write: writes.get(container),
+      menu: byContainer.get(container),
+    }));
+  }
+  return reads;
+}
+
+/**
+ * Every element at or above a changed node, through the hosts of shadow
+ * trees (D217): a container among them holds a change.
+ */
+function sourceElementsAroundChanges(
+  sets: readonly ReadonlySet<Node>[],
+): WeakSet<Element> {
+  const around = new WeakSet<Element>();
+  for (const nodes of sets) {
+    for (const start of nodes) {
+      let current: Node | null | undefined = start;
+      for (let depth = 0; current && depth < 4_096; depth += 1) {
+        if (sourceNodeType(current) === ELEMENT_NODE) {
+          const element = current as Element;
+          if (around.has(element)) break;
+          around.add(element);
+        }
+        const node: Node = current;
+        const parent = safelyRead(() => sourceProperty(node, 'parentNode') as Node | null);
+        current = parent && sourceNodeType(parent) === 11
+          ? safelyRead(() => sourceProperty(parent as ShadowRoot, 'host') as Element | null)
+          : parent;
+      }
+    }
+  }
+  return around;
+}
+
+/**
+ * Whether a node is, or is the text of, a `<style>` or a `<link>` (D217):
+ * a change there may change any sheet of the page.
+ */
+function holdsSourceStyleSheet(node: Node): boolean {
+  const element = sourceNodeType(node) === ELEMENT_NODE
+    ? node as Element
+    : safelyRead(() => node.parentNode);
+  if (!element || sourceNodeType(element) !== ELEMENT_NODE) return false;
+  const name = sourceLocalName(element as Element).toLowerCase();
+  return name === 'style' || name === 'link';
+}
+
+/**
+ * The node itself, or for a node inside a shadow tree the host at the top
+ * of its trees (D217): a walk from there meets the node, what its host
+ * holds and what is slotted around it.
+ */
+function outermostSourceHost(node: Node): Node {
+  let current = node;
+  for (let depth = 0; depth < 256; depth += 1) {
+    const root = safelyRead(() => sourceCall(current, 'getRootNode') as Node);
+    if (!root || sourceNodeType(root) !== 11) return current;
+    const host = safelyRead(() => sourceProperty(root as ShadowRoot, 'host') as Element | null);
+    if (!host) return current;
+    current = host;
+  }
+  return current;
 }
 
 function safelyReadShadowRoot(element: Element): ShadowRoot | undefined {

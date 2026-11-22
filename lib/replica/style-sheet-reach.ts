@@ -64,10 +64,7 @@ const TEXT_SECURITY_DECLARATION = /(?:^|[\s;{])(?:-webkit-text-security|text-sec
  * hold, so it reaches everywhere.
  */
 export function styleSheetTextReach(text: string): ReplicaSelectorReach {
-  const plain = text.replace(
-    /\/\*[\s\S]*?(?:\*\/|$)|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'/gu,
-    (match) => (match.startsWith('/*') ? ' ' : '""'),
-  );
+  const plain = plainSheetText(text);
   if (/@import\b/iu.test(plain)) return 'everything';
   if (!TEXT_SECURITY_DECLARATION.test(plain)) return 'subtree';
   let reach: ReplicaSelectorReach = 'subtree';
@@ -89,6 +86,46 @@ export function styleSheetTextReach(text: string): ReplicaSelectorReach {
     if (character === '}') blocks.pop();
   }
   return reach;
+}
+
+/** A sheet's text with comments and strings left out. */
+function plainSheetText(text: string): string {
+  return text.replace(
+    /\/\*[\s\S]*?(?:\*\/|$)|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'/gu,
+    (match) => (match.startsWith('/*') ? ' ' : '""'),
+  );
+}
+
+/**
+ * A declaration through which a sheet changes what the semantic scan
+ * classifies an element as (D217): text security makes it, and all it
+ * holds, a secret. Anything else a sheet declares leaves the classification
+ * alone, which reads attributes and the tree; an editor a sheet makes is
+ * marked when the page edits it (D192), which the scan asks every time.
+ * A property name written with an escape may spell it, and counts.
+ */
+const CLASSIFYING_DECLARATION =
+  /(?:^|[\s;{])(?:(?:-webkit-)?text-security|[-\w]*\\[-\w\\]*)\s*:/iu;
+
+/**
+ * Whether a sheet's text may change what the scan classifies an element as
+ * by style alone (D217): it declares one of those, or imports a sheet this
+ * text does not hold. A rule of either kind, under any selector, may start
+ * or stop matching with no change to the tree (`:hover`, `:focus`), so the
+ * scan classifies every element anew while such a sheet is on the page.
+ */
+export function styleSheetTextClassifies(text: string): boolean {
+  const plain = plainSheetText(text);
+  return /@import\b/iu.test(plain) || CLASSIFYING_DECLARATION.test(plain);
+}
+
+/** `styleSheetTextClassifies` of a sheet read through its rules; throws where it cannot be read. */
+function cssRulesClassify(sheet: CSSStyleSheet): boolean {
+  for (const rule of Array.from(sheet.cssRules)) {
+    if ((rule as Partial<CSSImportRule>).styleSheet !== undefined) return true;
+    if (styleSheetTextClassifies(rule.cssText)) return true;
+  }
+  return false;
 }
 
 /** The reach of a sheet read through its rules; throws where it cannot be read. */
@@ -123,10 +160,19 @@ const READ_SHEET_REACH = new WeakMap<CSSStyleSheet, {
   readonly count: number;
   readonly reach: ReplicaSelectorReach;
 }>();
+/** What a sheet of another origin was read to say, by its address (D191, D217). */
+interface CrossOriginSheetFacts {
+  readonly reach: ReplicaSelectorReach;
+  readonly classifies: boolean;
+}
 const CROSS_ORIGIN_SHEET_REACH = new WeakMap<
   Document,
-  Map<string, ReplicaSelectorReach | 'pending' | 'refused'>
+  Map<string, CrossOriginSheetFacts | 'pending' | 'refused'>
 >();
+const READ_SHEET_CLASSIFIES = new WeakMap<CSSStyleSheet, {
+  readonly count: number;
+  readonly classifies: boolean;
+}>();
 
 /**
  * How far the page's stylesheet links reach (D191), each read once: one of
@@ -157,7 +203,7 @@ export function readPageLinkedSheets(
     const known = pageSheetReach(document, sheet, href, read, onRead);
     if (known === undefined) continue;
     hrefs.push(href);
-    reach = widerReach(reach, known);
+    reach = widerReach(reach, known.reach);
   }
   return Object.freeze({ reach, hrefs: Object.freeze(hrefs) });
 }
@@ -168,14 +214,14 @@ function pageSheetReach(
   href: string,
   read: SourceCrossOriginSheetReader | undefined,
   onRead: () => void,
-): ReplicaSelectorReach | undefined {
+): CrossOriginSheetFacts | undefined {
   try {
     const count = sheet.cssRules.length;
     const known = READ_SHEET_REACH.get(sheet);
-    if (known?.count === count) return known.reach;
+    if (known?.count === count) return { reach: known.reach, classifies: readSheetClassifies(sheet) };
     const reach = cssRulesReach(sheet);
     READ_SHEET_REACH.set(sheet, { count, reach });
-    return reach;
+    return { reach, classifies: readSheetClassifies(sheet) };
   } catch {
     // Another origin's, or one that imports another origin's: its text.
   }
@@ -190,18 +236,79 @@ function pageSheetReach(
   }
   if (!read || asked.size >= MAX_PAGE_LINKED_SHEETS) return undefined;
   asked.set(href, 'pending');
-  const settle = (value: ReplicaSelectorReach | 'refused'): void => {
+  const settle = (value: CrossOriginSheetFacts | 'refused'): void => {
     asked.set(href, value);
     if (value !== 'refused') onRead();
   };
   try {
     void read(href).then((text) => {
       settle(typeof text === 'string' && text.length <= MAX_CROSS_ORIGIN_SHEET_CHARACTERS
-        ? styleSheetTextReach(text)
+        ? { reach: styleSheetTextReach(text), classifies: styleSheetTextClassifies(text) }
         : 'refused');
     }, () => settle('refused'));
   } catch {
     asked.set(href, 'refused');
   }
   return undefined;
+}
+
+/** `cssRulesClassify`, kept while the sheet holds as many rules; throws where it cannot be read. */
+function readSheetClassifies(sheet: CSSStyleSheet): boolean {
+  const count = sheet.cssRules.length;
+  const known = READ_SHEET_CLASSIFIES.get(sheet);
+  if (known?.count === count) return known.classifies;
+  const classifies = cssRulesClassify(sheet);
+  READ_SHEET_CLASSIFIES.set(sheet, { count, classifies });
+  return classifies;
+}
+
+/** Sheets of one tree looked at, at most (D217); past it every sheet may classify. */
+const MAX_CLASSIFYING_SHEETS = 2_048;
+
+/**
+ * Whether a sheet of the document, or of one of `roots`, may change what the
+ * semantic scan classifies an element as by style alone (D217); see
+ * `styleSheetTextClassifies`. A sheet that cannot be read may; a link of
+ * another origin is read from the page's copy (D191) and may until it has
+ * been, when `onRead` is told. The scan keeps what it classified for an
+ * element the page did not change only while none may.
+ */
+export function sourceSheetsMayClassify(
+  document: Document,
+  roots: Iterable<ShadowRoot>,
+  read: SourceCrossOriginSheetReader | undefined,
+  onRead: () => void,
+): boolean {
+  try {
+    for (const owner of [document, ...roots] as Array<Document | ShadowRoot>) {
+      const ordinary = sourceProperty(owner as Document, 'styleSheets') as StyleSheetList | undefined;
+      const adopted = sourceProperty(owner as Document, 'adoptedStyleSheets') as
+        readonly CSSStyleSheet[] | undefined;
+      const sheets: CSSStyleSheet[] = [];
+      for (let index = 0; index < (ordinary?.length ?? 0); index += 1) {
+        if (sheets.length >= MAX_CLASSIFYING_SHEETS) return true;
+        sheets.push(ordinary![index] as CSSStyleSheet);
+      }
+      for (const sheet of adopted ?? []) {
+        if (sheets.length >= MAX_CLASSIFYING_SHEETS) return true;
+        sheets.push(sheet);
+      }
+      for (const sheet of sheets) {
+        if (!sheet) return true;
+        try {
+          if (readSheetClassifies(sheet)) return true;
+          continue;
+        } catch {
+          // Another origin's: its text, as the page keeps it.
+        }
+        const href = sheet.href;
+        if (!href || owner !== document) return true;
+        const known = pageSheetReach(document, sheet, href, read, onRead);
+        if (!known || known.classifies) return true;
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
 }

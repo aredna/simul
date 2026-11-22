@@ -33,6 +33,10 @@ import {
   probeSourceShadowRoot,
 } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
+import {
+  sourceSheetsMayClassify,
+  styleSheetTextClassifies,
+} from '../lib/replica/style-sheet-reach';
 import { wholeSemanticBatch } from './support/semantic-batches';
 import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 
@@ -5972,6 +5976,148 @@ describe('a page whose images and forms take the names of its document\'s proper
   });
 });
 
+describe('a scan that reads only what changed (D217)', () => {
+  const menus = Array.from({ length: 3 }, (_, index) =>
+    `<div class="wrapper"><a href="/m${index}">Menu ${index}</a>` +
+    `<div class="collapsed"><a href="/m${index}/a">Item ${index}</a></div></div>`).join('');
+  const paragraphs = Array.from({ length: 40 }, (_, index) => `<p>Words ${index}</p>`).join('');
+  const PAGE = `<html><body><button id="flip" aria-label="Play A">Play</button>` +
+    `<nav>${menus}</nav>${paragraphs}</body></html>`;
+  const NO_NAMES = {
+    classes: new Set<string>(), ids: new Set<string>(), attributes: new Set<string>(),
+    attributeReads: new Set<string>(), pseudoClasses: new Set<string>(),
+    pseudoElements: new Set<string>(), hidingClasses: new Set<string>(),
+  };
+
+  /** A page, its session started and its first batch acknowledged; reads of style counted by element. */
+  const started = (styleNames?: () => typeof NO_NAMES | undefined) => {
+    const { document, window } = parseHTML(PAGE);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const reads = new Map<Element, number>();
+    const securityReads = new Map<Element, number>();
+    const base = structuralMenuStyle((element) =>
+      element.classList.contains('collapsed') ? 'display' : undefined);
+    const style = ((element: Element) => {
+      reads.set(element, (reads.get(element) ?? 0) + 1);
+      const declaration = base(element);
+      const read = declaration.getPropertyValue.bind(declaration);
+      return Object.assign(Object.create(declaration) as CSSStyleDeclaration, {
+        getPropertyValue: (name: string) => {
+          if (name === '-webkit-text-security') {
+            securityReads.set(element, (securityReads.get(element) ?? 0) + 1);
+          }
+          return read(name);
+        },
+      });
+    }) as Window['getComputedStyle'];
+    const harness: SemanticMutationHarness = { observed: [] };
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html', undefined, style, undefined, harness,
+      styleNames ? { styleNames } : {},
+    );
+    port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+    const first = port.messages.at(-1)!;
+    port.emit(createSemanticSourceAck(identity, first.policyFingerprint, first.sequence));
+    const flip = document.getElementById('flip')!;
+    /** The page changes the button's label, and the observer tells of it. */
+    const change = (label: string) => {
+      const oldValue = flip.getAttribute('aria-label');
+      flip.setAttribute('aria-label', label);
+      reads.clear();
+      securityReads.clear();
+      harness.callback!([{
+        type: 'attributes', target: flip, attributeName: 'aria-label',
+        attributeNamespace: null, oldValue,
+        addedNodes: [] as unknown as NodeList, removedNodes: [] as unknown as NodeList,
+        previousSibling: null, nextSibling: null,
+      } as MutationRecord], {} as MutationObserver);
+    };
+    onTestFinished(() => session.dispose());
+    return { document, port, session, flip, change, reads, securityReads, first };
+  };
+  const menuProofs = (batch: SemanticSourceBatch) =>
+    batch.proofs.filter((proof) => proof.kind === 'structural-menu').length;
+
+  it('classifies again only the element a change is in (D217)', () => {
+    const page = started();
+    expect(menuProofs(page.first)).toBe(3);
+    page.change('Play B');
+    const batch = page.port.messages.at(-1)!;
+    expect(batch.sequence).toBe(page.first.sequence + 1);
+    expect(JSON.stringify(batch)).toContain('Play B');
+    // The button is read again, with what is above it; no paragraph, menu
+    // or link is asked whether it masks text.
+    expect(page.securityReads.get(page.flip) ?? 0).toBeGreaterThan(0);
+    const others = [...page.securityReads.keys()].filter((element) =>
+      ['p', 'nav', 'div', 'a'].includes(element.localName));
+    expect(others.map((element) => element.outerHTML.slice(0, 40))).toEqual([]);
+  });
+
+  it('classifies every element again while a sheet of the page may mask text (D217)', () => {
+    const page = started();
+    const sheets = [{ cssRules: [{ cssText: '.x:hover { -webkit-text-security: disc }' }] }];
+    Object.defineProperty(page.document, 'styleSheets', { configurable: true, get: () => sheets });
+    onTestFinished(() => {
+      delete (page.document as unknown as Record<string, unknown>).styleSheets;
+    });
+    page.change('Play B');
+    const paragraph = page.document.querySelector('p')!;
+    expect(page.securityReads.get(paragraph) ?? 0).toBeGreaterThan(0);
+  });
+
+  it('tells a sheet that may mask text from one that may not (D217)', () => {
+    expect(styleSheetTextClassifies('nav li:hover > .sub { display: block }')).toBe(false);
+    expect(styleSheetTextClassifies('p::after { content: "-webkit-text-security: disc" }')).toBe(false);
+    expect(styleSheetTextClassifies('.md\\:flex { display: flex }')).toBe(false);
+    expect(styleSheetTextClassifies('.x:focus { -webkit-text-security: disc }')).toBe(true);
+    expect(styleSheetTextClassifies('.x { text-security: square }')).toBe(true);
+    expect(styleSheetTextClassifies('.x { -webkit-text-secur\\69ty: disc }')).toBe(true);
+    expect(styleSheetTextClassifies('@import url(other.css);')).toBe(true);
+    const { document } = parseHTML('<html><body></body></html>');
+    const page = document as unknown as Document;
+    const sheetsOf = (sheets: unknown[]) => {
+      Object.defineProperty(page, 'styleSheets', { configurable: true, get: () => sheets });
+    };
+    onTestFinished(() => {
+      delete (page as unknown as Record<string, unknown>).styleSheets;
+    });
+    sheetsOf([{ cssRules: [{ cssText: 'p { color: red }' }] }]);
+    expect(sourceSheetsMayClassify(page, [], undefined, () => undefined)).toBe(false);
+    sheetsOf([{ cssRules: [{ cssText: 'p { -webkit-text-security: disc }' }] }]);
+    expect(sourceSheetsMayClassify(page, [], undefined, () => undefined)).toBe(true);
+    // A sheet that cannot be read, and that no page copy says, may.
+    sheetsOf([{ href: 'https://cdn.example/site.css', get cssRules(): never { throw new Error('cross-origin'); } }]);
+    expect(sourceSheetsMayClassify(page, [], undefined, () => undefined)).toBe(true);
+    // A shadow root's adopted sheet counts too.
+    sheetsOf([]);
+    const root = { styleSheets: [], adoptedStyleSheets: [{ cssRules: [{ cssText: 'i { -webkit-text-security: disc }' }] }] };
+    expect(sourceSheetsMayClassify(page, [root as unknown as ShadowRoot], undefined, () => undefined)).toBe(true);
+  });
+
+  it('keeps the menus it read where no change is, when no rule reads the attribute (D217)', () => {
+    const page = started(() => NO_NAMES);
+    const wrapper = page.document.querySelector('.wrapper')!;
+    page.change('Play B');
+    const kept = page.reads.get(wrapper) ?? 0;
+    const batch = page.port.messages.at(-1)!;
+    expect(JSON.stringify(batch)).toContain('Play B');
+
+    // Without the census every container is read again.
+    const unnamed = started();
+    unnamed.change('Play B');
+    const read = unnamed.reads.get(unnamed.document.querySelector('.wrapper')!) ?? 0;
+    // The menu read asks the container, its panel and what is above them;
+    // a whole-page pass of the policy asks each element once all the same.
+    expect(kept).toBeLessThan(read);
+    const total = (reads: Map<Element, number>) =>
+      [...reads.values()].reduce((sum, count) => sum + count, 0);
+    expect(total(page.reads)).toBeLessThan(total(unnamed.reads) / 2);
+  });
+});
+
 const ids = new WeakMap<object, number>();
 let nextId = 1;
 function nodeId(node: object): number {
@@ -5992,8 +6138,10 @@ function createSession(
   getComputedStyle?: Window['getComputedStyle'],
   timers?: Array<() => void>,
   mutationHarness?: SemanticMutationHarness,
+  extra: Partial<ConstructorParameters<typeof SemanticSourceSession>[0]> = {},
 ): SemanticSourceSession {
   return new SemanticSourceSession({
+    ...extra,
     port,
     document: sourceDocument as Document,
     window: {
