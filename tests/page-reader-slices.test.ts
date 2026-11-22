@@ -717,6 +717,33 @@ describe('the preview (D163)', () => {
     })).toBeUndefined();
   });
 
+  it('shares its read cap by what is in view, so a heavy header leaves the content read (D215)', () => {
+    const links = Array.from({ length: 1_200 }, (_, index) =>
+      `<li data-top="${index % 5 * 40}"><a>Link ${index}</a></li>`).join('');
+    const target = page('<!doctype html><html lang="en"><head></head><body>' +
+      `<header id="hd" data-top="0" data-height="200"><ul id="hl" data-top="0" data-height="200">${links}</ul></header>` +
+      '<section id="content" data-top="200" data-height="600"><p id="cp" data-top="200">Content in view</p></section>' +
+      '<x-open id="open"></x-open><x-closed id="closed"></x-closed></body></html>');
+    paint(target.document, target.window);
+    const viewport = {
+      innerWidth: 1200, innerHeight: 800,
+      getComputedStyle: target.window.getComputedStyle,
+    } as unknown as Window;
+    const preview = sanitizeSourcePreview(target.document, viewport, new WeakNodeIdRegistry(), {
+      maxReadNodes: 1_000, maxNodes: 12_000,
+    })!;
+    expect(preview).toBeDefined();
+    // The header, a sixth of the view, is read to its share and boxes after.
+    const list = findElement(preview.root, 'hl')!;
+    expect(list.children.some((child) =>
+      child.kind === 'element' && child.placeholder !== undefined)).toBe(true);
+    expect(JSON.stringify(preview.root)).toContain('Link 0');
+    // The content in view is read, not a box.
+    const content = findElement(preview.root, 'cp');
+    expect(content?.placeholder).toBeUndefined();
+    expect(JSON.stringify(preview.root)).toContain('Content in view');
+  });
+
   it('gives up a preview before it reads a list that cannot fit (D193)', () => {
     const target = page('<!doctype html><html lang="en"><head></head><body>' +
       `<div id="box">${'<b></b>'.repeat(300)}</div>` +

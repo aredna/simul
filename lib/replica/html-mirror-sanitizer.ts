@@ -2684,7 +2684,11 @@ function serializeNode(
     );
     if (
       isHtmlMirrorLeftOutTagName(tagName) &&
-      liveElement.namespaceURI === 'http://www.w3.org/1999/xhtml'
+      (liveElement.namespaceURI === 'http://www.w3.org/1999/xhtml' ||
+        // A drawing's script holds its place too (D216): in the mirror an
+        // HTML element there draws nothing, and `script + circle` counts.
+        (tagName === 'script' &&
+          liveElement.namespaceURI === 'http://www.w3.org/2000/svg'))
     ) return serializeLeftOutPlaceholder(id, context, tagName);
     return undefined;
   }
@@ -3917,6 +3921,8 @@ function previewListCannotFit(element: Element, read: number, maxNodes: number):
 
 /** How many nodes a preview reads before every further box is a placeholder. */
 export const DEFAULT_HTML_MIRROR_PREVIEW_READ_NODES = 3_000;
+/** The least share of the preview's read cap a block in view gets (D215). */
+const MIN_PREVIEW_REGION_SHARE = 300;
 /** Past this many nodes, placeholders included, a page gets no preview. */
 export const DEFAULT_HTML_MIRROR_PREVIEW_MAX_NODES = 12_000;
 
@@ -4005,7 +4011,8 @@ export function sanitizeSourcePreview(
           Math.round(rect.height),
         ))
       : 0;
-    if (budget.nodes >= maxReadNodes) {
+    const cap = readCapOf(element);
+    if (budget.nodes >= cap) {
       // Past the cap only a box that keeps a height is one (D171): an
       // inline element (`span`, `a`) ignores the height it is given, so the
       // block read when the cap was reached came out shorter. It is read
@@ -4015,10 +4022,64 @@ export function sanitizeSourcePreview(
         sourceOuterDisplayKeepsHeight(readSourceOuterDisplay(next, sourceWindow)));
     }
     if (!sourceOuterDisplayIsBlockValue(display)) return undefined;
-    if (isNear(rect)) return undefined;
+    if (isNear(rect)) {
+      shareReadCap(element, rect, cap, budget);
+      return undefined;
+    }
     return boxOfRun(element, rect, height, (next, nextRect) =>
       !isNear(nextRect) &&
       sourceOuterDisplayIsBlockValue(readSourceOuterDisplay(next, sourceWindow)));
+  };
+  // The read cap shared by what is in view (D215): a header, sidebar or
+  // open menu that is displayed and holds more than the cap spent all of it
+  // in document order, and the content in view beside or below it was
+  // boxes until the copy came. A block in view that cannot be read whole in
+  // what is left of its cap gets a share of it as large as its part of the
+  // viewport (at least `MIN_PREVIEW_REGION_SHARE`), and what it holds past
+  // that is boxes, by the rule past the cap; what follows it reads on in
+  // what it left.
+  const regionCaps = new WeakMap<Element, number>();
+  const viewportArea = viewportWidth * viewportHeight;
+  const readCapOf = (element: Element): number => {
+    let cap = maxReadNodes;
+    try {
+      for (
+        let current = sourceProperty(element, 'parentElement');
+        current;
+        current = sourceProperty(current, 'parentElement')
+      ) {
+        const own = regionCaps.get(current);
+        if (own !== undefined && own < cap) cap = own;
+      }
+    } catch {
+      // A broken chain: the page's own cap.
+    }
+    return cap;
+  };
+  const shareReadCap = (
+    element: Element,
+    rect: DOMRect,
+    cap: number,
+    budget: HtmlMirrorReadBudget,
+  ): void => {
+    const left = cap - budget.nodes;
+    let holds: number;
+    try {
+      // Each element and, about, a text: twice the elements.
+      holds = (sourceCall(element, 'getElementsByTagName', '*').length ||
+        sourceCall(element, 'querySelectorAll', '*').length) * 2;
+    } catch {
+      return;
+    }
+    if (holds <= left) return;
+    const width = Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0);
+    const height = Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0);
+    const part = width > 0 && height > 0 ? (width * height) / viewportArea : 0;
+    const share = Math.max(
+      Math.min(left, MIN_PREVIEW_REGION_SHARE),
+      Math.floor(left * Math.min(1, part)),
+    );
+    regionCaps.set(element, budget.nodes + share);
   };
   // A dropdown is never cut (D163), so one of tens of thousands of options
   // was read whole, past the preview's limit, and the preview was given up
@@ -5295,9 +5356,10 @@ export function sanitizeCss(
     }
     return undefined;
   }
-  if (!declarationList) {
-    // A string that a line break cuts is read as Chrome reads it (D202).
-    const read = readCssSheetBadStrings(css);
+  {
+    // A string that a line break cuts is read as Chrome reads it (D202; in
+    // a `style` attribute since D216).
+    const read = readCssSheetBadStrings(css, declarationList);
     if (read === undefined) return undefined;
     css = read;
   }
@@ -6541,7 +6603,16 @@ function tokenizeCssForBadStrings(css: string): {
   return { tokens, bad };
 }
 
-export function readCssSheetBadStrings(css: string): string | undefined {
+export function readCssSheetBadStrings(
+  css: string,
+  /**
+   * A `style` attribute's declarations (D216): each declaration that holds
+   * a cut string goes up to its own `;`, a custom property's too, whose
+   * blocks hold what follows the line break (`--x: ("a` + line break +
+   * `;b)` is one invalid declaration), as Chrome reads it.
+   */
+  declarationList = false,
+): string | undefined {
   if (!cssHasCutString(css)) return css;
   const { tokens, bad } = tokenizeCssForBadStrings(css);
   if (!bad) return css;
@@ -6669,7 +6740,13 @@ export function readCssSheetBadStrings(css: string): string | undefined {
     return index;
   };
   try {
-    readList(0, true, 0);
+    if (!declarationList) readList(0, true, 0);
+    else {
+      // A `}` of the attribute's own closes nothing: what follows is read on.
+      for (let index = 0; index < tokens.length; index += 1) {
+        index = readList(index, false, 0);
+      }
+    }
   } catch {
     return undefined;
   }
@@ -6696,8 +6773,13 @@ function stripCssCommentsOutsideStrings(
   // In a `style` attribute, the blocks still open: the end of the text
   // closes them, as the browser reads it (D187), so a cut-off `url("…`
   // or `calc(…` is written closed.
+  // In a sheet the end of its own text closes them, but a string that
+  // ends there is closed with the functions around it (`url("a.png`), for
+  // the passes that read addresses (D216).
   const open: string[] = [];
   const closed = (): string => sheet ? '' : open.reverse().join('');
+  const functionsClosed = (): string =>
+    open.filter((closer) => closer !== '}').reverse().join('');
   for (let index = 0; index < css.length; index += 1) {
     const character = css[index]!;
     if (quote) {
@@ -6734,7 +6816,7 @@ function stripCssCommentsOutsideStrings(
       stringStart = index;
       continue;
     }
-    if (!sheet) {
+    {
       if (character === '(') open.push(')');
       else if (character === '[') open.push(']');
       else if (character === '{') open.push('}');
@@ -6788,9 +6870,8 @@ function stripCssCommentsOutsideStrings(
     if (character === '/' && css[index + 1] === '*') {
       const close = css.indexOf('*/', index + 2);
       if (close < 0) {
-        if (sheet) return undefined;
-        // A `style` attribute that ends inside a comment: the comment runs
-        // to the end of the text, as the browser reads it (D181).
+        // A text that ends inside a comment: the comment runs to the end of
+        // the text, as the browser reads it (D181; a sheet too since D216).
         parts.push(css.slice(segmentStart, index), closed());
         return parts.join('');
       }
@@ -6806,9 +6887,12 @@ function stripCssCommentsOutsideStrings(
     }
   }
   if (quote) {
-    if (sheet) return undefined;
-    // The end of a `style` attribute ends a string, as the browser reads it.
-    parts.push(css.slice(segmentStart), quote, closed());
+    // The end of the text ends a string, as the browser reads it (D181; a
+    // sheet too since D216, whose blocks the end of its own text closes). A
+    // backslash just before the end escapes nothing and is dropped.
+    let rest = css.slice(segmentStart);
+    if (/(?:^|[^\\])(?:\\\\)*\\$/u.test(rest)) rest = rest.slice(0, -1);
+    parts.push(rest, quote, sheet ? functionsClosed() : closed());
     return parts.join('');
   }
   parts.push(css.slice(segmentStart), closed());

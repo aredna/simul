@@ -300,6 +300,12 @@ describe('HtmlMirrorSourceSession', () => {
       running = false;
       turns.shift()!();
       await new Promise((resolve) => setTimeout(resolve, 0));
+      // The page reader gives the page a turn after the scan's last slice
+      // before its own first (D215); the other readers start at once.
+      expect(mirrorPort.posts).toEqual([]);
+      expect(turns).toHaveLength(1);
+      turns.shift()!();
+      await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(turns).toHaveLength(0);
       expect(mirrorPort.posts).toContainEqual(expect.objectContaining({

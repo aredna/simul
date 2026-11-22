@@ -5,6 +5,7 @@ import {
   MAX_PAINTED_SEMANTIC_LABEL_TEXT,
   PAINTED_SEMANTIC_LABEL_ATTRIBUTE,
   PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE,
+  PAINTED_SEMANTIC_LABEL_OVERLAY_TAG,
   aggregatePaintedSemanticLabelText,
   detectPaintedSemanticLabel,
   normalizePaintedSemanticLabelText,
@@ -321,8 +322,12 @@ describe('painted semantic labels', () => {
     );
     expect(link.element.lastElementChild?.getAttribute(PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE))
       .toBe('v1');
-    // A `bdi`: the page's `:last-of-type` counts its own spans (D208).
-    expect(link.element.lastElementChild?.localName).toBe('bdi');
+    // Of a type of Simul's own, defined: the page's `:last-of-type` counts
+    // its own spans and `bdi`s (D208, D216), and `:not(:defined)` passes it.
+    const label = link.element.lastElementChild!;
+    expect(label.localName).toBe(PAINTED_SEMANTIC_LABEL_OVERLAY_TAG);
+    expect(label.ownerDocument.defaultView!.customElements.get(PAINTED_SEMANTIC_LABEL_OVERLAY_TAG))
+      .toBeTypeOf('function');
     expect(readPaintedSemanticLabelOverlayText(link.element)).toBe('Mainichi');
   });
 

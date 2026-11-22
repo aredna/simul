@@ -197,9 +197,9 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       const style = 'content: "a\ncolor: blue; background: url(x.png)';
       const sanitized = sanitizeCss(style, 'https://example.test/app/', true);
       // The address after the cut string is made absolute; the declaration
-      // the string stood in stays invalid, as it is in the tab.
+      // the string stands in goes up to its `;`, as Chrome drops it (D216).
       expect(sanitized).toBe(
-        'content: !\ncolor: blue; background: url("https://example.test/app/x.png")',
+        ' background: url("https://example.test/app/x.png")',
       );
       expect(sanitizeCss(sanitized!, 'about:blank', true)).toBe(sanitized);
       expect(sanitizeCss(
@@ -223,8 +223,25 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
         expect(sanitized, style).toBe(expected);
         expect(sanitizeCss(sanitized!, 'about:blank', true), style).toBe(sanitized);
       }
-      // A sheet is read as before.
-      expect(sanitizeCss('.a{color:red} /* note', 'about:blank')).toBeUndefined();
+      // A sheet too, whose blocks the end of its own text closes (D216).
+      expect(sanitizeCss('.a{color:red} /* note', 'about:blank')).toBe('.a{color:red} ');
+      expect(sanitizeCss('.a{content:"open', 'about:blank')).toBe('.a{content:"open"');
+      expect(sanitizeCss('.a{content:"open\\', 'about:blank')).toBe('.a{content:"open"');
+    });
+
+    it('drops a custom property that a line break cuts in a style attribute, as Chrome does (D216)', () => {
+      // Each as Chrome 158 reads it (`compare.mjs` in the D216 harness).
+      const read = (style: string) => sanitizeCss(style, 'https://example.test/', true);
+      expect(read('--x: ("a\n;color:red); color: green')).toBe(' color: green');
+      expect(read('--x: "a\nb; color: green')).toBe(' color: green');
+      expect(read('color: green; --y: [1 "a\n] x; background-color: blue'))
+        .toBe('color: green;  background-color: blue');
+      expect(read('color: red; content: "a\n; --w: "b\n; color: green'))
+        .toBe('color: red;   color: green');
+      for (const style of ['--x: ("a\n;color:red); color: green', 'color: green; --z: "a\n} ; background-color: blue']) {
+        const once = read(style)!;
+        expect(read(once), style).toBe(once);
+      }
     });
 
     it('closes the blocks a style attribute ends in, a quoted url( too (D187)', () => {
@@ -244,7 +261,10 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
         expect(sanitized, style).toBe(expected);
         expect(sanitizeCss(sanitized!, 'about:blank', true), style).toBe(sanitized);
       }
-      expect(sanitizeCss('.a{background:url("a.png', 'about:blank')).toBeUndefined();
+      // A sheet's string that its end cuts is closed with the functions
+      // around it (D216); its blocks the end of its own text closes.
+      expect(sanitizeCss('.a{background:url("a.png', 'https://example.test/app/'))
+        .toBe('.a{background:url("https://example.test/app/a.png")');
     });
   });
 
@@ -728,7 +748,7 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       false, false, false, false, 'passive')).toBeDefined();
   });
 
-  it('holds no place in a dropdown or a drawing', () => {
+  it('holds no place in a dropdown, and holds one for a drawing\'s script (D216)', () => {
     const { graph } = read(`<!doctype html><html><body>
       <select id="s"><script>1</script><option>A</option><optgroup label="g"><template>t</template><option>B</option></optgroup></select>
       <svg id="g"><script>2</script><circle r="1"/></svg>
@@ -740,7 +760,12 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       for (const child of node.children) walk(child, `${path}>${node.tagName}`);
     };
     walk(graph.root, '');
-    expect(held).toEqual([]);
+    expect(held).toEqual(['>html>body>svg']);
+    expect(graphElementBySourceId(graph, 'g')!.children.find((child) =>
+      child.kind === 'element' && child.opaquePlaceholder)).toMatchObject({
+      namespace: 'html', leftOutTagName: 'script', attributes: [], children: [],
+    });
+    expect(JSON.stringify(graph)).not.toContain('"text":"2"');
     expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
       false, false, false, false, 'passive')).toBeDefined();
   });

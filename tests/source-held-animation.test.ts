@@ -915,7 +915,9 @@ describe('what a script animation leaves an element at', () => {
     expect(style('string'))
       .toBe("color: red; font-family: 'Open';opacity:1;transform:none");
     expect(style('comment')).toBe('color: red; ;opacity:1;transform:none');
-    expect(style('broken')).toBe("content: !\n(b'');opacity:1;transform:none");
+    // The declaration a cut string stands in goes whole, to its own `;`
+    // (D216).
+    expect(style('broken')).toBe('opacity:1;transform:none');
     expect(style('blank')).toBe('opacity:1;transform:none');
     // An option's style never travels, held or not.
     expect(JSON.stringify(graph)).not.toMatch(/"choice"[^\]]*\]\s*,\s*\["style"/u);

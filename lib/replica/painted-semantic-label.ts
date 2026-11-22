@@ -192,10 +192,7 @@ export function presentPaintedSemanticLabel(
   const style = sourceProperty(element, 'style');
   const originalPointerEvents = inlineStyleSnapshot(style, 'pointer-events');
   const originalPosition = inlineStyleSnapshot(style, 'position');
-  // A `bdi`, which isolates its text as `dir="auto"` does: a type the page's
-  // links and list items seldom hold, so the page's `:last-of-type` and
-  // `:nth-last-of-type()` count its own spans as in the tab (D208).
-  const overlay = sourceProperty(element, 'ownerDocument').createElement('bdi');
+  const overlay = createPaintedLabelOverlay(sourceProperty(element, 'ownerDocument'));
 
   sourceCall(element, 'setAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE, 'v1');
   style.setProperty('pointer-events', 'none', 'important');
@@ -708,6 +705,33 @@ function ownedLabelRoot(element: HTMLElement): ShadowRoot | undefined {
   root.append(sourceProperty(element, 'ownerDocument').createElement('slot'));
   ownedLabelRoots.set(element, root);
   return root;
+}
+
+/** The name of the label's element: a type of Simul's own (D216). */
+export const PAINTED_SEMANTIC_LABEL_OVERLAY_TAG = 'simul-painted-label';
+
+/**
+ * The label's element: of a type of Simul's own, defined in the mirror as an
+ * empty class, so no page rule counts it among a link's `-of-type` children
+ * (as a `span` was, D208, and a `bdi` still was where the link held one)
+ * and `:not(:defined)` does not hide it (D216). Where the mirror's frame
+ * defines no elements, a `bdi`, which isolates its text as `dir="auto"`
+ * does.
+ */
+function createPaintedLabelOverlay(document: Document): HTMLElement {
+  try {
+    const view = document.defaultView;
+    const registry = view?.customElements;
+    if (view && registry) {
+      if (!registry.get(PAINTED_SEMANTIC_LABEL_OVERLAY_TAG)) {
+        registry.define(PAINTED_SEMANTIC_LABEL_OVERLAY_TAG, class extends view.HTMLElement {});
+      }
+      return document.createElement(PAINTED_SEMANTIC_LABEL_OVERLAY_TAG);
+    }
+  } catch {
+    // A frame that defines no elements.
+  }
+  return document.createElement('bdi');
 }
 
 function hasOwnedOverlayChild(element: HTMLElement): boolean {

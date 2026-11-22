@@ -42,12 +42,11 @@ const MAX_SOURCE_ARIA_CONTROLS_LENGTH = 1 * 1_024 * 1_024;
 const MAX_SOURCE_CONTROLLED_MUTATION_NODES = 2_048;
 const MAX_SOURCE_PAINT_RECTS = 256;
 /**
- * How far below a target without a box held elements without one are looked
- * through. Two until D203; a component library nests a few `display:
- * contents` hosts and slots, and the elements judged stay under the budget
- * below, so a deeper nest costs no more than a wider one.
+ * The elements judged through targets without a box, for a page. Held
+ * elements without a box are looked through in turn as deep as this lasts
+ * (D215; two levels until D203, eight until D215): each level judges one
+ * element at least, so a deep nest costs no more than a wide one.
  */
-const MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH = 8;
 const MAX_SOURCE_CONTROLLED_LOOKED_THROUGH_ELEMENTS = 2_048;
 const DEFAULT_MAX_SOURCE_CONTROLLED_NODES = 50_000;
 const MAX_SOURCE_NAVIGATION_URL_LENGTH = 16 * 1024;
@@ -558,9 +557,11 @@ implements SourceControlledContentPolicyBuilder {
     }
     if (sourceNodeType(node) !== 1) return;
     const element = node as Element;
-    const scope = sourceCall(element, 'getRootNode');
     const id = safelyReadSourceAttribute(element, 'id');
     if (id) {
+      // Only for an element with an id (D215): asked of every element, it
+      // was a tenth of the walk on a page of 131,000.
+      const scope = sourceCall(element, 'getRootNode');
       this.#idElements.add(element);
       const byteLength = sourceControlledStringByteLength(id);
       if (
@@ -1395,15 +1396,14 @@ function sourceControlledLookThrough(
   const looked = new Map<Element, boolean>();
   const lookThrough = (
     element: Element,
-    depth: number,
     paintCache: SourcePaintScanCache,
   ): boolean => {
     const known = looked.get(element);
     if (known !== undefined) return known;
     looked.set(element, false);
-    const holding = depth > MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH
-      ? undefined
-      : readSourceElementsHeldWithoutBox(element, sourceWindow, paintCache);
+    // Nothing left to judge with: the rest stays withheld.
+    if (budget.left <= 0) return false;
+    const holding = readSourceElementsHeldWithoutBox(element, sourceWindow, paintCache);
     if (!holding || holding.elements.length > budget.left) return false;
     const held = holding.elements;
     budget.left -= held.length;
@@ -1413,8 +1413,8 @@ function sourceControlledLookThrough(
       return own === undefined
         ? (sourceElementBoxIsPainted(child, sourceWindow, paintCache) &&
           !sourceElementBoxIsOffPage(child, sourceWindow, paintCache)) ||
-          lookThrough(child, depth + 1, paintCache)
-        : (own !== 'withheld' || lookThrough(child, 0, paintCache)) &&
+          lookThrough(child, paintCache)
+        : (own !== 'withheld' || lookThrough(child, paintCache)) &&
           !sourceElementBoxIsOffPage(child, sourceWindow, paintCache);
     });
     // Nothing it holds is painted: it stays the boundary it was. Text of its
@@ -1433,7 +1433,7 @@ function sourceControlledLookThrough(
     return true;
   };
   return (panel, paintCache) => {
-    if (targets.get(panel) === 'withheld' && lookThrough(panel, 0, paintCache)) {
+    if (targets.get(panel) === 'withheld' && lookThrough(panel, paintCache)) {
       targets.set(panel, 'controlled-region');
     }
   };

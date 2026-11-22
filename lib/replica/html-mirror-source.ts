@@ -1744,6 +1744,7 @@ export class HtmlMirrorSourceSession {
     try {
       // Every node has met the injection-time credential scan first.
       const secretScan = this.environment.secretScan;
+      const waitedForScan = secretScan !== undefined && !secretScan.done;
       if (secretScan && !secretScan.done) {
         await secretScan.finished;
         if (!this.#readIsCurrent(read)) return;
@@ -1751,6 +1752,13 @@ export class HtmlMirrorSourceSession {
       const slices = this.#checkpointReadSlices();
       this.#openSliceRootWalk();
       const expired = (): boolean => slices.clock.expired();
+      // The scan's last slice ends in this task (D215): the policy's first
+      // slice after it made one task of both, 51–61 ms on a page of one box
+      // of 131,000 children. A turn for the page first.
+      if (waitedForScan) {
+        await slices.next();
+        if (!this.#readIsCurrent(read)) return;
+      }
       // Built in slices; a page whose policy fits the first is read on in
       // this task (no await on that path: a small page is sent in it).
       let builder = this.#beginControlledContentPolicy(read);

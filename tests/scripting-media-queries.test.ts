@@ -435,13 +435,18 @@ describe('media queries about scripts, read as the tab reads them', () => {
     // the sheet again. The passes that drop imports and read addresses end a
     // string only at its quote, so the sheet is first read as Chrome reads
     // it: the import here is an import, dropped under Conservative. A string
-    // still open at the end of a sheet refuses it, as before.
+    // still open at the end of a sheet is closed there, as Chrome closes it
+    // (D216).
     const cases: Array<[string, string | undefined, string | undefined]> = [
-      ['@x "a\n;@import url(https://example.test/evil0.css);.z{content:"}', undefined, undefined],
+      ['@x "a\n;@import url(https://example.test/evil0.css);.z{content:"}',
+        '.z{content:"}"',
+        '@import url("https://example.test/evil0.css");.z{content:"}"'],
       ['@x "a\n;@import url(https://example.test/evil0.css);.z{content:"x"}',
         '.z{content:"x"}',
         '@import url("https://example.test/evil0.css");.z{content:"x"}'],
-      [".a{content:'a\n}.b{background:url(https://example.test/p0.png)}.z{content:'}", undefined, undefined],
+      [".a{content:'a\n}.b{background:url(https://example.test/p0.png)}.z{content:'}",
+        ".a{}.b{background:url(\"https://example.test/p0.png\")}.z{content:'}'",
+        ".a{}.b{background:url(\"https://example.test/p0.png\")}.z{content:'}'"],
       [".a{content:'a\n}.b{background:url(https://example.test/p0.png)}",
         '.a{}.b{background:url("https://example.test/p0.png")}',
         '.a{}.b{background:url("https://example.test/p0.png")}'],
@@ -474,11 +479,11 @@ describe('media queries about scripts, read as the tab reads them', () => {
     expect(sheet('.a{color:red}/* "a\n */.b{color:blue}'))
       .toBe('.a{color:red}.b{color:blue}');
     // A declaration list holds no import. Its string ends at the line
-    // break, as Chrome ends it, and what Chrome reads there is written out
-    // (D181): the `'` after B opens a string that runs to the end, so that
-    // `color:red` stays out of every declaration, in the tab and here.
+    // break, as Chrome ends it (D181): the `'` after B opens a string that
+    // runs to the end, so the one declaration Chrome reads holds the cut
+    // string and `color:red`, and is dropped whole (D216).
     expect(sanitizeCss("font-family:'A\nB';color:red", BASE, true, undefined, 'passive'))
-      .toBe("font-family:!\nB';color:red'");
+      .toBe('');
     // An attribute's query is read as a browser reads it: the string ends
     // at the line break, and an escaped line break is part of it.
     expect(answerScriptingMediaFeatures('"x\n(scripting) "(scripting)"'))

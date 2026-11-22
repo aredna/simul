@@ -5507,12 +5507,14 @@ describe('isolated HTML sanitizer and protocol', () => {
       '.c{background:-webkit-image-set(url("https://example.test/c.png") 1x)}' +
       '.d{mask:url("https://example.test/d.png")}',
     );
-    for (const unterminated of [
-      'a{content:"open}',
-      'a{}/* open',
-      'a{content:"ends with \\',
+    // The end of a sheet closes its string and its comment, as Chrome's
+    // tokenizer does; a backslash just before it escapes nothing (D216).
+    for (const [unterminated, read] of [
+      ['a{content:"open}', 'a{content:"open}"'],
+      ['a{}/* open', 'a{}'],
+      ['a{content:"ends with \\', 'a{content:"ends with "'],
     ]) {
-      expect(sanitizeCss(unterminated, base)).toBeUndefined();
+      expect(sanitizeCss(unterminated!, base)).toBe(read);
     }
   });
 

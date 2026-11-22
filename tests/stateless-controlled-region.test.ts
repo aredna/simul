@@ -682,15 +682,24 @@ describe('painted controlled regions', () => {
         `${button('1')}<div id="t1" class="contents">${'<div class="contents">'.repeat(levels)}` +
         `<span id="seen1">DEEP1</span>${closed('1')}${'</div>'.repeat(levels)}</div>`,
       );
-      // Eight levels since D203 (two before).
-      const eight = nest(8);
-      expect(eight.state('t1')).toBe('controlled-region');
-      expect(eight.state('seen1')).toBe('controlled-region');
-      for (const id of closedIds('1')) expect(eight.state(id), id).toBe('withheld');
-      expect(eight.sent()).toContain('DEEP1');
-      const nine = nest(9);
-      expect(nine.state('t1')).toBe('withheld');
-      expect(nine.sent()).not.toContain('DEEP1');
+      // As deep as the page's budget of 2,048 judged elements lasts since
+      // D215 (two levels before D203, eight before D215): each level judges
+      // one, and the innermost six.
+      const deep = nest(40);
+      expect(deep.state('t1')).toBe('controlled-region');
+      expect(deep.state('seen1')).toBe('controlled-region');
+      for (const id of closedIds('1')) expect(deep.state(id), id).toBe('withheld');
+      expect(deep.sent()).toContain('DEEP1');
+      // Each level here judges 200: nine fit in the budget, eleven do not.
+      const wide = (levels: number) => shaped(
+        `${button('1')}<div id="t1" class="contents">` +
+        `${`<div class="contents">${'<i class="dn"></i>'.repeat(199)}`.repeat(levels)}` +
+        `<span id="seen1">DEEP1</span>${'</div>'.repeat(levels)}</div>`,
+      );
+      expect(wide(9).state('t1')).toBe('controlled-region');
+      expect(wide(9).sent()).toContain('DEEP1');
+      expect(wide(11).state('t1')).toBe('withheld');
+      expect(wide(11).sent()).not.toContain('DEEP1');
       // A wrapper of no height is looked through like one of no box at all,
       // and one that clips is not.
       const hanging = shaped(
