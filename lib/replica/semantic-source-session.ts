@@ -363,6 +363,12 @@ interface ValidatedDisclosure {
   readonly popupRole: SemanticDisclosurePopupRole;
 }
 
+/** What a trigger's disclosure read gave, kept for the next scan (D219). */
+interface KeptDisclosureRead {
+  readonly panel: Element | undefined;
+  readonly disclosure: ValidatedDisclosure | undefined;
+}
+
 interface ValidatedStructuralMenu {
   readonly container: Element;
   /** The first trigger, which the proof names. */
@@ -371,6 +377,12 @@ interface ValidatedStructuralMenu {
   readonly triggers: readonly Element[];
   readonly panel: Element;
   readonly expanded: boolean;
+  /**
+   * The nodes of a panel offered cut (D219, the owner's D218): the first
+   * 8,192 of its walk in the order the page draws them. Text past them is
+   * no menu text and stays as the page draws it. None for a whole panel.
+   */
+  readonly cut?: ReadonlySet<Node>;
 }
 
 interface ValidatedTab {
@@ -407,7 +419,8 @@ const MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES = 1_024;
 /**
  * A menu's panel is walked further (D179): a site menu of 400 links, or of
  * 200 links that each hold an icon and two spans, is over 1,024 nodes. Its
- * text costs only once now, since a batch carries what changed.
+ * text costs only once now, since a batch carries what changed. A panel
+ * past it is offered cut there (D219, the owner's D218).
  */
 const MAX_SEMANTIC_MENU_PANEL_NODES = 8_192;
 const SEMANTIC_CONTROL_POLL_INTERVAL_MS = 500;
@@ -622,6 +635,14 @@ export class SemanticSourceSession {
   #walkedShadowRootSet = new WeakSet<ShadowRoot>();
   /** What each container's menu read gave in the last posted scan (D217). */
   #structuralMenuReads = new WeakMap<Element, KeptStructuralMenuRead>();
+  /** What each trigger's disclosure read gave when last read (D219). */
+  #disclosureReads = new WeakMap<Element, KeptDisclosureRead>();
+  /** Whether each tab panel's walk passed when last read (D219). */
+  #tabPanelReads = new WeakMap<Element, boolean>();
+  /** The label each option or group gave when last read (D219). */
+  #optionLabels = new WeakMap<Element, { readonly label: string | undefined }>();
+  /** The collapsed menu panels whose dropdowns the last scan's labels revealed (D219). */
+  #revealedPanels: readonly Element[] = [];
 
   constructor(private readonly environment: SemanticSourceSessionEnvironment) {
     const identity = readSemanticSourcePortIdentity(
@@ -1618,6 +1639,13 @@ export class SemanticSourceSession {
     }
     if (!this.#isCurrentScan(run)) return;
     if (step.done) {
+      // A scan read in slices whose last one used up its share is sealed
+      // and posted in the next turn (D219): in the same task the seal made
+      // a task of 61-62 ms at opening on a page of 131,000 elements.
+      if (run.yielded && safelyRead(() => run.clock.expired()) === true) {
+        void this.#finishScanAfterTurn(run, step.value);
+        return;
+      }
       this.#finishScan(run, step.value);
       return;
     }
@@ -1628,6 +1656,20 @@ export class SemanticSourceSession {
     }
     run.yielded = true;
     void this.#continueScanAfterTurn(run);
+  }
+
+  async #finishScanAfterTurn(
+    run: SemanticScanRun,
+    staged: StagedSemanticSourceScan,
+  ): Promise<void> {
+    try {
+      await run.clock.next();
+    } catch {
+      // A turn that cannot be given: it is posted in this one.
+    }
+    if (!this.#isCurrentScan(run)) return;
+    // What changed meanwhile is the seal's: it asks every node it sends.
+    this.#finishScan(run, staged);
   }
 
   async #continueScanAfterTurn(run: SemanticScanRun): Promise<void> {
@@ -2084,21 +2126,32 @@ export class SemanticSourceSession {
     const validatedStructuralMenus: ValidatedStructuralMenu[] = [];
     let menuReadsComplete = false;
     const deepMenuReads = new Set<Element>();
+    // The elements around a change, and whether an element is neither in,
+    // under nor around one (D217, D219). What a read asks only of what was
+    // classified may be kept for such an element; what asks paint, only
+    // while no change since may move what a rule matches.
+    const aroundChange = classifyAll
+      ? undefined
+      : sourceElementsAroundChanges([journal.roots, journal.touched]);
+    const unchanged = (element: Element): boolean => aroundChange !== undefined &&
+      !changedElements.has(element) && !aroundChange.has(element);
+    const paintKept = (): boolean => aroundChange !== undefined &&
+      !journal.paint && !pending.paint;
+    const unchangedPainted = (element: Element): boolean =>
+      paintKept() && unchanged(element);
     if (scope.disclosureContent && walked) {
       yield* this.#validatedDisclosures(
         elements,
         classifications,
         turn,
         validatedDisclosures,
+        unchangedPainted,
       );
       // A container no change is in, under or around keeps what its menu
       // read gave in the last posted scan, while no change since may move
       // what any rule matches (D217): the read asks the paint of the
       // container and of everything above it, as it was.
-      const keepMenus = !classifyAll && !journal.paint && !pending.paint;
-      const aroundChange = keepMenus
-        ? sourceElementsAroundChanges([journal.roots, journal.touched])
-        : undefined;
+      const keepMenus = paintKept();
       const keptReads = this.#structuralMenuReads;
       yield* this.#validatedStructuralMenus(
         elements,
@@ -2106,10 +2159,8 @@ export class SemanticSourceSession {
         turn,
         structuralMenuWrites,
         validatedStructuralMenus,
-        aroundChange
-          ? (container) => changedElements.has(container) || aroundChange.has(container)
-            ? undefined
-            : keptReads.get(container)
+        keepMenus
+          ? (container) => unchanged(container) ? keptReads.get(container) : undefined
           : () => undefined,
         deepMenuReads,
       );
@@ -2120,6 +2171,11 @@ export class SemanticSourceSession {
     // the page itself showed the menu, and the mirror drew no dropdown.
     const collapsedMenuPanels = validatedStructuralMenus
       .filter((menu) => !menu.expanded).map((menu) => menu.panel);
+    // An option's label is kept only while the panels revealed are those
+    // its label was read with (D219).
+    const sameRevealed = collapsedMenuPanels.length === this.#revealedPanels.length &&
+      collapsedMenuPanels.every((panel, index) => this.#revealedPanels[index] === panel);
+    this.#revealedPanels = collapsedMenuPanels;
     if (collapsedMenuPanels.length > 0) {
       // Every later slice's label walk reveals them too (D164).
       attempt.revealPanels = collapsedMenuPanels;
@@ -2165,6 +2221,7 @@ export class SemanticSourceSession {
         classifications,
         turn,
         validatedTabs,
+        unchanged,
       );
     }
     // Hidden wins over edited: editor text the tab does not show is not
@@ -2275,6 +2332,22 @@ export class SemanticSourceSession {
     let batchBytes = 0;
     const selectStates = new WeakMap<Element, SelectStateSnapshot>();
     const disclosurePanels = new Set<Element>();
+    // The panels offered cut, with what of each is offered (D219).
+    const cutMenuPanels = new Map<Element, ReadonlySet<Node>>();
+    /** Whether a text sits past the cut of the nearest panel it is drawn in. */
+    const pastMenuCut = (text: Node): boolean => {
+      if (cutMenuPanels.size === 0) return false;
+      for (
+        let around = readSourceFlatTreeParentElement(text);
+        around;
+        around = readSourceFlatTreeParentElement(around)
+      ) {
+        if (!disclosurePanels.has(around)) continue;
+        const cut = cutMenuPanels.get(around);
+        return cut !== undefined && !cut.has(text);
+      }
+      return false;
+    };
     const admittedDisclosureTextNodes = new Set<Node>();
     const structuralMenuPanels = new WeakMap<Element, string>();
     const addProof = (draft: SemanticSourceProofDraft): boolean => {
@@ -2525,9 +2598,11 @@ export class SemanticSourceSession {
         panelNodeId,
         popupRole: 'menu',
         expanded: menu.expanded,
+        ...(menu.cut ? { cut: true as const } : {}),
         classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
       })) continue;
       disclosurePanels.add(menu.panel);
+      if (menu.cut) cutMenuPanels.set(menu.panel, menu.cut);
       structuralMenuPanels.set(menu.panel, relationId);
       structuralMenuTriggers.set(relationId, menu.triggers);
     }
@@ -2722,7 +2797,9 @@ export class SemanticSourceSession {
             });
           }
         } else if (current.disclosure && scope.disclosureContent &&
-          classification.category === 'public-semantic') {
+          classification.category === 'public-semantic' &&
+          // Past a panel's cut the text stays as the page draws it (D219).
+          !pastMenuCut(current.node)) {
           add(
             current.node,
             classification,
@@ -2792,7 +2869,9 @@ export class SemanticSourceSession {
           classification,
           'controlSemantics',
           'label',
-          readDirectControlLabel(element, tagName),
+          tagName === 'option' || tagName === 'optgroup'
+            ? this.#optionLabel(element, tagName, sameRevealed && unchangedPainted(element))
+            : readDirectControlLabel(element, tagName),
         );
       }
 
@@ -3105,6 +3184,7 @@ export class SemanticSourceSession {
     classifications: WeakMap<Element, ElementClassification>,
     turn: () => boolean,
     disclosures: ValidatedDisclosure[],
+    unchanged: (element: Element) => boolean = () => false,
   ): Generator<SemanticScanPause, void, void> {
     for (const trigger of elements) {
       const classification = classifications.get(trigger);
@@ -3123,37 +3203,74 @@ export class SemanticSourceSession {
         continue;
       }
       if (normalizedToken(classification.facts.role) === 'tab') continue;
-      const ids = controlled.trim().split(/\s+/u).filter(isSafeDomId);
-      if (
-        ids.length !== 1 ||
-        !isDisclosureActivationController(trigger) ||
-        !this.#isVisibleDisclosureController(trigger) ||
-        !hasValidPopupSemantics(trigger)
-      ) continue;
-      const root = trigger.getRootNode();
-      const panel = findUniqueElementById(elements, root, ids[0]!);
-      if (
-        !panel || panel === trigger || panel.ownerDocument !== trigger.ownerDocument ||
-        panel.getRootNode() !== root || panel.contains(trigger) ||
-        trigger.contains(panel)
-      ) continue;
-      const panelClassification = classifications.get(panel);
-      if (
-        panelClassification?.category !== 'public-semantic' ||
-        normalizedToken(panelClassification.facts.role) === 'tabpanel' ||
-        !popupTargetSemanticsMatch(trigger, panel) ||
-        !isBoundedSafeDisclosurePanel(panel, classifications) ||
-        (expandedState === 'true'
-          ? !this.#isVisibleDisclosureController(panel)
-          : !this.#isCollapsedDisclosurePanel(panel))
-      ) continue;
-      disclosures.push(Object.freeze({
+      // A trigger no change is in, under or around, with a panel alike,
+      // keeps what its read gave while no change may move what a rule
+      // matches (D219, as menus since D217).
+      const kept = this.#disclosureReads.get(trigger);
+      const read = kept && unchanged(trigger) && (!kept.panel || unchanged(kept.panel))
+        ? kept
+        : this.#readDisclosure(trigger, controlled, expandedState, elements, classifications);
+      this.#disclosureReads.set(trigger, read);
+      if (read.disclosure) disclosures.push(read.disclosure);
+    }
+  }
+
+  /**
+   * An option's or a group's label (D219): the one read last when `keep`
+   * says the option, what is around it and the paint are as they were
+   * then, or read now. Reading every option's label at every change was
+   * the largest part of a scan on a page of 10,000 options.
+   */
+  #optionLabel(element: Element, tagName: string, keep: boolean): string | undefined {
+    const kept = keep ? this.#optionLabels.get(element) : undefined;
+    if (kept) return kept.label;
+    const label = readDirectControlLabel(element, tagName);
+    this.#optionLabels.set(element, Object.freeze({ label }));
+    return label;
+  }
+
+  /** What one trigger's disclosure read gives: the panel it names, and the disclosure if it is one. */
+  #readDisclosure(
+    trigger: Element,
+    controlled: string,
+    expandedState: string,
+    elements: readonly Element[],
+    classifications: WeakMap<Element, ElementClassification>,
+  ): KeptDisclosureRead {
+    const none: KeptDisclosureRead = Object.freeze({ panel: undefined, disclosure: undefined });
+    const ids = controlled.trim().split(/\s+/u).filter(isSafeDomId);
+    if (
+      ids.length !== 1 ||
+      !isDisclosureActivationController(trigger) ||
+      !this.#isVisibleDisclosureController(trigger) ||
+      !hasValidPopupSemantics(trigger)
+    ) return none;
+    const root = trigger.getRootNode();
+    const panel = findUniqueElementById(elements, root, ids[0]!);
+    if (
+      !panel || panel === trigger || panel.ownerDocument !== trigger.ownerDocument ||
+      panel.getRootNode() !== root || panel.contains(trigger) ||
+      trigger.contains(panel)
+    ) return Object.freeze({ panel: panel ?? undefined, disclosure: undefined });
+    const panelClassification = classifications.get(panel);
+    if (
+      panelClassification?.category !== 'public-semantic' ||
+      normalizedToken(panelClassification.facts.role) === 'tabpanel' ||
+      !popupTargetSemanticsMatch(trigger, panel) ||
+      !isBoundedSafeDisclosurePanel(panel, classifications) ||
+      (expandedState === 'true'
+        ? !this.#isVisibleDisclosureController(panel)
+        : !this.#isCollapsedDisclosurePanel(panel))
+    ) return Object.freeze({ panel, disclosure: undefined });
+    return Object.freeze({
+      panel,
+      disclosure: Object.freeze({
         trigger,
         panel,
         expanded: expandedState === 'true',
         popupRole: disclosurePopupRole(trigger, panel),
-      }));
-    }
+      }),
+    });
   }
 
   /**
@@ -3265,8 +3382,16 @@ export class SemanticSourceSession {
         (!collapsed && (!retainedRelationship || !visible)) ||
         // The first trigger names the menu; an arrow beside it may be an icon.
         !triggers.every((element, index) =>
-          isBoundedSafeDisclosurePanel(element, classifications, index === 0)) ||
-        !isBoundedSafeMenuPanel(panel, classifications)
+          isBoundedSafeDisclosurePanel(element, classifications, index === 0))
+      ) {
+        writes.set(container, undefined);
+        continue;
+      }
+      const panelRead = readSafeMenuPanel(panel, classifications);
+      // A panel of version 2 cannot be told of a cut: it gets no such menu.
+      if (
+        !panelRead ||
+        (panelRead.cut && this.#protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION)
       ) {
         writes.set(container, undefined);
         continue;
@@ -3280,6 +3405,7 @@ export class SemanticSourceSession {
         // A panel the source shows (a real hover or click on the page) opens
         // in the replica too; the reader's own hover there opens it locally.
         expanded: !collapsed,
+        ...(panelRead.cut ? { cut: panelRead.cut } : {}),
       }));
     }
   }
@@ -3289,6 +3415,7 @@ export class SemanticSourceSession {
     classifications: WeakMap<Element, ElementClassification>,
     turn: () => boolean,
     tabs: ValidatedTab[],
+    unchanged: (element: Element) => boolean = () => false,
   ): Generator<SemanticScanPause, void, void> {
     for (const relationship of controlledContent.tabs) {
       if (turn()) yield 'turn';
@@ -3296,9 +3423,17 @@ export class SemanticSourceSession {
       const panelClassification = classifications.get(relationship.panel);
       if (
         triggerClassification?.category !== 'public-semantic' ||
-        panelClassification?.category !== 'public-semantic' ||
-        !isBoundedSafeTabPanel(relationship.panel, classifications)
+        panelClassification?.category !== 'public-semantic'
       ) continue;
+      // The walk of a panel asks only what each element was classified as:
+      // a panel no change is in, under or around keeps its answer (D219).
+      const panel = relationship.panel;
+      let safe = unchanged(panel) ? this.#tabPanelReads.get(panel) : undefined;
+      if (safe === undefined) {
+        safe = isBoundedSafeTabPanel(panel, classifications);
+        this.#tabPanelReads.set(panel, safe);
+      }
+      if (!safe) continue;
       tabs.push(Object.freeze({
         trigger: relationship.trigger,
         panel: relationship.panel,
@@ -3714,7 +3849,9 @@ function nextSourceChildNode<T>(
 ): { readonly node: Node; readonly context: T } | undefined {
   while (frames.length > 0) {
     const frame = frames[frames.length - 1]!;
-    const node = frame.index < frame.list.length ? frame.list[frame.index] : undefined;
+    // Read by index alone: the length of a live list of 131,000 children is
+    // counted at its first read (D219).
+    const node = frame.list[frame.index];
     if (!node) {
       frames.pop();
       continue;
@@ -3746,7 +3883,7 @@ function pushSourceChildFrame<T>(
   owner: Node,
   context: T,
 ): void {
-  if (list.length === 0) return;
+  if (!list[0]) return;
   frames.push({ list, owner, index: 0, last: undefined, context, copied: false });
 }
 
@@ -4483,43 +4620,59 @@ function isBoundedSafeDisclosurePanel(
  * It is refused only for a credential inside it. Nothing more travels for
  * the field than without the menu: its value and its options read under
  * their own settings, and only text beside it is menu text.
+ *
+ * Since D219 (the owner's D218) a panel of more than 8,192 nodes, or with
+ * more text than a batch may carry, is offered cut: the walk goes in the
+ * order the page draws (children, the root's, what a slot is assigned) and
+ * stops before the node past either bound; what it met is the cut, and the
+ * rest stays as the page draws it. A credential or a node of another
+ * document among what it met still refuses the panel, as does a panel with
+ * no text in it. A panel with more text than one record that is not mostly
+ * that of links is offered too (it was refused since D134).
  */
-function isBoundedSafeMenuPanel(
+function readSafeMenuPanel(
   panel: Element,
   classifications: WeakMap<Element, ElementClassification>,
-): boolean {
+): { readonly cut?: ReadonlySet<Node> } | undefined {
   const pending: Node[] = [panel];
-  let visited = 0;
+  const met = new Set<Node>();
   let textUnits = 0;
   let hasText = false;
-  let slotted = false;
+  let cut = false;
   while (pending.length > 0) {
     const node = pending.pop();
-    if (
-      !node || ++visited > MAX_SEMANTIC_MENU_PANEL_NODES ||
-      node.ownerDocument !== panel.ownerDocument
-    ) return false;
+    if (!node || node.ownerDocument !== panel.ownerDocument) return undefined;
+    if (met.size >= MAX_SEMANTIC_MENU_PANEL_NODES) {
+      cut = true;
+      break;
+    }
     if (sourceNodeType(node) === TEXT_NODE) {
       const value = safelyRead(() => node.nodeValue);
-      if (typeof value !== 'string') return false;
+      if (typeof value !== 'string') return undefined;
+      if ((textUnits + value.length) * 2 > MAX_SEMANTIC_SOURCE_BATCH_BYTES) {
+        cut = true;
+        break;
+      }
       textUnits += value.length;
-      if (textUnits * 2 > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
+      met.add(node);
       if (value.trim() !== '') hasText = true;
       continue;
     }
+    met.add(node);
     if (sourceNodeType(node) !== ELEMENT_NODE) continue;
     const element = node as Element;
     const category = classifications.get(element)?.category;
     if (category === undefined || category === 'secret' || category === 'withheld') {
-      return false;
+      return undefined;
     }
     const children = panelWalkChildren(element);
-    if (!children) return false;
-    slotted ||= children.slotted;
-    appendAll(pending, children.nodes);
+    if (!children) return undefined;
+    for (let index = children.nodes.length - 1; index >= 0; index -= 1) {
+      pending.push(children.nodes[index]!);
+    }
   }
-  // What is slotted is a menu's text where it is drawn (D179).
-  return hasText && hasMenuSizedText(panel, slotted);
+  if (!hasText) return undefined;
+  return cut ? { cut: met } : {};
 }
 
 /**
@@ -4552,102 +4705,6 @@ function readSlotAssignedNodes(slot: Element): readonly Node[] | undefined {
   } catch {
     return undefined;
   }
-}
-
-/**
- * The text of a panel as it is drawn, for `hasMenuSizedText`: a root's
- * text in place of its host's children, and what a slot is assigned in
- * place of its own (D179). With the items' text, outermost items only.
- * Undefined when the walk cannot be read or goes past the bound.
- */
-function readDrawnPanelText(
-  panel: Element,
-): { readonly whole: string; readonly items: readonly string[] } | undefined {
-  const parts: string[] = [];
-  const items: string[][] = [];
-  const pending: Array<{ readonly node: Node; readonly item: string[] | undefined }> =
-    [{ node: panel, item: undefined }];
-  let visited = 0;
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (++visited > MAX_SEMANTIC_MENU_PANEL_NODES) return undefined;
-    const node = current.node;
-    if (sourceNodeType(node) === TEXT_NODE) {
-      const value = safelyRead(() => node.nodeValue);
-      if (typeof value !== 'string') return undefined;
-      parts.push(value);
-      current.item?.push(value);
-      continue;
-    }
-    if (sourceNodeType(node) !== ELEMENT_NODE) continue;
-    const element = node as Element;
-    let item = current.item;
-    if (!item && node !== panel && safelyRead(() => element.matches(MENU_ITEM_SELECTOR))) {
-      item = [];
-      items.push(item);
-    }
-    let children: readonly Node[] | undefined;
-    const shadowRoot = safelyReadShadowRoot(element);
-    if (shadowRoot) {
-      children = Array.from(shadowRoot.childNodes);
-    } else if (sourceLocalName(element).toLowerCase() === 'slot') {
-      const assigned = readSlotAssignedNodes(element);
-      if (!assigned) return undefined;
-      children = assigned.length > 0 ? assigned : Array.from(sourceChildNodeList(element));
-    } else {
-      children = Array.from(sourceChildNodeList(element));
-    }
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      pending.push({ node: children[index]!, item });
-    }
-  }
-  return { whole: parts.join(''), items: items.map((item) => item.join('')) };
-}
-
-// What a menu's items are: the text of a large panel is mostly theirs.
-const MENU_ITEM_SELECTOR =
-  'a[href],button,[role="menuitem"],[role="menuitemcheckbox"],' +
-  '[role="menuitemradio"],[role="link"],[role="button"]';
-
-/**
- * Whether a panel holds a menu's amount of text: some, and no more than one
- * record may be, or, when more, mostly the text of links and buttons (D134).
- * A large site menu of 120 links is a menu; a block of prose hidden beside a
- * headline, with more text than one record, is not, as before: its text
- * would travel and be translated while hidden. Under one record's length a
- * panel is a menu whatever it holds, as it was.
- */
-function hasMenuSizedText(panel: Element, slotted = false): boolean {
-  if (slotted) {
-    const drawn = readDrawnPanelText(panel);
-    if (!drawn) return false;
-    const whole = normalizedTextLength(drawn.whole);
-    if (whole === 0) return false;
-    if (whole <= MAX_SEMANTIC_SOURCE_TEXT) return true;
-    let drawnInItems = 0;
-    for (const item of drawn.items) drawnInItems += normalizedTextLength(item);
-    return drawnInItems * 2 >= whole;
-  }
-  const length = normalizedTextLength(safelyRead(() => panel.textContent));
-  if (length === 0) return false;
-  if (length <= MAX_SEMANTIC_SOURCE_TEXT) return true;
-  const items = safelyRead(() => [...panel.querySelectorAll(MENU_ITEM_SELECTOR)]);
-  if (!items) return false;
-  let inItems = 0;
-  for (const item of items) {
-    // An item inside another is part of that one's text.
-    const outer = safelyRead(() => item.parentElement?.closest(MENU_ITEM_SELECTOR));
-    if (outer && outer !== panel && safelyRead(() => panel.contains(outer))) continue;
-    inItems += normalizedTextLength(safelyRead(() => item.textContent));
-  }
-  return inItems * 2 >= length;
-}
-
-/** The length of a text as a record would carry it. */
-function normalizedTextLength(value: unknown): number {
-  return typeof value === 'string'
-    ? value.normalize('NFC').replace(/\s+/gu, ' ').trim().length
-    : 0;
 }
 
 function isBoundedSafeTabPanel(

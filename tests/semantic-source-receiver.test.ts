@@ -1368,6 +1368,53 @@ describe('semantic source receiver', () => {
     expect(missingTextPresented.flat()).toEqual([]);
   });
 
+  it('takes a menu offered cut and binds the text it was sent (D219)', () => {
+    // 2,800 links in a list: 8,401 nodes, past the 8,192 a panel is walked.
+    const items = Array.from({ length: 2_800 }, (_, index) =>
+      `<li><a href="/s-${index}">Section ${index}</a></li>`).join('');
+    const { document } = parseHTML(`<html><body><nav><div id="wrapper">
+      <a id="trigger" href="/resources">Resources</a>
+      <ul id="panel" class="hidden">${items}</ul>
+    </div></nav></body></html>`);
+    const container = document.querySelector<HTMLElement>('#wrapper')!;
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const links = [...panel.querySelectorAll('a')];
+    const first = links[0]!.firstChild!;
+    const last = links.at(-1)!.firstChild!;
+    const nodes = new Map<number, Node>([
+      [16, container], [17, trigger], [18, panel], [19, first],
+    ]);
+    const take = (proof: SemanticSourceProof) => {
+      const presented: Array<readonly ResolvedSemanticSourceProof[]> = [];
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => nodes.get(nodeId),
+        applyProofs: (proofs) => {
+          presented.push(proofs);
+          return true;
+        },
+      });
+      receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1, [menuTextRecord(19, 'Abschnitt 0')], [proof],
+      ));
+      return presented.flat().map((resolved) => resolved.kind);
+    };
+    // Whole, the panel is past the walk and refused, as before.
+    expect(take(structuralMenuProof())).toEqual([]);
+    // Cut, it is taken up to its cut: the text sent is bound, and what is
+    // past the cut stays as the page draws it.
+    expect(take({ ...structuralMenuProof(), cut: true })).toEqual(['structural-menu']);
+    expect(first.nodeValue).toBe('Abschnitt 0');
+    expect(last.nodeValue).toBe('Section 2799');
+    // A credential among what the cut holds still refuses it.
+    const field = document.createElement('input');
+    field.setAttribute('type', 'password');
+    panel.querySelector('li')!.append(field);
+    expect(take({ ...structuralMenuProof(), cut: true })).toEqual([]);
+  });
+
   it('presents a structural menu locally in the isolated replica', () => {
       const { document, window } = parseHTML(`<html><body><nav>
         <div id="wrapper"><a id="trigger" href="/resources">Resources</a>

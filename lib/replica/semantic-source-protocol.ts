@@ -214,6 +214,12 @@ export interface SemanticStructuralMenuProof {
   readonly popupRole: 'menu';
   /** Current source-painted state after the relationship was safely inferred. */
   readonly expanded: boolean;
+  /**
+   * The panel is offered cut at 8,192 nodes (D219, the owner's D218): text
+   * past the cut has no record and stays as the page draws it. Only in a
+   * batch of version 3; absent for a whole panel.
+   */
+  readonly cut?: true;
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
 }
 
@@ -1207,11 +1213,12 @@ export function readSemanticSourceProof(
     });
   }
   if (input.kind === 'structural-menu') {
+    const cut = Object.hasOwn(input, 'cut');
     if (!hasExactKeys(input, [
       'kind', 'bridge', 'relationId', 'revision', 'gate', 'containerNodeId',
       'triggerNodeId', 'panelNodeId', 'popupRole', 'expanded',
-      'classifierVersion',
-    ]) || input.gate !== 'disclosureContent' ||
+      'classifierVersion', ...(cut ? ['cut'] : []),
+    ]) || (cut && input.cut !== true) || input.gate !== 'disclosureContent' ||
       !positiveSafeInteger(input.containerNodeId) ||
       !positiveSafeInteger(input.triggerNodeId) ||
       !positiveSafeInteger(input.panelNodeId) ||
@@ -1239,6 +1246,7 @@ export function readSemanticSourceProof(
       panelNodeId: input.panelNodeId,
       popupRole: input.popupRole,
       expanded: input.expanded,
+      ...(cut ? { cut: true as const } : {}),
       classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
     });
   }
@@ -1373,6 +1381,8 @@ export function semanticSourceProofSignature(proof: SemanticSourceProof): string
     proof.bridge, proof.kind, proof.relationId, proof.gate,
     proof.containerNodeId, proof.triggerNodeId, proof.panelNodeId,
     proof.popupRole, Number(proof.expanded), proof.classifierVersion,
+    // A whole panel signs as before D219.
+    ...(proof.cut ? ['cut'] : []),
   ].join('\u0000');
   return [
     proof.bridge, proof.kind, proof.relationId, proof.gate,

@@ -11,6 +11,7 @@ import {
   createSemanticSourcePortName,
   createSemanticSourceStart,
   readSemanticSourceProof,
+  semanticSourceProofSignature,
   semanticSourceProofIdentity,
   readSemanticSourceControllerMessage,
   readSemanticSourceBatch,
@@ -181,6 +182,12 @@ describe('semantic source protocol', () => {
     expect(readSemanticSourceProof(disclosureProof)).toEqual(disclosureProof);
     expect(readSemanticSourceProof(tabProof)).toEqual(tabProof);
     expect(readSemanticSourceProof(structuralMenuProof)).toEqual(structuralMenuProof);
+    // A menu offered cut says so (D219); `cut` is `true` or absent.
+    const cutMenu = { ...structuralMenuProof, cut: true as const };
+    expect(readSemanticSourceProof(cutMenu)).toEqual(cutMenu);
+    expect(readSemanticSourceProof({ ...structuralMenuProof, cut: false })).toBeUndefined();
+    expect(semanticSourceProofSignature(cutMenu))
+      .not.toBe(semanticSourceProofSignature(structuralMenuProof));
     expect(readSemanticSourceProof(choiceProof)).toEqual(choiceProof);
     expect(readSemanticSourceProof(controlProof)).toEqual(controlProof);
     expect(readSemanticSourceProof(ariaProof)).toEqual(ariaProof);

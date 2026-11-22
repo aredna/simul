@@ -1434,10 +1434,12 @@ export class SemanticSourceReceiver {
           this.#proofTargetIsSafe(other, false)) ||
         !this.#proofTargetIsSafe(panel, false) ||
         // A menu's panel may hold a field; never a credential (D132). It
-        // is walked as far as the page walks it (D179).
+        // is walked as far as the page walks it (D179); a panel the page
+        // offers cut, up to its cut, and what is past it stays as the page
+        // draws it, with no record bound there (D219, the owner's D218).
         !receiverDisclosureSubtreeIsSafe(panel, (element) =>
           this.#proofTargetIsSafe(element, false), true,
-        RECEIVER_MENU_PANEL_NODES)
+        RECEIVER_MENU_PANEL_NODES, proof.cut === true)
       ) return undefined;
       return Object.freeze({
         kind: proof.kind,
@@ -2148,16 +2150,28 @@ function receiverDisclosureSubtreeIsSafe(
   /** A menu's panel may hold a field that `classify` passes (D132). */
   allowFields = false,
   maxNodes = RECEIVER_DISCLOSURE_PANEL_NODES,
+  /**
+   * The page offered the panel cut (D219): what lies past `maxNodes`, in
+   * the order the panel is drawn, is not asked, and the panel is not
+   * refused for it.
+   */
+  cut = false,
 ): boolean {
+  // In the order the panel is drawn: a node's children, its root's, and
+  // what a slot is assigned, first to last (D219).
   const pending: Node[] = [panel];
+  const pushInOrder = (nodes: ArrayLike<Node>): void => {
+    for (let index = nodes.length - 1; index >= 0; index -= 1) pending.push(nodes[index]!);
+  };
   let visited = 0;
   while (pending.length > 0) {
     const node = pending.pop();
+    if (node && visited >= maxNodes && cut) return true;
     if (!node || ++visited > maxNodes || sourceProperty(node, 'ownerDocument') !== sourceProperty(panel, 'ownerDocument')) {
       return false;
     }
     if (sourceNodeType(node) === 11) {
-      pushEach(pending, sourceChildNodeList(node));
+      pushInOrder(sourceChildNodeList(node));
       continue;
     }
     if (sourceNodeType(node) !== 1) continue;
@@ -2173,19 +2187,19 @@ function receiverDisclosureSubtreeIsSafe(
         (contentEditable !== '' && contentEditable !== 'false')
       )
     ) return false;
-    pushEach(pending, sourceChildNodeList(element));
     try {
-      const shadowRoot = sourceProperty(element, 'shadowRoot');
-      if (shadowRoot?.mode === 'open') pending.push(shadowRoot);
       // What a slot is assigned is drawn in the panel, though it is the
       // host's (D179): it is asked as the panel's own nodes are.
       if (tagName === 'slot') {
         const assigned = (element as Partial<HTMLSlotElement>).assignedNodes;
-        if (typeof assigned === 'function') pushEach(pending, assigned.call(element));
+        if (typeof assigned === 'function') pushInOrder(assigned.call(element));
       }
+      const shadowRoot = sourceProperty(element, 'shadowRoot');
+      if (shadowRoot?.mode === 'open') pending.push(shadowRoot);
     } catch {
       return false;
     }
+    pushInOrder(sourceChildNodeList(element));
   }
   return true;
 }

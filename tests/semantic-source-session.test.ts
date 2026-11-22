@@ -1519,7 +1519,7 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
-  it('takes a large hidden block beside a link for a menu only when it is made of links (D134)', () => {
+  it('takes a large hidden block beside a link for a menu, whatever it holds (D134, D219)', () => {
     const prose = 'The council met on the quay and voted on the registers of the town hall. '
       .repeat(80);
     const few = '<a href="/more">Read more</a>';
@@ -1555,27 +1555,19 @@ describe('semantic source session', () => {
       return result;
     };
     // An article's text hidden beside its headline: 6,000 characters of
-    // prose and one link. No menu, and none of it travels.
+    // prose and one link. No menu from D134; the owner's D218 offers it
+    // (D219). A text longer than one record still travels as none.
     expect(prose.length).toBeGreaterThan(5_000);
-    expect(offered(`<p>${prose}</p>${few}`)).toEqual({ menu: false, hiddenText: 0 });
-    // A short hidden block was a menu before, and is.
-    expect(offered(`<p>${prose.slice(0, 600)}</p>${few}`).menu).toBe(true);
-    // Mostly links: a menu, whatever its size.
+    expect(offered(`<p>${prose}</p>${few}`)).toEqual({ menu: true, hiddenText: 1 });
+    expect(offered(`<p>${prose.slice(0, 600)}</p>${few}`)).toEqual({ menu: true, hiddenText: 2 });
     expect(offered(links(150)).menu).toBe(true);
-    expect(offered(`<p>${prose.slice(0, 1_500)}</p>${links(150)}`).menu).toBe(true);
-    // Mostly prose with many links in it: not one.
-    expect(offered(`<p>${prose}</p>${links(40)}`).menu).toBe(false);
-    // A button inside a link counts once.
-    const nested = Array.from({ length: 150 }, (_, index) =>
-      `<a href="/s-${index}"><button>Section ${index} of the product catalogue</button></a>`)
-      .join('');
-    expect(offered(`<p>${prose.slice(0, 4_000)}</p>${nested}`).menu).toBe(true);
-    expect(offered(`<p>${prose}</p>${nested}`).menu).toBe(false);
+    expect(offered(`<p>${prose}</p>${links(40)}`).menu).toBe(true);
   });
 
   // D179: a menu's panel is walked to 8,192 nodes on both sides, as its
-  // text costs once now that a batch carries what changed.
-  it('offers a site menu of 400 or 1,500 links, and refuses one past 8,192 nodes (D179)', () => {
+  // text costs once now that a batch carries what changed. Past them it is
+  // offered cut (D219, the owner's D218).
+  it('offers a site menu of 400 or 1,500 links, and one past 8,192 nodes cut there (D179, D219)', () => {
     const offered = (count: number) => {
       const items = Array.from({ length: count }, (_, index) =>
         `<li><a href="/s-${index}">Section ${index}</a></li>`).join('');
@@ -1597,16 +1589,24 @@ describe('semantic source session', () => {
       ));
       const batch = port.messages[0]!;
       session.dispose();
+      const texts = batch.records.filter((record) => record.gate === 'disclosureContent')
+        .map((record) => record.text);
+      const menu = batch.proofs.find((proof) => proof.kind === 'structural-menu');
       return {
-        menu: batch.proofs.some((proof) => proof.kind === 'structural-menu'),
-        text: batch.records.filter((record) => record.gate === 'disclosureContent').length,
+        menu: menu !== undefined,
+        cut: menu?.kind === 'structural-menu' && menu.cut === true,
+        text: texts.length,
+        last: texts.at(-1),
       };
     };
     // 400 links in a list are 1,201 nodes; 1,024 was the bound.
-    expect(offered(400)).toEqual({ menu: true, text: 400 });
-    expect(offered(1_500)).toEqual({ menu: true, text: 1_500 });
-    // 2,800 links are 8,401 nodes: no menu, and none of its text.
-    expect(offered(2_800)).toEqual({ menu: false, text: 0 });
+    expect(offered(400)).toEqual({ menu: true, cut: false, text: 400, last: 'Section 399' });
+    expect(offered(1_500)).toEqual({ menu: true, cut: false, text: 1_500, last: 'Section 1499' });
+    // 2,800 links are 8,401 nodes: refused before D219; now the first 8,192
+    // in the order the page draws them are offered (the list, 2,730 items
+    // of three nodes, and the next item's own element), and the rest of
+    // the text stays as the page draws it.
+    expect(offered(2_800)).toEqual({ menu: true, cut: true, text: 2_730, last: 'Section 2729' });
   });
 
   describe('what is slotted into a collapsed panel of a component (D179)', () => {
@@ -1962,9 +1962,9 @@ describe('semantic source session', () => {
             <div class="collapsed"><select><option>Buried</option></select></div>
           </div></li></ul></nav>
         <div class="collapsed"><select><option>Elsewhere</option></select></div>
-        <ul><li><a href="/story">Headline</a>
+        <div><a href="/story">Headline</a>
           <div class="collapsed"><p>${prose}</p><select><option>Unread</option></select></div>
-        </li></ul></form></body></html>`);
+        </div></form></body></html>`);
       installPaintedTabFixture(document, window as unknown as Window);
       // In Chrome nothing under `display: none` has a box.
       for (const element of document.querySelectorAll('.collapsed *')) {
@@ -2022,7 +2022,8 @@ describe('semantic source session', () => {
     expect(full.menus).toBe(1);
     // Not the option the page hides, the dropdown in a block that stays
     // hidden, the one in a hidden block that is no menu, nor the one beside
-    // an article's hidden text.
+    // an article's hidden text outside a list or navigation (no menu since
+    // D219 offers a block of prose beside a link in a list).
     expect(full.labels).toEqual(['English', 'Japanese']);
     expect(full.selected).toEqual([[full.ja]]);
     expect(full.selection).toEqual(['Japanese']);
@@ -2847,16 +2848,13 @@ describe('semantic source session', () => {
     it('makes no menu of what is none as the item\'s own child', () => {
       // What a wrapper holds is judged as the item's own child is. The
       // wrapper adds demands of its own (no box, a panel out of the flow)
-      // and takes none away: each of these is refused both ways.
-      const prose = 'The council met on the quay and voted on the registers of the town hall. '
-        .repeat(80);
+      // and takes none away: each of these is refused both ways. (Much text
+      // that is not links is offered since D219.)
       const outside = (held: string) => `<div id="item">
         <a id="trigger" href="/products">Products</a>${held}</div>`;
       const besideButton = (held: string) => `<div id="item">
         <button id="trigger" type="button">More</button>${held}</div>`;
       const shapes: readonly (readonly [string, (held: string) => string, string])[] = [
-        ['much text that is not links', item,
-          `<div id="panel"><p>${prose}</p><a href="/more">Read more</a></div>`],
         ['a hidden link (the mobile copy of a link)', item,
           '<a id="panel" href="/m">Mobile</a>'],
         ['a password field', item,
@@ -2888,14 +2886,14 @@ describe('semantic source session', () => {
       }
     });
 
-    it('offers no menu for a large block of prose inside a wrapper', () => {
+    it('offers a menu for a large block of prose inside a wrapper (D219)', () => {
+      // Refused since D134; the owner's D218 offers it.
       const prose = 'The council met on the quay and voted on the registers of the town hall. '
         .repeat(80);
       const page = read(item(
         `<div id="wrap"><div id="panel"><p>${prose}</p><a href="/more">Read more</a></div></div>`,
       ), { boxless: '#wrap' });
-      expect(page.menus).toEqual([]);
-      expect(page.hiddenText).toEqual([]);
+      expect(page.menus).toEqual(['item trigger panel']);
       page.session.dispose();
     });
 
@@ -5990,9 +5988,22 @@ describe('a scan that reads only what changed (D217)', () => {
   };
 
   /** A page, its session started and its first batch acknowledged; reads of style counted by element. */
-  const started = (styleNames?: () => typeof NO_NAMES | undefined) => {
-    const { document, window } = parseHTML(PAGE);
+  const started = (
+    styleNames?: () => typeof NO_NAMES | undefined,
+    markup = PAGE,
+    labelRules = false,
+  ) => {
+    const { document, window } = parseHTML(markup);
     installPaintedTabFixture(document, window as unknown as Window);
+    if (labelRules) {
+      // In Chrome nothing under `display: none` has a box.
+      for (const element of document.querySelectorAll('.collapsed *')) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true,
+          value: () => Object.assign([], { item: () => null }) as DOMRectList,
+        });
+      }
+    }
     const reads = new Map<Element, number>();
     const securityReads = new Map<Element, number>();
     const base = structuralMenuStyle((element) =>
@@ -6010,6 +6021,21 @@ describe('a scan that reads only what changed (D217)', () => {
         },
       });
     }) as Window['getComputedStyle'];
+    // The label rules ask the page's own window and name `Node` (D219).
+    if (labelRules) {
+      Object.defineProperty(window, 'getComputedStyle', { configurable: true, value: style });
+      const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+      Object.defineProperty(globalThis, 'Node', {
+        configurable: true,
+        writable: true,
+        value: (window as unknown as { Node: typeof Node }).Node,
+      });
+      onTestFinished(() => {
+        delete (window as unknown as Record<string, unknown>).getComputedStyle;
+        if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+        else delete (globalThis as { Node?: unknown }).Node;
+      });
+    }
     const harness: SemanticMutationHarness = { observed: [] };
     const port = new FakeSemanticPort(
       createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
@@ -6066,6 +6092,41 @@ describe('a scan that reads only what changed (D217)', () => {
     page.change('Play B');
     const paragraph = page.document.querySelector('p')!;
     expect(page.securityReads.get(paragraph) ?? 0).toBeGreaterThan(0);
+  });
+
+  it('keeps the labels of options and the disclosures no change is in (D219)', () => {
+    const options = Array.from({ length: 30 }, (_, index) =>
+      `<option value="${index}">Choice ${index}</option>`).join('');
+    // The dropdown sits in a menu's collapsed panel, where its labels are
+    // read for the mirror to open it.
+    const markup = `<html><body><button id="flip" aria-label="Play A">Play</button>` +
+      '<button id="more" aria-expanded="false" aria-controls="drawer">More</button>' +
+      '<div id="drawer" class="collapsed" hidden><a href="/x">Hidden link</a></div>' +
+      '<nav><div class="wrapper"><a href="/shop">Shop</a><div class="collapsed">' +
+      `<a href="/shop/a">Alpha</a><select id="pick">${options}</select></div></div>` +
+      `${menus}</nav></body></html>`;
+    const read = (styleNames?: () => typeof NO_NAMES | undefined) => {
+      const page = started(styleNames, markup, true);
+      expect(page.first.proofs.some((proof) => proof.kind === 'disclosure-state')).toBe(true);
+      expect(JSON.stringify(page.first)).toContain('Choice 29');
+      page.change('Play B');
+      const batch = page.port.messages.at(-1)!;
+      expect(JSON.stringify(batch)).toContain('Play B');
+      const optionReads = [...page.document.querySelectorAll('option')]
+        .reduce((sum, option) => sum + (page.reads.get(option) ?? 0), 0);
+      return {
+        optionReads,
+        drawerReads: page.reads.get(page.document.getElementById('drawer')!) ?? 0,
+        moreReads: page.reads.get(page.document.getElementById('more')!) ?? 0,
+      };
+    };
+    const whole = read();
+    const kept = read(() => NO_NAMES);
+    // Without the census each option's label and the disclosure are read
+    // again; with it, what a whole-page pass asks once is all.
+    expect(kept.optionReads).toBeLessThan(whole.optionReads);
+    expect(kept.drawerReads).toBeLessThan(whole.drawerReads);
+    expect(kept.moreReads).toBeLessThan(whole.moreReads);
   });
 
   it('tells a sheet that may mask text from one that may not (D217)', () => {

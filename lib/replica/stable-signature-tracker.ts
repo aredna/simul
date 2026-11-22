@@ -22,6 +22,11 @@ export class StableSignatureTracker {
     this.#states.set(owner, { baseline: signature, observations: 0 });
   }
 
+  /** Whether `signature` is the baseline of `owner`. */
+  isBaseline(owner: object, signature: string): boolean {
+    return this.#states.get(owner)?.baseline === signature;
+  }
+
   /** Whether `owner` has a baseline: its next observation is compared. */
   has(owner: object): boolean {
     return this.#states.has(owner);
