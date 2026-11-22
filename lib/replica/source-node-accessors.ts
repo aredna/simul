@@ -65,10 +65,16 @@ export function sourceLocalName(element: Element): string {
     : readSourceOwnAccessor(element, 'localName') as string;
 }
 
-/** Whether `node` is an element that answers for its fields' names. */
+/**
+ * Whether `node` answers for names put in front of its own properties: a
+ * form for its fields', and a document for those of its images, forms,
+ * embeds, objects and frames (D207): a page's `<img name="body">` is
+ * `document.body`, and `<form name="styleSheets">` its style sheets.
+ */
 export function sourceAnswersFieldNames(node: Node): boolean {
-  return sourceNodeType(node) === 1 &&
-    sourceLocalName(node as Element).toLowerCase() === 'form';
+  const type = sourceNodeType(node);
+  return type === 9 ||
+    type === 1 && sourceLocalName(node as Element).toLowerCase() === 'form';
 }
 
 /** An element's attributes, past a form's field names; see above. */
@@ -130,8 +136,10 @@ type MethodName<T> = {
 }[keyof T];
 
 /**
- * Calls a method of a node past a form's fields (D195). What a field stands
- * in front of is never a function, so a function found is the node's own.
+ * Calls a method of a node past a form's fields (D195), or a document's
+ * named elements (D207). A node that answers for names is called through
+ * its prototypes: Chrome's `<embed>` and `<object>` can be called, so a
+ * function there may be one of those.
  */
 export function sourceCall<T extends object, K extends MethodName<T>>(
   node: T,
@@ -139,7 +147,7 @@ export function sourceCall<T extends object, K extends MethodName<T>>(
   ...args: T[K] extends (...args: infer A) => unknown ? A : never
 ): T[K] extends (...args: never[]) => infer R ? R : never {
   type Result = T[K] extends (...args: never[]) => infer R ? R : never;
-  const own = node[name] as unknown;
+  const own = sourceAnswersFieldNames(node as unknown as Node) ? undefined : node[name] as unknown;
   if (typeof own === 'function') {
     return (own as (...values: unknown[]) => unknown).apply(node, args) as Result;
   }
@@ -149,7 +157,8 @@ export function sourceCall<T extends object, K extends MethodName<T>>(
 }
 
 /**
- * A property of a node past a form's fields (D195). A field is itself a
+ * A property of a node past a form's fields (D195) or a document's named
+ * elements (D207). A field is itself a
  * node, so what it stands in front of cannot be told by its kind: a form's
  * properties are read by the prototypes' accessors.
  */

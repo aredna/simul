@@ -1,7 +1,9 @@
 import {
+  sourceCall,
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
+  sourceProperty,
 } from './source-node-accessors';
 import {
   MAX_SEMANTIC_SOURCE_BATCH_BYTES,
@@ -868,32 +870,32 @@ export class SemanticSourceSession {
     this.#observedSemanticRoots.add(root);
     this.#semanticEventRoots.add(root);
     for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
-      root.addEventListener(type, this.#onDomChange, true);
+      sourceCall(root, 'addEventListener', type, this.#onDomChange, true);
     }
     for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
-      root.addEventListener(type, this.#onSelectActivation, true);
+      sourceCall(root, 'addEventListener', type, this.#onSelectActivation, true);
     }
     for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
-      root.addEventListener(type, this.#onPresentationChange, true);
+      sourceCall(root, 'addEventListener', type, this.#onPresentationChange, true);
     }
     // A root that assigns its slots by script moves what its host holds
     // into an editor, or out of one, without a mutation.
     if ((root as Partial<ShadowRoot>).slotAssignment === 'manual') {
-      root.addEventListener('slotchange', this.#onDomChange, true);
+      sourceCall(root, 'addEventListener', 'slotchange', this.#onDomChange, true);
     }
   }
 
   #stopListeningToRoot(root: Document | ShadowRoot): void {
     for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
-      root.removeEventListener(type, this.#onDomChange, true);
+      sourceCall(root, 'removeEventListener', type, this.#onDomChange, true);
     }
     for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
-      root.removeEventListener(type, this.#onSelectActivation, true);
+      sourceCall(root, 'removeEventListener', type, this.#onSelectActivation, true);
     }
     for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
-      root.removeEventListener(type, this.#onPresentationChange, true);
+      sourceCall(root, 'removeEventListener', type, this.#onPresentationChange, true);
     }
-    root.removeEventListener('slotchange', this.#onDomChange, true);
+    sourceCall(root, 'removeEventListener', 'slotchange', this.#onDomChange, true);
   }
 
   /**
@@ -1717,7 +1719,7 @@ export class SemanticSourceSession {
   ): Generator<SemanticScanPause, StagedSemanticSourceScan, void> {
     let askedWhatIsShown = false;
     const scope = this.#scope;
-    const root = this.environment.document.documentElement;
+    const root = sourceProperty(this.environment.document, 'documentElement');
     const recordRevisions = new Map<number, RevisionState>();
     const proofRevisions = new Map<string, RevisionState>();
     const structuralMenuWrites = new Map<Element, {
@@ -3194,13 +3196,16 @@ export class SemanticSourceSession {
     if (ids.length === 0) return undefined;
     const root = safelyRead(() => element.getRootNode());
     const lookup = root as Document | ShadowRoot | undefined;
-    if (!lookup || typeof lookup.getElementById !== 'function') return undefined;
+    // A document or a shadow root; a document's `getElementById` may be an
+    // image of that name (D207).
+    const lookupType = lookup ? sourceNodeType(lookup) : 0;
+    if (!lookup || lookupType !== 9 && lookupType !== 11) return undefined;
     const targetNodeIds: number[] = [];
     const seen = new Set<number>();
     for (const id of ids) {
       if (targetNodeIds.length >= MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS) break;
       if (!isSafeDomId(id)) continue;
-      const ref = safelyRead(() => lookup.getElementById(id));
+      const ref = safelyRead(() => sourceCall(lookup, 'getElementById', id));
       if (!ref || ref === element) continue;
       if (safelyRead(() => ref.getRootNode()) !== root) continue;
       if (this.#classifyElement(ref, false, false).category === 'secret') continue;
@@ -3226,7 +3231,7 @@ export function eagerlyClassifySourceDocumentSecrets(
     sourceDocument,
   ),
 ): void {
-  const root = sourceDocument.documentElement;
+  const root = sourceProperty(sourceDocument, 'documentElement');
   if (!root) return;
   classifySourceSecretScanSlice(
     createSourceSecretScanCursor(root),
@@ -3274,7 +3279,7 @@ export function startSourceDocumentSecretScan(
   classifier: StickySourceSecretClassifier,
   clock: SliceClock,
 ): SourceDocumentSecretScan {
-  const root = sourceDocument.documentElement;
+  const root = sourceProperty(sourceDocument, 'documentElement');
   if (!root) return FINISHED_SOURCE_DOCUMENT_SECRET_SCAN;
   const cursor = createSourceSecretScanCursor(root);
   const expired = (): boolean => clock.expired();
@@ -3518,9 +3523,10 @@ function rememberSourceNodeSecret(
 function sourceDocumentElementForNode(node: Node): Element | undefined {
   try {
     if (sourceNodeType(node) === 9) {
-      return (node as Document).documentElement ?? undefined;
+      return sourceProperty(node as Document, 'documentElement') ?? undefined;
     }
-    return node.ownerDocument?.documentElement ?? undefined;
+    const document = sourceProperty(node, 'ownerDocument');
+    return document ? sourceProperty(document, 'documentElement') ?? undefined : undefined;
   } catch {
     return undefined;
   }
@@ -4126,7 +4132,7 @@ function disclosureElementCanCarryUserState(element: Element): boolean {
   ) return true;
   const facts = sourceClassificationFacts(
     element,
-    element.ownerDocument.defaultView ?? (globalThis as unknown as Window),
+    sourceProperty(element.ownerDocument, 'defaultView') ?? (globalThis as unknown as Window),
     false,
     true,
   );

@@ -2,6 +2,7 @@ import {
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
+  sourceProperty,
 } from './source-node-accessors';
 import {
   createSourcePaintScanCache,
@@ -379,7 +380,7 @@ export class SourceVisibilityBoundaryIndex {
     run: SourceVisibilityRunState,
     imageSelectorSurface: boolean,
   ): Generator<void, SourceVisibilityBoundaryRefresh, void> {
-    const root = this.document.documentElement;
+    const root = sourceProperty(this.document, 'documentElement');
     const walk = yield* this.#walk(
       root ? [root] : [],
       run.previous,
@@ -498,7 +499,7 @@ export class SourceVisibilityBoundaryIndex {
   #replaceAll(): void {
     this.#styleMemory = undefined;
     this.#states.clear();
-    const root = this.document.documentElement;
+    const root = sourceProperty(this.document, 'documentElement');
     const result = this.#scanRoots(
       root ? [root] : [],
       this.#states,
@@ -622,7 +623,7 @@ export class SourceVisibilityBoundaryIndex {
         // `position: fixed`) and what it holds is told apart by its own
         // boxes. A change of the root alone was a whole read of the page at
         // every such dialog (D183).
-        if (state === 'shown' && element === this.document.documentElement) {
+        if (state === 'shown' && element === sourceProperty(this.document, 'documentElement')) {
           state = 'painted';
         }
         const prior = previous.get(element);

@@ -1,3 +1,5 @@
+import { sourceProperty } from './replica/source-node-accessors';
+
 export const PRIMARY_SCROLL_MAX = 100_000;
 /**
  * Panes the mirror follows at once (D122). A page with more scrolled panes
@@ -94,27 +96,27 @@ export function readDocumentScrollSnapshot(
   sourceDocument: Document,
   sourceWindow: ViewportLike,
 ): PrimaryScrollSnapshot {
-  const root = sourceDocument.scrollingElement ??
-    sourceDocument.documentElement ?? sourceDocument.body;
+  const root = sourceProperty(sourceDocument, 'scrollingElement') ??
+    sourceProperty(sourceDocument, 'documentElement') ?? sourceProperty(sourceDocument, 'body');
   const width = maximumFinite(
     root?.scrollWidth,
-    sourceDocument.documentElement?.scrollWidth,
-    sourceDocument.body?.scrollWidth,
+    sourceProperty(sourceDocument, 'documentElement')?.scrollWidth,
+    sourceProperty(sourceDocument, 'body')?.scrollWidth,
   );
   const height = maximumFinite(
     root?.scrollHeight,
-    sourceDocument.documentElement?.scrollHeight,
-    sourceDocument.body?.scrollHeight,
+    sourceProperty(sourceDocument, 'documentElement')?.scrollHeight,
+    sourceProperty(sourceDocument, 'body')?.scrollHeight,
   );
   const viewportWidth = positiveFinite(
     sourceWindow.innerWidth,
     root?.clientWidth,
-    sourceDocument.documentElement?.clientWidth,
+    sourceProperty(sourceDocument, 'documentElement')?.clientWidth,
   );
   const viewportHeight = positiveFinite(
     sourceWindow.innerHeight,
     root?.clientHeight,
-    sourceDocument.documentElement?.clientHeight,
+    sourceProperty(sourceDocument, 'documentElement')?.clientHeight,
   );
   // document.scrollingElement is the browser's authoritative owner. Do not
   // take the largest coordinate from body/html: a former scrolling element
@@ -148,8 +150,8 @@ export function readNestedScrollSnapshot(
   sourceDocument: Document,
   sourceWindow: NestedViewportLike,
 ): PrimaryScrollSnapshot | undefined {
-  const documentScrollOwner = sourceDocument.scrollingElement ??
-    sourceDocument.documentElement ?? sourceDocument.body;
+  const documentScrollOwner = sourceProperty(sourceDocument, 'scrollingElement') ??
+    sourceProperty(sourceDocument, 'documentElement') ?? sourceProperty(sourceDocument, 'body');
   if (
     candidate.ownerDocument !== sourceDocument ||
     candidate === documentScrollOwner ||
@@ -228,12 +230,12 @@ export function readPaneScrollPlace(
   candidate: Element,
   sourceDocument: Document,
 ): PaneScrollPlace | undefined {
-  const documentScrollOwner = sourceDocument.scrollingElement ??
-    sourceDocument.documentElement ?? sourceDocument.body;
+  const documentScrollOwner = sourceProperty(sourceDocument, 'scrollingElement') ??
+    sourceProperty(sourceDocument, 'documentElement') ?? sourceProperty(sourceDocument, 'body');
   if (
     candidate.ownerDocument !== sourceDocument ||
     candidate === documentScrollOwner ||
-    candidate === sourceDocument.documentElement ||
+    candidate === sourceProperty(sourceDocument, 'documentElement') ||
     candidate.isConnected === false ||
     isEditableScrollOwner(candidate)
   ) return undefined;
@@ -258,8 +260,8 @@ export function isDocumentScrollTarget(
   sourceDocument: Document,
   sourceWindow: Window,
 ): boolean {
-  const documentScrollOwner = sourceDocument.scrollingElement ??
-    sourceDocument.documentElement ?? sourceDocument.body;
+  const documentScrollOwner = sourceProperty(sourceDocument, 'scrollingElement') ??
+    sourceProperty(sourceDocument, 'documentElement') ?? sourceProperty(sourceDocument, 'body');
   return target === sourceWindow || target === sourceDocument ||
     target === documentScrollOwner;
 }
@@ -276,7 +278,7 @@ function isEditableScrollOwner(element: Element): boolean {
     if (editable !== null && editable.trim().toLowerCase() !== 'false') return true;
     const role = current.getAttribute('role');
     if (role && EDITABLE_SCROLL_ROLE.test(role)) return true;
-    if (current === element.ownerDocument.body) break;
+    if (current === sourceProperty(element.ownerDocument, 'body')) break;
   }
   return false;
 }

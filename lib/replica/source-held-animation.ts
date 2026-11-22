@@ -35,6 +35,10 @@
  * listed is not found, there as before.)
  */
 
+import {
+  sourceProperty,
+} from './source-node-accessors';
+
 /** A tree whose animations are listed as one: the document or a shadow root. */
 type AnimationTree = Document | ShadowRoot;
 
@@ -226,7 +230,7 @@ export function beginSourceHeldAnimationPass(
 
 /** For the reader, as it enters a shadow root: lists it in the open pass, if one is open. */
 export function listSourceHeldAnimations(tree: AnimationTree): void {
-  const ledger = LEDGERS.get(tree.ownerDocument ?? (tree as Document));
+  const ledger = LEDGERS.get(sourceProperty(tree, 'ownerDocument') ?? (tree as Document));
   if (ledger) listTree(ledger, tree);
 }
 
@@ -441,7 +445,9 @@ function heldStyleOf(element: Element, facts: readonly AnimationFacts[]): string
     let value = stated;
     if (value === undefined) {
       try {
-        computed ??= element.ownerDocument?.defaultView?.getComputedStyle(element);
+        const document: Document | null = element.ownerDocument;
+        computed ??= (document ? sourceProperty(document, 'defaultView') : null)
+          ?.getComputedStyle(element);
         value = computed?.getPropertyValue(name).trim();
       } catch {
         value = undefined;

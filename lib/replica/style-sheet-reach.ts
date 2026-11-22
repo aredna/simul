@@ -9,6 +9,9 @@
  * each one it could read reaches (`readPageLinkedSheets`).
  */
 import type { SourceCrossOriginSheetReader } from './source-style-names';
+import {
+  sourceProperty,
+} from './source-node-accessors';
 
 /**
  * How far a change of one node may change what a sheet makes secret
@@ -140,7 +143,7 @@ export function readPageLinkedSheets(
 ): PageLinkedSheets {
   let reach: ReplicaSelectorReach = 'subtree';
   const hrefs: string[] = [];
-  const sheets = document.styleSheets;
+  const sheets = sourceProperty(document, 'styleSheets');
   const length = Math.min(sheets?.length ?? 0, 2_048);
   for (let index = 0; index < length && hrefs.length < MAX_PAGE_LINKED_SHEETS; index += 1) {
     const sheet = sheets[index];

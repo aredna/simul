@@ -10,6 +10,7 @@ import {
 } from '../lib/primary-scroll';
 import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
+import { nameOnDocument } from './support/named-document';
 
 describe('primary scroll classification', () => {
   it('uses the authoritative standards/body document owner and bounded coordinates', () => {
@@ -375,6 +376,42 @@ describe('primary scroll classification', () => {
     });
   });
 });
+
+describe('a page whose images take the names of its scrolling root (D207)', () => {
+  it('reads the document\'s place past them', () => {
+    for (const name of ['scrollingElement', 'documentElement', 'body']) {
+      const { document, window } = parseHTML('<html><body><img id="named" alt=""></body></html>');
+      defineScrollBox(document.documentElement, {
+        clientWidth: 1_200, clientHeight: 700,
+        scrollWidth: 1_500, scrollHeight: 3_000,
+        scrollLeft: 60, scrollTop: 900,
+      });
+      Object.defineProperties(window, {
+        innerWidth: { configurable: true, value: 1_200 },
+        innerHeight: { configurable: true, value: 700 },
+        scrollX: { configurable: true, value: 60 },
+        scrollY: { configurable: true, value: 900 },
+      });
+      const root = document.documentElement;
+      Object.defineProperty(Object.getPrototypeOf(document) as object, 'scrollingElement', {
+        configurable: true,
+        get: () => root,
+      });
+      const undo = nameOnDocument(document as unknown as Document, name, document.getElementById('named')!);
+      try {
+        expect(readDocumentScrollSnapshot(document as unknown as Document, window), name).toEqual({
+          scrollTarget: 'document', scrollX: 60, scrollY: 900,
+          maxScrollX: 300, maxScrollY: 2_300,
+        });
+        expect(isDocumentScrollTarget(root, document as unknown as Document, window), name).toBe(true);
+      } finally {
+        undo();
+        delete (Object.getPrototypeOf(document) as { scrollingElement?: unknown }).scrollingElement;
+      }
+    }
+  });
+});
+
 
 function defineScrollBox(
   element: Element,

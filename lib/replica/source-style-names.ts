@@ -13,6 +13,10 @@
  * Whenever anything cannot be read, every name counts as mentioned.
  */
 
+import {
+  sourceProperty,
+} from './source-node-accessors';
+
 /** What the readable sheets of the page mention, all in lower case. */
 export interface SourceStyleNames {
   /** `.token` */
@@ -727,7 +731,7 @@ export class SourceStyleNameCensus {
   ): void {
     const census = this.#census(owner);
     const known = census.ordinary;
-    const listed = listSheets(() => owner.styleSheets);
+    const listed = listSheets(() => sourceProperty(owner, 'styleSheets'));
     // The signature is of every rule's text: the same, the same names.
     census.ordinary = this.#sheets(
       known,
@@ -749,7 +753,7 @@ export class SourceStyleNameCensus {
   noteAdopted(owner: Document | ShadowRoot, signature: string): void {
     const census = this.#census(owner);
     const known = census.adopted;
-    const listed = listSheets(() => owner.adoptedStyleSheets);
+    const listed = listSheets(() => sourceProperty(owner, 'adoptedStyleSheets'));
     const collection = createSourceStyleSheetCollection();
     // The same sheets with the same signature were read already, whole or
     // not: only the counts are taken again. A sheet too long to read is not
@@ -803,8 +807,8 @@ export class SourceStyleNameCensus {
       sheets += ordinary.ruleCounts.length + adopted.ruleCounts.length;
       if (sheets > MAX_CENSUS_SHEETS) return undefined;
       if (
-        !stillAsRead(ordinary, () => owner.styleSheets) ||
-        !stillAsRead(adopted, () => owner.adoptedStyleSheets)
+        !stillAsRead(ordinary, () => sourceProperty(owner, 'styleSheets')) ||
+        !stillAsRead(adopted, () => sourceProperty(owner, 'adoptedStyleSheets'))
       ) return undefined;
     }
     const union = this.#union;

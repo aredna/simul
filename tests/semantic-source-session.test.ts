@@ -34,6 +34,7 @@ import {
 } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
 import { wholeSemanticBatch } from './support/semantic-batches';
+import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 
 const identity: ReplicaSourceDocumentIdentity = {
   sessionId: 'semantic-source-session',
@@ -5930,6 +5931,44 @@ describe('editors a page makes without the attribute (D192)', () => {
       ['typed words', 'html', SEMANTIC_PAGE_EDITOR_MARK],
     ]);
     session.dispose();
+  });
+});
+
+describe('a page whose images and forms take the names of its document\'s properties (D207)', () => {
+  const PAGE = '<html><head><link rel="stylesheet" href="/site.css"></head><body>' +
+    '<button aria-expanded="true" aria-controls="menu">Menu</button>' +
+    '<ul id="menu"><li><a href="/a">First</a></li></ul><p>Plain words</p>' +
+    '<form><img alt="" id="named"><input value="kept"></form></body></html>';
+  const scan = (name?: string) => {
+    const { document, window } = parseHTML(PAGE);
+    const undo = name
+      ? nameOnDocument(document as unknown as Document, name, document.getElementById('named')!)
+      : () => {};
+    try {
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+      session.refresh();
+      session.dispose();
+      const batch = port.posted[0];
+      return JSON.stringify([
+        batch?.records.map(({ text, tagName, category, gate }) => [text, tagName, category, gate]),
+        batch?.linkedSheets,
+      ]);
+    } catch (error) {
+      return String(error);
+    } finally {
+      undo();
+    }
+  };
+
+  it('reads the page as it reads one without them', () => {
+    const expected = scan();
+    expect(expected).toContain('First');
+    const differ = DOCUMENT_NAMES.filter((name) => scan(name) !== expected);
+    expect(differ).toEqual([]);
   });
 });
 
