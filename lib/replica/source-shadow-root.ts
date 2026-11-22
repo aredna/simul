@@ -322,7 +322,7 @@ export function askAboutSourceShadowRootsWithin(
 /** Whether a node is a shadow root, open or closed. */
 export function isSourceShadowRoot(node: Node): node is ShadowRoot {
   return sourceNodeType(node) === 11 &&
-    (node as ShadowRoot).host?.nodeType === 1;
+    !!(node as ShadowRoot).host && sourceNodeType((node as ShadowRoot).host) === 1;
 }
 
 /**

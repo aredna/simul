@@ -1,3 +1,5 @@
+import { sourceNodeType } from './source-node-accessors';
+
 export interface ReplicaPatchTarget {
   readonly target: Node;
   readonly structural: boolean;
@@ -37,7 +39,7 @@ export function hasStructuralPatchTargetConflict(
     ) {
       // From a root up to its host: the host's children are replaced, not
       // its root.
-      if (below.nodeType === 11) continue;
+      if (sourceNodeType(below) === 11) continue;
       if (indexedTargets.get(ancestor) === true) return true;
     }
   }

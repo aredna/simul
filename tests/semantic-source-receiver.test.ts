@@ -534,6 +534,41 @@ describe('semantic source receiver', () => {
       });
     });
 
+    it('reads a mirror form past a field named for one of its properties (D194)', () => {
+      for (const name of ['attributes', 'localName', 'childNodes', 'nodeType']) {
+        const { document } = parseHTML(
+          '<html><body><form id="f" contenteditable="true"><input id="field">' +
+            '<p id="typed">*</p></form></body></html>',
+        );
+        const form = document.getElementById('f')!;
+        const field = document.getElementById('field')!;
+        field.setAttribute('name', name);
+        // Chrome reads these through the prototypes' accessors; linkedom
+        // keeps them on the element, so they move to a prototype here.
+        Object.setPrototypeOf(form, Object.create(Object.getPrototypeOf(form) as object, {
+          localName: { configurable: true, get: () => 'form' },
+          nodeType: { configurable: true, get: () => 1 },
+        }));
+        delete (form as { localName?: string }).localName;
+        delete (form as { nodeType?: number }).nodeType;
+        // A form answers `form.<field name>` before its own properties.
+        Object.defineProperty(form, name, { configurable: true, value: field });
+        const text = document.getElementById('typed')!.firstChild!;
+        const receiver = new SemanticSourceReceiver({
+          document: identity,
+          replicaDocument: document as unknown as Document,
+          resolveNode: (nodeId) => (nodeId === 7 ? text : undefined),
+        });
+        receiver.applyBatch(createSemanticSourceBatch(
+          identity, 'read-v1-111111', 1,
+          [editorRecord(7, 'typed words', { tagName: 'form' })],
+        ));
+        expect(text.nodeValue, name).toBe('typed words');
+        expect(receiver.refreshBindings(), name).toEqual([]);
+        expect(text.nodeValue, name).toBe('typed words');
+      }
+    });
+
     it('takes an editor the page made without the attribute, by the page\'s mark (D192)', () => {
       const take = (markup: string, overrides: Partial<SemanticSourceRecord>) => {
         const { document } = parseHTML(`<html><body>${markup}</body></html>`);

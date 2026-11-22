@@ -17,6 +17,8 @@
  * cost on a large page).
  */
 
+import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+
 const ABSENT: unique symbol = Symbol('absent');
 
 export class JournaledMap<Key, Value> extends Map<Key, Value> {
@@ -287,10 +289,10 @@ const VISUALLY_HIDDEN = 4;
 const SELECTED_IMAGE_SOURCE = 8;
 
 function nodeKinds(node: Node): number {
-  if (node.nodeType === 11) return 'host' in node ? SHADOW_ROOT : 0;
-  if (node.nodeType !== 1) return 0;
+  if (sourceNodeType(node) === 11) return 'host' in node ? SHADOW_ROOT : 0;
+  if (sourceNodeType(node) !== 1) return 0;
   const element = node as Element;
-  let kinds = element.localName.toLowerCase() === 'img' ? IMAGE : 0;
+  let kinds = sourceLocalName(element).toLowerCase() === 'img' ? IMAGE : 0;
   if (element.getAttribute('data-simul-visually-hidden') === 'v1') {
     kinds |= VISUALLY_HIDDEN;
   }

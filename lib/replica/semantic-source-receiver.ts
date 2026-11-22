@@ -1508,7 +1508,7 @@ export class SemanticSourceReceiver {
         return undefined;
       }
       if (
-        node?.nodeType !== 3 ||
+        !node || sourceNodeType(node) !== 3 ||
         node.ownerDocument !== this.environment.replicaDocument
       ) continue;
       // Up the tree as it is drawn: text slotted into a panel of a root is
@@ -1549,7 +1549,7 @@ export class SemanticSourceReceiver {
       return undefined;
     }
     if (!target?.isConnected) this.#missingNodeNotes?.add(nodeId);
-    return target?.nodeType === 1 && target.isConnected &&
+    return !!target && sourceNodeType(target) === 1 && target.isConnected &&
         target.ownerDocument === this.environment.replicaDocument
       ? target as Element
       : undefined;

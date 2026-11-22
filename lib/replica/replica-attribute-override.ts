@@ -7,6 +7,8 @@
  * back, not what shows.
  */
 
+import { sourceAttributeList } from './source-node-accessors';
+
 interface AttributeOverride {
   /** What the page has for this attribute; `null` when it has none. */
   page: string | null;
@@ -72,7 +74,8 @@ export function pageAttributes(
 ): readonly (readonly [string, string])[] {
   const own = overrides.get(element);
   const attributes: (readonly [string, string])[] = [];
-  for (const attribute of [...element.attributes]) {
+  // Past a form's field named `attributes` (D194).
+  for (const attribute of [...sourceAttributeList(element)]) {
     const { name, value } = attribute;
     if (!own?.has(name) && !skip?.(attribute)) {
       attributes.push([name, value] as const);
