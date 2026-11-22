@@ -380,7 +380,8 @@ interface ValidatedStructuralMenu {
   /**
    * The nodes of a panel offered cut (D219, the owner's D218): the first
    * 8,192 of its walk in the order the page draws them. Text past them is
-   * no menu text and stays as the page draws it. None for a whole panel.
+   * sent last, as the page has it and never translated (D223). None for a
+   * whole panel.
    */
   readonly cut?: ReadonlySet<Node>;
 }
@@ -2617,6 +2618,7 @@ export class SemanticSourceSession {
       gate: SemanticSourceGate,
       presentation: SemanticSourcePresentation,
       text: string | undefined,
+      untranslated = false,
     ): void => {
       if (!text || records.length >= MAX_SEMANTIC_SOURCE_RECORDS) return;
       if (!scope[gate] || !semanticGateAdmits(
@@ -2633,7 +2635,7 @@ export class SemanticSourceSession {
         classification.category, gate, presentation, text,
         classification.facts.tagName, classification.facts.type ?? '',
         classification.facts.autocomplete ?? '', classification.facts.role ?? '',
-        classification.facts.contentEditable ?? '',
+        classification.facts.contentEditable ?? '', untranslated ? 'untranslated' : '',
       ].join('\u0000');
       const previous = this.#revisions.get(recordId);
       const nodeRevision = previous?.signature === signature
@@ -2653,6 +2655,7 @@ export class SemanticSourceSession {
         contentEditable: classification.facts.contentEditable ?? '',
         text,
         presentation,
+        ...(untranslated ? { untranslated: true as const } : {}),
         classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
       });
       const recordBytes = semanticSourceBatchByteLength([record]);
@@ -2664,7 +2667,8 @@ export class SemanticSourceSession {
       records.push(record);
       recordNodes.push(node);
       recordChanged.push(nodeRevision !== previous?.revision);
-      if (gate === 'disclosureContent' && presentation === 'text') {
+      // A cut menu has text before its cut (D223).
+      if (gate === 'disclosureContent' && presentation === 'text' && !untranslated) {
         admittedDisclosureTextNodes.add(node);
       }
     };
@@ -2674,6 +2678,14 @@ export class SemanticSourceSession {
     // filled the batch, no menu opened in the mirror (D132). Editable text,
     // which a page can hold any amount of, comes after the controls.
     const editableText: Array<{
+      readonly node: Node;
+      readonly classification: ElementClassification;
+    }> = [];
+    // The text of a menu's panel past its cut (D219) is sent last, shown as
+    // the page has it and never translated (D223, the owner's rule: the
+    // page's own words rather than blank rows, which the mirror leaves where
+    // it withholds hidden text).
+    const pastCutText: Array<{
       readonly node: Node;
       readonly classification: ElementClassification;
     }> = [];
@@ -2798,8 +2810,11 @@ export class SemanticSourceSession {
           }
         } else if (current.disclosure && scope.disclosureContent &&
           classification.category === 'public-semantic' &&
-          // Past a panel's cut the text stays as the page draws it (D219).
-          !pastMenuCut(current.node)) {
+          // Past a panel's cut the text is the page's own (D219, D223).
+          pastMenuCut(current.node)) {
+          pastCutText.push({ node: current.node, classification });
+        } else if (current.disclosure && scope.disclosureContent &&
+          classification.category === 'public-semantic') {
           add(
             current.node,
             classification,
@@ -2941,6 +2956,11 @@ export class SemanticSourceSession {
       if (records.length >= MAX_SEMANTIC_SOURCE_RECORDS) break;
       if (turn()) yield 'turn';
       add(node, classification, 'editableContent', 'text', readTextNode(node));
+    }
+    for (const { node, classification } of pastCutText) {
+      if (records.length >= MAX_SEMANTIC_SOURCE_RECORDS) break;
+      if (turn()) yield 'turn';
+      add(node, classification, 'disclosureContent', 'text', readTextNode(node), true);
     }
 
     // Every control gets a disabled-state proof, so on a page with hundreds
@@ -4625,7 +4645,7 @@ function isBoundedSafeDisclosurePanel(
  * more text than a batch may carry, is offered cut: the walk goes in the
  * order the page draws (children, the root's, what a slot is assigned) and
  * stops before the node past either bound; what it met is the cut, and the
- * rest stays as the page draws it. A credential or a node of another
+ * rest is sent as the page has it, untranslated (D223). A credential or a node of another
  * document among what it met still refuses the panel, as does a panel with
  * no text in it. A panel with more text than one record that is not mostly
  * that of links is offered too (it was refused since D134).

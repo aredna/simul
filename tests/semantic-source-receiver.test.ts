@@ -12,6 +12,7 @@ import {
 import { SemanticProofPresenter } from '../lib/replica/semantic-proof-presenter';
 import {
   createSemanticSourceBatch,
+  readSemanticSourceRecord,
   semanticSourceOrderPlacements,
   semanticSourceProofIdentity,
   semanticSourceRecordId,
@@ -1408,6 +1409,33 @@ describe('semantic source receiver', () => {
     expect(take({ ...structuralMenuProof(), cut: true })).toEqual(['structural-menu']);
     expect(first.nodeValue).toBe('Abschnitt 0');
     expect(last.nodeValue).toBe('Section 2799');
+    // Past the cut the mirror leaves hidden text blank; the page's own text
+    // is sent flagged, written as it is and kept from the translator (D223).
+    last.nodeValue = '';
+    nodes.set(20, last);
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: () => true,
+    });
+    const changes = receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [
+        menuTextRecord(19, 'Section 0'),
+        { ...menuTextRecord(20, 'Section 2799'), untranslated: true },
+      ], [{ ...structuralMenuProof(), cut: true }],
+    ));
+    expect(last.nodeValue).toBe('Section 2799');
+    expect(changes?.flatMap((change) =>
+      change.kind === 'upsert' ? [change.record.nodeId] : [])).toHaveLength(1);
+    // Only text past a menu's cut is sent so.
+    expect(readSemanticSourceRecord({ ...menuTextRecord(20, 'Section 2799'), untranslated: true }))
+      .toMatchObject({ untranslated: true });
+    expect(readSemanticSourceRecord({
+      ...menuTextRecord(20, 'Section 2799'), untranslated: true, gate: 'formLabels',
+    })).toBeUndefined();
+    expect(readSemanticSourceRecord({ ...menuTextRecord(20, 'Section 2799'), untranslated: false }))
+      .toBeUndefined();
     // A credential among what the cut holds still refuses it.
     const field = document.createElement('input');
     field.setAttribute('type', 'password');

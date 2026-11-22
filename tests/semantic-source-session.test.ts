@@ -1589,7 +1589,10 @@ describe('semantic source session', () => {
       ));
       const batch = port.messages[0]!;
       session.dispose();
-      const texts = batch.records.filter((record) => record.gate === 'disclosureContent')
+      const menuText = batch.records.filter((record) => record.gate === 'disclosureContent');
+      const texts = menuText.filter((record) => !record.untranslated)
+        .map((record) => record.text);
+      const original = menuText.filter((record) => record.untranslated)
         .map((record) => record.text);
       const menu = batch.proofs.find((proof) => proof.kind === 'structural-menu');
       return {
@@ -1597,6 +1600,9 @@ describe('semantic source session', () => {
         cut: menu?.kind === 'structural-menu' && menu.cut === true,
         text: texts.length,
         last: texts.at(-1),
+        ...(original.length > 0
+          ? { original: original.length, lastOriginal: original.at(-1) }
+          : {}),
       };
     };
     // 400 links in a list are 1,201 nodes; 1,024 was the bound.
@@ -1604,9 +1610,13 @@ describe('semantic source session', () => {
     expect(offered(1_500)).toEqual({ menu: true, cut: false, text: 1_500, last: 'Section 1499' });
     // 2,800 links are 8,401 nodes: refused before D219; now the first 8,192
     // in the order the page draws them are offered (the list, 2,730 items
-    // of three nodes, and the next item's own element), and the rest of
-    // the text stays as the page draws it.
-    expect(offered(2_800)).toEqual({ menu: true, cut: true, text: 2_730, last: 'Section 2729' });
+    // of three nodes, and the next item's own element). The rest of the
+    // text is sent last as the page has it, never translated (D223): the
+    // mirror withholds hidden text, and those rows were blank.
+    expect(offered(2_800)).toEqual({
+      menu: true, cut: true, text: 2_730, last: 'Section 2729',
+      original: 70, lastOriginal: 'Section 2799',
+    });
   });
 
   describe('what is slotted into a collapsed panel of a component (D179)', () => {

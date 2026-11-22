@@ -146,6 +146,12 @@ export interface SemanticSourceRecord {
   readonly contentEditable: string;
   readonly text: string;
   readonly presentation: SemanticSourcePresentation;
+  /**
+   * Shown as the page has it and never offered for translation (D223): the
+   * text of a menu's panel past its cut (D219), which the mirror withholds
+   * as hidden text and would otherwise draw blank. Absent for other text.
+   */
+  readonly untranslated?: true;
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
 }
 
@@ -216,8 +222,8 @@ export interface SemanticStructuralMenuProof {
   readonly expanded: boolean;
   /**
    * The panel is offered cut at 8,192 nodes (D219, the owner's D218): text
-   * past the cut has no record and stays as the page draws it. Only in a
-   * batch of version 3; absent for a whole panel.
+   * past the cut is sent flagged `untranslated` and shown as the page has
+   * it (D223). Only in a batch of version 3; absent for a whole panel.
    */
   readonly cut?: true;
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
@@ -675,7 +681,8 @@ export function semanticSourceBatchByteLength(
     bytes += record.text.length * 2 + record.tagName.length +
       record.type.length + record.autocomplete.length + record.role.length +
       record.contentEditable.length + record.gate.length +
-      record.presentation.length + MIN_SEMANTIC_SOURCE_RECORD_BYTES;
+      record.presentation.length + MIN_SEMANTIC_SOURCE_RECORD_BYTES +
+      (record.untranslated ? 24 : 0);
   }
   for (const proof of proofs) {
     if (proof.kind === 'select-state') {
@@ -1394,11 +1401,17 @@ export function semanticSourceProofSignature(proof: SemanticSourceProof): string
 export function readSemanticSourceRecord(
   input: unknown,
 ): SemanticSourceRecord | undefined {
+  const untranslated = isRecord(input) && Object.hasOwn(input, 'untranslated');
   if (!isRecord(input) || !hasExactKeys(input, [
     'bridge', 'recordId', 'nodeId', 'nodeRevision', 'category', 'gate',
     'tagName', 'type', 'autocomplete', 'role', 'contentEditable', 'text',
-    'presentation', 'classifierVersion',
+    'presentation', 'classifierVersion', ...(untranslated ? ['untranslated'] : []),
   ]) ||
+    // Only a menu's text past its cut (D223).
+    (untranslated && (
+      input.untranslated !== true || input.gate !== 'disclosureContent' ||
+      input.presentation !== 'text'
+    )) ||
     input.bridge !== 'isolated-html' ||
     !positiveSafeInteger(input.recordId) ||
     !positiveSafeInteger(input.nodeId) ||
@@ -1445,6 +1458,7 @@ export function readSemanticSourceRecord(
     contentEditable: input.contentEditable,
     text: input.text,
     presentation: input.presentation,
+    ...(untranslated ? { untranslated: true as const } : {}),
     classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
   });
 }

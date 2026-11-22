@@ -756,7 +756,9 @@ export class SemanticSourceReceiver {
         current.sourceRecord.nodeRevision === sourceRecord.nodeRevision &&
         current.sourceRecord.text === sourceRecord.text &&
         current.sourceRecord.gate === sourceRecord.gate &&
-        current.sourceRecord.category === sourceRecord.category,
+        current.sourceRecord.category === sourceRecord.category &&
+        // Past a menu's cut or before it (D223).
+        current.sourceRecord.untranslated === sourceRecord.untranslated,
       );
       let binding: SemanticBinding | undefined;
       try {
@@ -1435,8 +1437,8 @@ export class SemanticSourceReceiver {
         !this.#proofTargetIsSafe(panel, false) ||
         // A menu's panel may hold a field; never a credential (D132). It
         // is walked as far as the page walks it (D179); a panel the page
-        // offers cut, up to its cut, and what is past it stays as the page
-        // draws it, with no record bound there (D219, the owner's D218).
+        // offers cut, up to its cut (D219, the owner's D218); its text past
+        // the cut comes as records kept from the translator (D223).
         !receiverDisclosureSubtreeIsSafe(panel, (element) =>
           this.#proofTargetIsSafe(element, false), true,
         RECEIVER_MENU_PANEL_NODES, proof.cut === true)
@@ -1722,6 +1724,8 @@ function entryIsTranslated(
   entry: Pick<SemanticEntry, 'binding' | 'sourceRecord'>,
 ): boolean {
   return entry.binding.translatable &&
+    // A menu's text past its cut is shown as the page has it (D223).
+    entry.sourceRecord.untranslated !== true &&
     TRANSLATABLE_SOURCE_TEXT.test(entry.sourceRecord.text);
 }
 
