@@ -3,7 +3,9 @@ import { readImageSourcePortSessionId } from '../ocr/image-source-protocol';
 import { SourceImageObserver } from '../ocr/source-image-observer';
 import type { ReplicaDocumentIdentity } from './contracts';
 import {
+  HTML_MIRROR_PANE_BOXES_VERSION,
   HTML_MIRROR_PORT_PREFIX,
+  MAX_HTML_MIRROR_PANE_BOXES,
   MAX_HTML_MIRROR_SCROLL_PANES,
   MAX_HTML_MIRROR_UNACKED_BATCHES,
   HtmlMirrorCheckpointAssembly,
@@ -18,6 +20,8 @@ import {
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   type HtmlMirrorCheckpoint,
+  type HtmlMirrorPaneBox,
+  type HtmlMirrorPaneBoxes,
   type HtmlMirrorPaneScroll,
   type HtmlMirrorPatchBatch,
   type HtmlMirrorReconcileChild,
@@ -55,7 +59,9 @@ import {
   sanitizeSourceSubtrees,
   sourceDeclaredHiddenRegionIsWithheld,
   beginSourceSlotReadingWalk,
+  beginSourceWithheldAncestorWalk,
   createSourceSlotReadings,
+  noteSourceEditingTarget,
   sourceSlotReadingChanged,
   snapshotHtmlMirrorRepresentability,
   sourceStructuralChildNodes,
@@ -78,8 +84,10 @@ import { minimizeConnectedComposedTargets } from './composed-targets';
 import {
   beginSourceHeldAnimationPass,
   listenForSourceHeldAnimations,
+  readSourceAnimationListing,
 } from './source-held-animation';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
+import { learnSourceSheetBase } from './source-sheet-base';
 import {
   SOURCE_EVIDENCE_ATTRIBUTE_FILTER,
   SemanticSourceSession,
@@ -122,6 +130,10 @@ import {
 import {
   SourceStyleNameCensus,
   createSourceStyleSheetCollection,
+  readCrossOriginSheetFromPageCache,
+  SourceCrossOriginSheetNames,
+  type SourceCrossOriginSheetReader,
+  sourceClassChangeNamesHidingRule,
   sourceVisibilityEventMaySkip,
   sourceVisibilityMutationMaySkip,
   type SourceStyleNames,
@@ -223,9 +235,14 @@ export interface HtmlMirrorSourceBridgeEnvironment {
   readonly now?: () => number;
   /**
    * Gives the page a turn between slices of the page script's long work
-   * (D163): `scheduler.yield()` by default.
+   * (D163): `yieldToMain`, a task at the page's own priority, by default (D180).
    */
   readonly yieldToMain?: () => Promise<void>;
+  /**
+   * Reads a cross-origin style sheet's text for its names alone (D180):
+   * `readCrossOriginSheetFromPageCache` by default.
+   */
+  readonly readCrossOriginStyleSheet?: SourceCrossOriginSheetReader;
   readonly createMutationObserver?: (
     callback: MutationCallback,
   ) => Pick<MutationObserver, 'observe' | 'disconnect'>;
@@ -452,6 +469,7 @@ export function installHtmlMirrorSourceBridge(
         secretScan,
         now,
         yieldToMain: environment.yieldToMain ?? yieldToMain,
+        readCrossOriginStyleSheet: environment.readCrossOriginStyleSheet,
         passShare,
         createMutationObserver: environment.createMutationObserver ??
           ((callback) => new MutationObserver(callback)),
@@ -517,9 +535,11 @@ interface HtmlMirrorSourceSessionEnvironment {
   readonly now: () => number;
   /**
    * Gives the page a turn between the slices of a checkpoint read (D163):
-   * `scheduler.yield()` by default.
+   * `yieldToMain` by default (D180).
    */
   readonly yieldToMain?: () => Promise<void>;
+  /** See `HtmlMirrorSourceBridgeEnvironment.readCrossOriginStyleSheet` (D180). */
+  readonly readCrossOriginStyleSheet?: SourceCrossOriginSheetReader;
   /**
    * The share of the tab's time the live whole-page passes keep to, shared
    * with the semantic scan (D164): the comparison of what the page paints
@@ -679,8 +699,51 @@ const SHAPE_SIGNATURE_SHEETS = new WeakSet<CSSStyleSheet>();
 const CAPTURED_RESOURCE_ELEMENTS: ReadonlySet<string> = new Set(['img', 'link']);
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
+/**
+ * The most one look at the elements the page declares hidden takes after a
+ * comparison, in milliseconds (D180); the rest wait for the next.
+ */
+const DECLARED_HIDDEN_LOOK_MS = 8;
+/** Credential fields sized by their content whose scrollers are kept (D180). */
+const MAX_CREDENTIAL_SCROLL_FREEZES = 16;
+const MAX_CREDENTIAL_SCROLL_ANCESTORS = 256;
+/** See `#credentialScrollFreezes` (D180). */
+interface CredentialScrollFreeze {
+  readonly axis: 'x' | 'y';
+  readonly document: { readonly offset: number; readonly max: number };
+  readonly panes: ReadonlyMap<Element, { readonly offset: number; readonly max: number }>;
+}
+/**
+ * How far the comparison after a change of a class a hiding rule names may
+ * run ahead of the share (D180), in milliseconds.
+ */
+const HIDING_CLASS_MAX_ADVANCE_MS = 1_000;
+/** Elements with more content than room kept to be asked (D180). */
+const MAX_PANE_BOX_CANDIDATES = 4_096;
+/** Time for asking them, per read of the boxes (D180), in milliseconds. */
+const PANE_BOX_LOOK_MS = 4;
+
+/** The box that says an element is a pane no longer (D180). */
+function noPaneBox(nodeId: number): HtmlMirrorPaneBox {
+  return { nodeId, x: 0, y: 0, width: 0, height: 0, maxScrollX: 0, maxScrollY: 0 };
+}
+
 /** How many roots a full set refuses between two compactions (D171). */
 const IMAGE_EVENT_ROOT_COMPACTION_EVERY = 256;
+/**
+ * Attributes that change how an element's children are read (D180): when
+ * one of them changes in the frame the element's list does, the list is
+ * read whole with it, as before.
+ */
+const SOURCE_CHILD_READING_ATTRIBUTES: ReadonlySet<string> = new Set([
+  'role',
+  'contenteditable',
+  'hidden',
+  'aria-hidden',
+  'inert',
+  'type',
+  'autocomplete',
+]);
 const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
 /**
  * Nodes of a slot read again one by one when what the slot shows changes;
@@ -928,6 +991,15 @@ export class HtmlMirrorSourceSession {
   #resizeObserver: Pick<ResizeObserver, 'observe' | 'disconnect'> | undefined;
   #pendingChildren = new Set<Node>();
   #pendingAttributes = new Set<Element>();
+  /**
+   * Elements whose pending attributes change how their children are read
+   * (D180): a role, `contenteditable`, `hidden`, `aria-hidden`, `inert`, a
+   * field's type or autocomplete, an element shown or hidden, a panel the
+   * policy reads otherwise. Their list goes with them in one patch, read
+   * whole; any other element's attributes may follow its list in a later
+   * patch of the frame (see `#holdBack`).
+   */
+  #readWithChildren = new Set<Element>();
   #pendingText = new Set<Text>();
   /**
    * Elements whose style sheet is sent again: a `<style>` whose text
@@ -1003,6 +1075,13 @@ export class HtmlMirrorSourceSession {
    */
   #declaredHiddenSent = new WeakMap<Element, boolean>();
   /**
+   * The same elements, to go through (D180): asked again after each
+   * comparison of what the page paints, which a class or the end of an
+   * animation asks for (`#askDeclaredHiddenAgain`). The index of what is
+   * painted takes such an element for unknown before a fade and after it.
+   */
+  #declaredHiddenElements = new Set<Element>();
+  /**
    * A style sheet changed: what the reader takes from an element's style
    * is taken again at the next flush. See `#readStyleDerivedAgain`.
    */
@@ -1032,11 +1111,53 @@ export class HtmlMirrorSourceSession {
    * were sent, or when they were shown. See `#meetPane`.
    */
   #metPanes = new Set<Element>();
+  /**
+   * Scrollable elements the reader met, at their start or not, each with
+   * the box the panel was last told (D180): the panel tests the wheel
+   * against them. In the order they were met; at most
+   * `MAX_HTML_MIRROR_PANE_BOXES`.
+   */
+  #paneBoxes = new Map<Element, HtmlMirrorPaneBox | undefined>();
+  /** Elements met with more content than room, whose overflow is asked next. */
+  #paneBoxCandidates = new Set<Element>();
+  /** What the panel was told of the boxes is not what is noted here. */
+  #restatePaneBoxes = false;
+  /** The panel holds boxes from this stream: an empty list is news to it. */
+  #paneBoxesSent = false;
   /** The viewport-scale pane the tab scrolls in place of its document. */
   #primaryPane: Element | undefined;
   #pendingDocumentScroll = false;
   #lastDocumentScroll:
     ReturnType<typeof readDocumentScrollSnapshot> | undefined;
+  /**
+   * For each credential field sized by its content (`field-sizing:
+   * content`), the place of every scroller around it, the document's
+   * included, on the field's inline axis, as it was before the field was
+   * first typed into (D180). Such a field grows a character at a time, and
+   * the scroll numbers would carry the length of the password; they are
+   * reported at these places while the field is in the page.
+   */
+  #credentialScrollFreezes = new Map<Element, CredentialScrollFreeze>();
+  /** The names of the page's cross-origin sheets, from its cache (D180). */
+  #crossOriginSheets: SourceCrossOriginSheetNames | undefined;
+  readonly #crossOriginNames = (
+    sheet: CSSStyleSheet,
+  ): SourceStyleNames | undefined => {
+    if (!this.#crossOriginSheets) {
+      let origin = '';
+      try {
+        origin = this.environment.window.location?.origin ?? '';
+      } catch {
+        origin = '';
+      }
+      this.#crossOriginSheets = new SourceCrossOriginSheetNames(
+        this.environment.readCrossOriginStyleSheet ??
+          readCrossOriginSheetFromPageCache(this.environment.window),
+        origin,
+      );
+    }
+    return this.#crossOriginSheets.names(sheet);
+  };
   /** The last place sent, to tell a frame in which nothing moved. */
   #lastReportedPlace: string | undefined;
   /** The pane last named as the one scrolled in place of the document. */
@@ -1057,6 +1178,14 @@ export class HtmlMirrorSourceSession {
    * been read without one: attached since. See `#takeLateShadowRoots`.
    */
   #lateShadowRoots: ShadowRoot[] = [];
+  /**
+   * Roots met on a host the mirror does not hold yet (D180): a component a
+   * page made, gave a root and filled before it put it in the page. The
+   * patch that adds the host carries its root, so it is asked about after
+   * that patch (`#rootsAwaitingPatchHeld`), not taken for a root the mirror
+   * lacks: each such card or row was a whole read.
+   */
+  #rootsAwaitingPatch = new Set<ShadowRoot>();
   #stopListeningForShadowRoots: (() => void) | undefined;
   #stopListeningForHeldAnimations: (() => void) | undefined;
   /**
@@ -1077,6 +1206,13 @@ export class HtmlMirrorSourceSession {
   #visibilityInteractionTargets = new Set<Element>();
   /** A person's input asked for the next comparison: it skips the share (D164). */
   #userInputPending = false;
+  /**
+   * A class a hiding rule names changed since the last comparison began
+   * (D180): it hides or shows a panel, which the mirror shows until the
+   * comparison notices, so the comparison waits for no share while the
+   * share owes at most `HIDING_CLASS_MAX_ADVANCE_MS`.
+   */
+  #hidingClassPending = false;
   /** The policy read again in slices after a change of layout (D165). */
   #policyRefreshRunning = false;
   #policyRefreshGeneration = 0;
@@ -1184,6 +1320,7 @@ export class HtmlMirrorSourceSession {
     this.#stopListeningForHeldAnimations = undefined;
     this.#heldChanged.clear();
     this.#lateShadowRoots = [];
+    this.#rootsAwaitingPatch.clear();
     this.#observer?.disconnect();
     this.#observer = undefined;
     this.#resizeObserver?.disconnect();
@@ -1261,6 +1398,9 @@ export class HtmlMirrorSourceSession {
     this.#pendingPanes.clear();
     this.#pendingPaneBurst = false;
     this.#metPanes.clear();
+    this.#paneBoxes.clear();
+    this.#paneBoxCandidates.clear();
+    this.#restatePaneBoxes = false;
     this.#primaryPane = undefined;
     this.#pendingDocumentScroll = false;
     this.#lastDocumentScroll = undefined;
@@ -1274,6 +1414,7 @@ export class HtmlMirrorSourceSession {
     this.#ordinaryStyleSheets = new WeakMap();
     this.#sheetTextStyles = new WeakSet<Element>();
     this.#declaredHiddenSent = new WeakMap<Element, boolean>();
+    this.#declaredHiddenElements.clear();
     this.#styleDerivedPending = false;
     this.#controlledContentPolicy = undefined;
     this.#cancelPolicyRefresh();
@@ -1291,6 +1432,7 @@ export class HtmlMirrorSourceSession {
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
     this.#userInputPending = false;
+    this.#hidingClassPending = false;
     this.#visibilityFullRefreshPending = false;
     this.#layoutChangePending = false;
     this.#comparedAtSize = undefined;
@@ -1552,6 +1694,7 @@ export class HtmlMirrorSourceSession {
     // Whatever was owed is read with the page. What is met from here on in
     // what was read already is kept for the copy that is sent.
     this.#lateShadowRoots = [];
+    this.#rootsAwaitingPatch.clear();
     this.#imageRefreshRequested = false;
     void this.#readCheckpoint(read);
   }
@@ -1855,7 +1998,9 @@ export class HtmlMirrorSourceSession {
     if (!checkpoint) return false;
     this.#post(checkpoint);
     // Only the document's place: no pane is the mirror's before the copy.
-    const documentScroll = readDocumentScrollSnapshot(document, window);
+    const documentScroll = this.#withoutCredentialLength(
+      readDocumentScrollSnapshot(document, window),
+    );
     const scroll = createHtmlMirrorScrollUpdate(
       this.#identityAt(this.#sequence),
       {
@@ -2404,8 +2549,7 @@ export class HtmlMirrorSourceSession {
     // moved by it (D171): sent again after the ACK under the new policy.
     for (const target of read.policyRequeue) {
       if (!target.isConnected || !this.#mirroredNodes.has(target)) continue;
-      this.#queuePending(this.#pendingChildren, target);
-      this.#queuePending(this.#pendingAttributes, target);
+      this.#queueReadWithChildren(target);
     }
     // What the page changed while it was read in slices: each record is
     // judged against the copy just sent, as any record after it is, and
@@ -2530,6 +2674,11 @@ export class HtmlMirrorSourceSession {
     if (this.#visibilityBoundaryIndex && visibilityRecords.length > 0) {
       visibilityQueued = true;
       if (
+        !this.#hidingClassPending &&
+        visibilityRecords.some((record) =>
+          sourceClassChangeNamesHidingRule(record, mentionedNames()))
+      ) this.#hidingClassPending = true;
+      if (
         this.#visibilityMutationOverflow ||
         this.#visibilityMutationRecords.length + visibilityRecords.length >
           MAX_VISIBILITY_MUTATION_RECORDS
@@ -2537,7 +2686,7 @@ export class HtmlMirrorSourceSession {
         this.#visibilityMutationRecords = [];
         this.#visibilityMutationOverflow = true;
       } else {
-        this.#visibilityMutationRecords.push(...visibilityRecords);
+        for (const item of visibilityRecords) this.#visibilityMutationRecords.push(item);
       }
     }
     const replayPolicy = this.#replayPolicy;
@@ -2592,6 +2741,11 @@ export class HtmlMirrorSourceSession {
         }
         continue;
       }
+      // What an opaque placeholder stands for (a script, an iframe: D181)
+      // is not in the mirror: its own changes change nothing there.
+      if (mutationElement && this.#mirroredOpaqueSecrets.has(mutationElement)) {
+        continue;
+      }
       const structuralSelectOwner = sourceNativeSelectStructuralOwner(record.target);
       // A slot added to a root, taken out of it or renamed: the root's
       // slots may take other nodes of its host than they did (D135).
@@ -2644,13 +2798,16 @@ export class HtmlMirrorSourceSession {
         if (changesPrivacyContext && structuralSelectOwner) {
           // Public/private transitions replace select grammar and state in one
           // root-level batch so an old public label cannot survive recovery.
-          this.#queuePending(this.#pendingChildren, structuralSelectOwner);
-          this.#queuePending(this.#pendingAttributes, structuralSelectOwner);
+          this.#queueReadWithChildren(structuralSelectOwner);
         } else {
           this.#queuePending(
             this.#pendingAttributes,
             record.target,
           );
+          if (
+            changesPrivacyContext ||
+            SOURCE_CHILD_READING_ATTRIBUTES.has(record.attributeName ?? '')
+          ) this.#readWithChildren.add(record.target);
         }
         if (changesPrivacyContext) {
           // A children patch can re-sanitize a host's light DOM, but it cannot
@@ -2754,8 +2911,10 @@ export class HtmlMirrorSourceSession {
     // assigns 4,000 nodes by script had its slots' lists gone through once
     // a child).
     const rootWalk = beginSourceShadowRootWalk();
-    // And one answer an element about the secrets above it.
+    // And one answer an element about the secrets above it, and about the
+    // hidden and private regions above it (D181).
     const secretWalk = beginSourceSecretAncestorWalk();
+    const withheldWalk = beginSourceWithheldAncestorWalk();
     try {
       // One listing of the page's animations serves the whole flush: what
       // is compared and what is read see the same held values.
@@ -2775,6 +2934,7 @@ export class HtmlMirrorSourceSession {
         if (this.#heldChanged.size > 0) this.#scheduleFlush();
       }
     } finally {
+      withheldWalk.end();
       secretWalk.end();
       rootWalk.end();
     }
@@ -2873,8 +3033,14 @@ export class HtmlMirrorSourceSession {
       this.#applyComparison(index, refresh);
       return;
     }
-    if (this.#waitForComparisonShare(this.#userInputPending)) return;
+    if (
+      this.#waitForComparisonShare(
+        this.#userInputPending,
+        this.#hidingClassPending,
+      )
+    ) return;
     this.#userInputPending = false;
+    this.#hidingClassPending = false;
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
     this.#visibilityFullRefreshPending = false;
@@ -3018,6 +3184,8 @@ export class HtmlMirrorSourceSession {
     // no scroll event.
     for (const element of index.takeShownElements()) this.#meetPane(element);
     this.#applyVisibilityBoundaryRefresh(refresh);
+    if (this.#paused || this.#shadowReconciliationPending) return;
+    this.#askDeclaredHiddenAgain();
   }
 
   #cancelComparison(): void {
@@ -3047,11 +3215,17 @@ export class HtmlMirrorSourceSession {
    * (D164); if so, a timer asks for a flush when the wait is over, and the
    * requests stay as they are.
    */
-  #waitForComparisonShare(userInput: boolean): boolean {
+  #waitForComparisonShare(userInput: boolean, hidingClass = false): boolean {
     const share = this.environment.passShare;
     if (!share) return false;
-    // A person's input waits only for a pass that holds the page.
-    const wait = share.waitMs(this, userInput);
+    // A person's input waits only for a pass that holds the page; so does
+    // a class a hiding rule names, while the share owes little (D180). The
+    // pass's time is noted all the same, and its rest comes on top of what
+    // is owed: a carousel that keeps changing such a class runs ahead by
+    // that much at most and keeps to the fifth over time.
+    const ahead = hidingClass &&
+      share.waitMs(this) <= HIDING_CLASS_MAX_ADVANCE_MS;
+    const wait = share.waitMs(this, userInput || ahead);
     if (!(wait > 0)) return false;
     if (this.#comparisonShareTimer === undefined) {
       this.#comparisonShareTimer = this.environment.setTimer(() => {
@@ -3150,6 +3324,8 @@ export class HtmlMirrorSourceSession {
       if (patch) patches.push(patch);
       this.#takeBack(held, patch);
     }
+    this.#readWithChildren.clear();
+    if (!this.#rootsAwaitingPatchHeld()) return false;
     const frame = createHtmlMirrorPatchFrame(patches);
     if (!frame) return false;
     this.#sequence = frame.lastSequence;
@@ -3174,7 +3350,8 @@ export class HtmlMirrorSourceSession {
           (node) => this.#changedInsideKeptChild(node),
         ),
         attributes: [...this.#pendingAttributes].filter(
-          (node) => this.#changedInsideKeptChild(node),
+          (node) => this.#changedInsideKeptChild(node) ||
+            this.#attributesFollowList(node),
         ),
         text: [...this.#pendingText].filter(
           (node) => this.#changedInsideKeptChild(node),
@@ -3219,6 +3396,32 @@ export class HtmlMirrorSourceSession {
     this.#pendingChildren.add(html);
     this.#pendingDimensions = false;
     return held;
+  }
+
+  /**
+   * Whether an element's attributes, changed in the frame its own list of
+   * children changed, can follow that list in a later patch (D180): its
+   * list is then sent as "these stay, these are new" instead of whole.
+   * Not when they change how its children are read (`#readWithChildren`),
+   * and not for a dropdown, whose list is read whole anyway. Opening a
+   * site's search put a class on `<body>` in the frame it added a child
+   * to it, and the whole `<body>` was sent (635,226 characters).
+   */
+  #attributesFollowList(element: Element): boolean {
+    return this.#pendingChildren.has(element) &&
+      !this.#readWithChildren.has(element) &&
+      this.#emittedChildren.has(element) &&
+      !sourceNativeSelectStructuralOwner(element);
+  }
+
+  /**
+   * Queues an element and its list of children to be read again in one
+   * patch: what changed changes how its children are read (D180).
+   */
+  #queueReadWithChildren(element: Element): void {
+    this.#queuePending(this.#pendingChildren, element);
+    this.#queuePending(this.#pendingAttributes, element);
+    if (this.#pendingAttributes.has(element)) this.#readWithChildren.add(element);
   }
 
   /**
@@ -3737,12 +3940,16 @@ export class HtmlMirrorSourceSession {
     this.#pendingDimensions = false;
     this.#styleDerivedPending = false;
     this.#controlledLayoutSettlePending = false;
+    // A patch of the frame was read: what a later patch of the same frame
+    // takes back keeps its mark (`#readAndPostInTurns` clears it).
     if (!comparison) return;
+    this.#readWithChildren.clear();
     this.#cancelComparison();
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
     this.#visibilityInteractionTargets.clear();
     this.#userInputPending = false;
+    this.#hidingClassPending = false;
     this.#visibilityFullRefreshPending = false;
   }
 
@@ -3968,10 +4175,10 @@ export class HtmlMirrorSourceSession {
     // While a checkpoint is read, nothing of the copy is the panel's yet:
     // the checkpoint's own report carries the whole state (D163).
     if (this.#disposed || !this.#identity || this.#checkpointRead) return;
-    const documentScroll = readDocumentScrollSnapshot(
+    const documentScroll = this.#withoutCredentialLength(readDocumentScrollSnapshot(
       this.environment.document,
       this.environment.window,
-    );
+    ));
     const documentMoved = this.#lastDocumentScroll !== undefined &&
       (documentScroll.scrollX !== this.#lastDocumentScroll.scrollX ||
         documentScroll.scrollY !== this.#lastDocumentScroll.scrollY);
@@ -3990,7 +4197,8 @@ export class HtmlMirrorSourceSession {
       // stay at a place that is neither its start nor the tab's.
       for (const [pane, told] of this.#scrolledPanes) {
         if (!told) continue;
-        const place = readPaneScrollPlace(pane, this.environment.document);
+        const read = readPaneScrollPlace(pane, this.environment.document);
+        const place = read && this.#withoutCredentialLength(read, pane);
         if (
           !place || place.scrollX !== told.scrollX ||
           place.scrollY !== told.scrollY
@@ -4013,6 +4221,11 @@ export class HtmlMirrorSourceSession {
       if (this.#scrolledPanes.size <= MAX_HTML_MIRROR_SCROLL_PANES) break;
       this.#forgetPane(pane, dropped);
     }
+    // The boxes are read where the layout may have changed: a checkpoint,
+    // a patch, a look; not for each frame of scroll events (D180).
+    const paneBoxes = scrolledOnly && !wholeState && !this.#restatePaneBoxes
+      ? undefined
+      : this.#readPaneBoxes(wholeState);
     let whole = wholeState || this.#restatePanes;
     let panes = this.#readPanePlaces(
       whole || !scrolledOnly ? [...this.#scrolledPanes.keys()] : scrolled,
@@ -4068,7 +4281,8 @@ export class HtmlMirrorSourceSession {
     const withPanes = whole || panes.length > 0 ||
       primaryPaneId !== this.#lastReportedPrimaryPaneId;
     if (
-      onlyIfMoved && !withPanes && reportedPlace === this.#lastReportedPlace
+      onlyIfMoved && !withPanes && !paneBoxes &&
+      reportedPlace === this.#lastReportedPlace
     ) return;
     const update = createHtmlMirrorScrollUpdate(
       this.#identityAt(this.#sequence),
@@ -4081,13 +4295,17 @@ export class HtmlMirrorSourceSession {
               ...(primaryPaneId !== undefined ? { primaryPaneId } : {}),
             }
           : {}),
+        ...(paneBoxes ? { paneBoxes } : {}),
       },
     );
     if (!update) {
       // What the panel was told is no longer what is noted here.
       this.#restatePanes = true;
+      if (paneBoxes) this.#restatePaneBoxes = true;
       return;
     }
+    if (paneBoxes?.whole) this.#restatePaneBoxes = false;
+    if (paneBoxes) this.#paneBoxesSent = paneBoxes.boxes.length > 0 || !paneBoxes.whole;
     this.#lastReportedPlace = reportedPlace;
     if (withPanes) this.#lastReportedPrimaryPaneId = primaryPaneId;
     if (whole) this.#restatePanes = false;
@@ -4121,13 +4339,14 @@ export class HtmlMirrorSourceSession {
       // Forgotten a moment ago: a burst, or the bound.
       if (!this.#scrolledPanes.has(pane)) continue;
       const told = this.#scrolledPanes.get(pane);
-      const place = this.#mirroredOpaqueSecrets.has(pane)
+      const read = this.#mirroredOpaqueSecrets.has(pane)
         ? undefined
         : readPaneScrollPlace(pane, this.environment.document);
-      if (!place) {
+      if (!read) {
         this.#forgetPane(pane, dropped);
         continue;
       }
+      const place = this.#withoutCredentialLength(read, pane);
       if (place.scrollX === 0 && place.scrollY === 0) {
         // A hidden pane has no box and reads as at its start. Chrome gives
         // it its place back when it is shown again, with no scroll event, so
@@ -4176,6 +4395,120 @@ export class HtmlMirrorSourceSession {
     return named;
   }
 
+  /**
+   * Asks the elements met with more content than room whether the reader
+   * can scroll them (an `overflow` of `auto`, `scroll` or `overlay` on an
+   * axis with a range), in a time box (D180). The ones not asked yet wait
+   * for the next read.
+   */
+  #takePaneBoxCandidates(): void {
+    const candidates = this.#paneBoxCandidates;
+    if (candidates.size === 0) return;
+    const view = this.environment.window as Window & {
+      getComputedStyle?: Window['getComputedStyle'];
+    };
+    if (typeof view.getComputedStyle !== 'function') {
+      candidates.clear();
+      return;
+    }
+    const clock = this.environment.now ?? (() => Date.now());
+    const started = clock();
+    for (const element of candidates) {
+      candidates.delete(element);
+      if (this.#paneBoxes.size >= MAX_HTML_MIRROR_PANE_BOXES) {
+        candidates.clear();
+        return;
+      }
+      if (this.#paneBoxes.has(element) || !element.isConnected) continue;
+      let style: CSSStyleDeclaration;
+      try {
+        style = view.getComputedStyle(element);
+      } catch {
+        continue;
+      }
+      const scrolls = (value: string) => /^(?:auto|scroll|overlay)$/u.test(value);
+      if (
+        (scrolls(style.overflowY) && element.scrollHeight > element.clientHeight) ||
+        (scrolls(style.overflowX) && element.scrollWidth > element.clientWidth)
+      ) this.#paneBoxes.set(element, undefined);
+      if (clock() - started >= PANE_BOX_LOOK_MS) return;
+    }
+  }
+
+  /**
+   * The boxes of the scrollable panes met (D180): with `whole` every one,
+   * otherwise the ones whose box or ranges changed since the panel was
+   * told, and a box of no size for each that is a pane no longer (gone,
+   * hidden, or with no range). A pane the mirror holds no id for yet is
+   * kept in mind and named after its patch.
+   */
+  #readPaneBoxes(wholeState: boolean): HtmlMirrorPaneBoxes | undefined {
+    this.#takePaneBoxCandidates();
+    const whole = wholeState || this.#restatePaneBoxes;
+    if (this.#paneBoxes.size === 0) {
+      return whole && this.#paneBoxesSent
+        ? { version: HTML_MIRROR_PANE_BOXES_VERSION, whole: true, boxes: [] }
+        : undefined;
+    }
+    const sourceWindow = this.environment.window;
+    const offsetX = Number.isFinite(sourceWindow.scrollX) ? sourceWindow.scrollX : 0;
+    const offsetY = Number.isFinite(sourceWindow.scrollY) ? sourceWindow.scrollY : 0;
+    const round = (value: number) => Math.round(value * 100) / 100;
+    const boxes: HtmlMirrorPaneBox[] = [];
+    for (const [pane, told] of this.#paneBoxes) {
+      const nodeId = this.#mirroredPaneId(pane);
+      if (nodeId === undefined && pane.isConnected) {
+        if (told) {
+          if (!whole) boxes.push(noPaneBox(told.nodeId));
+          this.#paneBoxes.set(pane, undefined);
+        }
+        continue;
+      }
+      const place = nodeId === undefined
+        ? undefined
+        : readPaneScrollPlace(pane, this.environment.document);
+      let rect: DOMRect | undefined;
+      try {
+        rect = place ? pane.getBoundingClientRect() : undefined;
+      } catch {
+        rect = undefined;
+      }
+      if (
+        nodeId === undefined || !place || !rect ||
+        (place.maxScrollX === 0 && place.maxScrollY === 0) ||
+        (rect.width <= 0 && rect.height <= 0)
+      ) {
+        // Met again when it is sent or shown again.
+        this.#paneBoxes.delete(pane);
+        if (told && !whole) boxes.push(noPaneBox(told.nodeId));
+        continue;
+      }
+      const box: HtmlMirrorPaneBox = {
+        nodeId,
+        x: round(rect.left + offsetX),
+        y: round(rect.top + offsetY),
+        width: round(rect.width),
+        height: round(rect.height),
+        maxScrollX: place.maxScrollX,
+        maxScrollY: place.maxScrollY,
+      };
+      if (
+        whole || !told || told.nodeId !== box.nodeId ||
+        told.x !== box.x || told.y !== box.y ||
+        told.width !== box.width || told.height !== box.height ||
+        told.maxScrollX !== box.maxScrollX || told.maxScrollY !== box.maxScrollY
+      ) {
+        if (told && told.nodeId !== box.nodeId && !whole) {
+          boxes.push(noPaneBox(told.nodeId));
+        }
+        this.#paneBoxes.set(pane, box);
+        boxes.push(box);
+      }
+    }
+    if (!whole && boxes.length === 0) return undefined;
+    return { version: HTML_MIRROR_PANE_BOXES_VERSION, whole, boxes };
+  }
+
   /** Follows `pane` no longer; the panel is told when it knew of it. */
   #forgetPane(pane: Element, dropped: number[]): void {
     const told = this.#scrolledPanes.get(pane);
@@ -4203,6 +4536,15 @@ export class HtmlMirrorSourceSession {
    * decided where its place is read.
    */
   #meetPane(element: Element): void {
+    // More content than room: it may be a pane the wheel scrolls, at its
+    // start or not (D180). Two more number reads; its overflow is asked
+    // when the boxes are next read.
+    if (
+      !this.#paneBoxes.has(element) &&
+      this.#paneBoxCandidates.size < MAX_PANE_BOX_CANDIDATES &&
+      (element.scrollHeight > element.clientHeight ||
+        element.scrollWidth > element.clientWidth)
+    ) this.#paneBoxCandidates.add(element);
     if (
       (!element.scrollTop && !element.scrollLeft) ||
       this.#scrolledPanes.has(element)
@@ -4256,6 +4598,12 @@ export class HtmlMirrorSourceSession {
 
   readonly #onVisibilityInteraction = (event: Event): void => {
     const target = event.target;
+    if (event.type === 'keydown' || event.type === 'beforeinput') {
+      this.#freezeCredentialScroll(event);
+    }
+    if (event.type === 'beforeinput' || event.type === 'input') {
+      this.#noteEditorWithoutAttribute(event);
+    }
     if (
       this.#disposed || !this.#identity ||
       !target || typeof target !== 'object' ||
@@ -4277,6 +4625,105 @@ export class HtmlMirrorSourceSession {
     if (USER_INPUT_EVENTS.has(event.type)) this.#userInputPending = true;
     this.#scheduleFlush();
   };
+
+  /**
+   * A key or an input into a credential field sized by its content, before
+   * the character is put in (D180): the places of the scrollers around it
+   * on its inline axis are kept, and reported from then on.
+   */
+  #freezeCredentialScroll(event: Event): void {
+    if (this.#disposed || !this.#identity) return;
+    const target = (event.composedPath?.()[0] ?? event.target) as Node | null;
+    if (
+      !target || typeof target !== 'object' || target.nodeType !== 1 ||
+      this.#credentialScrollFreezes.has(target as Element) ||
+      this.#credentialScrollFreezes.size >= MAX_CREDENTIAL_SCROLL_FREEZES
+    ) return;
+    const field = target as Element;
+    let axis: 'x' | 'y';
+    try {
+      if (!this.#secretClassifier().isSecret(field)) return;
+      const style = this.environment.window.getComputedStyle(field);
+      if (style.getPropertyValue('field-sizing').trim() !== 'content') return;
+      const mode = style.getPropertyValue('writing-mode').trim();
+      axis = mode.startsWith('vertical') || mode.startsWith('sideways') ? 'y' : 'x';
+    } catch {
+      return;
+    }
+    const frozen = (place: { readonly scrollX: number; readonly scrollY: number;
+      readonly maxScrollX: number; readonly maxScrollY: number }) =>
+      axis === 'x'
+        ? { offset: place.scrollX, max: place.maxScrollX }
+        : { offset: place.scrollY, max: place.maxScrollY };
+    const panes = new Map<Element, { offset: number; max: number }>();
+    let depth = 0;
+    for (
+      let node: Node | null = field.parentNode;
+      node && depth < MAX_CREDENTIAL_SCROLL_ANCESTORS;
+      depth += 1
+    ) {
+      if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in node) {
+        node = (node as ShadowRoot).host;
+        continue;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) break;
+      const place = readPaneScrollPlace(node as Element, this.environment.document);
+      if (place) panes.set(node as Element, frozen(place));
+      node = node.parentNode;
+    }
+    this.#credentialScrollFreezes.set(field, {
+      axis,
+      document: frozen(readDocumentScrollSnapshot(
+        this.environment.document,
+        this.environment.window,
+      )),
+      panes,
+    });
+  }
+
+  /**
+   * A place as it is reported: on the inline axis of a credential field
+   * sized by its content, the place before it was typed into (D180).
+   * `scroller` is a pane, or undefined for the document.
+   */
+  #withoutCredentialLength<T extends {
+    readonly scrollX: number;
+    readonly scrollY: number;
+    readonly maxScrollX: number;
+    readonly maxScrollY: number;
+  }>(place: T, scroller?: Element): T {
+    if (this.#credentialScrollFreezes.size === 0) return place;
+    let result = place;
+    for (const [field, freeze] of this.#credentialScrollFreezes) {
+      if (!field.isConnected) {
+        this.#credentialScrollFreezes.delete(field);
+        continue;
+      }
+      const kept = scroller ? freeze.panes.get(scroller) : freeze.document;
+      if (!kept) continue;
+      result = freeze.axis === 'x'
+        ? { ...result, scrollX: kept.offset, maxScrollX: kept.max }
+        : { ...result, scrollY: kept.offset, maxScrollY: kept.max };
+    }
+    return result;
+  }
+
+  /**
+   * An editor the page made without the attribute is known by what is typed
+   * into it (D181): `beforeinput` comes before the text is put in, and the
+   * editor is read again as an editor.
+   */
+  #noteEditorWithoutAttribute(event: Event): void {
+    if (this.#disposed || !this.#identity) return;
+    const target = (event.composedPath?.()[0] ?? event.target) as Node | null;
+    if (!target || typeof target !== 'object' || target.nodeType !== 1) return;
+    const editor = noteSourceEditingTarget(target as Element);
+    if (!editor || !this.#mirroredNodes.has(editor) || this.#checkpointRead) {
+      return;
+    }
+    this.#queueReadWithChildren(editor);
+    this.#scheduleFlush();
+  }
 
   /**
    * A script gave a slot other nodes (a root that assigns by hand, D135):
@@ -4394,8 +4841,7 @@ export class HtmlMirrorSourceSession {
       this.#signalShadowReconciliation();
       return;
     }
-    this.#queuePending(this.#pendingChildren, target);
-    this.#queuePending(this.#pendingAttributes, target);
+    this.#queueReadWithChildren(target);
     // What a host's own root holds is hidden and shown with the host, and
     // a patch for the host's children does not carry it: the text of a
     // menu a web component shows by `:host([open])` never arrived (D132).
@@ -4424,7 +4870,7 @@ export class HtmlMirrorSourceSession {
       while (boxes.length > 0) {
         const box = boxes.pop() as Element;
         const slots: Element[] = box.localName === 'slot' ? [box] : [];
-        slots.push(...box.querySelectorAll('slot'));
+        for (const item of box.querySelectorAll('slot')) slots.push(item);
         for (const slot of slots) {
           for (const node of (slot as HTMLSlotElement).assignedNodes?.({
             flatten: true,
@@ -4695,10 +5141,7 @@ export class HtmlMirrorSourceSession {
       return true;
     }
     const changed = sourceControlledContentChangedTargets(previous, next);
-    for (const panel of changed) {
-      this.#queuePending(this.#pendingChildren, panel);
-      this.#queuePending(this.#pendingAttributes, panel);
-    }
+    for (const panel of changed) this.#queueReadWithChildren(panel);
     return changed.length > 0;
   }
 
@@ -4859,8 +5302,49 @@ export class HtmlMirrorSourceSession {
     const policy = this.#controlledContentPolicy;
     if (!policy || source.nodeType !== Node.ELEMENT_NODE) return;
     const withheld = sourceDeclaredHiddenRegionIsWithheld(source as Element, policy);
-    if (withheld === undefined) this.#declaredHiddenSent.delete(source as Element);
-    else this.#declaredHiddenSent.set(source as Element, withheld);
+    if (withheld === undefined) {
+      this.#declaredHiddenSent.delete(source as Element);
+      this.#declaredHiddenElements.delete(source as Element);
+    } else {
+      this.#declaredHiddenSent.set(source as Element, withheld);
+      this.#declaredHiddenElements.add(source as Element);
+    }
+  }
+
+  /**
+   * Asks each element the page declares hidden whether what it holds is
+   * withheld as it was when it was sent, and queues the ones that changed
+   * (D180): a class on such a box, or an animation, that fades it in or
+   * out. A page can declare hundreds of icons hidden, so at most
+   * `DECLARED_HIDDEN_LOOK_MS` goes to it at a time, and the ones asked go
+   * to the end of the list for the next time.
+   */
+  #askDeclaredHiddenAgain(): void {
+    const policy = this.#controlledContentPolicy;
+    const elements = this.#declaredHiddenElements;
+    if (!policy || elements.size === 0) return;
+    const now = this.environment.now;
+    const started = now();
+    let left = elements.size;
+    let queued = false;
+    for (const element of elements) {
+      if (left === 0) break;
+      left -= 1;
+      elements.delete(element);
+      const withheld = this.#declaredHiddenSent.get(element);
+      if (
+        withheld === undefined || !element.isConnected ||
+        !this.#mirroredNodes.has(element)
+      ) continue;
+      elements.add(element);
+      if (sourceDeclaredHiddenRegionIsWithheld(element, policy) !== withheld) {
+        this.#queueVisibilityTarget(element);
+        queued = true;
+        if (this.#paused || !this.#queueSlottedContent(element)) return;
+      }
+      if (now() - started >= DECLARED_HIDDEN_LOOK_MS) break;
+    }
+    if (queued) this.#scheduleFlush();
   }
 
   #recordEmittedChildren(
@@ -5197,9 +5681,26 @@ export class HtmlMirrorSourceSession {
    * seconds on one that has been at rest (see `#heldLook`).
    */
   #lookForHeldAnimations(): void {
+    const listing = readSourceAnimationListing(this.environment.document);
+    if (listing.running) {
+      // An animation runs (D180): it may lengthen or shorten a pane with
+      // nothing the reader hears of, so the panes are read again, as after
+      // a change, every half second while it runs.
+      this.#takeMetPanes();
+      if (this.#scrolledPanes.size > 0) this.#postScroll(true);
+    }
     const look = this.#heldLook;
     look.in -= 1;
     if (look.in > 0) return;
+    if (!listing.script) {
+      // The last listing held no animation a script made (D180): the look
+      // is for those, and a page of endless spinners was listed every few
+      // seconds for nothing. One a timer starts is met at the next change
+      // the reader hears of, which lists the animations again.
+      look.every = Math.min(look.every * 2, MAX_HELD_LOOK_WAIT);
+      look.in = look.every;
+      return;
+    }
     const pass = beginSourceHeldAnimationPass(
       this.environment.document,
       false,
@@ -5245,7 +5746,7 @@ export class HtmlMirrorSourceSession {
     owner: Document | ShadowRoot,
     work: HtmlMirrorStyleWorkBudget,
   ): StylePollResult {
-    const collection = createSourceStyleSheetCollection();
+    const collection = createSourceStyleSheetCollection(this.#crossOriginNames);
     const read = ordinaryStyleSignature(
       owner,
       work,
@@ -5254,6 +5755,7 @@ export class HtmlMirrorSourceSession {
     );
     if (read.kind === 'capacity') return 'capacity';
     this.#styleNames.noteOrdinary(owner, read.signature, collection);
+    this.#learnRedirectedSheetBases(owner);
     const signature = read.signature;
     if (signature === undefined) return 'unchanged';
     // The first look at an owner is what the mirror holds of it.
@@ -5266,6 +5768,37 @@ export class HtmlMirrorSourceSession {
     return settled && this.#rereadChangedStyleSheets(settled, read.sheets ?? [])
       ? 'unchanged'
       : 'changed';
+  }
+
+  /**
+   * Asks where each redirected linked sheet of `owner` came from, once a
+   * sheet (D180): its relative `url()`s are the tab's only against that
+   * address. A sheet whose address is learned is sent again with its
+   * element.
+   */
+  #learnRedirectedSheetBases(owner: Document | ShadowRoot): void {
+    let sheets: ArrayLike<CSSStyleSheet>;
+    try {
+      sheets = owner.styleSheets;
+    } catch {
+      return;
+    }
+    const count = Math.min(sheets?.length ?? 0, MAX_STYLE_SHEETS_PER_TICK);
+    for (let index = 0; index < count; index += 1) {
+      const sheet = sheets[index];
+      if (!sheet) continue;
+      learnSourceSheetBase(sheet, this.environment.window, (learned) => {
+        if (this.#disposed) return;
+        const element = learned.ownerNode;
+        if (
+          !element || element.nodeType !== Node.ELEMENT_NODE ||
+          !(element as Element).isConnected ||
+          !this.#mirroredNodes.has(element)
+        ) return;
+        this.#queuePending(this.#pendingSheets, element as Element);
+        this.#scheduleFlush();
+      });
+    }
   }
 
   /**
@@ -5314,7 +5847,7 @@ export class HtmlMirrorSourceSession {
       const index = (this.#stylePollingCursor + offset) % owners.length;
       const owner = owners[index]!;
       processed += 1;
-      const collection = createSourceStyleSheetCollection();
+      const collection = createSourceStyleSheetCollection(this.#crossOriginNames);
       const read = ordinaryStyleSignature(
         owner,
         work,
@@ -5540,8 +6073,38 @@ export class HtmlMirrorSourceSession {
       return;
     }
     if (this.#unheldShadowRoots.has(shadow)) return;
+    if (!this.#mirroredNodes.has(shadow.host)) {
+      // A host the mirror does not hold: the patch that adds it carries
+      // its root (D180).
+      this.#rootsAwaitingPatch.add(shadow);
+      return;
+    }
     this.#shadowReconciliationPending = true;
     this.#signalShadowReconciliation();
+  }
+
+  /**
+   * After a frame's patches are read: whether the mirror holds every root
+   * met on a host it did not hold (D180). A host still not held needs no
+   * root (a host the mirror leaves out, or one taken out again); one held
+   * now without its root asks for a checkpoint, as a root attached to a
+   * held host does.
+   */
+  #rootsAwaitingPatchHeld(): boolean {
+    if (this.#rootsAwaitingPatch.size === 0) return true;
+    const roots = this.#rootsAwaitingPatch;
+    this.#rootsAwaitingPatch = new Set();
+    for (const shadow of roots) {
+      if (
+        !this.#mirroredNodes.has(shadow.host) ||
+        this.#mirroredNodes.has(shadow) ||
+        this.#unheldShadowRoots.has(shadow)
+      ) continue;
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -5855,6 +6418,13 @@ function cssomRuleSignature(
       signature: adoptedStyleSignature(parts),
     });
   } catch {
+    // Another origin's sheet: its names, once the page's copy of it has
+    // been read (D180), and no rules.
+    const names = collection?.crossOrigin?.(sheet);
+    if (names) {
+      collection!.names.push(names);
+      return Object.freeze({ kind: 'signature', signature: 'cross-origin' });
+    }
     return incomplete(Object.freeze({ kind: 'signature', signature: 'unreadable' }));
   } finally {
     visited.delete(sheet);
@@ -5916,7 +6486,7 @@ function collectLiveSubtreeNodes(
         const shadow = readSourceShadowRoot(current as Element);
         if (shadow) stack.push(shadow);
       }
-      stack.push(...current.childNodes);
+      for (const item of current.childNodes) stack.push(item);
     }
     return sources;
   } catch {

@@ -329,12 +329,15 @@ describe('what a script animation leaves an element at', () => {
     expect(readSourceHeldAnimationStyle(other)).toBe('opacity:0.2');
   });
 
-  it('holds nothing for an animation that runs, is paused, or a sheet made', () => {
+  it('holds nothing for an animation that runs, one a scroll drives, or a sheet made', () => {
     const { document, window, box } = page('<div id="box">text</div><p id="other"></p>');
     computeStyles(window, () => ({ opacity: '1' }));
     const running = new FakeAnimation(box, fade());
     running.playState = 'running';
-    const paused = new FakeAnimation(box, fade());
+    // Paused on a scroll timeline: its frame moves at every scroll (D175).
+    const paused = Object.assign(new FakeAnimation(box, fade()), {
+      timeline: { source: document.body, axis: 'block' },
+    });
     paused.playState = 'paused';
     const idle = new FakeAnimation(box, fade());
     idle.playState = 'idle';
@@ -558,6 +561,34 @@ describe('what a script animation leaves an element at', () => {
     expect(readSourceHeldAnimationStyle(box)).toBe('');
   });
 
+  it('holds the frame a paused animation stands at, read afresh at each pass (D180)', () => {
+    const { document, window, box } = page('<div id="box">text</div>');
+    let opacity = '0.5';
+    computeStyles(window, () => ({ opacity }));
+    // Paused half way: the element is drawn at its computed value.
+    const paused = Object.assign(new FakeAnimation(box, fade()), {
+      timeline: { currentTime: 0 },
+    });
+    paused.playState = 'paused';
+    paused.progress = 0.5;
+    animate(document, [paused]);
+    pass(document);
+    expect(readSourceHeldAnimationStyle(box)).toBe('opacity:0.5');
+    // A script moves its time: the next pass has the new frame.
+    opacity = '0.75';
+    paused.progress = 0.75;
+    pass(document);
+    expect(readSourceHeldAnimationStyle(box)).toBe('opacity:0.75');
+    // Set back to its start: the first keyframe's value, as stated.
+    paused.progress = 0;
+    pass(document);
+    expect(readSourceHeldAnimationStyle(box)).toBe('opacity:0.01');
+    // Played again: running, it holds nothing.
+    paused.playState = 'running';
+    pass(document);
+    expect(readSourceHeldAnimationStyle(box)).toBe('');
+  });
+
   it('tells its listeners whose held values changed, and when a running one ends', () => {
     const { document, window, box } = page('<div id="box">text</div><p id="other">x</p>');
     computeStyles(window, () => ({ opacity: '1' }));
@@ -566,7 +597,9 @@ describe('what a script animation leaves an element at', () => {
     running.playState = 'running';
     const css = Object.assign(new FakeAnimation(box, fade()), { animationName: 'fade' });
     css.playState = 'running';
-    const paused = new FakeAnimation(other, fade());
+    const paused = Object.assign(new FakeAnimation(other, fade()), {
+      timeline: { source: document.body },
+    });
     paused.playState = 'paused';
     animate(document, [running, css, paused]);
     const failing = listenForSourceHeldAnimations(document as unknown as Document, {
@@ -627,13 +660,16 @@ describe('what a script animation leaves an element at', () => {
     pass(document);
     expect(heard.changed).toHaveLength(2);
 
-    // Set back and paused: listed, and holding nothing at rest.
+    // Set back and paused: listed, and holding the frame it stands at
+    // (D180), its first.
     listed = [animation];
     pass(document);
     animation.playState = 'paused';
+    animation.progress = 0;
     pass(document);
-    expect(readSourceHeldAnimationStyle(box)).toBe('');
+    expect(readSourceHeldAnimationStyle(box)).toBe('opacity:0.01');
     expect(heard.changed).toHaveLength(4);
+    animation.progress = 1;
 
     // Other keyframes (`setKeyframes`): the new value.
     animation.playState = 'finished';
@@ -872,11 +908,14 @@ describe('what a script animation leaves an element at', () => {
     expect(style('bracket'))
       .toBe('width: calc(10px + (2px));opacity:1;transform:none');
     expect(style('escape')).toBe('color: red;opacity:1;transform:none');
-    // An own style that is refused does not take the held values with it,
-    // nor does one that would not read, with them, as it was written.
-    for (const id of ['string', 'comment', 'refused', 'broken']) {
-      expect(style(id), id).toBe('opacity:1;transform:none');
-    }
+    // An own style that is refused does not take the held values with it.
+    expect(style('refused')).toBe('opacity:1;transform:none');
+    // One cut off in a string or a comment, or with a string a line break
+    // ends, is read as Chrome reads it, and the held values follow (D181).
+    expect(style('string'))
+      .toBe("color: red; font-family: 'Open';opacity:1;transform:none");
+    expect(style('comment')).toBe('color: red; ;opacity:1;transform:none');
+    expect(style('broken')).toBe("content: !\n(b'');opacity:1;transform:none");
     expect(style('blank')).toBe('opacity:1;transform:none');
     // An option's style never travels, held or not.
     expect(JSON.stringify(graph)).not.toMatch(/"choice"[^\]]*\]\s*,\s*\["style"/u);
@@ -948,7 +987,7 @@ describe('what a script animation leaves an element at', () => {
     const element = (id: string) => document.querySelector(`#${id}`)!;
     computeStyles(window, () => ({}));
     // As `setAttributeNS(null, 'STYLE', …)` in an HTML document: another
-    // attribute to Chrome, which travels as `style` when it stands alone.
+    // attribute to Chrome, which it does not read as the element's style.
     element('twin').setAttribute('STYLE', 'color: blue');
     element('alone').setAttribute('STYLE', 'color: green');
     const read = () => {
@@ -976,7 +1015,9 @@ describe('what a script animation leaves an element at', () => {
       .filter(([name]) => name === 'style')
       .map(([, value]) => value);
     expect(styles('twin')).toEqual(['color: red;opacity:1']);
-    expect(styles('alone')).toEqual(['color: green;opacity:1']);
+    // Alone, it is still an attribute Chrome does not read, and stays
+    // behind (D181).
+    expect(styles('alone')).toEqual(['opacity:1']);
     expect(styles('none')).toEqual(['opacity:1']);
     // An element that has a style is not read as if it had a second one: an
     // option's, which never travels, is counted as left out once, as before.
@@ -1158,11 +1199,18 @@ describe('what a script animation leaves an element at', () => {
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
 
     // An animation a timer started and that ended since, with nothing else
-    // happening on the page: found by the same look.
+    // happening on the page: the last listing held no script animation, so
+    // no look comes for it (D180); the next change the reader hears of
+    // lists the animations, and finds it.
     listed = [new FakeAnimation(box, frames({ color: 'red' }))];
-    fixture.tick();
+    const calls = list.calls;
+    for (let tick = 0; tick < 16; tick += 1) fixture.tick();
+    expect(list.calls).toBe(calls);
+    expect(fixture.frames).toHaveLength(0);
+    box.dispatchEvent(new fixture.window.Event('click', { bubbles: true }));
     fixture.flushFrame();
     expect(JSON.stringify(fixture.patches()[2])).toContain('color:red');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
     // A look that finds nothing new asks for no frame.
     fixture.tick();
     expect(fixture.frames).toHaveLength(0);
@@ -1235,7 +1283,8 @@ describe('what a script animation leaves an element at', () => {
     const fixture = sessionFixture('<div id="box">text</div>');
     const box = fixture.document.querySelector('#box')!;
     computeStyles(fixture.window, () => ({}));
-    let listed: unknown[] = [];
+    // A script animation the page holds: the look is for such pages (D180).
+    let listed: unknown[] = [new FakeAnimation(box, frames({ color: 'blue' }))];
     const list = animate(fixture.document, () => listed);
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
@@ -1254,7 +1303,7 @@ describe('what a script animation leaves an element at', () => {
     // An animation that a timer started and that ended since is found by the
     // next look, 4 s after the last at worst; what it finds is sent, and the
     // look is half a second off again.
-    listed = [new FakeAnimation(box, fade())];
+    listed = [...listed, new FakeAnimation(box, fade())];
     for (let tick = 0; tick < 8; tick += 1) fixture.tick();
     expect(fixture.frames).toHaveLength(1);
     fixture.flushFrame();
@@ -1292,6 +1341,14 @@ describe('what a script animation leaves an element at', () => {
     expect(fixture.errors()).toEqual([]);
     fixture.tick();
     expect(list.calls).toBe(calls + 2);
+
+    // The page lets go of every script animation: the look that finds it
+    // gone is the last while nothing else happens (D180).
+    listed = [];
+    for (let tick = 0; tick < 8; tick += 1) fixture.tick();
+    calls = list.calls;
+    for (let tick = 0; tick < 40; tick += 1) fixture.tick();
+    expect(list.calls).toBe(calls);
   });
 
   it('reads again what an element holds when its animation shows it, and not the page', () => {
@@ -1353,12 +1410,15 @@ describe('what a script animation leaves an element at', () => {
       document.body.append(element);
       return element;
     });
-    let listed: unknown[] = [];
+    // One script animation runs from the start, so the look comes (D180).
+    const keeper = new FakeAnimation(document.body, fade());
+    keeper.playState = 'running';
+    let listed: unknown[] = [keeper];
     animate(document, () => listed);
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
-    listed = elements.map((element) => new FakeAnimation(element, fade()));
+    listed = [keeper, ...elements.map((element) => new FakeAnimation(element, fade()))];
     fixture.tick();
     const sizes: number[] = [];
     while (fixture.frames.length > 0) {
@@ -1373,7 +1433,10 @@ describe('what a script animation leaves an element at', () => {
     // A panel that does not keep up stops the stream at a full window of
     // batches; what is left waits for its ACKs, then goes out, each held
     // value once (D164; before, this was an overflow and a whole read).
-    listed = elements.map((element) => new FakeAnimation(element, frames({ opacity: '0.5' })));
+    listed = [
+      keeper,
+      ...elements.map((element) => new FakeAnimation(element, frames({ opacity: '0.5' }))),
+    ];
     fixture.tick();
     while (fixture.frames.length > 0) fixture.flushFrame();
     expect(fixture.errors()).toEqual([]);

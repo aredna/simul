@@ -220,6 +220,40 @@ export interface HtmlMirrorPaneScroll {
   readonly alsoNodeIds?: readonly number[];
 }
 
+/** The version of the pane boxes this build sends and reads (D180). */
+export const HTML_MIRROR_PANE_BOXES_VERSION = 1 as const;
+/** Pane boxes one message names, at most (D180). */
+export const MAX_HTML_MIRROR_PANE_BOXES = 1_024;
+
+/**
+ * A pane the reader met that the reader can scroll (D180), at its start or
+ * not: its box in the tab's document, in CSS pixels from the document's
+ * top left corner (where the page's own scrolling does not move it), and
+ * its scroll ranges. For the panel's test of which pane the wheel is over.
+ * A box of no width and no height says the element is no longer a pane.
+ */
+export interface HtmlMirrorPaneBox {
+  readonly nodeId: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly maxScrollX: number;
+  readonly maxScrollY: number;
+}
+
+/**
+ * The scrollable panes' boxes (D180), beside the list of panes that are
+ * not at their start. `whole`: every pane, any other is none; otherwise
+ * the boxes that changed. Versioned on its own, so a later change to it
+ * leaves the scroll message's other fields as they are.
+ */
+export interface HtmlMirrorPaneBoxes {
+  readonly version: typeof HTML_MIRROR_PANE_BOXES_VERSION;
+  readonly whole: boolean;
+  readonly boxes: readonly HtmlMirrorPaneBox[];
+}
+
 export interface HtmlMirrorScrollState {
   /** The document's place and its scroll ranges. */
   readonly scrollX: number;
@@ -250,6 +284,8 @@ export interface HtmlMirrorScrollState {
    * its progress moves the replica document instead (D100).
    */
   readonly primaryPaneId?: number;
+  /** Every scrollable pane the reader met, with its box (D180). */
+  readonly paneBoxes?: HtmlMirrorPaneBoxes;
   /**
    * Pinch zoom (D115): how many times the tab magnifies the page on top of
    * its browser zoom, and where the magnified view's corner is inside the
@@ -1202,10 +1238,46 @@ export function groupHtmlMirrorScrollPanes(
  */
 export class HtmlMirrorScrollPaneLedger {
   readonly #places = new Map<number, HtmlMirrorPaneScroll>();
+  /** Every scrollable pane's box (D180); none before the page sent one. */
+  readonly #boxes = new Map<number, HtmlMirrorPaneBox>();
+  #boxesSeen = false;
   /** The last list handed on; none before the page has sent one. */
   #last: HtmlMirrorScrollState | undefined;
 
   complete(update: HtmlMirrorScrollUpdate): HtmlMirrorScrollUpdate {
+    return this.#withBoxes(this.#completePanes(update));
+  }
+
+  /**
+   * Keeps the boxes the page sent (D180) and gives every update the whole
+   * list once one came, as for the panes' places.
+   */
+  #withBoxes(update: HtmlMirrorScrollUpdate): HtmlMirrorScrollUpdate {
+    const sent = update.scroll.paneBoxes;
+    if (sent) {
+      this.#boxesSeen = true;
+      if (sent.whole) this.#boxes.clear();
+      for (const box of sent.boxes) {
+        this.#boxes.delete(box.nodeId);
+        if (box.width > 0 || box.height > 0) this.#boxes.set(box.nodeId, box);
+      }
+      for (const nodeId of this.#boxes.keys()) {
+        if (this.#boxes.size <= MAX_HTML_MIRROR_PANE_BOXES) break;
+        this.#boxes.delete(nodeId);
+      }
+    }
+    if (!this.#boxesSeen) return update;
+    const paneBoxes: HtmlMirrorPaneBoxes = Object.freeze({
+      version: HTML_MIRROR_PANE_BOXES_VERSION,
+      whole: true,
+      boxes: Object.freeze([...this.#boxes.values()]),
+    });
+    const scroll = Object.freeze({ ...update.scroll, paneBoxes });
+    if (this.#last) this.#last = Object.freeze({ ...this.#last, paneBoxes });
+    return Object.freeze({ ...update, scroll });
+  }
+
+  #completePanes(update: HtmlMirrorScrollUpdate): HtmlMirrorScrollUpdate {
     const { panes, movedPanes, primaryPaneId, ...place } = update.scroll;
     const named = panes ?? movedPanes;
     if (!named) return withHtmlMirrorScrollPanes(update, this.#last);
@@ -1869,7 +1941,7 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
       input as unknown as Record<string, unknown>,
       ['scrollX', 'scrollY', 'maxScrollX', 'maxScrollY'],
       [
-        'panes', 'movedPanes', 'primaryPaneId',
+        'panes', 'movedPanes', 'primaryPaneId', 'paneBoxes',
         'visualScale', 'visualOffsetX', 'visualOffsetY',
       ],
     ) ||
@@ -1891,7 +1963,11 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
   const movedPanes = input.movedPanes === undefined
     ? undefined
     : readScrollPanes(input.movedPanes);
+  const paneBoxes = input.paneBoxes === undefined
+    ? undefined
+    : readPaneBoxes(input.paneBoxes);
   if (
+    (input.paneBoxes !== undefined && !paneBoxes) ||
     (input.panes !== undefined && !panes) ||
     (input.movedPanes !== undefined && !movedPanes) ||
     (input.primaryPaneId !== undefined && (
@@ -1914,6 +1990,7 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
     ...(input.primaryPaneId !== undefined
       ? { primaryPaneId: input.primaryPaneId }
       : {}),
+    ...(paneBoxes ? { paneBoxes } : {}),
     ...(input.visualScale !== undefined
       ? {
           visualScale: input.visualScale,
@@ -1980,6 +2057,54 @@ function readScrollPanes(
     }));
   }
   return Object.freeze(panes);
+}
+
+/**
+ * The pane boxes of one scroll message (D180): this version, a bounded
+ * list, each pane once, every number finite and inside the scroll bound.
+ * One bad box refuses the whole message.
+ */
+function readPaneBoxes(input: unknown): HtmlMirrorPaneBoxes | undefined {
+  if (
+    !isRecord(input) ||
+    !hasExactKeysWithOptional(input, ['version', 'whole', 'boxes'], []) ||
+    input.version !== HTML_MIRROR_PANE_BOXES_VERSION ||
+    typeof input.whole !== 'boolean' ||
+    !Array.isArray(input.boxes) ||
+    input.boxes.length > MAX_HTML_MIRROR_PANE_BOXES
+  ) return undefined;
+  const seen = new Set<number>();
+  const boxes: HtmlMirrorPaneBox[] = [];
+  for (const box of input.boxes as readonly unknown[]) {
+    if (
+      !isRecord(box) ||
+      !hasExactKeysWithOptional(
+        box,
+        ['nodeId', 'x', 'y', 'width', 'height', 'maxScrollX', 'maxScrollY'],
+        [],
+      ) ||
+      !isNodeId(box.nodeId) || seen.has(box.nodeId) ||
+      !isPaneOffset(box.x, PRIMARY_SCROLL_MAX) ||
+      !isPaneOffset(box.y, PRIMARY_SCROLL_MAX) ||
+      !isScrollValue(box.width) || !isScrollValue(box.height) ||
+      !isScrollValue(box.maxScrollX) || !isScrollValue(box.maxScrollY)
+    ) return undefined;
+    seen.add(box.nodeId);
+    boxes.push(Object.freeze({
+      nodeId: box.nodeId,
+      x: box.x,
+      y: box.y,
+      width: box.width,
+      height: box.height,
+      maxScrollX: box.maxScrollX,
+      maxScrollY: box.maxScrollY,
+    }));
+  }
+  return Object.freeze({
+    version: HTML_MIRROR_PANE_BOXES_VERSION,
+    whole: input.whole,
+    boxes: Object.freeze(boxes),
+  });
 }
 
 /** A pane's offset on one axis: either sign, never past its range. */

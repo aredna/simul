@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
 import {
   MAX_HTML_MIRROR_SCROLL_PANES,
+  HTML_MIRROR_PANE_BOXES_VERSION,
   createHtmlMirrorAck,
   createHtmlMirrorCheckpointRequest,
   createHtmlMirrorPortName,
@@ -2389,7 +2390,12 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(childListRecord(page, [added]));
     fixture.flushFrame();
 
-    expect(fixture.patches()).toHaveLength(patchesBeforeOmittedFrame);
+    // Only an empty placeholder holds the frame's place (D181).
+    expect(fixture.patches()).toHaveLength(patchesBeforeOmittedFrame + 1);
+    const framePatch = JSON.stringify(fixture.patches().at(-1));
+    expect(framePatch).toContain('"opaquePlaceholder":true');
+    expect(framePatch).not.toContain('"tagName":"iframe"');
+    expect(framePatch).not.toContain('srcdoc');
     expect(JSON.stringify(fixture.port.posts)).not.toContain('dynamic frame secret');
 
     const foreign = parseHTML('<html><body>foreign frame secret</body></html>');
@@ -2583,6 +2589,62 @@ describe('HtmlMirrorSourceSession', () => {
       }),
     ]);
     expect(second.representability.coveredDirtyBranchFallbackCount).toBe(0);
+  });
+
+  it('sends a parent\'s own attribute after its list unless it changes how the children are read (D180)', () => {
+    const fixture = sourceFixture(
+      '<main id="target"><span id="label">kept</span></main>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const added = fixture.document.createElement('aside');
+    added.textContent = 'new sibling';
+    target.append(added);
+    target.setAttribute('class', 'open');
+    fixture.mutateAll([childListRecord(target, [added]), attributeRecord(target, 'class')]);
+    fixture.flushFrame();
+
+    // A class: the list as what stays and what is new, the class after it,
+    // in the same message.
+    const first = fixture.patches()[0]!;
+    expect(first.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        nodeId: fixture.registry.peekId(target),
+      }),
+    ]);
+    expect(JSON.stringify(first.operations)).not.toContain('"kept"');
+    expect(first.more).toHaveLength(1);
+    expect(first.more![0]!.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        nodeId: fixture.registry.peekId(target),
+        attributes: expect.arrayContaining([['class', 'open']]),
+      }),
+    ]);
+    expect(first.representability.attributeContextFallbackCount).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // `inert`, `hidden`, `aria-hidden`, a role or `contenteditable` change
+    // how the children are read: the list is read whole with it.
+    for (const [name, value, sequence] of [
+      ['inert', '', 2],
+      ['aria-hidden', 'false', 3],
+    ] as const) {
+      const more = fixture.document.createElement('aside');
+      target.append(more);
+      target.setAttribute(name, value);
+      fixture.mutateAll([childListRecord(target, [more]), attributeRecord(target, name)]);
+      fixture.flushFrame();
+      const patch = fixture.patches().at(-1)!;
+      expect(patch.operations.map(({ kind }) => kind)).toEqual(
+        expect.arrayContaining(['attributes', 'children']),
+      );
+      expect(patch.more).toBeUndefined();
+      expect(patch.representability.attributeContextFallbackCount).toBe(1);
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, sequence));
+    }
   });
 
   it('still reads a list again whole when its own later patch has a list inside a child that stays', () => {
@@ -3263,17 +3325,54 @@ describe('HtmlMirrorSourceSession', () => {
     // The mutation walk finds both roots without waiting for discovery.
     expect(fixture.observed).toContain(root);
     expect(fixture.observed).toContain(nested);
+    // They are on a host the mirror does not hold yet: the patch that adds
+    // the host carries them (D180). Each such host was a whole read.
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
+    fixture.flushFrame();
+    const patch = JSON.stringify(fixture.patches().at(-1));
+    expect(patch).toContain('added closed text');
+    expect(patch).toContain('added nested text');
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The root on the element the mirror held is found by the discovery,
+    // and asks for its checkpoint.
+    fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
       kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
-    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 1));
     const recovery = JSON.stringify(fixture.checkpoints().at(-1));
     expect(recovery).toContain('added closed text');
     expect(recovery).toContain('added nested text');
-    // Roots attached together arrive together: the same checkpoint asked
-    // about the old element again.
     expect(recovery).toContain('root on an old element');
+  });
+
+  it('patches a component the page made, gave an open root and filled before it put it in the page (D180)', () => {
+    const fixture = sourceFixture('<main id="page"><p>page text</p></main>');
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const page = fixture.document.querySelector('#page')!;
+    for (let round = 0; round < 3; round += 1) {
+      const card = fixture.document.createElement('x-card');
+      const root = card.attachShadow({ mode: 'open' });
+      Object.defineProperty(root, 'mode', { value: 'open' });
+      Object.defineProperty(root, 'isConnected', { get: () => card.isConnected });
+      root.innerHTML = `<p>card ${round} text</p>`;
+      page.append(card);
+      fixture.mutate(childListRecord(page, [card]));
+      fixture.flushFrame();
+      const patch = fixture.patches().at(-1)!;
+      expect(JSON.stringify(patch)).toContain(`card ${round} text`);
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, patch.identity.sequence));
+    }
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.patches()).toHaveLength(3);
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
   });
 
   it('does the same for a closed root (D125, D135)', () => {
@@ -4102,12 +4201,14 @@ describe('HtmlMirrorSourceSession', () => {
   });
 
   it('bounds open-shadow-root observation per batch and records the omission', () => {
+    // An element left out with no place held for it: changes under a
+    // script's placeholder are not looked at at all (D181).
     const fixture = sourceFixture(
-      '<main><p id="budgeted">budget text</p></main><script></script>',
+      '<main><p id="budgeted">budget text</p></main><webview></webview>',
     );
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
-    const omitted = fixture.document.querySelector('script')!;
+    const omitted = fixture.document.querySelector('webview')!;
     const bulk = fixture.document.createElement('div');
     const bulkNodeCount = 25_000;
     for (let index = 1; index < bulkNodeCount; index += 1) {
@@ -4488,6 +4589,65 @@ describe('HtmlMirrorSourceSession', () => {
     expect(serialized).toContain('"resolvedStyleSheetText":');
   });
 
+  it('resolves a redirected linked sheet\'s url() against the address it came from (D180)', async () => {
+    const href = 'https://example.test/r?to=/deep/er/made.css';
+    const fixture = sourceFixture(
+      `<link id="theme" rel="stylesheet" href="${href}">` +
+      '<main class="box">styled content</main>',
+    );
+    const link = fixture.document.querySelector('#theme')!;
+    const sheet = Object.assign(
+      fakeStyleSheet({ cssText: '.box { background-image: url("img.png"); }' }),
+      { href, ownerNode: link },
+    );
+    Object.defineProperty(link, 'sheet', { configurable: true, value: sheet });
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(sheet),
+    });
+    // The server answered the link's address with a redirect: Resource
+    // Timing says so, and a request that follows it ends at the sheet.
+    const asked: string[] = [];
+    onTestFinished(() => {
+      for (const name of ['performance', 'fetch']) {
+        delete (fixture.window as unknown as Record<string, unknown>)[name];
+      }
+    });
+    Object.defineProperties(fixture.window, {
+      performance: {
+        configurable: true,
+        value: {
+          getEntriesByName: (name: string) =>
+            name === href ? [{ redirectStart: 5, redirectEnd: 9 }] : [],
+        },
+      },
+      fetch: {
+        configurable: true,
+        value: async (url: string) => {
+          asked.push(url);
+          return { redirected: true, url: 'https://example.test/deep/er/made.css' };
+        },
+      },
+    });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('https://example.test/img.png');
+
+    // The style poll asks where it came from, once, and the link is sent
+    // again with its rules resolved against that address.
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    await Promise.resolve();
+    await Promise.resolve();
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    expect(asked).toEqual([href]);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(
+      'https://example.test/deep/er/img.png',
+    );
+    expect(fixture.port.posts.some((message) =>
+      (message as { code?: string }).code === 'stream_gap')).toBe(false);
+  });
+
   it('coalesces real document scroll into one bounded transport update per frame', () => {
     const fixture = sourceFixture('<main>scrolling page</main>');
     const root = fixture.document.documentElement;
@@ -4802,6 +4962,71 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual(panes);
   });
 
+  it('reports the box of every pane the reader can scroll, at its start or not (D180)', () => {
+    const fixture = sourceFixture(
+      '<div id="list">rows</div><div id="code">lines</div><div id="spill">text</div>',
+    );
+    const page = defineDocumentScroll(fixture);
+    const list = fixture.document.querySelector('#list')!;
+    const code = fixture.document.querySelector('#code')!;
+    const listBox = defineScrollBox(list, {
+      clientWidth: 300, clientHeight: 200, scrollWidth: 300, scrollHeight: 1_400,
+    }, { left: 10, top: 50, right: 310, bottom: 250 });
+    defineScrollBox(code, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 1_000, scrollHeight: 300,
+      scrollLeft: 120,
+    }, { left: 0, top: 300, right: 400, bottom: 600 });
+    // Content spills out of this one, which does not scroll.
+    defineScrollBox(fixture.document.querySelector('#spill')!, {
+      clientWidth: 300, clientHeight: 20, scrollWidth: 300, scrollHeight: 90,
+    });
+    const overflow: Record<string, [string, string]> = {
+      list: ['visible', 'auto'], code: ['scroll', 'hidden'], spill: ['visible', 'visible'],
+    };
+    onTestFinished(() => {
+      delete (fixture.window as unknown as Record<string, unknown>).getComputedStyle;
+    });
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const [overflowX, overflowY] = overflow[element.id] ?? ['visible', 'visible'];
+        return { overflowX, overflowY, getPropertyValue: () => '' };
+      },
+    });
+    page.scrollY = 240;
+
+    fixture.start();
+    const listId = fixture.registry.peekId(list)!;
+    const codeId = fixture.registry.peekId(code)!;
+    const scroll = fixture.scrolls()[0]?.scroll;
+    expect(scroll?.paneBoxes).toEqual({
+      version: HTML_MIRROR_PANE_BOXES_VERSION,
+      whole: true,
+      boxes: [
+        { nodeId: listId, x: 10, y: 290, width: 300, height: 200, maxScrollX: 0, maxScrollY: 1_200 },
+        { nodeId: codeId, x: 0, y: 540, width: 400, height: 300, maxScrollX: 600, maxScrollY: 0 },
+      ],
+    });
+    // The list of panes off their start is as before.
+    expect(scroll?.panes).toEqual([
+      { nodeId: codeId, scrollX: 120, scrollY: 0, maxScrollX: 600, maxScrollY: 0 },
+    ]);
+
+    // After a patch, only what changed: the list lost its range.
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    listBox.scrollHeight = 200;
+    list.setAttribute('data-state', 'short');
+    fixture.mutate(attributeRecord(list, 'data-state'));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.paneBoxes).toEqual({
+      version: HTML_MIRROR_PANE_BOXES_VERSION,
+      whole: false,
+      boxes: [
+        { nodeId: listId, x: 0, y: 0, width: 0, height: 0, maxScrollX: 0, maxScrollY: 0 },
+      ],
+    });
+  });
+
   it('reports the panes afresh after a patch, and keeps a hidden pane in mind (D122)', () => {
     const fixture = sourceFixture('<div id="chat"><p id="last">message</p></div>');
     defineDocumentScroll(fixture);
@@ -4885,6 +5110,117 @@ describe('HtmlMirrorSourceSession', () => {
       ...PAGE_AT_START, movedPanes: [paneAtStart(nodeId)],
     });
     expect(fixture.panes()).toEqual([]);
+  });
+
+  it('keeps the length of a password sized by its content out of the scroll numbers (D180)', () => {
+    const fixture = sourceFixture(
+      '<div id="line"><input id="pw" type="password"></div><input id="plain">',
+    );
+    defineDocumentScroll(fixture);
+    const line = fixture.document.querySelector('#line')!;
+    const field = fixture.document.querySelector('#pw')!;
+    const plain = fixture.document.querySelector('#plain')!;
+    const lineBox = defineScrollBox(line, {
+      clientWidth: 400, clientHeight: 40, scrollWidth: 1_448, scrollHeight: 40,
+      scrollLeft: 0,
+    });
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    // Both fields are sized by their content. linkedom's windows share
+    // what is defined on one: taken away after the test.
+    onTestFinished(() => {
+      delete (fixture.window as { getComputedStyle?: unknown }).getComputedStyle;
+    });
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        getPropertyValue: (name: string) =>
+          (element === field || element === plain) && name === 'field-sizing'
+            ? 'content'
+            : name === 'writing-mode' ? 'horizontal-tb' : '',
+      }),
+    });
+    const nodeId = fixture.registry.peekId(line);
+    // The line is scrolled before anything is typed: followed as it is.
+    lineBox.scrollLeft = 200;
+    line.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    const before = { nodeId, scrollX: 200, scrollY: 0, maxScrollX: 1_048, maxScrollY: 0 };
+    expect(fixture.scrolls().at(-1)?.scroll.movedPanes).toEqual([before]);
+
+    // Typed into: the field grows a character at a time, and Chrome keeps
+    // the caret in view. The numbers stay where they were.
+    field.dispatchEvent(new fixture.window.Event('keydown', { bubbles: true }));
+    const reports = fixture.scrolls().length;
+    for (let typed = 1; typed <= 12; typed += 1) {
+      lineBox.scrollWidth = 1_448 + typed * 10;
+      lineBox.scrollLeft = 200 + typed * 10;
+      line.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+      fixture.flushFrame();
+    }
+    expect(fixture.scrolls()).toHaveLength(reports);
+
+    // Its vertical numbers still travel; a field that holds no secret
+    // changes nothing.
+    plain.dispatchEvent(new fixture.window.Event('keydown', { bubbles: true }));
+    lineBox.scrollHeight = 140;
+    lineBox.scrollTop = 30;
+    line.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.movedPanes).toEqual([
+      { ...before, scrollY: 30, maxScrollY: 100 },
+    ]);
+
+    // The field taken out of the page: the numbers are the tab's again.
+    field.remove();
+    lineBox.scrollTop = 0;
+    line.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.movedPanes).toEqual([
+      { ...before, scrollX: 320, maxScrollX: 1_168, maxScrollY: 100 },
+    ]);
+  });
+
+  it('reads the panes again every half second while an animation runs (D180)', () => {
+    const fixture = sourceFixture('<div id="chat"><p>message</p></div>');
+    defineDocumentScroll(fixture);
+    const chat = fixture.document.querySelector('#chat')!;
+    const chatBox = defineScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 2_265,
+      scrollTop: 600,
+    });
+    let animations: unknown[] = [];
+    Object.defineProperty(fixture.document, 'getAnimations', {
+      configurable: true,
+      value: () => animations,
+    });
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const nodeId = fixture.registry.peekId(chat);
+    const reports = fixture.scrolls().length;
+
+    // Nothing runs: a range that changes with nothing the reader hears of
+    // waits for the next change.
+    chatBox.scrollHeight = 2_400;
+    fixture.runTimer();
+    expect(fixture.scrolls()).toHaveLength(reports);
+
+    // A CSS animation runs (the last listing found it): the periodic look
+    // reads the panes and reports the new range.
+    animations = [{ playState: 'running', animationName: 'grow' }];
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(
+      identity,
+      fixture.checkpoints().at(-1)!.identity.sequence,
+    ));
+    const afterRead = fixture.scrolls().length;
+    chatBox.scrollHeight = 2_640;
+    fixture.runTimer();
+    expect(fixture.scrolls()).toHaveLength(afterRead + 1);
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      ...PAGE_AT_START,
+      movedPanes: [{ nodeId, scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 2_340 }],
+    });
   });
 
   it('keeps a pane scrolled before the mirror has it in mind, and names it after its patch (D122)', () => {
@@ -6740,13 +7076,14 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
     }
   });
 
-  it('reads a child that no slot takes as it reads its host', () => {
+  it('withholds a child that no slot takes, as a hidden box\'s (D181)', () => {
     const { fixture, assign } = dialogFixture('open');
-    // Nothing is assigned: the nodes are not drawn, and travel as before.
+    // Nothing is assigned: the nodes are drawn nowhere, and do not travel.
     assign();
     fixture.start('passive');
-    expect(sent(fixture)).toContain('slotted paragraph');
-    expect(sent(fixture)).toContain('text straight in the host');
+    expect(sent(fixture)).not.toContain('slotted paragraph');
+    expect(sent(fixture)).not.toContain('text straight in the host');
+    expect(sent(fixture)).toContain('root text');
   });
 
   it('reads the same in a patch of the host\'s children as in a checkpoint', () => {
@@ -6774,7 +7111,7 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
 
     // The same when the host's children are all read again (an attribute of
-    // the host changed with them).
+    // the host that changes how they are read changed with them: D180).
     const later = fixture.document.createElement('p');
     later.textContent = 'read again while hidden';
     host.append(later);
@@ -6787,9 +7124,9 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
       configurable: true,
       value: () => [slotted, direct, late, later],
     });
-    host.setAttribute('class', 'changed');
+    host.setAttribute('aria-hidden', 'false');
     fixture.mutateAll([
-      attributeRecord(host, 'class'),
+      attributeRecord(host, 'aria-hidden'),
       childListRecord(host, [later]),
     ]);
     fixture.flushFrame();
@@ -8160,6 +8497,44 @@ describe('style sheets that change (D143)', () => {
     expect(gaps(fixture)).toBe(0);
   });
 
+  it('reads again what a declared-hidden element holds when a class or the end of an animation fades it (D180)', () => {
+    const { fixture, styled, write } = derivedFixture(
+      '<main><div id="deco" aria-hidden="true">decorative words</div><p id="plain">plain words</p></main>',
+      (document, shown) => {
+        shown.set(document.querySelector('#deco')!, { display: 'block', opacity: '0' });
+      },
+    );
+    const deco = fixture.document.querySelector('#deco')!;
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('decorative words');
+    write('.page{color:red} .in{opacity:1}');
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('decorative words');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // A class a sheet names fades the box in: neither `display` nor
+    // `visibility` changes, and the index of what is painted sees nothing.
+    styled.set(deco, { display: 'block', opacity: '1' });
+    deco.setAttribute('class', 'in');
+    fixture.mutate(attributeRecord(deco, 'class'));
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('decorative words');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, fixture.patches().at(-1)!.identity.sequence));
+
+    // An animation that ends faded out: withheld again.
+    const sent = fixture.patches().length;
+    styled.set(deco, { display: 'block', opacity: '0' });
+    deco.dispatchEvent(new fixture.window.Event('animationend', { bubbles: true }));
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches().length).toBe(sent + 1);
+    const last = fixture.patches().at(-1)!;
+    expect(parts(last).flatMap(operations).some(
+      (operation) => operation.kind === 'children' &&
+        operation.nodeId === fixture.registry.peekId(deco),
+    )).toBe(true);
+    expect(JSON.stringify(last)).not.toContain('decorative words');
+  });
+
   it('knows from the whole read which declared-hidden elements were read', () => {
     // Painted when the page was first read: its text is in the mirror.
     const { fixture, styled, write } = derivedFixture(
@@ -8355,18 +8730,18 @@ describe('style sheets that change (D143)', () => {
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
 
     // Sent once more without a sheet, inside a block that is read again
-    // whole (its own attribute changed with its list): its text is the
-    // mirror's again.
+    // whole (its own attribute, one that changes how its children are read,
+    // changed with its list: D180): its text is the mirror's again.
     Object.defineProperty(style, 'sheet', { configurable: true, value: null });
     setSheets(fixture);
     style.setAttribute('type', 'text/plain');
     const added = fixture.document.createElement('p');
     wrap.append(added);
-    wrap.setAttribute('class', 'wide');
+    wrap.setAttribute('aria-hidden', 'false');
     fixture.mutateAll([
       attributeRecord(style, 'type'),
       childListRecord(wrap, [added]),
-      attributeRecord(wrap, 'class'),
+      attributeRecord(wrap, 'aria-hidden'),
     ]);
     fixture.flushFrame();
     expect(gaps(fixture)).toBe(0);
@@ -9390,3 +9765,49 @@ class ControlledBridgeMutationObserver extends NoopBridgeMutationObserver {
     this.callback(records, this as unknown as MutationObserver);
   }
 }
+
+describe('an editor the page makes without the attribute (D181)', () => {
+  it('is read again as an editor when it is typed into', () => {
+    const fixture = sourceFixture(
+      '<div id="editor"><p id="line">Typed text</p></div><p>Page text</p>',
+    );
+    const editor = fixture.document.querySelector('#editor')!;
+    // As a document in design mode, or `-webkit-user-modify` in a style.
+    Object.defineProperty(editor, 'isContentEditable', { configurable: true, value: true });
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints())).toContain('Typed text');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // `beforeinput` comes before the typed text is put in.
+    editor.dispatchEvent(new fixture.window.Event('beforeinput', { bubbles: true }));
+    const line = fixture.document.querySelector('#line')!.firstChild as Text;
+    line.data = 'Typed text, and what was typed';
+    fixture.mutate(characterDataRecord(line));
+    fixture.flushFrame();
+    const sent = JSON.stringify(fixture.patches());
+    expect(sent).not.toContain('Typed text');
+    expect(sent).not.toContain('what was typed');
+  });
+});
+
+describe('what the reader holds a place for (D181)', () => {
+  it('sends nothing for a change of a script or an iframe it holds a place for', () => {
+    const fixture = sourceFixture(
+      '<p id="before">Before</p><iframe id="ad" class="a"></iframe><script id="code">var a = 1;</script>',
+    );
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints())).not.toContain('var a');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const frame = fixture.document.querySelector('#ad')!;
+    frame.setAttribute('class', 'b');
+    fixture.mutate(attributeRecord(frame, 'class'));
+    const code = fixture.document.querySelector('#code')!.firstChild as Text;
+    code.data = 'var a = 2;';
+    fixture.mutate(characterDataRecord(code));
+    fixture.frames.splice(0).forEach((frameCallback) => frameCallback());
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('var a = 2');
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
+  });
+});

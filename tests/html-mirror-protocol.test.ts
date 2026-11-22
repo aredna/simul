@@ -2,7 +2,9 @@ import { parseHTML } from 'linkedom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  HTML_MIRROR_PANE_BOXES_VERSION,
   HTML_MIRROR_PROTOCOL_VERSION,
+  MAX_HTML_MIRROR_PANE_BOXES,
   MAX_HTML_MIRROR_SCROLL_PANES,
   assembleHtmlMirrorCheckpoint,
   createHtmlMirrorCheckpoint,
@@ -368,6 +370,53 @@ describe('isolated HTML sanitizer and protocol', () => {
     applySourcePrivacyFiltersOff(false);
     expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
       false, false, false, false, 'passive')).toBeUndefined();
+  });
+
+  it('reads the versioned boxes of the scrollable panes, and the panel keeps them (D180)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'scroll-session', pageEpoch: 3, generation: 3,
+      documentId: 'scroll-document', frameId: 0, sequence: 4,
+    });
+    const place = { scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 800 };
+    const box = (nodeId: number, y = 10) => ({
+      nodeId, x: -4, y, width: 300, height: 200, maxScrollX: 0, maxScrollY: 1_200,
+    });
+    const boxes = (whole: boolean, ...list: object[]) => ({
+      version: HTML_MIRROR_PANE_BOXES_VERSION, whole, boxes: list,
+    });
+    const update = createHtmlMirrorScrollUpdate(identity, {
+      ...place, paneBoxes: boxes(true, box(3), box(4)),
+    } as never);
+    expect(update?.scroll.paneBoxes?.boxes).toHaveLength(2);
+    expect(readHtmlMirrorSourceMessage(update, identity)).toEqual(update);
+    for (const bad of [
+      { ...boxes(true, box(3)), version: 2 },
+      { ...boxes(true, box(3)), extra: 1 },
+      boxes(true, box(3), box(3)),
+      boxes(true, { ...box(3), width: -1 }),
+      boxes(true, { ...box(3), y: Number.NaN }),
+      boxes(true, { ...box(3), label: 'x' }),
+      boxes(true, ...Array.from({ length: MAX_HTML_MIRROR_PANE_BOXES + 1 }, (_, index) => box(index + 1))),
+    ]) {
+      expect(createHtmlMirrorScrollUpdate(identity, { ...place, paneBoxes: bad } as never))
+        .toBeUndefined();
+    }
+
+    // The panel's ledger keeps every box: a change, a box of no size, and
+    // a message with none all come out with the whole list.
+    const ledger = new HtmlMirrorScrollPaneLedger();
+    expect(ledger.complete(createHtmlMirrorScrollUpdate(identity, place)!).scroll)
+      .not.toHaveProperty('paneBoxes');
+    ledger.complete(update!);
+    const changed = ledger.complete(createHtmlMirrorScrollUpdate(identity, {
+      ...place,
+      paneBoxes: boxes(false, box(4, 90), {
+        nodeId: 3, x: 0, y: 0, width: 0, height: 0, maxScrollX: 0, maxScrollY: 0,
+      }),
+    } as never)!);
+    expect(changed.scroll.paneBoxes).toEqual(boxes(true, box(4, 90)));
+    expect(ledger.complete(createHtmlMirrorScrollUpdate(identity, place)!).scroll.paneBoxes)
+      .toEqual(boxes(true, box(4, 90)));
   });
 
   it('accepts only bounded exact-document scroll updates', () => {
@@ -1246,6 +1295,12 @@ describe('isolated HTML sanitizer and protocol', () => {
       configurable: true,
       value: 'https://example.test/app/page',
     });
+    // An XHTML page, where an attribute alone travels as it always did; in
+    // an HTML document one Chrome does not read stays behind (D181).
+    Object.defineProperty(document, 'contentType', {
+      configurable: true,
+      value: 'application/xhtml+xml',
+    });
     const at = (id: string): Element =>
       document.getElementById(id) as unknown as Element;
     // As `setAttributeNS(null, 'CLASS', …)` in an HTML document, or `CLASS`
@@ -1305,6 +1360,11 @@ describe('isolated HTML sanitizer and protocol', () => {
     Object.defineProperty(document, 'baseURI', {
       configurable: true,
       value: 'https://example.test/app/page',
+    });
+    // An XHTML page (see above; D181).
+    Object.defineProperty(document, 'contentType', {
+      configurable: true,
+      value: 'application/xhtml+xml',
     });
     const at = (id: string): Element =>
       document.getElementById(id) as unknown as Element;
@@ -2020,7 +2080,9 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('private selected secret');
     expect(serialized).not.toContain('hidden legend secret');
     expect(serialized).not.toContain('ancestor-hidden selected secret');
-    expect(hiddenSelect).toBeUndefined();
+    // Its id travels for the panel's stand-in (D181); its state does not.
+    expect(hiddenSelect).not.toHaveProperty('selectedOptionIndexes');
+    expect(JSON.stringify(hiddenSelect?.children)).not.toContain('secret');
   });
 
   it('drops the implicit role a select states, and keeps other activation roles as button (D98)', () => {
@@ -2029,7 +2091,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       <select id="listed" role="listbox" multiple><option>One</option></select>
       <select id="button" role="button"><option>One</option></select>
     </body></html>`, 'passive');
-    // A native select carries no id in the graph; they arrive in order.
+    // They arrive in order.
     const roles = graphElementsByTag(graph, 'select').map((select) =>
       select.attributes.find(([name]) => name === 'role')?.[1]);
     expect(roles).toEqual([undefined, undefined, 'button']);
@@ -3022,6 +3084,13 @@ describe('isolated HTML sanitizer and protocol', () => {
       </header>
       <main style="overflow-y:auto"><h1>Ask anything</h1></main>
     </body></html>`);
+    // Chrome's parser puts an SVG `xlink:href` in the XLink namespace,
+    // where linkedom leaves it in none (D181 drops one in none).
+    Object.defineProperty(
+      document.querySelector('#legacy')!.getAttributeNode('xlink:href')!,
+      'namespaceURI',
+      { value: 'http://www.w3.org/1999/xlink' },
+    );
     Object.defineProperty(window, 'getComputedStyle', {
       configurable: true,
       value: (element: Element) => ({

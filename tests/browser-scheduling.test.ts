@@ -10,6 +10,7 @@ import {
   receiverSafeTimeoutCanceller,
   receiverSafeTimeoutScheduler,
   startBestEffortBackgroundTasks,
+  yieldToMain,
   type AnimationFrameCanceller,
   type AnimationFrameScheduler,
   type TimeoutCanceller,
@@ -119,6 +120,41 @@ describe('best-effort background startup work', () => {
     expect(order).toEqual(['primary']);
     await Promise.resolve();
     expect(order).toEqual(['primary', 'first', 'second']);
+  });
+});
+
+describe('a turn for the page between slices (D180)', () => {
+  it('waits as a task of the page\'s own priority, not ahead of its timers', async () => {
+    const posted: { priority?: string }[] = [];
+    const yielded = vi.fn();
+    vi.stubGlobal('scheduler', {
+      postTask: (callback: () => void, options?: { priority?: string }) => {
+        posted.push({ ...options });
+        callback();
+        return Promise.resolve();
+      },
+      yield: yielded,
+    });
+    await yieldToMain();
+    expect(posted).toEqual([{ priority: 'user-visible' }]);
+    expect(yielded).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a new task without the scheduler', async () => {
+    vi.stubGlobal('scheduler', undefined);
+    vi.useFakeTimers();
+    try {
+      let done = false;
+      void yieldToMain().then(() => {
+        done = true;
+      });
+      await Promise.resolve();
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

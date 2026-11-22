@@ -332,6 +332,30 @@ describe('the page reader reads less at a change (D144)', () => {
   });
 });
 
+describe('an element with more children than one call takes (D180)', () => {
+  it('walks 131,000 children of one box in the policy and the index of what is painted', () => {
+    // Spread into one call (`push(...childNodes)`), a list this long threw
+    // past the engine's limit on arguments; the walk took that for an
+    // incomplete scan, and the page was refused as too large.
+    const { document, window } = parseHTML(
+      `<!doctype html><html><head></head><body><div>${'<b></b>'.repeat(131_000)}</div></body></html>`,
+    );
+    const policy = createSourceControlledContentPolicy(
+      document,
+      window as unknown as Window,
+      200_000,
+    );
+    expect(policy.incomplete).toBe(false);
+    const index = new SourceVisibilityBoundaryIndex(
+      document,
+      window as unknown as Window,
+      200_000,
+    );
+    expect(index.refreshAll().overflow).toBe(false);
+    index.dispose();
+  }, 60_000);
+});
+
 describe('the page reader does a frame\'s work once (D144)', () => {
   beforeEach(() => {
     const { window } = parseHTML('<html><body></body></html>');

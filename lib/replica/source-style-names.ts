@@ -27,9 +27,17 @@ export interface SourceStyleNames {
   readonly pseudoClasses: ReadonlySet<string>;
   /** `::name`: a pseudo-element, which no event turns on or off by itself. */
   readonly pseudoElements: ReadonlySet<string>;
+  /**
+   * `.token` in the selector of a rule that hides (`display: none`,
+   * `visibility: hidden`, `opacity: 0`, `content-visibility: hidden`), as
+   * far as a plain rule shows it (D180): such a class hides or shows a
+   * panel, and its comparison does not wait for the share.
+   */
+  readonly hidingClasses: ReadonlySet<string>;
 }
 
 interface MutableSourceStyleNames extends SourceStyleNames {
+  readonly hidingClasses: Set<string>;
   readonly classes: Set<string>;
   readonly ids: Set<string>;
   readonly attributes: Set<string>;
@@ -46,6 +54,7 @@ export function createSourceStyleNames(): MutableSourceStyleNames {
     attributeReads: new Set(),
     pseudoClasses: new Set(),
     pseudoElements: new Set(),
+    hidingClasses: new Set(),
   };
 }
 
@@ -59,6 +68,59 @@ export function collectSourceStyleNames(
   into: MutableSourceStyleNames,
 ): void {
   collectNames(cssText, 0, cssText.length, into, false);
+  collectHidingClasses(cssText, into);
+}
+
+/** A declaration that hides what a rule selects (D180). */
+const HIDING_DECLARATION =
+  /(?:^|[;\s])(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|opacity\s*:\s*(?:0+(?:\.0*)?|\.0+)%?\s*(?:!|;|$)|content-visibility\s*:\s*hidden)/iu;
+
+/**
+ * The classes in the selectors of the plain rules of `cssText` (a block
+ * with no block inside) that hide (D180). A rule this misses (nested CSS,
+ * a hiding by `transform` or a height of 0) only keeps the share's wait.
+ */
+function collectHidingClasses(cssText: string, into: MutableSourceStyleNames): void {
+  if (!cssText.includes('{')) return;
+  const block = /([^{}]*)\{([^{}]*)\}/gu;
+  for (const match of cssText.matchAll(block)) {
+    if (!HIDING_DECLARATION.test(match[2] ?? '')) continue;
+    const selector = match[1] ?? '';
+    for (let index = selector.indexOf('.'); index >= 0; index = selector.indexOf('.', index + 1)) {
+      const name = readIdentifier(selector, index + 1);
+      if (name) into.hidingClasses.add(name.value.toLowerCase());
+    }
+  }
+}
+
+/**
+ * Whether a change of `class` added or took away a token a hiding rule
+ * names (D180): a panel hidden or shown by it, which waits for no share.
+ */
+export function sourceClassChangeNamesHidingRule(
+  record: MutationRecord,
+  names: SourceStyleNames | undefined,
+): boolean {
+  if (
+    !names || names.hidingClasses.size === 0 ||
+    record.type !== 'attributes' || record.attributeName !== 'class'
+  ) return false;
+  const target = record.target as Element;
+  let current: string | null;
+  try {
+    current = target.getAttribute('class');
+  } catch {
+    return false;
+  }
+  const before = classTokens(record.oldValue);
+  const after = classTokens(current);
+  for (const token of before) {
+    if (!after.has(token) && names.hidingClasses.has(token)) return true;
+  }
+  for (const token of after) {
+    if (!before.has(token) && names.hidingClasses.has(token)) return true;
+  }
+  return false;
 }
 
 /**
@@ -426,10 +488,139 @@ export interface SourceStyleSheetCollection {
   /** The text of every rule read whole. */
   readonly texts: string[];
   readonly ruleCounts: Array<readonly [CSSStyleSheet, number]>;
+  /** The names of cross-origin sheets the page's cache gave (D180). */
+  readonly names: SourceStyleNames[];
+  /**
+   * The names of a sheet the page may not read (another origin's), when
+   * they are known (`SourceCrossOriginSheetNames`): undefined leaves the
+   * collection incomplete.
+   */
+  readonly crossOrigin?: (sheet: CSSStyleSheet) => SourceStyleNames | undefined;
 }
 
-export function createSourceStyleSheetCollection(): SourceStyleSheetCollection {
-  return { complete: true, texts: [], ruleCounts: [] };
+export function createSourceStyleSheetCollection(
+  crossOrigin?: (sheet: CSSStyleSheet) => SourceStyleNames | undefined,
+): SourceStyleSheetCollection {
+  return { complete: true, texts: [], ruleCounts: [], names: [], crossOrigin };
+}
+
+/** Reads a cross-origin sheet's text, or answers undefined (D180). */
+export type SourceCrossOriginSheetReader = (
+  href: string,
+) => Promise<string | undefined>;
+
+/** Cross-origin sheets of one document whose text is asked for, at most (D180). */
+const MAX_CROSS_ORIGIN_SHEETS = 32;
+/** The longest cross-origin sheet whose names are read (D180). */
+const MAX_CROSS_ORIGIN_SHEET_CHARACTERS = 2 * 1024 * 1024;
+
+/**
+ * The names a cross-origin style sheet mentions, read from the copy the
+ * browser keeps of it (owner ruling D175, built in D180). The page may not
+ * read such a sheet's rules, so every name counted and the comparison of
+ * what the page paints ran at every change on a page with a sheet from a
+ * CDN. The sheet's text is asked for with `cache: 'force-cache'` and no
+ * credentials, once a sheet, only for a sheet the page itself loaded
+ * (Resource Timing names it), and only from the page's script: that is
+ * where Chrome keeps the page's copy (the cache is kept apart for each
+ * site, and the extension's worker asked the server again, D180). The
+ * server must allow it to be read (CORS), as CDNs do for style sheets; a
+ * sheet it does not let be read keeps every name counted. The text is used
+ * for the names alone and kept nowhere.
+ */
+export class SourceCrossOriginSheetNames {
+  readonly #read: SourceCrossOriginSheetReader | undefined;
+  readonly #baseOrigin: string;
+  readonly #asked = new Map<string, SourceStyleNames | 'pending' | 'refused'>();
+
+  constructor(
+    read: SourceCrossOriginSheetReader | undefined,
+    baseOrigin: string,
+  ) {
+    this.#read = read;
+    this.#baseOrigin = baseOrigin;
+  }
+
+  /**
+   * The sheet's names, once its text has been read; the first ask starts
+   * the read. Undefined for a sheet of the page's own origin, which is read
+   * through its rules, and for one that cannot be read.
+   */
+  names(sheet: CSSStyleSheet): SourceStyleNames | undefined {
+    let href: string | null | undefined;
+    try {
+      href = sheet.href;
+    } catch {
+      return undefined;
+    }
+    if (!href || !this.#read) return undefined;
+    const known = this.#asked.get(href);
+    if (known !== undefined) return typeof known === 'object' ? known : undefined;
+    let url: URL;
+    try {
+      url = new URL(href);
+    } catch {
+      return undefined;
+    }
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.origin === this.#baseOrigin ||
+      this.#asked.size >= MAX_CROSS_ORIGIN_SHEETS
+    ) return undefined;
+    this.#asked.set(href, 'pending');
+    let reading: Promise<string | undefined>;
+    try {
+      reading = this.#read(href);
+    } catch {
+      this.#asked.set(href, 'refused');
+      return undefined;
+    }
+    void reading.then((text) => {
+      if (typeof text !== 'string' || text.length > MAX_CROSS_ORIGIN_SHEET_CHARACTERS) {
+        this.#asked.set(href, 'refused');
+        return;
+      }
+      const names = createSourceStyleNames();
+      collectSourceStyleNames(text, names);
+      this.#asked.set(href, names);
+    }, () => {
+      this.#asked.set(href, 'refused');
+    });
+    return undefined;
+  }
+}
+
+/**
+ * The default reader of a cross-origin sheet (D180): only a sheet the page
+ * loaded in this document, from the page's copy, with no credentials.
+ */
+export function readCrossOriginSheetFromPageCache(
+  sourceWindow: Window,
+): SourceCrossOriginSheetReader | undefined {
+  const fetchSheet = (sourceWindow as { fetch?: typeof fetch }).fetch;
+  const performance = (sourceWindow as { performance?: Performance }).performance;
+  if (typeof fetchSheet !== 'function' || !performance) return undefined;
+  return async (href) => {
+    try {
+      if (performance.getEntriesByName(href, 'resource').length === 0) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+    const response = await fetchSheet.call(sourceWindow, href, {
+      cache: 'force-cache',
+      credentials: 'omit',
+      mode: 'cors',
+      referrerPolicy: 'no-referrer',
+    });
+    if (!response.ok) return undefined;
+    const length = Number(response.headers.get('content-length'));
+    if (Number.isFinite(length) && length > MAX_CROSS_ORIGIN_SHEET_CHARACTERS * 4) {
+      return undefined;
+    }
+    return await response.text();
+  };
 }
 
 /**
@@ -478,6 +669,7 @@ export class SourceStyleNameCensus {
       collection.ruleCounts,
       collection.texts,
       known?.names !== undefined && known.signature === signature,
+      collection.names,
     );
   }
 
@@ -500,7 +692,7 @@ export class SourceStyleNameCensus {
       known.ruleCounts.every(([sheet, count]) => ruleCount(sheet) === count);
     if (reuse) {
       if (!known.names) collection.complete = false;
-      collection.ruleCounts.push(...known.ruleCounts);
+      for (const item of known.ruleCounts) collection.ruleCounts.push(item);
     } else if (listed) {
       for (const sheet of listed) collectSheet(sheet, collection, new Set(), 0);
     }
@@ -557,12 +749,7 @@ export class SourceStyleNameCensus {
     for (const owner of owners) {
       const census = this.#owners.get(owner)!;
       for (const part of [census.ordinary!.names!, census.adopted!.names!]) {
-        for (const name of part.classes) names.classes.add(name);
-        for (const name of part.ids) names.ids.add(name);
-        for (const name of part.attributes) names.attributes.add(name);
-        for (const name of part.attributeReads) names.attributeReads.add(name);
-        for (const name of part.pseudoClasses) names.pseudoClasses.add(name);
-        for (const name of part.pseudoElements) names.pseudoElements.add(name);
+        mergeSourceStyleNames(part, names);
       }
     }
     this.#union = { version: this.#version, owners: [...owners], names };
@@ -586,6 +773,7 @@ export class SourceStyleNameCensus {
     ruleCounts: ReadonlyArray<readonly [CSSStyleSheet, number]>,
     texts: readonly string[],
     reuseNames: boolean,
+    crossOriginNames: readonly SourceStyleNames[] = [],
   ): OwnerSheets {
     let names: SourceStyleNames | undefined;
     if (!complete || signature === undefined || !listed) {
@@ -595,6 +783,7 @@ export class SourceStyleNameCensus {
     } else {
       const collected = createSourceStyleNames();
       for (const text of texts) collectSourceStyleNames(text, collected);
+      for (const part of crossOriginNames) mergeSourceStyleNames(part, collected);
       names = collected;
     }
     if (names !== known?.names) this.#version += 1;
@@ -605,6 +794,19 @@ export class SourceStyleNameCensus {
       ruleCounts: Object.freeze([...ruleCounts]),
     });
   }
+}
+
+function mergeSourceStyleNames(
+  part: SourceStyleNames,
+  names: MutableSourceStyleNames,
+): void {
+  for (const name of part.classes) names.classes.add(name);
+  for (const name of part.ids) names.ids.add(name);
+  for (const name of part.attributes) names.attributes.add(name);
+  for (const name of part.attributeReads) names.attributeReads.add(name);
+  for (const name of part.pseudoClasses) names.pseudoClasses.add(name);
+  for (const name of part.pseudoElements) names.pseudoElements.add(name);
+  for (const name of part.hidingClasses) names.hidingClasses.add(name);
 }
 
 function listSheets(

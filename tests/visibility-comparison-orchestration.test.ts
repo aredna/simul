@@ -106,6 +106,8 @@ interface FixtureOptions {
   readonly passShare?: (now: () => number) => PassShareLedger;
   /** The page's style sheets, as `document.styleSheets` lists them. */
   readonly sheets?: unknown[];
+  /** Reads a cross-origin sheet's text (D180). */
+  readonly readCrossOriginStyleSheet?: (href: string) => Promise<string | undefined>;
 }
 
 /**
@@ -189,6 +191,9 @@ function fixture(markup: string, options: FixtureOptions = {}) {
     now,
     yieldToMain: () => new Promise<void>((resolve) => turns.push(resolve)),
     ...(passShare ? { passShare } : {}),
+    ...(options.readCrossOriginStyleSheet
+      ? { readCrossOriginStyleSheet: options.readCrossOriginStyleSheet }
+      : {}),
     createMutationObserver: (callback) => {
       mutationCallback = callback;
       return { observe: () => {}, disconnect: () => {} };
@@ -520,6 +525,44 @@ describe('the comparison of what the page paints, in slices (D164)', () => {
     expect(target.probe()).toBe(compared + 1);
   });
 
+  it('compares at once for a class a hiding rule names, while the share owes little (D180)', () => {
+    const target = fixture(SMALL, {
+      tick: 1,
+      sheets: [sheet('.closed { display: none } .wide { width: 100% }')],
+      passShare: (now) => createPassShareLedger({ now }),
+    });
+    target.open();
+    target.runTimers();
+    const share = target.passShare!;
+    const first = target.byId('first');
+    // A scan kept the tab busy for 10 ms: a class that only restyles waits.
+    share.note(10);
+    target.ack();
+    let compared = target.probe();
+    target.timers.splice(0);
+    target.mutate(attributeRecord(first, 'class', 'wide'));
+    target.flushFrames();
+    expect(target.probe()).toBe(compared);
+    expect(target.timers).toHaveLength(1);
+    // One a hiding rule names does not: the panel it hides is compared in
+    // the next frame, and its work counts.
+    target.ack();
+    target.mutate(attributeRecord(first, 'class', 'wide closed'));
+    target.flushFrames();
+    expect(target.probe()).toBe(compared + 1);
+    expect(share.waitMs()).toBeGreaterThan(0);
+
+    // A carousel that keeps changing it runs ahead of the share by a second
+    // at most: past that, it waits as any change does.
+    share.note(400);
+    compared = target.probe();
+    target.ack();
+    target.mutate(attributeRecord(first, 'class', 'wide'));
+    target.flushFrames();
+    expect(share.waitMs()).toBeGreaterThan(1_000);
+    expect(target.probe()).toBe(compared);
+  });
+
   it('keeps a semantic scan waiting for the time a comparison used', () => {
     const target = fixture(SMALL, {
       tick: 0,
@@ -680,6 +723,55 @@ describe('the changes the live comparison leaves out (D164)', () => {
     changing.cssRules.push({ cssText: '[data-x] ~ div { display: block }' });
     expect(comparisonsAfter(inserted, () =>
       inserted.mutate(attributeRecord(inserted.byId('first'), 'data-x', 'off')))).toBe(1);
+  });
+
+  it('takes the names of a cross-origin sheet from the page\'s copy of it (D180)', async () => {
+    const crossOrigin = (href: string) => ({
+      href,
+      get cssRules(): never {
+        throw new Error('SecurityError');
+      },
+      disabled: false,
+      media: { mediaText: '' },
+      ownerNode: null,
+    });
+    const asked: string[] = [];
+    const target = fixture(SMALL, {
+      sheets: [sheet('.gone {}'), crossOrigin('https://cdn.example.net/site.css')],
+      readCrossOriginStyleSheet: async (href) => {
+        asked.push(href);
+        return '[data-y] ~ div { display: none } .open:hover {}';
+      },
+    });
+    target.open();
+    target.runTimers();
+    // Until its text has been read every name counts.
+    expect(comparisonsAfter(target, () =>
+      target.mutate(attributeRecord(target.byId('first'), 'data-x', 'on')))).toBe(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    target.runTimers();
+    expect(asked).toEqual(['https://cdn.example.net/site.css']);
+    // Its names, and the page's own sheet's, decide.
+    expect(comparisonsAfter(target, () =>
+      target.mutate(attributeRecord(target.byId('first'), 'data-x', 'off')))).toBe(0);
+    expect(comparisonsAfter(target, () =>
+      target.mutate(attributeRecord(target.byId('first'), 'data-y', 'on')))).toBe(1);
+    expect(comparisonsAfter(target, () =>
+      target.event('pointerover', target.byId('first')))).toBe(1);
+
+    // A sheet whose text cannot be read keeps every name counted.
+    const refused = fixture(SMALL, {
+      sheets: [crossOrigin('https://other.example.net/a.css')],
+      readCrossOriginStyleSheet: async () => undefined,
+    });
+    refused.open();
+    refused.runTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+    refused.runTimers();
+    expect(comparisonsAfter(refused, () =>
+      refused.mutate(attributeRecord(refused.byId('first'), 'data-x', 'on')))).toBe(1);
   });
 
   it('compares everything beside a sheet watched only by its shape', () => {

@@ -1,6 +1,6 @@
 # Simul privacy policy
 
-Last updated: 2026-11-20
+Last updated: 2026-11-21
 
 Simul is a Chrome extension that shows a translated copy of the web page or
 PDF you are reading. It works on your own computer. It has no server, no
@@ -42,6 +42,14 @@ computer. Some requests do go over the network:
   own site, as the page itself does.
 - To read text in an image, Simul may download that image again from its
   own address, without your cookies.
+- A style sheet the page loaded from another site (a CDN) is read again,
+  without your cookies, from the copy your browser keeps of it (or from its
+  own address, if the browser no longer has it), only to know which names it
+  mentions, so Simul can skip work the page's changes do not need. Nothing
+  else is taken from it.
+- A style sheet the page's site redirected to another address is asked for
+  once more, without your cookies, only to learn that address, so the
+  mirror finds the sheet's images and fonts.
 - On a PDF tab, Simul downloads that PDF once more from its own address,
   with the site's cookies, as the tab did.
 - The first time you translate into a new language, Chrome may download that

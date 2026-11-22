@@ -464,9 +464,12 @@ describe('media queries about scripts, read as the tab reads them', () => {
     }
     expect(sheet('.a{color:red}/* "a\n */.b{color:blue}'))
       .toBe('.a{color:red}.b{color:blue}');
-    // A declaration list holds no import; it is read as it was.
+    // A declaration list holds no import. Its string ends at the line
+    // break, as Chrome ends it, and what Chrome reads there is written out
+    // (D181): the `'` after B opens a string that runs to the end, so that
+    // `color:red` stays out of every declaration, in the tab and here.
     expect(sanitizeCss("font-family:'A\nB';color:red", BASE, true, undefined, 'passive'))
-      .toBe("font-family:'A\nB';color:red");
+      .toBe("font-family:!\nB';color:red'");
     // An attribute's query is read as a browser reads it: the string ends
     // at the line break, and an escaped line break is part of it.
     expect(answerScriptingMediaFeatures('"x\n(scripting) "(scripting)"'))

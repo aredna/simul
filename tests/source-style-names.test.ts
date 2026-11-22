@@ -6,6 +6,7 @@ import {
   collectSourceStyleNames,
   createSourceStyleNames,
   createSourceStyleSheetCollection,
+  sourceClassChangeNamesHidingRule,
   sourceVisibilityEventMaySkip,
   sourceVisibilityMutationMaySkip,
   type SourceStyleNames,
@@ -87,6 +88,32 @@ describe('the names a style sheet mentions (D164)', () => {
     const names = namesOf('@media (hover: hover) { .card { opacity: .5 } }');
     expect(names.pseudoClasses.has('hover')).toBe(false);
     expect(names.classes.has('card')).toBe(true);
+  });
+});
+
+describe('the classes of the rules that hide (D180)', () => {
+  it('lists the classes of a plain rule that hides, and only those', () => {
+    const names = namesOf(
+      '.closed, .tab.hidden > p { display: none } .faded{opacity:0} .dim { opacity: 0.5 }',
+      '.gone { visibility : hidden !important } .wide { width: 0 } .idle{content-visibility:hidden}',
+      '@media (width < 1px) { .narrow { display: none } }',
+    );
+    expect([...names.hidingClasses].sort()).toEqual(
+      ['closed', 'faded', 'gone', 'hidden', 'idle', 'narrow', 'tab'],
+    );
+  });
+
+  it('knows a change of class that adds or takes away such a class', () => {
+    const { byId } = page('<p id="p" class="wide open">x</p>');
+    const names = namesOf('.closed { display: none } .wide { width: 100% }');
+    const target = byId('p');
+    expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'class', 'wide'), names)).toBe(false);
+    expect(sourceClassChangeNamesHidingRule(
+      attributeRecord(target, 'class', 'wide open closed'), names)).toBe(true);
+    target.setAttribute('class', 'closed');
+    expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'class', 'wide'), names)).toBe(true);
+    expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'data-x', null), names)).toBe(false);
+    expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'class', 'wide'), undefined)).toBe(false);
   });
 });
 

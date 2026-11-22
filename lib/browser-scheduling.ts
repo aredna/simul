@@ -63,14 +63,31 @@ export function startBestEffortBackgroundTasks(
 }
 
 /**
- * Gives the browser a turn before continuing: scheduler.yield() in Chrome
- * (129 and later, so every supported Chrome), otherwise a new task.
+ * Gives the browser a turn before continuing, as a task among the page's own
+ * (D180): `scheduler.postTask` at `user-visible` priority, the priority of
+ * the page's timers and messages, in Chrome (94 and later, so every
+ * supported Chrome), otherwise a new task through `setTimeout`.
+ *
+ * `scheduler.yield()` was used before D180. Its continuation runs ahead of
+ * every task of the same priority, so a page read in slices back to back
+ * (the first read in parts of a page of 54,000 elements, about two seconds)
+ * kept the page's own timers waiting for the whole read (a 10 ms interval did
+ * not run for 1.3 s) and its frames to Chrome's floor of about one in
+ * 110 ms. A task of the same priority waits behind what the page has already
+ * queued and no longer: a page with nothing waiting continues at once.
  */
 export function yieldToMain(): Promise<void> {
   const scheduler = (globalThis as {
-    scheduler?: { yield?: () => Promise<void> };
+    scheduler?: {
+      postTask?: (
+        callback: () => void,
+        options?: { priority?: 'user-blocking' | 'user-visible' | 'background' },
+      ) => Promise<void>;
+    };
   }).scheduler;
-  if (typeof scheduler?.yield === 'function') return scheduler.yield();
+  if (typeof scheduler?.postTask === 'function') {
+    return scheduler.postTask(() => undefined, { priority: 'user-visible' });
+  }
   return new Promise((resolve) => globalThis.setTimeout(resolve, 0));
 }
 

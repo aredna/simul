@@ -13,7 +13,9 @@
  *
  * Animations made by style sheets (CSS animations and transitions) are left
  * alone: the mirror has the sheets and runs them itself. So is a script
- * animation that is still running: its end is listened for.
+ * animation that is still running: its end is listened for. One that is
+ * paused draws the frame it stands at, which travels as an ended one's does
+ * (D180), unless a scroll timeline drives it (a patch at every scroll, D175).
  *
  * Nothing is asked of an element. A tree's animations are listed once in a
  * pass (`document.getAnimations()`, and each shadow root's own: the
@@ -91,6 +93,16 @@ interface Ledger {
   notBefore: number;
   /** The script animations each tree last listed, so that they stay listed. */
   kept: WeakMap<AnimationTree, readonly AnimationLike[]>;
+  /**
+   * What each tree's last listing held (D180): `SCRIPT_LISTED` when a
+   * script animation, `RUNNING_LISTED` when an animation that runs (one a
+   * sheet made too); and how many trees say each.
+   */
+  treeFlags: WeakMap<AnimationTree, number>;
+  scriptTrees: number;
+  runningTrees: number;
+  /** Some tree was listed since a reader began listening. */
+  everListed: boolean;
   readonly ended: () => void;
 }
 
@@ -139,6 +151,10 @@ function ledgerOf(sourceDocument: Document): Ledger {
       elapsed: 0,
       notBefore: 0,
       kept: new WeakMap(),
+      treeFlags: new WeakMap(),
+      scriptTrees: 0,
+      runningTrees: 0,
+      everListed: false,
       // Called once for each animation that ends: thousands may end together.
       ended: () => {
         for (const listener of listeners) {
@@ -165,7 +181,13 @@ export function listenForSourceHeldAnimations(
   return () => {
     ledger.listeners.delete(listener);
     // With no reader left, nothing of the page is kept hold of.
-    if (ledger.listeners.size === 0) ledger.kept = new WeakMap();
+    if (ledger.listeners.size === 0) {
+      ledger.kept = new WeakMap();
+      ledger.treeFlags = new WeakMap();
+      ledger.scriptTrees = 0;
+      ledger.runningTrees = 0;
+      ledger.everListed = false;
+    }
   };
 }
 
@@ -209,6 +231,20 @@ export function listSourceHeldAnimations(tree: AnimationTree): void {
 }
 
 /**
+ * What the last listings of the document's trees held (D180): `script`, a
+ * script animation, which the periodic look is for; `running`, an animation
+ * that runs, which can change a pane's range with nothing else to tell.
+ * Both true before anything was listed.
+ */
+export function readSourceAnimationListing(
+  sourceDocument: Document,
+): { readonly script: boolean; readonly running: boolean } {
+  const ledger = LEDGERS.get(sourceDocument);
+  if (!ledger || !ledger.everListed) return { script: true, running: true };
+  return { script: ledger.scriptTrees > 0, running: ledger.runningTrees > 0 };
+}
+
+/**
  * The declarations an element's ended script animations hold, as
  * `name:value` pairs joined by `;`, or the empty string: what the last
  * listing of the element's tree worked out.
@@ -236,11 +272,24 @@ function listTree(ledger: Ledger, tree: AnimationTree): void {
   const kept: AnimationLike[] = [];
   const againFrom = READ_AGAIN_FROM.get(tree) ?? 0;
   let ended = 0;
+  let running = false;
   for (const animation of animations) {
     try {
+      if (animation.playState === 'running') running = true;
       const target = scriptAnimationTarget(animation);
       if (!target) continue;
       kept.push(animation);
+      if (animation.playState === 'paused' && runsOnDocumentTimeline(animation)) {
+        // Paused (D180): it draws the frame it stands at, which a script may
+        // move (`currentTime`), so it is read afresh at each listing.
+        FACTS.delete(animation);
+        const facts = readAnimationFacts(animation);
+        FACTS.delete(animation);
+        const list = holding.get(target);
+        if (list) list.push(facts);
+        else holding.set(target, [facts]);
+        continue;
+      }
       if (animation.playState !== 'finished') {
         // Where it comes to rest next may be elsewhere (reversed, say).
         FACTS.delete(animation);
@@ -283,12 +332,34 @@ function listTree(ledger: Ledger, tree: AnimationTree): void {
   if (after.size > 0) HELD_IN_TREE.set(tree, after);
   else HELD_IN_TREE.delete(tree);
   ledger.kept.set(tree, kept);
+  const flags = (kept.length > 0 ? SCRIPT_LISTED : 0) |
+    (running ? RUNNING_LISTED : 0);
+  const was = ledger.treeFlags.get(tree) ?? 0;
+  ledger.scriptTrees += (flags & SCRIPT_LISTED ? 1 : 0) - (was & SCRIPT_LISTED ? 1 : 0);
+  ledger.runningTrees += (flags & RUNNING_LISTED ? 1 : 0) - (was & RUNNING_LISTED ? 1 : 0);
+  ledger.treeFlags.set(tree, flags);
+  ledger.everListed = true;
   if (againFrom + MAX_FACTS_READ_AGAIN < ended) {
     READ_AGAIN_FROM.set(tree, againFrom + MAX_FACTS_READ_AGAIN);
   } else {
     READ_AGAIN_FROM.delete(tree);
   }
   ledger.elapsed += ledger.now() - started;
+}
+
+const SCRIPT_LISTED = 1;
+const RUNNING_LISTED = 2;
+
+/**
+ * Whether an animation runs on the document's timeline, not on a scroll or
+ * view timeline (D180). An engine that does not say has only the one.
+ */
+function runsOnDocumentTimeline(animation: AnimationLike): boolean {
+  if (!('timeline' in animation)) return true;
+  const timeline = (animation as { readonly timeline?: unknown }).timeline;
+  if (!timeline || typeof timeline !== 'object') return false;
+  return !('source' in timeline) && !('subject' in timeline) &&
+    !('axis' in timeline);
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   isSourceNativeSelectImplicitRole,
   isSourceActivationTagName,
   isSourcePrivateRoleValue,
+  isSourcePrivateTagName,
   isEligibleSourceTextControl,
   isSourceNativeTextControlTagName,
   isSourceOptionInsideNativeSelect,
@@ -34,6 +35,7 @@ import {
   sourceElementScalesItselfToNothing,
 } from './source-own-hiding';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
+import { readSourceSheetBase } from './source-sheet-base';
 import {
   isSourceSecretPlaceholderTagName,
   sourceSecretPlaceholderTagName,
@@ -47,6 +49,7 @@ import {
 } from './source-held-animation';
 import {
   beginSourceShadowRootWalk,
+  canHostAuthorShadowRoot,
   readSourceAssignedSlot,
   readSourceShadowRoot,
 } from './source-shadow-root';
@@ -418,7 +421,7 @@ export function sourceBaseTextIsPublic(
     );
   } catch {
     // A detached non-element has no element privacy boundary to inherit.
-    return source.nodeType !== 1;
+    return sourceNodeType(source) !== 1;
   }
 }
 
@@ -497,6 +500,12 @@ interface SerializeContext {
 interface SourceReadCut {
   /** The sliced read: the slice has run out. */
   readonly expired?: () => boolean;
+  /**
+   * The preview: the most nodes it reads, also past elements no cut takes
+   * (D180). `placeholder` asks only elements with children, so 131,000
+   * empty elements in one box were read whole, in one task, as a preview.
+   */
+  readonly maxNodes?: number;
   /** The sliced read: an element whose content follows in a unit. */
   readonly defer?: (unit: SourceReadUnit) => void;
   /**
@@ -609,7 +618,6 @@ const UNSAFE_ELEMENTS = new Set([
   'foreignobject',
   'iframe',
   'mpath',
-  'noscript',
   'object',
   'portal',
   'script',
@@ -707,10 +715,83 @@ const REPLICA_OWNED_DISCLOSURE_ATTRIBUTES = new Set([
   'aria-haspopup',
 ]);
 
-function isPrivateBaseAttribute(tagName: string, name: string): boolean {
+/**
+ * State a component reflects as an attribute and draws itself by (D181,
+ * owner ruling D175): `<sp-tab-panel selected>` shown by `:host([selected])`,
+ * a component checkbox's checked look, a component button's disabled look,
+ * the current page of a navigation styled by `[aria-current="page"]`. On an
+ * element that is no native form control and holds no value these say what
+ * the page draws, as `open` does, and travel; on a native control, on an
+ * element that holds a value, and in a region whose attributes are private
+ * (an editor, a control that acts, a menu, a hidden or collapsed panel) they
+ * stay withheld as control state.
+ */
+const REFLECTED_STATE_ATTRIBUTES = new Set([
+  'aria-current',
+  'checked',
+  'disabled',
+  'selected',
+]);
+
+/** HTML elements whose state is the reader's own choice or a form's. */
+const NATIVE_FORM_CONTROL_TAGS = new Set([
+  'button',
+  'datalist',
+  'fieldset',
+  'input',
+  'meter',
+  'optgroup',
+  'option',
+  'output',
+  'progress',
+  'select',
+  'textarea',
+]);
+
+/** What holds a value the reader may have given: never read, only named. */
+const VALUE_HOLDER_ATTRIBUTES = ['value', 'aria-valuenow', 'aria-valuetext'];
+
+/**
+ * Whether the element's reflected state may travel (see
+ * `REFLECTED_STATE_ATTRIBUTES`): it is no native form control and holds no
+ * value. Only the presence of a value attribute is asked.
+ */
+function reflectedStateMayTravel(element: Element, tagName: string): boolean {
+  if (NATIVE_FORM_CONTROL_TAGS.has(tagName)) return false;
+  for (const name of VALUE_HOLDER_ATTRIBUTES) {
+    if (element.hasAttribute(name)) return false;
+  }
+  return true;
+}
+
+/**
+ * Words an author writes on an element (D76). Inside a hidden or collapsed
+ * region, a closed panel that a control names above all, they stay behind
+ * with the region's text (D181): the mirror does not draw the region, and
+ * they travelled and were held there while it was closed. In an editor
+ * they still travel (D76): the editor is drawn, and its text alone is what
+ * the person edits.
+ */
+const AUTHOR_WORD_ATTRIBUTES = new Set(['alt', 'aria-label', 'title']);
+
+/**
+ * `reflectedState`: the attribute stands on an element whose reflected state
+ * may travel, outside a region whose attributes are private. The receiver,
+ * which knows the tag alone, asks with `true` for what may cross at all and
+ * with `false` inside a region whose attributes are private.
+ */
+function isPrivateBaseAttribute(
+  tagName: string,
+  name: string,
+  reflectedState = false,
+): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) {
     return REPLICA_OWNED_DISCLOSURE_ATTRIBUTES.has(name);
   }
+  if (
+    reflectedState && REFLECTED_STATE_ATTRIBUTES.has(name) &&
+    !NATIVE_FORM_CONTROL_TAGS.has(tagName)
+  ) return false;
   // A stylesheet's disabled bit is presentation state, not user-authored
   // control state.  It is required to keep a captured stylesheet inert.
   if (name === 'disabled' && (tagName === 'link' || tagName === 'style')) {
@@ -868,7 +949,7 @@ function isTwinOfSentName(
   const svg = element.namespaceURI === 'http://www.w3.org/2000/svg';
   if (svg && name === 'xlink:href') {
     if (attribute.namespaceURI === XLINK_NAMESPACE_URI) return false;
-    const attributes = element.attributes;
+    const attributes = sourceAttributeList(element);
     for (let index = 0; index < attributes.length; index += 1) {
       const other = attributes[index]!;
       if (
@@ -881,6 +962,50 @@ function isTwinOfSentName(
   const spelling = svg ? canonicalSvgAttributeName(name) : name;
   if (attribute.name === spelling && !attribute.namespaceURI) return false;
   return element.hasAttributeNS(null, spelling);
+}
+
+const XMLNS_NAMESPACE_URI = 'http://www.w3.org/2000/xmlns/';
+
+/**
+ * Whether Chrome reads no attribute of the page under the name `attribute`
+ * would travel by (D181, owner ruling D175), in an HTML document. There an
+ * attribute name means something in lowercase without a namespace (an SVG
+ * name in its own case, `viewBox`), and an SVG `xlink:href` in the XLink
+ * namespace. `CLASS` set with `setAttributeNS(null, 'CLASS', …)`, a `class`
+ * put into some namespace, an `xlink:href` a script set on an SVG `use` with
+ * `setAttribute` (in no namespace, so the tab draws nothing): alone, each
+ * travelled under a name the mirror reads, and styled or drew there what the
+ * tab does not. Nothing a page's selector names without a namespace matches
+ * them either. Such an attribute stays behind. An attribute of the XML,
+ * XLink or XMLNS namespace keeps its old way (it means in the mirror what it
+ * means in the tab, or nothing in either). An XHTML page is read as it was:
+ * its own case-sensitive selectors (`[CLASS="x"]`) style by such a name, and
+ * the lowercase name keeps that right.
+ */
+function isAttributeChromeDoesNotRead(
+  element: Element,
+  attribute: SourceAttribute,
+  name: string,
+): boolean {
+  if (!sourceDocumentIsHtml(element.ownerDocument)) return false;
+  const namespace = attribute.namespaceURI;
+  const svg = element.namespaceURI === 'http://www.w3.org/2000/svg';
+  if (svg && name === 'xlink:href') return namespace !== XLINK_NAMESPACE_URI;
+  if (!namespace) {
+    return attribute.name !== (svg ? canonicalSvgAttributeName(name) : name);
+  }
+  return namespace !== XLINK_NAMESPACE_URI &&
+    namespace !== XML_NAMESPACE_URI &&
+    namespace !== XMLNS_NAMESPACE_URI;
+}
+
+/** An HTML document, not an XML one (XHTML, an SVG file). */
+function sourceDocumentIsHtml(document: Document | null | undefined): boolean {
+  try {
+    return !/xml/iu.test(document?.contentType ?? '');
+  } catch {
+    return false;
+  }
 }
 
 /** Whether `attribute` is the element's `lang` in the XML namespace. */
@@ -903,7 +1028,9 @@ const HELD_STYLE_ATTRIBUTE: SourceAttribute = Object.freeze({
   localName: 'style',
 });
 const NATIVE_SELECT_PRESENTATION_ATTRIBUTES = Object.freeze({
-  select: new Set(['role']),
+  // A dropdown's `class` and `id` go to the panel's stand-in, so that the
+  // page's rules for them (Bootstrap's floating label) apply (D181).
+  select: new Set(['class', 'id', 'role']),
   option: new Set(['role']),
   optgroup: new Set(['role']),
 });
@@ -1181,7 +1308,7 @@ export function sanitizeSourceSubtrees(
     const slotRegions = new Map<Element, SourceSlotRegion>();
     return Object.freeze(sources.map((source) => {
       const sourceElement = nearestElement(source);
-      const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
+      const inheritedElement = sourceNodeType(source) === Node.ELEMENT_NODE && sourceElement
         ? composedParentElement(sourceElement)
         : sourceElement;
       const visibilityHidden = inheritedElement
@@ -1291,7 +1418,7 @@ export function sanitizeSourceChildren(
       false,
     );
     // The children of a host are drawn where the host's root slots them.
-    const host = source.nodeType === Node.ELEMENT_NODE &&
+    const host = sourceNodeType(source) === Node.ELEMENT_NODE &&
       readSourceShadowRoot(source as Element)
       ? source as Element
       : undefined;
@@ -1320,7 +1447,7 @@ export function sanitizeSourceChildren(
         nonContentRegion,
         styleRegion,
         hardSecretRegion,
-        visibilityHidden: slotRegion && child.nodeType === Node.TEXT_NODE
+        visibilityHidden: slotRegion && sourceNodeType(child) === Node.TEXT_NODE
           ? slotRegion.visibilityHidden
           : visibilityHidden,
         depth: 0,
@@ -1361,14 +1488,19 @@ export function sanitizeSourceAttributes(
       incrementRepresentability(representability, 'capacityOmissionCount');
       return undefined;
     }
+    const privateRegion = hasSourceBaseWithheldAncestor(
+      source,
+      controlledContent,
+    );
+    const activationRegion = hasSourceActivationElementAncestor(source);
     return sanitizeAttributes(
       source,
-      source.localName.toLowerCase(),
-      hasSourceBaseWithheldAncestor(
-        source,
-        controlledContent,
-      ),
-      hasSourceActivationElementAncestor(source),
+      sourceLocalName(source).toLowerCase(),
+      privateRegion,
+      activationRegion,
+      privateRegion || activationRegion ||
+        hasSourcePrivateAttributeElementAncestor(source),
+      privateRegion && !hasSourcePrivacyWithheldAncestor(source),
       false,
       baseUrl,
       representability,
@@ -1396,7 +1528,7 @@ export function sanitizeSourceElementHints(
   if (
     hasSourceCredentialSecretAncestor(source, undefined, undefined, secretAncestors)
   ) return Object.freeze({});
-  const tagName = source.localName.toLowerCase();
+  const tagName = sourceLocalName(source).toLowerCase();
   const hidden = tagName === 'select'
     ? isSourceSelectVisuallyHidden(source)
     : (tagName === 'option' || tagName === 'optgroup')
@@ -1484,7 +1616,7 @@ function readSourceManualSlotNodeIds(
 function isSourceCustomElementDefined(source: Element): boolean {
   if (
     source.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
-    !isAutonomousCustomElementName(source.localName)
+    !isAutonomousCustomElementName(sourceLocalName(source))
   ) return false;
   try {
     return source.matches(':defined');
@@ -2286,7 +2418,7 @@ function serializeNode(
   // before evaluating nodeValue, and before an inherited hard-secret context
   // returns, so the Text identity itself becomes sticky.
   if (
-    live.nodeType === Node.TEXT_NODE &&
+    sourceNodeType(live) === Node.TEXT_NODE &&
     hasSourceCredentialSecretAncestor(
       live,
       undefined,
@@ -2310,7 +2442,7 @@ function serializeNode(
     return undefined;
   }
   if (
-    live.nodeType === Node.ELEMENT_NODE &&
+    sourceNodeType(live) === Node.ELEMENT_NODE &&
     hasSourceCredentialSecretAncestor(
       live as Element,
       undefined,
@@ -2348,7 +2480,7 @@ function serializeNode(
       opaquePlaceholder: true as const,
     });
   }
-  if (live.nodeType === Node.TEXT_NODE) {
+  if (sourceNodeType(live) === Node.TEXT_NODE) {
     // Establish the structural/computed privacy boundary before touching page
     // content.  Accessors for withheld text are never evaluated. Stylesheet
     // text is presentation rather than page content, so a hidden or controlled
@@ -2409,7 +2541,7 @@ function serializeNode(
         !context.privateRegion && !context.nonContentRegion && text.trim().length > 0,
     });
   }
-  if (live.nodeType !== Node.ELEMENT_NODE) {
+  if (sourceNodeType(live) !== Node.ELEMENT_NODE) {
     incrementRepresentability(
       context.representability,
       'unsupportedNodeOmissionCount',
@@ -2417,7 +2549,7 @@ function serializeNode(
     return undefined;
   }
   const liveElement = live as Element;
-  const tagName = liveElement.localName.toLowerCase();
+  const tagName = sourceLocalName(liveElement).toLowerCase();
   if (
     !isSafeTagName(tagName) ||
     isUnsafeSourceElement(
@@ -2436,6 +2568,10 @@ function serializeNode(
         ? 'strictResourcePolicyBlockCount'
         : 'executionRiskBlockCount',
     );
+    if (
+      LEFT_OUT_PLACEHOLDER_TAGS.has(tagName) &&
+      liveElement.namespaceURI === 'http://www.w3.org/1999/xhtml'
+    ) return serializeLeftOutPlaceholder(id, context);
     return undefined;
   }
   const namespace = readNamespace(liveElement.namespaceURI);
@@ -2492,6 +2628,8 @@ function serializeNode(
     tagName,
     privateRegion,
     activationRegion,
+    privateAttributeRegion,
+    privateRegion && !privacyRegion,
     false,
     context.baseUrl,
     context.representability,
@@ -2548,7 +2686,10 @@ function serializeNode(
   if (cutFacts) {
     const cut = cutSourceElement(context, context.cut!, cutFacts);
     if (cut !== false) return cut;
-  }
+  } else if (
+    context.cut?.maxNodes !== undefined &&
+    context.budget.nodes > context.cut.maxNodes
+  ) throw new HtmlMirrorCapacityError();
   const wholeBoxHeight = context.cut?.wholeBox && !styleRegion
     ? context.cut.wholeBox(liveElement, tagName, context.budget)
     : undefined;
@@ -2610,7 +2751,7 @@ function serializeNode(
         return resumed === false || resumed === undefined ? leftOut() : resumed;
       }
       lightRead += 1;
-      if (lightElements && liveChild.nodeType === Node.ELEMENT_NODE) {
+      if (lightElements && sourceNodeType(liveChild) === Node.ELEMENT_NODE) {
         lightElements.push(liveChild as Element);
       }
       const slotRegion = sourceShadow
@@ -2641,7 +2782,7 @@ function serializeNode(
         nonContentRegion,
         styleRegion,
         styleResolved,
-        visibilityHidden: slotRegion && liveChild.nodeType === Node.TEXT_NODE
+        visibilityHidden: slotRegion && sourceNodeType(liveChild) === Node.TEXT_NODE
           ? slotRegion.visibilityHidden
           : visibilityHidden,
         depth: context.depth + 1,
@@ -2721,7 +2862,7 @@ function serializeNode(
         }) ?? leftOut();
       }
       shadowRead += 1;
-      if (shadowElements && childNode.nodeType === Node.ELEMENT_NODE) {
+      if (shadowElements && sourceNodeType(childNode) === Node.ELEMENT_NODE) {
         shadowElements.push(childNode as Element);
       }
       const child = serializeNode(childNode, {
@@ -2788,7 +2929,7 @@ function isSourceCutCandidate(
     isVoidElement(tagName) ||
     isSourceNativeTextControlTagName(tagName)
   ) return false;
-  return sourceShadow !== undefined || element.childNodes.length > 0;
+  return sourceShadow !== undefined || sourceChildNodeList(element).length > 0;
 }
 
 /** What `serializeNode` knows of an element when a read may cut it. */
@@ -3119,7 +3260,7 @@ function readSourceReadUnit(
         return { fills, elements, rest: { ...unit, cursor: liveChild } };
       }
       read += 1;
-      if (liveChild.nodeType === Node.ELEMENT_NODE) elements.push(liveChild as Element);
+      if (sourceNodeType(liveChild) === Node.ELEMENT_NODE) elements.push(liveChild as Element);
       const slotRegion = unit.shadow
         ? readSourceSlotRegion(
             liveChild,
@@ -3143,7 +3284,7 @@ function readSourceReadUnit(
         privacyRegion: context.privacyRegion || slotRegion?.privacy === true,
         activationRegion: context.activationRegion ||
           slotRegion?.activation === true,
-        visibilityHidden: slotRegion && liveChild.nodeType === Node.TEXT_NODE
+        visibilityHidden: slotRegion && sourceNodeType(liveChild) === Node.TEXT_NODE
           ? slotRegion.visibilityHidden
           : context.visibilityHidden,
       });
@@ -3181,7 +3322,7 @@ function readSourceReadUnit(
       };
     }
     read += 1;
-    if (childNode.nodeType === Node.ELEMENT_NODE) elements.push(childNode as Element);
+    if (sourceNodeType(childNode) === Node.ELEMENT_NODE) elements.push(childNode as Element);
     const child = serializeNode(childNode, context);
     if (child) shadowChildren.push(child);
   }
@@ -3459,7 +3600,7 @@ export function beginSourceDocumentRead(
         );
         if (cut.metTwice || run === 'restart') return end('restart');
         if (run !== 'skipped') {
-          fills.push(...run.fills);
+          for (const item of run.fills) fills.push(item);
           handOnPrefills();
           addElements(run.elements);
           if (run.rest) queue.push(run.rest);
@@ -3574,7 +3715,7 @@ function readSourceDocumentReadValues(
  */
 function standsInRunOfBoxes(element: Element): boolean {
   if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (
     tagName === 'style' || tagName === 'link' || tagName === 'script' ||
     tagName === 'template' || tagName === 'noscript' || tagName === 'meta' ||
@@ -3583,7 +3724,7 @@ function standsInRunOfBoxes(element: Element): boolean {
     isVoidElement(tagName) ||
     isSourceNativeTextControlTagName(tagName)
   ) return false;
-  return element.childNodes.length > 0 ||
+  return sourceChildNodeList(element).length > 0 ||
     readSourceShadowRoot(element) !== undefined;
 }
 
@@ -3652,7 +3793,9 @@ export function sanitizeSourcePreview(
     if (
       element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
       tagName === 'html' || tagName === 'head' || tagName === 'body' ||
-      element.parentElement?.localName.toLowerCase() === 'head'
+      (element.parentElement
+        ? sourceLocalName(element.parentElement).toLowerCase()
+        : undefined) === 'head'
     ) return undefined;
     const display = readSourceOuterDisplay(element, sourceWindow);
     // No box at all (D171): a `display: none` menu or panel paints nothing,
@@ -3748,16 +3891,16 @@ export function sanitizeSourcePreview(
     let bottom = firstRect.bottom;
     let between: Node[] = [];
     for (let next = first.nextSibling; next; next = next.nextSibling) {
-      if (next.nodeType === 3) {
+      if (sourceNodeType(next) === 3) {
         if ((next.nodeValue ?? '').trim() !== '') break;
         between.push(next);
         continue;
       }
-      if (next.nodeType === 8) {
+      if (sourceNodeType(next) === 8) {
         between.push(next);
         continue;
       }
-      if (next.nodeType !== 1) break;
+      if (sourceNodeType(next) !== 1) break;
       const element = next as Element;
       if (!standsInRunOfBoxes(element)) break;
       let nextRect: DOMRect;
@@ -3782,6 +3925,7 @@ export function sanitizeSourcePreview(
   const cut: SourceReadCut = {
     placeholder,
     wholeBox,
+    maxNodes,
     skip: (node) => skipped.has(node),
     metTwice: false,
   };
@@ -3934,11 +4078,13 @@ function serializeCredentialInputShell(
 ): HtmlMirrorElementNode | undefined {
   if (
     element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
-    element.localName.toLowerCase() !== 'input'
+    sourceLocalName(element).toLowerCase() !== 'input'
   ) return undefined;
   const attributes = sanitizeAttributes(
     element,
     'input',
+    true,
+    false,
     true,
     false,
     true,
@@ -3975,16 +4121,20 @@ function sanitizeAttributes(
   tagName: string,
   privateRegion: boolean,
   activationRegion: boolean,
+  privateAttributeRegion: boolean,
+  disclosureWithheld: boolean,
   credentialShell: boolean,
   baseUrl: string,
   representability: HtmlMirrorRepresentabilityCollector,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): readonly (readonly [string, string])[] | undefined {
-  if (element.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES) {
+  if (sourceAttributeList(element).length > MAX_HTML_MIRROR_ATTRIBUTES) {
     incrementRepresentability(representability, 'capacityOmissionCount');
     return undefined;
   }
   const result: Array<readonly [string, string]> = [];
+  const reflectedState = !privateAttributeRegion && !credentialShell &&
+    reflectedStateMayTravel(element, tagName);
   // What a script animation that has ended still holds the element at is
   // drawn as if the element's own style said it, and is read with it: an
   // element that has no `style` gets one for it. Where the page has one
@@ -3993,14 +4143,19 @@ function sanitizeAttributes(
   const heldStyle = readSourceHeldAnimationStyle(element);
   const sourceAttributes: Iterable<SourceAttribute> =
     heldStyle && !element.hasAttribute('style')
-      ? [...element.attributes, HELD_STYLE_ATTRIBUTE]
-      : element.attributes;
+      ? [...sourceAttributeList(element), HELD_STYLE_ATTRIBUTE]
+      : sourceAttributeList(element);
   for (const attribute of sourceAttributes) {
     const xmlLanguage = isXmlNamespaceLanguage(attribute);
     const name = xmlLanguage
       ? PAGE_XML_LANGUAGE_ATTRIBUTE
       : attribute.name.toLowerCase();
-    if (!xmlLanguage && isTwinOfSentName(element, attribute, name)) continue;
+    if (
+      !xmlLanguage && (
+        isTwinOfSentName(element, attribute, name) ||
+        isAttributeChromeDoesNotRead(element, attribute, name)
+      )
+    ) continue;
     const svgResourceReferenceAttribute =
       element.namespaceURI === 'http://www.w3.org/2000/svg' &&
       PASSIVE_SVG_RESOURCE_ELEMENTS.has(tagName) &&
@@ -4021,7 +4176,8 @@ function sanitizeAttributes(
       (isSourceNativeTextControlTagName(tagName) &&
         RAW_CONTROL_TEXT_ATTRIBUTES.has(name) &&
         !SOURCE_PRIVACY_FILTERS_OFF) ||
-      isPrivateBaseAttribute(tagName, name) ||
+      isPrivateBaseAttribute(tagName, name, reflectedState) ||
+      (disclosureWithheld && AUTHOR_WORD_ATTRIBUTES.has(name)) ||
       // `data-*` is the page's own markup and travels (D76); a credential
       // input's empty field keeps only what draws its box.
       (credentialShell && !CREDENTIAL_SHELL_ATTRIBUTES.has(name))
@@ -4217,7 +4373,8 @@ function sanitizeAttributes(
       }
     } else if (name === 'srcset') {
       const passivePictureSource = fidelityPolicy === 'passive' &&
-        tagName === 'source' && element.parentElement?.localName === 'picture';
+        tagName === 'source' && element.parentElement !== null &&
+        sourceLocalName(element.parentElement) === 'picture';
       if (tagName !== 'img' && !passivePictureSource) {
         incrementRepresentability(representability, 'strippedUnsafeResourceCount');
         incrementRepresentability(
@@ -4510,7 +4667,8 @@ function readAdoptedStyleSheet(
     const capacityBefore = representability.capacityOmissionCount;
     const serialized = serializeReadableStyleSheetRules(
       sheet,
-      sheet.href ?? baseUrl,
+      // Where a redirected sheet came from (D180).
+      readSourceSheetBase(sheet) ?? sheet.href ?? baseUrl,
       fidelityPolicy,
       representability,
       new Set(),
@@ -4602,7 +4760,7 @@ function serializeReadableStyleSheetRules(
         );
         const nested = serializeReadableStyleSheetRules(
           importedSheet,
-          importedSheet.href ?? baseUrl,
+          readSourceSheetBase(importedSheet) ?? importedSheet.href ?? baseUrl,
           fidelityPolicy,
           representability,
           visited,
@@ -4700,7 +4858,7 @@ function readResolvedElementStyleSheet(
   fidelityPolicy: SelectableReplicaFidelityPolicy,
   sharedWork?: HtmlMirrorStyleWorkBudget,
 ): string | undefined {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (tagName !== 'style' && tagName !== 'link') return undefined;
   if (tagName === 'link' && !isPassiveStylesheet(element)) return undefined;
   let sheet: CSSStyleSheet | null | undefined;
@@ -4750,7 +4908,7 @@ function readResolvedElementStyleSheet(
     work.sheets += 1;
     resolved = readAdoptedStyleSheet(
       sheet,
-      sheet.href ?? baseUrl,
+      readSourceSheetBase(sheet) ?? sheet.href ?? baseUrl,
       work,
       representability ?? createHtmlMirrorRepresentabilityCollector(),
       fidelityPolicy,
@@ -4824,7 +4982,7 @@ function readStyleElementSourceText(
   baseUrl: string,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): string | undefined {
-  if (element.localName.toLowerCase() !== 'style') return undefined;
+  if (sourceLocalName(element).toLowerCase() !== 'style') return undefined;
   const text = element.textContent ?? '';
   const Sheet = element.ownerDocument?.defaultView?.CSSStyleSheet;
   if (!text || text.length > MAX_HTML_MIRROR_STRING || typeof Sheet !== 'function') {
@@ -5060,9 +5218,79 @@ export function sanitizeCss(
   // Taking the comments out joins what stood on either side of each. A
   // feature that only that made (`(scrip/**/ting)`, or a rule named
   // `@med/**/ia`) is none to the tab, and is written as none.
-  return rewritten === undefined || !namesScripting
+  const answered = rewritten === undefined || !namesScripting
     ? rewritten
     : answerCssScriptingQueries(rewritten, true);
+  return answered === undefined || declarationList
+    ? answered
+    : rewriteAlertRoleSelectors(answered);
+}
+
+/**
+ * The attribute the mirror keeps a page's alert role in (D178): it takes
+ * `role="alert"` off, and `alertdialog` down to `dialog`, so that a screen
+ * reader hears an alert once, from the tab.
+ */
+const PAGE_ROLE_ATTRIBUTE = 'data-simul-page-role';
+
+/**
+ * A page's rules for its alerts still apply in the mirror (D181): a
+ * selector `[role="alert"]`, `[role=alertdialog]`, `[role~=alert]` and the
+ * like, or `[role]`, also matches the element by the role the mirror keeps
+ * for it: `[role="alert"]` is written `:is([role="alert"],[data-simul-page-
+ * role="alert"])`, with the page's own operator, value and flag. Only a
+ * selector (one a `{` follows before a `;` or a `}`) is written so, never a
+ * value such as a grid line named `[role]`, and never a string. Written
+ * once: one already inside such an `:is(` is left as it is, so the text is
+ * read the same when the panel reads it again.
+ */
+function rewriteAlertRoleSelectors(css: string): string {
+  if (!/role/iu.test(css)) return css;
+  const projection = cssExecutableProjection(css);
+  const parts: string[] = [];
+  let segmentStart = 0;
+  const pattern = /\[[ \t\n\r\f]*role[ \t\n\r\f]*(?:[~|^$*]?=|\])/giu;
+  for (let match = pattern.exec(projection); match; match = pattern.exec(projection)) {
+    const start = match.index;
+    const close = projection.indexOf(']', start);
+    if (close < 0) break;
+    pattern.lastIndex = close + 1;
+    if (css.slice(Math.max(0, start - 4), start).toLowerCase() === ':is(') continue;
+    const selector = css.slice(start, close + 1);
+    const lower = selector.toLowerCase();
+    if (!lower.includes('alert') && !/^\[[ \t\n\r\f]*role[ \t\n\r\f]*\]$/u.test(lower)) {
+      continue;
+    }
+    if (!cssPositionStartsBlock(projection, close + 1)) continue;
+    const name = lower.indexOf('role');
+    parts.push(
+      css.slice(segmentStart, start),
+      `:is(${selector},[${PAGE_ROLE_ATTRIBUTE}${selector.slice(name + 4)})`,
+    );
+    segmentStart = close + 1;
+  }
+  if (segmentStart === 0) return css;
+  parts.push(css.slice(segmentStart));
+  return parts.join('');
+}
+
+/** Whether a `{` comes before a `;` or a `}` outside brackets from `from`. */
+function cssPositionStartsBlock(projection: string, from: number): boolean {
+  let depth = 0;
+  for (let index = from; index < projection.length; index += 1) {
+    const character = projection[index];
+    if (character === '\\') {
+      index += 1;
+    } else if (character === '(' || character === '[') {
+      depth += 1;
+    } else if (character === ')' || character === ']') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0) {
+      if (character === '{') return true;
+      if (character === ';' || character === '}') return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -5230,7 +5458,7 @@ function readCssImportConditions(
   const end = readCssMediaQueryList(reading, from, true, answers);
   // What is found after those passes (`joined`) changes nothing for them.
   if (reading.joined) {
-    edits.push(...answers);
+    for (const item of answers) edits.push(item);
   } else if (end - from <= MAX_IMPORT_CONDITIONS_ANSWERED) {
     for (const answer of answers) {
       if (!reading.css.slice(answer.start, answer.end).includes('\\')) {
@@ -5474,7 +5702,7 @@ function readCssMediaQueryList(
     ) return index;
     if (character === '(') {
       const block = readCssMediaBlock(reading, index, 1);
-      edits.push(...block.edits);
+      for (const item of block.edits) edits.push(item);
       index = block.end;
     } else {
       index = readCssAtom(css, index).end;
@@ -5553,7 +5781,7 @@ function readCssMediaBlock(
   const edits: CssEdit[] = [];
   for (const token of tokens) {
     if (token === undefined || token === ':') return { end: index, edits: [] };
-    if (!('word' in token)) edits.push(...token.edits);
+    if (!('word' in token)) for (const item of token.edits) edits.push(item);
     else if (!MEDIA_CONDITION_WORDS.has(token.word)) return { end: index, edits: [] };
   }
   return { end: index, edits };
@@ -5681,7 +5909,7 @@ export function readSourceSelectPresentationStyle(
 ): string | undefined {
   const view = element.ownerDocument?.defaultView;
   if (
-    element.localName.toLowerCase() !== 'select' ||
+    sourceLocalName(element).toLowerCase() !== 'select' ||
     !view ||
     typeof view.getComputedStyle !== 'function'
   ) return undefined;
@@ -5751,6 +5979,7 @@ function stripCssCommentsOutsideStrings(
   const parts: string[] = [];
   let segmentStart = 0;
   let quote: '"' | "'" | undefined;
+  let stringStart = 0;
   for (let index = 0; index < css.length; index += 1) {
     const character = css[index]!;
     if (quote) {
@@ -5760,10 +5989,19 @@ function stripCssCommentsOutsideStrings(
       } else if (character === quote) {
         quote = undefined;
       } else if (
-        sheet &&
-        (character === '\n' || character === '\r' || character === '\f')
+        character === '\n' || character === '\r' || character === '\f'
       ) {
-        return undefined;
+        if (sheet) return undefined;
+        // In a `style` attribute a line break ends the string, as the
+        // browser reads it (a bad string), and what follows is read as the
+        // declarations again (D181): an address there is made absolute and
+        // `expression(` is looked for. The declaration the string stood in
+        // is invalid to the browser; a `!` with no `important` after it
+        // keeps it invalid in the mirror, and the string's text stays
+        // behind.
+        parts.push(css.slice(segmentStart, stringStart), '!');
+        segmentStart = index;
+        quote = undefined;
       }
       continue;
     }
@@ -5775,6 +6013,7 @@ function stripCssCommentsOutsideStrings(
     }
     if (character === '"' || character === "'") {
       quote = character;
+      stringStart = index;
       continue;
     }
     // An unquoted url body takes `/` and `*` as URL code points, not as a
@@ -5811,12 +6050,26 @@ function stripCssCommentsOutsideStrings(
             segmentStart = close + 1;
             continue;
           }
+        } else if (
+          !sheet && !/["'()]/u.test(css.slice(bodyStart))
+        ) {
+          // A `style` attribute cut off inside an unquoted `url(`: the
+          // browser closes it at the end of the text and applies the
+          // declarations before it (D181).
+          parts.push(css.slice(segmentStart), ')');
+          return parts.join('');
         }
       }
     }
     if (character === '/' && css[index + 1] === '*') {
       const close = css.indexOf('*/', index + 2);
-      if (close < 0) return undefined;
+      if (close < 0) {
+        if (sheet) return undefined;
+        // A `style` attribute that ends inside a comment: the comment runs
+        // to the end of the text, as the browser reads it (D181).
+        parts.push(css.slice(segmentStart, index));
+        return parts.join('');
+      }
       parts.push(css.slice(segmentStart, index));
       // A comment parts tokens: removing it must not join the material
       // around it into a function, at-keyword, or name the page never
@@ -5828,7 +6081,12 @@ function stripCssCommentsOutsideStrings(
       segmentStart = close + 2;
     }
   }
-  if (quote) return undefined;
+  if (quote) {
+    if (sheet) return undefined;
+    // The end of a `style` attribute ends a string, as the browser reads it.
+    parts.push(css.slice(segmentStart), quote);
+    return parts.join('');
+  }
   parts.push(css.slice(segmentStart));
   return parts.join('');
 }
@@ -5861,6 +6119,8 @@ function commentJoinsTokens(
     /\\[0-9a-fA-F]{1,6}[ \t\n\r\f]?$/u.test(beforeWindow);
   if (beforeIdent && (afterIdent || after === '(')) return true;
   if ((before === '@' || before === '#') && afterIdent) return true;
+  // `/` and `*` would open a comment the page never wrote: `*//**/*/`.
+  if (before === '/' && after === '*') return true;
   if (/[0-9]/u.test(before) && (after === '.' || after === '%')) return true;
   if (before === '+' && (/[0-9]/u.test(after) || after === '.')) return true;
   return false;
@@ -6844,7 +7104,7 @@ function boundedPositiveGeometry(value: number): number | undefined {
  * narrower than transporting arbitrary computed styles.
  */
 function isCanonicalClippedSourceElement(element: Element): boolean {
-  const candidate = `${element.localName} ${element.getAttribute('class') ?? ''} ${
+  const candidate = `${sourceLocalName(element)} ${element.getAttribute('class') ?? ''} ${
     element.getAttribute('style') ?? ''
   }`;
   if (!/(?:screen-reader|sr-only|visually-hidden|a11y|clip(?:-path)?\s*:)/iu.test(
@@ -7028,7 +7288,7 @@ function isUnsafeTransportedAttribute(
   if (
     name !== PAGE_XML_LANGUAGE_ATTRIBUTE && isSimulOwnedAttributeName(name)
   ) return true;
-  if (isPrivateBaseAttribute(tagName, name)) return true;
+  if (isPrivateBaseAttribute(tagName, name, true)) return true;
   if (
     isNativeSelectSemanticTag(tagName) &&
     !isNativeSelectPresentationAttribute(tagName, name)
@@ -7190,11 +7450,50 @@ function isUnsafeSourceElement(
   fidelityPolicy: SelectableReplicaFidelityPolicy,
   baseUrl: string,
 ): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
+  // What a page keeps for browsers without scripts is an ordinary element
+  // where the tab runs none (D181): its content is drawn there, and the
+  // mirror, which runs none either, draws it too. Where the tab runs
+  // scripts it holds the markup as text, and is left out.
+  if (tagName === 'noscript') return sourceRunsScripts();
   if (isUnsafeElement(tagName, fidelityPolicy)) return true;
   if (tagName !== 'video') return false;
   const poster = element.getAttribute('poster');
   return !poster || passiveUrl(poster, baseUrl, true) === undefined;
+}
+
+/**
+ * HTML elements the reader leaves out that the mirror holds a place for
+ * (D181): an empty element of Simul's own name that no page selector
+ * targets and that draws nothing, the canonical opaque placeholder. Left out
+ * whole, a script or an iframe made `:first-child`, `:empty`, `:nth-child`
+ * and sibling rules count otherwise than in the tab.
+ */
+const LEFT_OUT_PLACEHOLDER_TAGS = new Set([
+  'audio',
+  'embed',
+  'iframe',
+  'noscript',
+  'object',
+  'script',
+  'template',
+]);
+
+function serializeLeftOutPlaceholder(
+  id: number,
+  context: SerializeContext,
+): HtmlMirrorElementNode {
+  const tagName = sourceSecretPlaceholderTagName(id);
+  admitNode(context.budget, id, tagName.length * 2 + 64, context.representability);
+  return Object.freeze({
+    kind: 'element',
+    id,
+    namespace: 'html',
+    tagName,
+    attributes: Object.freeze([]),
+    children: Object.freeze([]),
+    opaquePlaceholder: true as const,
+  });
 }
 
 function elementStartsPrivateRegion(
@@ -7205,10 +7504,91 @@ function elementStartsPrivateRegion(
     hasSourceCredentialSecretAncestor(element, undefined, undefined, secretAncestors)
   ) return true;
   return sourceElementStartsPrivateRegionInContext(
-    element.localName,
+    sourceLocalName(element),
     readSourceStructuralAttributes(element),
     isSourceOptionInsideNativeSelect(element),
-  );
+  ) || sourceElementIsEditorWithoutAttribute(element);
+}
+
+/**
+ * Editors a page made without the `contenteditable` attribute (D181): the
+ * element at the top of what a person typed into, met by `beforeinput` or
+ * `input` (`-webkit-user-modify: read-write` in a page's style, or a
+ * document in design mode). Kept for the document's life, as a secret is.
+ */
+const SOURCE_EDITORS_WITHOUT_ATTRIBUTE = new WeakSet<Element>();
+
+/**
+ * Whether `element` is an editor the page made without the attribute: one
+ * that was typed into, or the root of a document in design mode. What it
+ * holds is withheld from the mirror channel as an editor's is; asking each
+ * element's computed style or `isContentEditable` would cost a style read
+ * an element of every read.
+ */
+function sourceElementIsEditorWithoutAttribute(element: Element): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
+  if (SOURCE_EDITORS_WITHOUT_ATTRIBUTE.has(element)) return true;
+  try {
+    const document = element.ownerDocument;
+    return element === document?.documentElement &&
+      document.designMode?.toLowerCase() === 'on';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * For the target of a `beforeinput` or `input` event: the editor it is in,
+ * when the page made that editor without the attribute and it is new to the
+ * reader (D181), so that the reader reads it again as an editor; otherwise
+ * `undefined`. A text field, and an editor the attribute (or a role) makes,
+ * are known already. `beforeinput` comes before the typed text is put in.
+ */
+export function noteSourceEditingTarget(target: Element): Element | undefined {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return undefined;
+  try {
+    if (!sourceElementIsEditable(target)) return undefined;
+    const path = readSourceFlatTreeElementPath(target);
+    if (!path) return undefined;
+    // The editor is the outermost element of the editable run.
+    let editor = target;
+    for (let index = 1; index < path.length; index += 1) {
+      const above = path[index]!;
+      if (!sourceElementIsEditable(above)) break;
+      editor = above;
+    }
+    for (const current of path) {
+      if (
+        SOURCE_EDITORS_WITHOUT_ATTRIBUTE.has(current) ||
+        sourceElementStartsPrivateRegionInContext(
+          sourceLocalName(current),
+          readSourceStructuralAttributes(current),
+          isSourceOptionInsideNativeSelect(current),
+        )
+      ) return undefined;
+    }
+    SOURCE_EDITORS_WITHOUT_ATTRIBUTE.add(editor);
+    return editor;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a person can type into `element`. Chrome 158 answers
+ * `isContentEditable` false for an element its style makes editable
+ * (`-webkit-user-modify: read-write`), and takes typing there all the same;
+ * the computed style says it.
+ */
+function sourceElementIsEditable(element: Element): boolean {
+  if ((element as Partial<HTMLElement>).isContentEditable === true) return true;
+  const view = element.ownerDocument.defaultView;
+  const style = view?.getComputedStyle?.call(view, element);
+  const value = typeof style?.getPropertyValue === 'function'
+    ? style.getPropertyValue('-webkit-user-modify')
+    : undefined;
+  return typeof value === 'string' &&
+    value.trim().toLowerCase().startsWith('read-write');
 }
 
 interface SourceHiddenRegionState {
@@ -7297,12 +7677,119 @@ export function readSourceHiddenRegionState(
   }
 }
 
+/**
+ * What Chrome draws nothing of though no box of it is hidden by the rule of
+ * `readSourceHiddenRegionState` (D181, owner ruling D175): a closed
+ * `<details>` draws its summary alone, and `content-visibility: hidden`
+ * draws none of what an element holds. `skipped`: the element itself is not
+ * drawn, since the element it is drawn in skips it. `skipsText`: the text
+ * the element holds itself is not drawn. Field values and editor text there
+ * count as hidden; the page's own text in a closed `<details>` keeps
+ * travelling on the mirror channel (the mirror's own closed `<details>`
+ * hides it again, and a reader may open it there), so the mirror's reading
+ * does not ask this. Content-free: no label or value is read.
+ */
+export interface SourceSkippedContentState {
+  readonly skipped: boolean;
+  readonly skipsText: boolean;
+}
+
+const SOURCE_CONTENT_DRAWN: SourceSkippedContentState = Object.freeze({
+  skipped: false,
+  skipsText: false,
+});
+
+export function readSourceSkippedContentState(
+  element: Element,
+): SourceSkippedContentState {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return SOURCE_CONTENT_DRAWN;
+  try {
+    const parent = readSourceFlatTreeElementPath(element)?.[1];
+    const skipped = parent !== undefined && (
+      sourceContentVisibilityIsHidden(parent) ||
+      (isClosedSourceDetails(parent) && !isSourceDetailsSummary(parent, element))
+    );
+    const skipsText = isClosedSourceDetails(element) ||
+      sourceContentVisibilityIsHidden(element);
+    return skipped || skipsText
+      ? Object.freeze({ skipped, skipsText })
+      : SOURCE_CONTENT_DRAWN;
+  } catch {
+    return Object.freeze({ skipped: true, skipsText: true });
+  }
+}
+
+function isClosedSourceDetails(element: Element): boolean {
+  return element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    sourceLocalName(element).toLowerCase() === 'details' &&
+    !element.hasAttribute('open');
+}
+
+function sourceContentVisibilityIsHidden(element: Element): boolean {
+  const view = element.ownerDocument.defaultView;
+  const style = view?.getComputedStyle?.call(view, element);
+  const value = typeof style?.getPropertyValue === 'function'
+    ? style.getPropertyValue('content-visibility')
+    : undefined;
+  return typeof value === 'string' && value.trim().toLowerCase() === 'hidden';
+}
+
+/** Whether `child` is the summary a closed `<details>` still draws. */
+function isSourceDetailsSummary(details: Element, child: Element): boolean {
+  if (
+    child.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    sourceLocalName(child).toLowerCase() !== 'summary' ||
+    child.parentElement !== details
+  ) return false;
+  for (const sibling of details.children) {
+    if (
+      sibling.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+      sourceLocalName(sibling).toLowerCase() === 'summary'
+    ) return sibling === child;
+  }
+  return false;
+}
+
 function elementStartsHiddenOrControlledDisclosureRegion(
   element: Element,
   controlledContent: SourceControlledContentPolicy,
 ): boolean {
-  return readSourceHiddenRegionState(element, controlledContent).starts;
+  return readSourceHiddenRegionState(element, controlledContent).starts ||
+    sourceNodeIsUnslotted(element);
 }
+
+/**
+ * Whether `node` is a child of a shadow host that the host's root assigns
+ * to no slot (D181): Chrome draws it nowhere, and it is withheld as what a
+ * hidden box holds is. Where the root is open Chrome says so exactly
+ * (`assignedSlot` is null). Where it is closed the answer is worked out,
+ * from the slot of the node's name or the lists of a root that assigns by
+ * script, and only for a root the reader knows; a host with a root no
+ * reader has met is read as its host is, as it always was. A wrong "no
+ * slot" would blank text the tab draws.
+ */
+function sourceNodeIsUnslotted(node: Node): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
+  try {
+    if (sourceNodeType(node) !== 1 && sourceNodeType(node) !== 3) return false;
+    const host = node.parentNode;
+    if (!host || sourceNodeType(host) !== 1) return false;
+    // An open root's slot is the node's own `assignedSlot`; a closed
+    // root's is worked out from the ledger, or not at all.
+    if (!canHostAuthorShadowRoot(host as Element)) return false;
+    return readSourceShadowRoot(host as Element) !== undefined &&
+      readSourceAssignedSlot(node) === null;
+  } catch {
+    return false;
+  }
+}
+
+const SOURCE_SLOT_REGION_UNSLOTTED: SourceSlotRegion = Object.freeze({
+  withheld: true,
+  privacy: false,
+  activation: false,
+  visibilityHidden: false,
+});
 
 /**
  * For an element the page declares hidden (`hidden`, `aria-hidden="true"`):
@@ -7344,9 +7831,11 @@ const SOURCE_SLOT_REGION_UNREADABLE: SourceSlotRegion = Object.freeze({
  * while it was hidden), a box that is edited withholds its text from the
  * mirror (text slotted into a component's text editor travelled under every
  * read profile, where the same text in an editor of the page did not), and a
- * control that acts counts for it. `undefined` for a node that is not
- * assigned to a slot: it is read as its host is, as it always was. A slot's
- * boxes are looked at once in a walk.
+ * control that acts counts for it. A child the host's root assigns to no
+ * slot is drawn nowhere and is withheld (`sourceNodeIsUnslotted`, D181);
+ * `undefined` for any other node that no slot takes (no root, or a closed
+ * root no reader has met): it is read as its host is, as it always was. A
+ * slot's boxes are looked at once in a walk.
  */
 function readSourceSlotRegion(
   child: Node,
@@ -7360,7 +7849,9 @@ function readSourceSlotRegion(
   } catch {
     return SOURCE_SLOT_REGION_UNREADABLE;
   }
-  if (!slot) return undefined;
+  if (!slot) {
+    return sourceNodeIsUnslotted(child) ? SOURCE_SLOT_REGION_UNSLOTTED : undefined;
+  }
   const kept = known.get(slot);
   if (kept) return kept;
   let region = SOURCE_SLOT_REGION_UNREADABLE;
@@ -7373,7 +7864,7 @@ function readSourceSlotRegion(
       // drawn, and nothing inside a dropdown is page text.
       privacy: path.some((current) =>
         elementStartsPrivateRegion(current, secretAncestors) ||
-        current.localName.toLowerCase() === 'select'),
+        sourceLocalName(current).toLowerCase() === 'select'),
       activation: path.some(elementStartsActivationRegion),
       visibilityHidden:
         readSourceHiddenRegionState(slot, controlledContent).visibilityHidden,
@@ -7408,7 +7899,7 @@ function sourceSlotReading(
   hostVisibilityHidden: boolean,
 ): number {
   // A child no slot takes is read as its host is.
-  const visibilityHidden = child.nodeType === Node.TEXT_NODE &&
+  const visibilityHidden = sourceNodeType(child) === Node.TEXT_NODE &&
     (region ? region.visibilityHidden : hostVisibilityHidden);
   return (region?.withheld ? 1 : 0) | (region?.privacy ? 2 : 0) |
     (region?.activation ? 4 : 0) | (visibilityHidden ? 8 : 0);
@@ -7494,7 +7985,7 @@ export function sourceSlotReadingChanged(
     child,
     region,
     // Asked only where it counts: for text that no slot takes.
-    !region && child.nodeType === Node.TEXT_NODE &&
+    !region && sourceNodeType(child) === Node.TEXT_NODE &&
       readSourceHiddenRegionState(
         child.parentElement as Element,
         walk.controlledContent,
@@ -7559,17 +8050,123 @@ function hasSourcePrivacyWithheldAncestor(element: Element): boolean {
   return hasSourceWithheldAncestor(element, undefined);
 }
 
+/**
+ * One answer an element for a run of a reader that the page cannot
+ * interrupt (D181), for the questions whether a withheld region, or a
+ * region whose attributes are private, lies above it. An attribute patch
+ * asks them of each element it names, and each time every element above was
+ * classified again, its style read at each step: a `title` set on 250
+ * elements nested in one another was 70 of a 113 ms pause. Entries map an
+ * element to whether it or an element above it starts such a region.
+ */
+interface SourceWithheldAncestorMemo {
+  readonly privacy: Map<Element, boolean>;
+  readonly withheld: Map<SourceControlledContentPolicy, Map<Element, boolean>>;
+  readonly privateAttributes: Map<Element, boolean>;
+}
+
+let ambientWithheldAncestors: SourceWithheldAncestorMemo | undefined;
+let ambientWithheldAncestorWalks = 0;
+
+/**
+ * Opens one run of a reader that the page cannot interrupt (a flush): until
+ * it is ended, the questions above share one memo. Walks nest; end each in
+ * a `finally`. Never keep one open across a task.
+ */
+export function beginSourceWithheldAncestorWalk(): { end(): void } {
+  ambientWithheldAncestorWalks += 1;
+  ambientWithheldAncestors ??= {
+    privacy: new Map(),
+    withheld: new Map(),
+    privateAttributes: new Map(),
+  };
+  let ended = false;
+  return {
+    end: () => {
+      if (ended) return;
+      ended = true;
+      ambientWithheldAncestorWalks -= 1;
+      if (ambientWithheldAncestorWalks === 0) {
+        ambientWithheldAncestors = undefined;
+      }
+    },
+  };
+}
+
+/**
+ * Whether an element of `path` (the element first, then the elements above
+ * it) starts a region by `starts`, each element asked once for the memo's
+ * life: the lowest element the memo knows answers for itself and everything
+ * above it.
+ */
+function memoizedPathStartsRegion(
+  path: readonly Element[],
+  known: Map<Element, boolean>,
+  starts: (element: Element) => boolean,
+): boolean {
+  let index = 0;
+  let above = false;
+  for (; index < path.length; index += 1) {
+    const answer = known.get(path[index]!);
+    if (answer !== undefined) {
+      above = answer;
+      break;
+    }
+  }
+  for (index -= 1; index >= 0; index -= 1) {
+    const current = path[index]!;
+    above = above || starts(current);
+    known.set(current, above);
+  }
+  return above;
+}
+
+function sourceElementStartsWithheldRegion(
+  current: Element,
+  controlledContent: SourceControlledContentPolicy | undefined,
+): boolean {
+  const localName = sourceLocalName(current);
+  return sourceElementStartsPrivateRegionInContext(
+    localName,
+    readSourceStructuralAttributes(current),
+    isSourceOptionInsideNativeSelect(current),
+  ) ||
+    sourceElementIsEditorWithoutAttribute(current) ||
+    localName.toLowerCase() === 'select' ||
+    (controlledContent !== undefined &&
+      elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent));
+}
+
 function hasSourceWithheldAncestor(
   element: Element,
   controlledContent: SourceControlledContentPolicy | undefined,
 ): boolean {
+  const memo = ambientWithheldAncestors;
+  if (memo) {
+    if (
+      !SOURCE_PRIVACY_FILTERS_OFF && hasSourceCredentialSecretAncestor(element)
+    ) return true;
+    const path = readSourceFlatTreeElementPath(element);
+    if (!path) return true;
+    let known = memo.privacy;
+    if (controlledContent) {
+      known = memo.withheld.get(controlledContent) ?? new Map();
+      memo.withheld.set(controlledContent, known);
+    }
+    return memoizedPathStartsRegion(
+      path,
+      known,
+      (current) => sourceElementStartsWithheldRegion(current, controlledContent),
+    );
+  }
   if (hasSourcePrivateElementAncestor(element)) return true;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
   for (const current of path) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     if (
       tagName === 'select' ||
+      sourceElementIsEditorWithoutAttribute(current) ||
       (controlledContent !== undefined &&
         elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent))
     ) return true;
@@ -7653,29 +8250,113 @@ function nativeSelectOptionCount(children: readonly HtmlMirrorNode[]): number {
  * order, as Chrome lists them: a dropdown in the mirror is options and groups
  * only (D135).
  */
+/**
+ * The accessors the prototypes of a node define, looked up once a
+ * prototype: a property read by them is never a property of the node
+ * itself (D181, as D144's `sourceElementLinks`).
+ */
+const SOURCE_OWN_ACCESSORS = new WeakMap<
+  object,
+  Map<string, ((this: object) => unknown) | null>
+>();
+
+function readSourceOwnAccessor(node: object, name: string): unknown {
+  const prototype: object | null = Object.getPrototypeOf(node);
+  if (!prototype) return (node as Record<string, unknown>)[name];
+  let accessors = SOURCE_OWN_ACCESSORS.get(prototype);
+  if (!accessors) {
+    accessors = new Map();
+    SOURCE_OWN_ACCESSORS.set(prototype, accessors);
+  }
+  let getter = accessors.get(name);
+  if (getter === undefined) {
+    getter = null;
+    for (
+      let current: object | null = prototype;
+      current;
+      current = Object.getPrototypeOf(current)
+    ) {
+      const found = Object.getOwnPropertyDescriptor(current, name)?.get;
+      if (found) {
+        getter = found as (this: object) => unknown;
+        break;
+      }
+    }
+    accessors.set(name, getter);
+  }
+  return getter ? getter.call(node) : (node as Record<string, unknown>)[name];
+}
+
+/**
+ * A node's type, past a form's field names (D181). A form answers
+ * `form.<name of one of its fields>` before its own DOM properties, in a
+ * content script as in the page: with a field named `nodeType` the form
+ * read as no element and the mirror was short; one named `localName` or
+ * `attributes` left the page without a mirror, one named `childNodes` too.
+ * What a property gives that is not of its kind (a field for a number or a
+ * string) is read again by the prototypes' accessor.
+ */
+export function sourceNodeType(node: Node): number {
+  const own = node.nodeType;
+  return typeof own === 'number'
+    ? own
+    : readSourceOwnAccessor(node, 'nodeType') as number;
+}
+
+/** An element's local name, past a form's field names; see above. */
+export function sourceLocalName(element: Element): string {
+  const own = element.localName;
+  return typeof own === 'string'
+    ? own
+    : readSourceOwnAccessor(element, 'localName') as string;
+}
+
+/** Whether `node` is an element that answers for its fields' names. */
+function sourceAnswersFieldNames(node: Node): boolean {
+  return sourceNodeType(node) === 1 &&
+    sourceLocalName(node as Element).toLowerCase() === 'form';
+}
+
+/** An element's attributes, past a form's field names; see above. */
+export function sourceAttributeList(element: Element): NamedNodeMap {
+  return sourceAnswersFieldNames(element)
+    ? readSourceOwnAccessor(element, 'attributes') as NamedNodeMap
+    : element.attributes;
+}
+
+/** A node's children, past a form's field names; see above. */
+export function sourceChildNodeList(node: Node): NodeListOf<ChildNode> {
+  return sourceAnswersFieldNames(node)
+    ? readSourceOwnAccessor(node, 'childNodes') as NodeListOf<ChildNode>
+    : node.childNodes;
+}
+
 export function sourceStructuralChildNodes(node: Node): Iterable<Node> {
-  if (node.nodeType !== Node.ELEMENT_NODE) return node.childNodes;
+  if (sourceNodeType(node) !== Node.ELEMENT_NODE) return node.childNodes;
   const element = node as Element;
-  if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return node.childNodes;
-  return readSourceSelectEntries(element) ?? node.childNodes;
+  if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') {
+    return sourceChildNodeList(node);
+  }
+  return readSourceSelectEntries(element) ?? sourceChildNodeList(node);
 }
 
 /** Whether the mirror holds `source` as a child of `target`; see above. */
 export function isSourceStructuralChildOf(source: Node, target: Node): boolean {
   if (source.parentNode === target) return true;
   if (
-    source.nodeType !== Node.ELEMENT_NODE || target.nodeType !== Node.ELEMENT_NODE
+    sourceNodeType(source) !== Node.ELEMENT_NODE || sourceNodeType(target) !== Node.ELEMENT_NODE
   ) return false;
-  const tagName = (source as Element).localName.toLowerCase();
+  const tagName = sourceLocalName(source as Element).toLowerCase();
   return (tagName === 'option' || tagName === 'optgroup') &&
     readSourceSelectEntryOwner(source as Element) === target;
 }
 
 function isRepresentableSourceNativeSelectChild(node: Node): boolean {
-  const parentTag = node.parentElement?.localName.toLowerCase();
+  const parent = node.parentElement;
+  const parentTag = parent ? sourceLocalName(parent).toLowerCase() : undefined;
   if (!parentTag || !isNativeSelectSemanticTag(parentTag)) return true;
-  if (node.nodeType !== Node.ELEMENT_NODE) return false;
-  const tagName = (node as Element).localName.toLowerCase();
+  if (sourceNodeType(node) !== Node.ELEMENT_NODE) return false;
+  const tagName = sourceLocalName(node as Element).toLowerCase();
   if (parentTag === 'select') {
     return tagName === 'option' || tagName === 'optgroup';
   }
@@ -7685,9 +8366,10 @@ function isRepresentableSourceNativeSelectChild(node: Node): boolean {
 
 function elementStartsActivationRegion(element: Element): boolean {
   const role = element.getAttribute('role');
-  return isSourceActivationTagName(element.localName) ||
+  const localName = sourceLocalName(element);
+  return isSourceActivationTagName(localName) ||
     (isSourceActivationRoleValue(role) &&
-      !isSourceNativeSelectImplicitRole(element.localName, role));
+      !isSourceNativeSelectImplicitRole(localName, role));
 }
 
 function readTransportedControlText(
@@ -7751,19 +8433,55 @@ export function readHtmlMirrorSelectedOptionIndexes(
   return Object.freeze(result);
 }
 
+function hasSourceEditorWithoutAttributeAncestor(element: Element): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
+  const path = readSourceFlatTreeElementPath(element);
+  return path?.some(sourceElementIsEditorWithoutAttribute) ?? false;
+}
+
 function hasNonContentAncestor(element: Element): boolean {
   for (let current: Element | undefined = element; current;) {
-    if (NON_CONTENT_ELEMENTS.has(current.localName.toLowerCase())) return true;
+    if (NON_CONTENT_ELEMENTS.has(sourceLocalName(current).toLowerCase())) return true;
     current = composedParentElement(current);
   }
   return false;
 }
 
 function hasSourcePrivateAttributeElementAncestor(element: Element): boolean {
-  if (hasSourcePrivateOrActivationElementAncestor(element)) return true;
+  const memo = ambientWithheldAncestors;
+  if (memo) {
+    if (SOURCE_PRIVACY_FILTERS_OFF) return false;
+    if (hasSourceCredentialSecretAncestor(element)) return true;
+    const path = readSourceFlatTreeElementPath(element);
+    if (!path) return true;
+    return memoizedPathStartsRegion(
+      path,
+      memo.privateAttributes,
+      (current) => {
+        const localName = sourceLocalName(current);
+        const tagName = localName.toLowerCase();
+        const role = current.getAttribute('role');
+        return sourceElementStartsPrivateRegionInContext(
+          localName,
+          readSourceStructuralAttributes(current),
+          isSourceOptionInsideNativeSelect(current),
+        ) ||
+          sourceElementIsEditorWithoutAttribute(current) ||
+          isSourcePrivateTagName(localName) ||
+          isSourceActivationTagName(localName) ||
+          isSourceActivationRoleValue(role) ||
+          (!isNativeSelectSemanticTag(tagName) &&
+            isSourcePublicMenuRoleValue(role));
+      },
+    );
+  }
+  if (
+    hasSourcePrivateOrActivationElementAncestor(element) ||
+    hasSourceEditorWithoutAttributeAncestor(element)
+  ) return true;
   for (let current: Element | undefined = element; current;) {
     if (
-      !isNativeSelectSemanticTag(current.localName.toLowerCase()) &&
+      !isNativeSelectSemanticTag(sourceLocalName(current).toLowerCase()) &&
       isSourcePublicMenuRoleValue(current.getAttribute('role'))
     ) return true;
     current = composedParentElement(current);
@@ -7783,7 +8501,7 @@ function composedParentElement(element: Element): Element | undefined {
 }
 
 function nearestElement(node: Node): Element | undefined {
-  if (node.nodeType === 1) return node as Element;
+  if (sourceNodeType(node) === 1) return node as Element;
   return readSourceFlatTreeElementPath(node)?.[0];
 }
 
