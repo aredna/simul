@@ -10,6 +10,7 @@ import {
   findPdfPageBox,
   pdfPageFromBoxText,
   samePdfPageBox,
+  type PdfPageBoxLayout,
   type PdfPageBoxLine,
   type PdfPageBoxMissing,
 } from '../../lib/pdf/pdf-page-box';
@@ -72,20 +73,30 @@ export const PDF_CAPTURE_UNWANTED = 'unwanted';
 export const PDF_LOCATE_STOP = 'stop';
 
 /**
- * The page box's number is selected or has a caret, or a second capture
- * showed a caret or another number (D220): the reader is at the box, and
- * what it shows may be a number typed and not yet entered, which a later
- * look could take once the caret has blinked off. This doubt is not looked
- * into again (D177).
+ * The page box's number is selected or has a caret: the reader is at the
+ * box, and what it shows may be a number typed and not yet entered, which
+ * a later look could take once the caret has blinked off. This doubt is
+ * not looked into again (D177).
  */
 export const PDF_LOCATE_TYPING = 'typing';
 
 /**
- * The page found (0-based), none, that looking again is no use, or that
- * the reader is at the page box.
+ * A page found that moves the panel, taken at once, and whether a capture
+ * about 0.55 s later shows that it was a number typed and not entered: a
+ * caret or another number in the box (D224).
+ */
+export interface PdfLocateChecked {
+  readonly page: number;
+  readonly typed: Promise<boolean>;
+}
+
+/**
+ * The page found (0-based), with its check when it moves the panel, none,
+ * that looking again is no use, or that the reader is at the page box.
  */
 export type PdfLocateResult =
   | number
+  | PdfLocateChecked
   | undefined
   | typeof PDF_LOCATE_STOP
   | typeof PDF_LOCATE_TYPING;
@@ -98,9 +109,10 @@ export interface PdfLocateDiagnostic {
    * has moved since). `kept`: it did not, and the guess stays (`why` says
    * what was missing). `refused`: Chrome does not allow a capture of this
    * tab. `no-capture`: the capture failed otherwise (the tab is not the one
-   * in view).
+   * in view). `undone`: a later capture showed the page read to be a number
+   * typed and not entered (D224); the panel goes back to its guess.
    */
-  readonly outcome: 'read' | 'kept' | 'refused' | 'no-capture';
+  readonly outcome: 'read' | 'kept' | 'refused' | 'no-capture' | 'undone';
   /**
    * `size`: the capture is not the tab's size. `toolbar`: the viewer's view
    * does not start under a toolbar. `bar`, `box`, `count`, `number`: what
@@ -108,8 +120,6 @@ export interface PdfLocateDiagnostic {
    * `text`: the text is not a page number and this PDF's page count.
    * `differ`: the picture read at another size names another page.
    * `page`: the page read does not fit where the viewer reports the page.
-   * `typed`: a second capture shows a caret or another number in the box
-   * (D220). `again`: the second capture failed or shows no page box.
    */
   readonly why?:
     | 'size'
@@ -118,9 +128,7 @@ export interface PdfLocateDiagnostic {
     | 'unread'
     | 'text'
     | 'differ'
-    | 'page'
-    | 'typed'
-    | 'again';
+    | 'page';
   readonly milliseconds: number;
 }
 
@@ -174,13 +182,14 @@ const MAX_UNREADABLE_LOOKS = 3;
 const UNREADABLE_PAUSE_MS = 60_000;
 
 /**
- * A page read that would move the panel is captured again this long after
- * the first capture (D220): a caret blinked off then is back, unless the
- * second capture falls in its next blink-off. Chrome's caret is on and off
- * 0.5 s each (Chrome for Testing 158): one such look in five; a caret of
- * 0.6 s, never. Chrome allows two captures a second.
+ * A page read that moves the panel is checked by a capture this long after
+ * the first (D224): a caret blinked off then is back, unless that capture
+ * falls in its next blink-off. With Chrome's caret on and off 0.5 s each
+ * (Chrome for Testing 158) one such look in ten is missed; at 0.53 s
+ * (Windows) one in 26, at 0.6 s (GTK) one in 12. Chrome allows two
+ * captures a second.
  */
-export const PDF_PAGE_BOX_SECOND_LOOK_MS = 600;
+export const PDF_PAGE_BOX_SECOND_LOOK_MS = 550;
 
 /** Waits `ms`; ends early once `signal` is aborted. */
 function waitFor(ms: number, signal: AbortSignal): Promise<void> {
@@ -353,43 +362,64 @@ export class PdfPageBoxReader {
     if (page === undefined) return finish('kept', why);
     // Only a page that is where the viewer reports the page.
     if (!doubt.pages.includes(page - 1)) return finish('kept', 'page');
-    if (page - 1 !== doubt.page) {
-      // The box focused, its caret blinked off, shows a number typed and
-      // not entered as a plain one, and its pixels cannot tell focus (D197).
-      // A number that would move the panel is captured once more about
-      // 0.6 s on, when a caret would be back; a caret or another number
-      // then is typing, and the guess stays (D220). A number that names the
-      // guessed page moves nothing and is not captured again.
-      try {
-        await (this.#dependencies.wait ?? waitFor)(
-          Math.max(0, PDF_PAGE_BOX_SECOND_LOOK_MS - (now() - firstAt)),
-          signal,
-        );
-      } catch {
-        // The look goes on at once.
-      }
-      if (signal.aborted) return undefined;
+    finish('read');
+    // The box focused, its caret blinked off, shows a number typed and not
+    // entered as a plain one, and its pixels cannot tell focus (D197). A
+    // page that moves the panel is taken at once, and the tab captured once
+    // more about 0.55 s on, when a caret would be back: a caret or another
+    // number then says it was typed, and the panel goes back to its guess
+    // (D224; D220 waited for that capture before taking the page). A page
+    // that names the guessed one moves nothing and is not checked.
+    if (page - 1 === doubt.page) return page - 1;
+    return {
+      page: page - 1,
+      typed: this.#typedLater(request, underToolbar, firstAt, strip, search.layout, now, started),
+    };
+  }
+
+  /**
+   * Whether a capture about 0.55 s after the first shows a caret or another
+   * number in the page box (D224). Anything else (the same box, no capture,
+   * no box, a stop) is no: the page stays.
+   */
+  async #typedLater(
+    request: PdfPageBoxRequest,
+    underToolbar: (tabHeight: number) => boolean,
+    firstAt: number,
+    strip: RgbaPixels,
+    layout: PdfPageBoxLayout,
+    now: () => number,
+    started: number,
+  ): Promise<boolean> {
+    const { signal, pageCount } = request;
+    try {
+      await (this.#dependencies.wait ?? waitFor)(
+        Math.max(0, PDF_PAGE_BOX_SECOND_LOOK_MS - (now() - firstAt)),
+        signal,
+      );
+      if (signal.aborted) return false;
       const second = await this.#look(request, underToolbar, (_tabWidth, tabHeight) =>
         underToolbar(tabHeight));
-      if (second.kind === 'refused') {
-        finish('refused');
-        return PDF_LOCATE_STOP;
-      }
-      if (second.kind === 'aborted') return undefined;
-      if (second.kind !== 'strip') return finish('kept', 'again');
+      if (signal.aborted || second.kind !== 'strip') return false;
       const again = findPdfPageBox(second.strip, second.scale, pageCount);
-      if (
-        again.found
-          ? !samePdfPageBox(strip, search.layout, second.strip, again.layout)
-          : again.missing === 'number'
-      ) {
-        finish('kept', 'typed');
-        return PDF_LOCATE_TYPING;
+      const typed = again.found
+        ? !samePdfPageBox(strip, layout, second.strip, again.layout)
+        : again.missing === 'number';
+      if (typed) {
+        try {
+          this.#dependencies.onDiagnostic?.({
+            stage: 'locate',
+            outcome: 'undone',
+            milliseconds: Math.round(now() - started),
+          });
+        } catch {
+          // A failing log line is not a failing look.
+        }
       }
-      if (!again.found) return finish('kept', 'again');
+      return typed;
+    } catch {
+      return false;
     }
-    finish('read');
-    return page - 1;
   }
 
   /**

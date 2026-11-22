@@ -130,6 +130,18 @@ function readerFor(captures: TestCapture | readonly TestCapture[]) {
   return { reader, diagnostics, taken, waits, clock };
 }
 
+type Located = Awaited<ReturnType<PdfPageBoxReader['locate']>>;
+
+/**
+ * What a look found, once the check of a page that moves the panel has run
+ * (D224): the page, and whether the check found it typed.
+ */
+async function settled(result: Promise<Located>): Promise<{ page: Exclude<Located, object>; typed?: boolean }> {
+  const found = await result;
+  if (found !== null && typeof found === 'object') return { page: found.page, typed: await found.typed };
+  return { page: found };
+}
+
 function requestFor(
   strip: Pick<StripFixture, 'pageCount'>,
   overrides: Partial<PdfPageBoxRequest> = {},
@@ -155,11 +167,13 @@ describe('PdfPageBoxReader on pictures of Chrome\'s toolbar, read by the bundled
 
       // What the box shows: the viewer's page, but for a number typed and
       // not entered, which the viewer has not gone to yet: the same picture
-      // twice is all a test can give (D220).
-      expect(await reader.locate(requestFor(strip))).toBe(Number(strip.box) - 1);
+      // twice is all a test can give (D224).
+      expect(await settled(reader.locate(requestFor(strip)))).toEqual(Number(strip.box) === 1
+        ? { page: 0 }
+        : { page: Number(strip.box) - 1, typed: false });
       expect(diagnostics).toEqual([{ stage: 'locate', outcome: 'read', milliseconds: 0 }]);
-      // Another page than the guessed first one is captured twice, each
-      // capture let go.
+      // Another page than the guessed first one is checked by a second
+      // capture; each capture is let go.
       const captures = Number(strip.box) === 1 ? 1 : 2;
       expect(taken).toHaveBeenCalledTimes(captures);
       expect(capture.image.close).toHaveBeenCalledTimes(captures);
@@ -215,7 +229,7 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
       return '55 / 300';
     });
 
-    expect(await reader.locate(requestFor(strip, { read }))).toBe(54);
+    expect((await settled(reader.locate(requestFor(strip, { read })))).page).toBe(54);
     expect(read).toHaveBeenCalledTimes(PDF_PAGE_BOX_INK_HEIGHTS.length);
     // The same picture, larger: a few times the digits' height each.
     expect(sizes[1]! / sizes[0]!).toBeCloseTo(PDF_PAGE_BOX_INK_HEIGHTS[1] / PDF_PAGE_BOX_INK_HEIGHTS[0], 1);
@@ -254,7 +268,7 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
       return tesseract(picture);
     });
 
-    expect(await reader.locate(requestFor(twelve, { read }))).toBe(4);
+    expect((await settled(reader.locate(requestFor(twelve, { read })))).page).toBe(4);
     expect(diagnostics).toEqual([{ stage: 'locate', outcome: 'read', milliseconds: 0 }]);
     // Spaced out at the first size, then as it stands at both.
     expect(read).toHaveBeenCalledTimes(3);
@@ -273,7 +287,7 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
     // As it stands both sizes read, and agree.
     const other = readerFor(await captureOf(strip));
     const plain = says('SS / 300', '55 / 300', '55 / 300');
-    expect(await other.reader.locate(requestFor(strip, { read: plain }))).toBe(54);
+    expect((await settled(other.reader.locate(requestFor(strip, { read: plain })))).page).toBe(54);
     expect(plain).toHaveBeenCalledTimes(3);
 
     // Two readings of the spaced picture that differ end the look.
@@ -404,16 +418,16 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
     expect(taken).toHaveBeenCalledTimes(7);
     // The window made wider: the toolbar holds a page box now.
     showing = wide;
-    expect(await reader.locate(request)).toBe(54);
+    expect((await settled(reader.locate(request))).page).toBe(54);
     // A page box found starts the count again: two looks without one, a
-    // look with one (two captures: another page than the guess, D220), and
+    // look with one (two captures: another page than the guess, D224), and
     // two more without are all taken.
     const before = taken.mock.calls.length;
     showing = narrow;
     await reader.locate(request);
     await reader.locate(request);
     showing = wide;
-    await reader.locate(request);
+    await settled(reader.locate(request));
     showing = narrow;
     await reader.locate(request);
     await reader.locate(request);
@@ -475,11 +489,11 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
       },
     });
 
-    expect(await reader.locate(requestFor(strip, { read: says('55 / 300') }))).toBe(54);
+    expect((await settled(reader.locate(requestFor(strip, { read: says('55 / 300') })))).page).toBe(54);
   });
 });
 
-describe('PdfPageBoxReader captures a page that would move the panel twice (D220)', () => {
+describe('PdfPageBoxReader checks a page that moves the panel by a later capture (D224)', () => {
   // Two digits typed into the box, not entered: with the caret blinked off
   // the box shows a plain 25 (pixel for pixel an unfocused box, D197); with
   // it on, a number Chrome does not take for one.
@@ -487,42 +501,48 @@ describe('PdfPageBoxReader captures a page that would move the panel twice (D220
   const caret = fixture('state-1x-typed-caret.png');
   const says = (text: string) => vi.fn(async (): Promise<string | undefined> => text);
 
-  it('keeps the guess when the second capture, about 0.6 s on, shows the caret back', async () => {
+  it('gives the page at once, and says it was typed when a capture about 0.55 s on shows the caret back', async () => {
     const { reader, diagnostics, taken, waits, clock } = readerFor([
       await captureOf(typed),
       await captureOf(caret),
     ]);
     const read = vi.fn(async (picture: PdfPageBoxPicture) => {
-      // Reading takes a while: the wait is what is left of the 0.6 s.
+      // Reading takes a while: the wait is what is left of the 0.55 s.
       clock.now += 50;
       return tesseract(picture);
     });
 
-    expect(await reader.locate(requestFor(typed, { read }))).toBe(PDF_LOCATE_TYPING);
+    const found = await reader.locate(requestFor(typed, { read }));
+    // Taken from the first capture, before any second one.
+    expect(found).toMatchObject({ page: 24 });
+    expect(diagnostics).toMatchObject([{ outcome: 'read' }]);
+    expect(await (found as { typed: Promise<boolean> }).typed).toBe(true);
     expect(taken).toHaveBeenCalledTimes(2);
     expect(waits).toEqual([PDF_PAGE_BOX_SECOND_LOOK_MS - 50 * read.mock.calls.length]);
-    expect(diagnostics).toMatchObject([{ outcome: 'kept', why: 'typed' }]);
+    expect(diagnostics).toMatchObject([{ outcome: 'read' }, { outcome: 'undone' }]);
   });
 
-  it('keeps the guess when the second capture shows another number', async () => {
+  it('says it was typed when the later capture shows another number', async () => {
     const other = fixture('chrome138-1x-37-of-300.png');
-    const { reader, diagnostics, taken } = readerFor([await captureOf(typed), await captureOf(other)]);
+    const { reader, taken } = readerFor([await captureOf(typed), await captureOf(other)]);
 
-    expect(await reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBe(PDF_LOCATE_TYPING);
+    expect(await settled(reader.locate(requestFor(typed, { read: says('25 / 300') }))))
+      .toEqual({ page: 24, typed: true });
     expect(taken).toHaveBeenCalledTimes(2);
-    expect(diagnostics).toMatchObject([{ outcome: 'kept', why: 'typed' }]);
   });
 
-  it('takes the page when the second capture shows the same box', async () => {
-    const { reader, diagnostics, taken, waits } = readerFor(await captureOf(typed));
-    const read = says('25 / 300');
+  it('lets the page stand when the later capture shows the same box, none, or fails', async () => {
+    const narrow = await captureOf({ file: 'no-page-box-narrow-tab.png', scale: 1 });
+    for (const later of [await captureOf(typed), narrow, undefined, PDF_CAPTURE_REFUSED] as const) {
+      const { reader, diagnostics, taken } = readerFor([await captureOf(typed), later]);
+      const read = says('25 / 300');
 
-    expect(await reader.locate(requestFor(typed, { read }))).toBe(24);
-    expect(taken).toHaveBeenCalledTimes(2);
-    expect(waits).toEqual([PDF_PAGE_BOX_SECOND_LOOK_MS]);
-    // The second capture is compared, not read.
-    expect(read).toHaveBeenCalledTimes(PDF_PAGE_BOX_INK_HEIGHTS.length);
-    expect(diagnostics).toMatchObject([{ outcome: 'read' }]);
+      expect(await settled(reader.locate(requestFor(typed, { read })))).toEqual({ page: 24, typed: false });
+      expect(taken).toHaveBeenCalledTimes(2);
+      // The later capture is compared, not read.
+      expect(read).toHaveBeenCalledTimes(PDF_PAGE_BOX_INK_HEIGHTS.length);
+      expect(diagnostics).toMatchObject([{ outcome: 'read' }]);
+    }
   });
 
   it('captures once when the page read is the guessed one: taking it moves nothing', async () => {
@@ -535,21 +555,7 @@ describe('PdfPageBoxReader captures a page that would move the panel twice (D220
     expect(diagnostics).toMatchObject([{ outcome: 'read' }]);
   });
 
-  it('keeps the guess when the second capture shows no page box, or fails', async () => {
-    const narrow = await captureOf({ file: 'no-page-box-narrow-tab.png', scale: 1 });
-    const gone = readerFor([await captureOf(typed), narrow]);
-    expect(await gone.reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBeUndefined();
-    expect(gone.diagnostics).toMatchObject([{ outcome: 'kept', why: 'again' }]);
-
-    const failed = readerFor([await captureOf(typed), undefined]);
-    expect(await failed.reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBeUndefined();
-    expect(failed.diagnostics).toMatchObject([{ outcome: 'kept', why: 'again' }]);
-
-    const refused = readerFor([await captureOf(typed), PDF_CAPTURE_REFUSED]);
-    expect(await refused.reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBe(PDF_LOCATE_STOP);
-  });
-
-  it('takes nothing, and captures no more, once stopped while it waits', async () => {
+  it('captures no more once stopped while it waits', async () => {
     const stop = new AbortController();
     const taken = vi.fn();
     const capture = await captureOf(typed);
@@ -563,11 +569,12 @@ describe('PdfPageBoxReader captures a page that would move the panel twice (D220
     });
     vi.useFakeTimers();
     try {
-      const looking = reader.locate(requestFor(typed, { read: says('25 / 300'), signal: stop.signal }));
+      const found = await reader.locate(requestFor(typed, { read: says('25 / 300'), signal: stop.signal }));
+      expect(found).toMatchObject({ page: 24 });
       await vi.advanceTimersByTimeAsync(PDF_PAGE_BOX_SECOND_LOOK_MS / 2);
       expect(taken).toHaveBeenCalledTimes(1);
       stop.abort();
-      expect(await looking).toBeUndefined();
+      expect(await (found as { typed: Promise<boolean> }).typed).toBe(false);
       await vi.advanceTimersByTimeAsync(PDF_PAGE_BOX_SECOND_LOOK_MS);
       expect(taken).toHaveBeenCalledTimes(1);
     } finally {

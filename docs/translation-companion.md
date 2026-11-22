@@ -1549,15 +1549,19 @@ shell and the mirror has nothing to copy (D103).
       number selected or with a caret ends the looks into that doubt
       (D177). With the caret blinked off the focused box is the unfocused
       one pixel for pixel, the digits apart (D197), so one picture cannot
-      tell a typed number from an entered one. A page read that would move
-      the panel (another than the guessed one) is therefore captured once
-      more, 0.6 s after the first capture, when a caret blinked off is
-      back; a caret or another number in the box then ends the looks into
-      that doubt as above, and only the same box lets the page be taken
-      (D220). Chrome's caret is on and off 0.5 s each, so a look whose
-      first capture falls in the last tenth of a second of a blink-off
-      meets the next blink-off and still takes a typed number: one such
-      look in five. A jump made while the viewer still scrolls whose second
+      tell a typed number from an entered one. A page read that moves the
+      panel (another than the guessed one) is taken at once, and the tab
+      is captured once more about 0.55 s after the first capture, when a
+      caret blinked off is back. A caret or another number in the box then
+      sends the panel back to its guess, unless the viewer has moved since,
+      and ends the looks into that doubt as above; the same box changes
+      nothing (D224). So a typed number is followed for about half a second
+      and undone, and jumps are taken as fast as before (D220 waited for
+      the second capture, 0.6 s on every jump). With Chrome's caret on and
+      off 0.5 s each, a first capture in the last twentieth of a second of
+      a blink-off meets the next one: one such look in ten keeps a typed
+      number (one in 12 with GTK's 0.6 s, one in 26 with Windows' 0.53 s).
+      A jump made while the viewer still scrolls whose second
       report comes more than 12 ms after its first raises no doubt (Chrome
       138 with the companion window sent it up to 18.8 ms late on a busy
       machine), nor does a jump on a PDF so long that the snap moves its

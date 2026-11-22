@@ -39,6 +39,8 @@ export interface PdfViewerFollowerDependencies {
    * not asked again until the PDF is shown anew (a Refresh, another PDF).
    * `typing` when the page box's number is selected or has a caret: the
    * reader is at the box, so that doubt is not looked into again (D177).
+   * A page that moves the view comes with `typed`, which resolves `true`
+   * about 0.55 s later if it was a number typed and not entered (D224).
    * Returns `undefined` at once when it cannot try (Simul's text
    * recognition is off).
    */
@@ -46,7 +48,7 @@ export interface PdfViewerFollowerDependencies {
     target: PdfViewerTarget,
     doubt: PdfViewerDoubt,
     signal: AbortSignal,
-  ) => Promise<number | undefined | 'stop' | 'typing'> | undefined;
+  ) => Promise<PdfLocated> | undefined;
   /** The tab's zoom, which is the viewer's (D104); `undefined` when unknown. */
   readonly viewerZoom?: () => number | undefined;
   /**
@@ -68,6 +70,14 @@ export const PDF_LOCATE_MAX_TRIES = 3;
 // The view counts as where the follower put it within this share of a page.
 const SAME_PLACE_SHARE = 0.02;
 
+/** What a look found (see `locate`). */
+type PdfLocated =
+  | number
+  | { readonly page: number; readonly typed: Promise<boolean> }
+  | undefined
+  | 'stop'
+  | 'typing';
+
 interface Session {
   readonly target: PdfViewerTarget;
   readonly pageSizes: readonly PdfPagePoints[];
@@ -82,6 +92,8 @@ interface Session {
   locateTimer: ReturnType<typeof setTimeout> | undefined;
   /** Stops a look in progress. */
   locating: AbortController | undefined;
+  /** Stops the check of the page last taken (D224). */
+  checking: AbortController | undefined;
   /** A rest came while a look ran: look again when it ends. */
   locateAgain: boolean;
   /** The doubt last looked into and how many times. */
@@ -166,6 +178,7 @@ export class PdfViewerFollower {
       timer: undefined,
       locateTimer: undefined,
       locating: undefined,
+      checking: undefined,
       locateAgain: false,
       episode: undefined,
       tries: 0,
@@ -247,6 +260,8 @@ export class PdfViewerFollower {
     session.locateTimer = undefined;
     session.locating?.abort();
     session.locating = undefined;
+    session.checking?.abort();
+    session.checking = undefined;
     if (this.#session === session) {
       this.#session = undefined;
       this.#previous = session;
@@ -344,8 +359,11 @@ export class PdfViewerFollower {
       session.tries = 0;
     }
     if (session.tries >= PDF_LOCATE_MAX_TRIES) return;
+    // A new look: the page last taken belongs to a report gone by.
+    session.checking?.abort();
+    session.checking = undefined;
     const stop = new AbortController();
-    let locating: Promise<number | undefined | 'stop' | 'typing'> | undefined;
+    let locating: Promise<PdfLocated> | undefined;
     try {
       locating = locate(session.target, doubt, stop.signal);
     } catch {
@@ -355,7 +373,7 @@ export class PdfViewerFollower {
     if (!locating) return;
     session.tries += 1;
     session.locating = stop;
-    let page: number | undefined | 'stop' | 'typing';
+    let page: PdfLocated;
     try {
       page = await locating;
     } catch {
@@ -374,6 +392,21 @@ export class PdfViewerFollower {
       // guess stays until the next doubt (D177).
       session.tries = PDF_LOCATE_MAX_TRIES;
       page = undefined;
+    }
+    if (typeof page === 'object') {
+      const { typed } = page;
+      page = page.page;
+      session.checking = stop;
+      void typed.then((wasTyped) => {
+        if (session.checking === stop) session.checking = undefined;
+        if (!wasTyped || this.#session !== session || stop.signal.aborted) return;
+        // The page taken was a number typed into the page box and not
+        // entered (D224): back to the guess, unless the viewer has moved
+        // since (then the tracker takes nothing). The reader is at the box:
+        // that doubt is not looked into again.
+        if (session.episode === doubt.episode) session.tries = PDF_LOCATE_MAX_TRIES;
+        this.#place(session, doubt, doubt.page);
+      }, () => undefined);
     }
     if (page !== undefined) this.#place(session, doubt, page);
     if (session.locateAgain) {

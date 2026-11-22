@@ -18,7 +18,7 @@ import type { RgbaPixels } from './colour-sample';
  * (D177, measured with Chrome's `--force-high-contrast`, light and dark).
  * What the box shows is what is read: a number typed and not yet entered,
  * once its caret has blinked off, is a plain number here; the reader tells
- * it by a second capture (D220).
+ * it by a later capture (D220, D224).
  */
 
 /** Chrome's PDF toolbar is this tall, in CSS pixels (Chrome 138 to 158, D177). */

@@ -440,6 +440,65 @@ describe('PdfViewerFollower looks into a doubted place (D133)', () => {
     expect(locate).toHaveBeenCalledTimes(PDF_LOCATE_MAX_TRIES + 1);
   });
 
+  it('takes a page at once and goes back to the guess when it was found typed (D224)', async () => {
+    vi.useFakeTimers();
+    let answer: (typed: boolean) => void = () => undefined;
+    const locate = vi.fn(async () => ({
+      page: 89,
+      typed: new Promise<boolean>((resolve) => { answer = resolve; }),
+    }));
+    const { follower, view, send } = setup({ locate });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(100, 1_000));
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    expect(locate).toHaveBeenCalledTimes(1);
+    // Taken from the first capture, without waiting for the check.
+    expect(view.position?.index).toBe(89);
+    // A capture about 0.55 s on showed a caret: a number typed, not entered.
+    answer(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.position?.index).toBe(0);
+    // The reader is at the page box: that doubt is not looked into again.
+    for (let rest = 1; rest <= 4; rest += 1) {
+      send(report(100 + rest * 60, 1_000 + rest * 2_000));
+      await vi.advanceTimersByTimeAsync(2_000);
+    }
+    expect(locate).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a page whose check finds nothing typed, and one the viewer has moved on from (D224)', async () => {
+    vi.useFakeTimers();
+    const answers: ((typed: boolean) => void)[] = [];
+    const locate = vi.fn(async () => ({
+      page: 89,
+      typed: new Promise<boolean>((resolve) => { answers.push(resolve); }),
+    }));
+    const { follower, view, send } = setup({ locate });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(100, 1_000));
+    await vi.advanceTimersByTimeAsync(PDF_LOCATE_REST_MS);
+    answers[0]!(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.position?.index).toBe(89);
+
+    // Another jump, its page taken; the viewer scrolls on before the check
+    // says typed: the tracker follows from where it is, nothing goes back.
+    locate.mockImplementation(async () => ({
+      page: 150,
+      typed: new Promise<boolean>((resolve) => { answers.push(resolve); }),
+    }));
+    jump(send, 150 * PITCH + 300, 60_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(locate).toHaveBeenCalledTimes(2);
+    expect(view.position?.index).toBe(150);
+    send(report(150 * PITCH + 360, 62_100));
+    answers[1]!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.position?.index).toBe(150);
+  });
+
   it('does not look into a doubt again once a look found the reader at the page box (D177)', async () => {
     vi.useFakeTimers();
     // The page box's number selected or with a caret: a number typed and
