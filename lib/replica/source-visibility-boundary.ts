@@ -1,10 +1,17 @@
 import {
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
+import {
   createSourcePaintScanCache,
   readSourceElementPathPaint,
   readSourceFlatTreeElementPath,
   sourceControlledPanelBoxIsPlaced,
   sourceElementPaintInputsAreReadable,
   type SourcePaintScanCache,
+  type SourcePaintStyleFacts,
+  type SourcePaintStyleMemory,
 } from './source-privacy-policy';
 import { readSourceShadowRoot } from './source-shadow-root';
 
@@ -22,13 +29,15 @@ export interface SourceVisibilityBoundaryIndexBuild {
    * Adds `root`'s subtree (through roots, as the whole build walks it), each
    * call with a paint memo of its own. `includeSelf: false` leaves `root`
    * out (added by an earlier call); each element of `stopAt` is added
-   * without what it holds, which a later call adds.
+   * without what it holds, which a later call adds. `paintCache`: one memo
+   * shared by the calls of one task (D186), which must not outlive it.
    */
   add(
     root: Element,
     options?: {
       readonly includeSelf?: boolean;
       readonly stopAt?: ReadonlySet<Element>;
+      readonly paintCache?: SourcePaintScanCache;
     },
   ): void;
   /** Every element added so far, or over the node bound. */
@@ -84,12 +93,30 @@ interface SourceVisibilityWalkResult {
 }
 
 /** A comparison in slices that has not ended (D164). */
+/**
+ * Whether a comparison keeps the style answers it reads for the next one,
+ * and whether it may answer from those kept (D186). The caller decides:
+ * the index cannot see what changed the page's styles.
+ */
+export interface SourceVisibilityComparisonOptions {
+  /** Keep what this comparison reads: the page may soon change only text. */
+  readonly keepStyles?: boolean;
+  /**
+   * No computed style can have changed since the kept answers were read,
+   * except by the records given: answered from them when every record is
+   * a change of text. Boxes are read afresh all the same.
+   */
+  readonly stylesUnchanged?: boolean;
+}
+
 interface SourceVisibilityRunState {
   readonly previous: ReadonlyMap<Element, SourceVisibilityState>;
   /** What this comparison read; in place of `previous` once it ends. */
   readonly next: Map<Element, SourceVisibilityState>;
   readonly shown: Element[];
   readonly context: SourceVisibilityWalkContext;
+  /** The style answers it keeps or recalls (D186). */
+  readonly styles: SourcePaintStyleMemory | undefined;
   cancelled: boolean;
 }
 
@@ -109,6 +136,13 @@ export class SourceVisibilityBoundaryIndex {
   #wholeComparisons = 0;
   /** The comparison in slices that has not ended, if any (D164). */
   #run: SourceVisibilityRunState | undefined;
+  /**
+   * The style answers of the last whole comparison that kept them, while
+   * nothing compared since can have changed them (D186).
+   */
+  #styleMemory: WeakMap<Element, SourcePaintStyleFacts> | undefined;
+  /** Whole comparisons that answered from kept styles (D186). */
+  #recalledComparisons = 0;
 
   constructor(
     private readonly document: Document,
@@ -144,11 +178,12 @@ export class SourceVisibilityBoundaryIndex {
     return {
       add: (root, options = {}) => {
         if (finished || overflow) return;
+        const { paintCache, ...scan } = options;
         const result = index.#scanRoots(
           [root],
           nothingBefore,
-          createSourcePaintScanCache(),
-          { ...options, inspected },
+          paintCache ?? createSourcePaintScanCache(),
+          { ...scan, inspected },
         );
         inspected = result.inspected;
         overflow = result.overflow;
@@ -184,8 +219,15 @@ export class SourceVisibilityBoundaryIndex {
    * still in the page, to no end. A comparison begun before and not ended
    * is cancelled.
    */
-  beginRefreshAll(): SourceVisibilityComparison {
-    return this.#beginWholeComparison(false);
+  beginRefreshAll(options: SourceVisibilityComparisonOptions = {}): SourceVisibilityComparison {
+    return this.#beginWholeComparison(false, options.keepStyles
+      ? { facts: new WeakMap(), recall: false }
+      : undefined);
+  }
+
+  /** How many whole comparisons answered from kept styles (D186). */
+  get recalledComparisons(): number {
+    return this.#recalledComparisons;
   }
 
   refreshMutations(
@@ -197,13 +239,16 @@ export class SourceVisibilityBoundaryIndex {
   /** `refreshMutations`, to run in slices (D164). */
   beginRefreshMutations(
     records: readonly MutationRecord[],
+    options: SourceVisibilityComparisonOptions = {},
   ): SourceVisibilityComparison {
     this.#cancelRun();
     let global = false;
     let imageSelectorSurface = false;
+    let textOnly = records.length > 0;
     for (const record of records) {
+      if (record.type !== 'characterData') textOnly = false;
       if (record.type === 'attributes') {
-        if (record.target.nodeType !== 1) continue;
+        if (sourceNodeType(record.target) !== 1) continue;
         // Every authored attribute is CSS selector surface. Attribute
         // selectors, sibling combinators, and :has() can rematerialize text
         // outside the mutated subtree, so bounded local ancestry is not an
@@ -211,7 +256,7 @@ export class SourceVisibilityBoundaryIndex {
         // rematerialization boundary only when painted state actually changes.
         global = true;
         imageSelectorSurface ||=
-          (record.target as Element).localName.toLowerCase() === 'img';
+          sourceLocalName(record.target as Element).toLowerCase() === 'img';
         continue;
       }
       if (record.type === 'characterData') {
@@ -229,7 +274,18 @@ export class SourceVisibilityBoundaryIndex {
       // index so a local marker can reveal a remote text subtree.
       global = true;
     }
-    if (global) return this.#beginWholeComparison(imageSelectorSurface);
+    if (global) {
+      // Only text changed, and nothing else can have restyled the page:
+      // the styles kept answer, the boxes are read (D186).
+      const memory = this.#styleMemory;
+      if (textOnly && options.stylesUnchanged && memory) {
+        this.#recalledComparisons += 1;
+        return this.#beginWholeComparison(false, { facts: memory, recall: true });
+      }
+      return this.#beginWholeComparison(imageSelectorSurface, options.keepStyles
+        ? { facts: new WeakMap(), recall: false }
+        : undefined);
+    }
     // A batch that names no element (a stand-in's attribute record on a text
     // node) compares nothing: every real record makes the comparison global.
     const nothing = Object.freeze({
@@ -245,17 +301,22 @@ export class SourceVisibilityBoundaryIndex {
 
   #beginWholeComparison(
     imageSelectorSurface: boolean,
+    styles?: SourcePaintStyleMemory,
   ): SourceVisibilityComparison {
     this.#cancelRun();
+    // Whatever this one keeps, the answers kept before are not believed
+    // again unless it recalls them.
+    if (!styles?.recall) this.#styleMemory = undefined;
     const run: SourceVisibilityRunState = {
       previous: this.#states,
       next: new Map(),
       shown: [],
       context: {
-        paintCache: createSourcePaintScanCache(),
+        paintCache: createSourcePaintScanCache(styles),
         expired: NEVER_EXPIRED,
         yielded: false,
       },
+      styles,
       cancelled: false,
     };
     this.#run = run;
@@ -269,7 +330,7 @@ export class SourceVisibilityBoundaryIndex {
         // Each slice reads with a memo of its own, and does at least one
         // element before it asks whether its share is done.
         let units = 0;
-        run.context.paintCache = createSourcePaintScanCache();
+        run.context.paintCache = createSourcePaintScanCache(run.styles);
         run.context.expired = () => units++ > 0 && expired();
         let next: IteratorResult<void, SourceVisibilityBoundaryRefresh>;
         try {
@@ -352,6 +413,7 @@ export class SourceVisibilityBoundaryIndex {
     this.#wholeComparisons += 1;
     this.#states = run.next;
     this.#complete = !walk.overflow;
+    this.#styleMemory = run.styles && !walk.overflow ? run.styles.facts : undefined;
     for (const element of run.shown) {
       if (this.#shown.length >= this.maximumNodes) break;
       this.#shown.push(element);
@@ -384,6 +446,8 @@ export class SourceVisibilityBoundaryIndex {
    * of elements that all changed was walked once for each of them.
    */
   refreshWithin(roots: readonly Element[]): SourceVisibilityBoundaryRefresh {
+    // What these hold was restyled (D186).
+    if (roots.length > 0) this.#styleMemory = undefined;
     const result = this.#scanRoots(
       minimizeVisibilityRoots(roots),
       this.#states,
@@ -425,12 +489,14 @@ export class SourceVisibilityBoundaryIndex {
 
   dispose(): void {
     this.#cancelRun();
+    this.#styleMemory = undefined;
     this.#states.clear();
     this.#shown = [];
     this.#complete = false;
   }
 
   #replaceAll(): void {
+    this.#styleMemory = undefined;
     this.#states.clear();
     const root = this.document.documentElement;
     const result = this.#scanRoots(
@@ -551,6 +617,14 @@ export class SourceVisibilityBoundaryIndex {
             context.paintCache,
           )
         ) state = 'placed';
+        // The root is drawn whenever it is shown: its own box may leave the
+        // view (a dialog that locks the page's scroll, the page made
+        // `position: fixed`) and what it holds is told apart by its own
+        // boxes. A change of the root alone was a whole read of the page at
+        // every such dialog (D183).
+        if (state === 'shown' && element === this.document.documentElement) {
+          state = 'painted';
+        }
         const prior = previous.get(element);
         const changed = prior !== undefined && prior !== state;
         into.set(element, state);
@@ -596,14 +670,14 @@ export class SourceVisibilityBoundaryIndex {
       const current = pending.pop();
       if (!current) break;
       inspected += 1;
-      if (current.nodeType === 11) {
-        for (const item of current.childNodes) pending.push(item);
+      if (sourceNodeType(current) === 11) {
+        for (const item of sourceChildNodeList(current)) pending.push(item);
         continue;
       }
-      if (current.nodeType !== 1) continue;
+      if (sourceNodeType(current) !== 1) continue;
       const element = current as Element;
       this.#states.delete(element);
-      for (const item of element.childNodes) pending.push(item);
+      for (const item of sourceChildNodeList(element)) pending.push(item);
       const shadow = readSourceVisibilityShadowRoot(element);
       if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
         this.#complete = false;
@@ -731,12 +805,12 @@ function subtreeMayContainAuthoredText(
   const pending: Node[] = [];
   try {
     for (const item of slottedNodes(root)) pending.push(item);
-    for (const item of root.childNodes) pending.push(item);
+    for (const item of sourceChildNodeList(root)) pending.push(item);
     const shadow = readSourceVisibilityShadowRoot(root);
     if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
       return Object.freeze({ mayContainText: true, inspected: 0, overflow: true });
     }
-    if (shadow) for (const item of shadow.childNodes) pending.push(item);
+    if (shadow) for (const item of sourceChildNodeList(shadow)) pending.push(item);
   } catch {
     return Object.freeze({ mayContainText: true, inspected: 0, overflow: true });
   }
@@ -748,14 +822,14 @@ function subtreeMayContainAuthoredText(
     const node = pending.pop();
     if (!node) break;
     inspected += 1;
-    if (node.nodeType === 3 || node.nodeType === 4 || node.nodeType === 5) {
+    if (sourceNodeType(node) === 3 || sourceNodeType(node) === 4 || sourceNodeType(node) === 5) {
       return Object.freeze({ mayContainText: true, inspected, overflow: false });
     }
-    if (node.nodeType !== 1 && node.nodeType !== 11) continue;
+    if (sourceNodeType(node) !== 1 && sourceNodeType(node) !== 11) continue;
     try {
-      if (node.nodeType === 1) for (const item of slottedNodes(node as Element)) pending.push(item);
-      for (const item of node.childNodes) pending.push(item);
-      if (node.nodeType === 1) {
+      if (sourceNodeType(node) === 1) for (const item of slottedNodes(node as Element)) pending.push(item);
+      for (const item of sourceChildNodeList(node)) pending.push(item);
+      if (sourceNodeType(node) === 1) {
         const shadow = readSourceVisibilityShadowRoot(node as Element);
         if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
           return Object.freeze({
@@ -764,7 +838,7 @@ function subtreeMayContainAuthoredText(
             overflow: true,
           });
         }
-        if (shadow) for (const item of shadow.childNodes) pending.push(item);
+        if (shadow) for (const item of sourceChildNodeList(shadow)) pending.push(item);
       }
     } catch {
       return Object.freeze({ mayContainText: true, inspected, overflow: true });

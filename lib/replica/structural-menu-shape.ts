@@ -1,4 +1,5 @@
 import { readSourceFlatTreeElementPath } from './source-privacy-policy';
+import { sourceChildNodeList, sourceLocalName, sourceNodeType } from './source-node-accessors';
 
 /**
  * Where a menu without ARIA relations is recognized from its shape: inside
@@ -158,11 +159,11 @@ function structuralMenuWrappedElement(wrapper: Element): Element | undefined {
   if (!isStructuralMenuPanelElement(wrapper)) return undefined;
   try {
     let wrapped: Element | undefined;
-    for (const node of wrapper.childNodes) {
-      if (node.nodeType === 1) {
+    for (const node of sourceChildNodeList(wrapper)) {
+      if (sourceNodeType(node) === 1) {
         if (wrapped) return undefined;
         wrapped = node as Element;
-      } else if (node.nodeType === 3 && (node.nodeValue ?? '').trim() !== '') {
+      } else if (sourceNodeType(node) === 3 && (node.nodeValue ?? '').trim() !== '') {
         return undefined;
       }
     }
@@ -174,7 +175,7 @@ function structuralMenuWrappedElement(wrapper: Element): Element | undefined {
 
 function readLocalName(element: Element): string {
   try {
-    return element.localName.toLowerCase();
+    return sourceLocalName(element).toLowerCase();
   } catch {
     return '';
   }

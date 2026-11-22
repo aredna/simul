@@ -1,4 +1,11 @@
 import {
+  sourceAnswersFieldNames,
+  sourceAttributeList,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
+import {
   MAX_SOURCE_SELECTED_OPTION_INDEXES,
   createSourceControlledContentPolicy,
   createSourceSecretAncestorMemo,
@@ -19,6 +26,7 @@ import {
   isSourceSelectEntryVisuallyHidden,
   isSourceTransparentSelectClickTarget,
   readSourceFlatTreeElementPath,
+  readSourceFlatTreeParentElement,
   readSourceSelectEntries,
   readSourceSelectEntryOwner,
   readSourceSelectRevealer,
@@ -2741,6 +2749,14 @@ function serializeNode(
       ? 'conservative'
       : context.fidelityPolicy;
     let lightRead = 0;
+    // The preview (D193): a list that alone passes the preview's limit and
+    // whose elements hold nothing, so none of them can be a box, is read
+    // whole by any reading: the preview is given up before it is read
+    // (131,000 empty elements in one box read 12,000 of them, 62–72 ms).
+    if (
+      context.cut?.maxNodes !== undefined &&
+      previewListCannotFit(liveElement, context.budget.nodes, context.cut.maxNodes)
+    ) throw new HtmlMirrorCapacityError();
     for (const liveChild of sourceStructuralChildNodes(liveElement)) {
       if (split && lightElements && lightRead > 0 && split.expired?.() === true) {
         const resumed = cutSourceElement(context, split, cutFacts!, {
@@ -3726,6 +3742,49 @@ function standsInRunOfBoxes(element: Element): boolean {
   ) return false;
   return sourceChildNodeList(element).length > 0 ||
     readSourceShadowRoot(element) !== undefined;
+}
+
+/** Elements the preview's count leaves out: the read may drop them (D193). */
+const PREVIEW_UNCOUNTED_TAGS: ReadonlySet<string> = new Set([
+  'script', 'noscript', 'template', 'style', 'link', 'meta', 'base', 'title',
+  'iframe', 'frame', 'object', 'embed', 'slot', 'select', 'option', 'optgroup',
+]);
+
+/**
+ * Whether `element`'s own list passes `maxNodes` from `read` with nodes the
+ * preview reads whatever it does (D193): an element that holds nothing
+ * (only an element with children can be a box, and it ends a run of
+ * boxes) and a text that shows. Counted only for a list long enough by its
+ * length alone, and over at most that list.
+ */
+function previewListCannotFit(element: Element, read: number, maxNodes: number): boolean {
+  try {
+    if (sourceLocalName(element).toLowerCase() === 'select') return false;
+    const nodes = sourceChildNodeList(element);
+    if (!(read + nodes.length > maxNodes)) return false;
+    let always = read;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index]!;
+      const type = sourceNodeType(node);
+      if (type === 1) {
+        // Counted low where unsure: an element the read may leave out
+        // (a script, a frame, a template's hidden content) does not count.
+        const child = node as Element;
+        if (
+          child.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+          !PREVIEW_UNCOUNTED_TAGS.has(sourceLocalName(child).toLowerCase()) &&
+          sourceChildNodeList(child).length === 0 &&
+          readSourceShadowRoot(child) === undefined
+        ) always += 1;
+      } else if (type === 3) {
+        if ((node.nodeValue ?? '').trim() !== '') always += 1;
+      }
+      if (always > maxNodes) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /** How many nodes a preview reads before every further box is a placeholder. */
@@ -5980,6 +6039,11 @@ function stripCssCommentsOutsideStrings(
   let segmentStart = 0;
   let quote: '"' | "'" | undefined;
   let stringStart = 0;
+  // In a `style` attribute, the blocks still open: the end of the text
+  // closes them, as the browser reads it (D187), so a cut-off `url("…`
+  // or `calc(…` is written closed.
+  const open: string[] = [];
+  const closed = (): string => sheet ? '' : open.reverse().join('');
   for (let index = 0; index < css.length; index += 1) {
     const character = css[index]!;
     if (quote) {
@@ -6015,6 +6079,12 @@ function stripCssCommentsOutsideStrings(
       quote = character;
       stringStart = index;
       continue;
+    }
+    if (!sheet) {
+      if (character === '(') open.push(')');
+      else if (character === '[') open.push(']');
+      else if (character === '{') open.push('}');
+      else if (character === open[open.length - 1]) open.pop();
     }
     // An unquoted url body takes `/` and `*` as URL code points, not as a
     // comment: stripping one there would request a URL the page never
@@ -6056,7 +6126,7 @@ function stripCssCommentsOutsideStrings(
           // A `style` attribute cut off inside an unquoted `url(`: the
           // browser closes it at the end of the text and applies the
           // declarations before it (D181).
-          parts.push(css.slice(segmentStart), ')');
+          parts.push(css.slice(segmentStart), ')', closed());
           return parts.join('');
         }
       }
@@ -6067,7 +6137,7 @@ function stripCssCommentsOutsideStrings(
         if (sheet) return undefined;
         // A `style` attribute that ends inside a comment: the comment runs
         // to the end of the text, as the browser reads it (D181).
-        parts.push(css.slice(segmentStart, index));
+        parts.push(css.slice(segmentStart, index), closed());
         return parts.join('');
       }
       parts.push(css.slice(segmentStart, index));
@@ -6084,10 +6154,10 @@ function stripCssCommentsOutsideStrings(
   if (quote) {
     if (sheet) return undefined;
     // The end of a `style` attribute ends a string, as the browser reads it.
-    parts.push(css.slice(segmentStart), quote);
+    parts.push(css.slice(segmentStart), quote, closed());
     return parts.join('');
   }
-  parts.push(css.slice(segmentStart));
+  parts.push(css.slice(segmentStart), closed());
   return parts.join('');
 }
 
@@ -7525,7 +7595,7 @@ const SOURCE_EDITORS_WITHOUT_ATTRIBUTE = new WeakSet<Element>();
  * element's computed style or `isContentEditable` would cost a style read
  * an element of every read.
  */
-function sourceElementIsEditorWithoutAttribute(element: Element): boolean {
+export function sourceElementIsEditorWithoutAttribute(element: Element): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (SOURCE_EDITORS_WITHOUT_ATTRIBUTE.has(element)) return true;
   try {
@@ -7596,6 +7666,11 @@ interface SourceHiddenRegionState {
   readonly starts: boolean;
   /** Its own computed `visibility` hides its text (see SerializeContext). */
   readonly visibilityHidden: boolean;
+  /**
+   * Its computed `content-visibility` is `hidden`: it draws none of what it
+   * holds (D187; read from the same style, for `readSourceSkippedContentState`).
+   */
+  readonly contentVisibilityHidden?: boolean;
 }
 
 const SOURCE_REGION_VISIBLE: SourceHiddenRegionState = Object.freeze({
@@ -7651,8 +7726,15 @@ export function readSourceHiddenRegionState(
       ? style.visibility.trim().toLowerCase()
       : undefined;
     const visibilityHidden = visibility === 'hidden' || visibility === 'collapse';
+    const contentVisibility = typeof style?.getPropertyValue === 'function'
+      ? style.getPropertyValue('content-visibility')
+      : undefined;
+    const contentVisibilityHidden = typeof contentVisibility === 'string' &&
+      contentVisibility.trim().toLowerCase() === 'hidden';
     const state = (starts: boolean): SourceHiddenRegionState =>
-      Object.freeze({ starts, visibilityHidden });
+      Object.freeze(contentVisibilityHidden
+        ? { starts, visibilityHidden, contentVisibilityHidden }
+        : { starts, visibilityHidden });
     if (display === 'none') return state(true);
     if (!declaredHidden) return state(false);
     // The declaration yields only to a box that is really painted, by the
@@ -7701,16 +7783,23 @@ const SOURCE_CONTENT_DRAWN: SourceSkippedContentState = Object.freeze({
 
 export function readSourceSkippedContentState(
   element: Element,
+  /**
+   * Whether an element's computed `content-visibility` is `hidden`, for a
+   * reader that has its style read already (the `contentVisibilityHidden`
+   * of `readSourceHiddenRegionState`).
+   */
+  contentVisibilityHidden: (element: Element) => boolean =
+    sourceContentVisibilityIsHidden,
 ): SourceSkippedContentState {
   if (SOURCE_PRIVACY_FILTERS_OFF) return SOURCE_CONTENT_DRAWN;
   try {
-    const parent = readSourceFlatTreeElementPath(element)?.[1];
+    const parent = readSourceFlatTreeParentElement(element);
     const skipped = parent !== undefined && (
-      sourceContentVisibilityIsHidden(parent) ||
+      contentVisibilityHidden(parent) ||
       (isClosedSourceDetails(parent) && !isSourceDetailsSummary(parent, element))
     );
     const skipsText = isClosedSourceDetails(element) ||
-      sourceContentVisibilityIsHidden(element);
+      contentVisibilityHidden(element);
     return skipped || skipsText
       ? Object.freeze({ skipped, skipsText })
       : SOURCE_CONTENT_DRAWN;
@@ -7768,7 +7857,7 @@ function elementStartsHiddenOrControlledDisclosureRegion(
  * reader has met is read as its host is, as it always was. A wrong "no
  * slot" would blank text the tab draws.
  */
-function sourceNodeIsUnslotted(node: Node): boolean {
+export function sourceNodeIsUnslotted(node: Node): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   try {
     if (sourceNodeType(node) !== 1 && sourceNodeType(node) !== 3) return false;
@@ -8250,86 +8339,12 @@ function nativeSelectOptionCount(children: readonly HtmlMirrorNode[]): number {
  * order, as Chrome lists them: a dropdown in the mirror is options and groups
  * only (D135).
  */
-/**
- * The accessors the prototypes of a node define, looked up once a
- * prototype: a property read by them is never a property of the node
- * itself (D181, as D144's `sourceElementLinks`).
- */
-const SOURCE_OWN_ACCESSORS = new WeakMap<
-  object,
-  Map<string, ((this: object) => unknown) | null>
->();
-
-function readSourceOwnAccessor(node: object, name: string): unknown {
-  const prototype: object | null = Object.getPrototypeOf(node);
-  if (!prototype) return (node as Record<string, unknown>)[name];
-  let accessors = SOURCE_OWN_ACCESSORS.get(prototype);
-  if (!accessors) {
-    accessors = new Map();
-    SOURCE_OWN_ACCESSORS.set(prototype, accessors);
-  }
-  let getter = accessors.get(name);
-  if (getter === undefined) {
-    getter = null;
-    for (
-      let current: object | null = prototype;
-      current;
-      current = Object.getPrototypeOf(current)
-    ) {
-      const found = Object.getOwnPropertyDescriptor(current, name)?.get;
-      if (found) {
-        getter = found as (this: object) => unknown;
-        break;
-      }
-    }
-    accessors.set(name, getter);
-  }
-  return getter ? getter.call(node) : (node as Record<string, unknown>)[name];
-}
-
-/**
- * A node's type, past a form's field names (D181). A form answers
- * `form.<name of one of its fields>` before its own DOM properties, in a
- * content script as in the page: with a field named `nodeType` the form
- * read as no element and the mirror was short; one named `localName` or
- * `attributes` left the page without a mirror, one named `childNodes` too.
- * What a property gives that is not of its kind (a field for a number or a
- * string) is read again by the prototypes' accessor.
- */
-export function sourceNodeType(node: Node): number {
-  const own = node.nodeType;
-  return typeof own === 'number'
-    ? own
-    : readSourceOwnAccessor(node, 'nodeType') as number;
-}
-
-/** An element's local name, past a form's field names; see above. */
-export function sourceLocalName(element: Element): string {
-  const own = element.localName;
-  return typeof own === 'string'
-    ? own
-    : readSourceOwnAccessor(element, 'localName') as string;
-}
-
-/** Whether `node` is an element that answers for its fields' names. */
-function sourceAnswersFieldNames(node: Node): boolean {
-  return sourceNodeType(node) === 1 &&
-    sourceLocalName(node as Element).toLowerCase() === 'form';
-}
-
-/** An element's attributes, past a form's field names; see above. */
-export function sourceAttributeList(element: Element): NamedNodeMap {
-  return sourceAnswersFieldNames(element)
-    ? readSourceOwnAccessor(element, 'attributes') as NamedNodeMap
-    : element.attributes;
-}
-
-/** A node's children, past a form's field names; see above. */
-export function sourceChildNodeList(node: Node): NodeListOf<ChildNode> {
-  return sourceAnswersFieldNames(node)
-    ? readSourceOwnAccessor(node, 'childNodes') as NodeListOf<ChildNode>
-    : node.childNodes;
-}
+export {
+  sourceAttributeList,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
 
 export function sourceStructuralChildNodes(node: Node): Iterable<Node> {
   if (sourceNodeType(node) !== Node.ELEMENT_NODE) return node.childNodes;

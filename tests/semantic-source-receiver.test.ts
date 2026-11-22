@@ -1,9 +1,12 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
+import { disposeReadOnlyReplicaDisclosures } from '../lib/replica/read-only-disclosure';
 import {
   SemanticSourceReceiver,
+  semanticRefreshScope,
   semanticSelectionTextFor,
+  styleSheetTextReach,
   type ResolvedSemanticSourceProof,
 } from '../lib/replica/semantic-source-receiver';
 import { SemanticProofPresenter } from '../lib/replica/semantic-proof-presenter';
@@ -14,6 +17,7 @@ import {
   semanticSourceRecordId,
   semanticStructuralMenuRelationId,
   semanticTabRelationId,
+  SEMANTIC_PAGE_EDITOR_MARK,
   type SemanticSourceBatch,
   type SemanticSourceProof,
   type SemanticSourceRecord,
@@ -528,6 +532,34 @@ describe('semantic source receiver', () => {
         ))).toEqual([]);
         expect(replica.direct.nodeValue).toBe('');
       });
+    });
+
+    it('takes an editor the page made without the attribute, by the page\'s mark (D192)', () => {
+      const take = (markup: string, overrides: Partial<SemanticSourceRecord>) => {
+        const { document } = parseHTML(`<html><body>${markup}</body></html>`);
+        const text = document.querySelector('#typed')!.firstChild!;
+        const receiver = new SemanticSourceReceiver({
+          document: identity,
+          replicaDocument: document as unknown as Document,
+          resolveNode: (nodeId) => (nodeId === 7 ? text : undefined),
+        });
+        receiver.applyBatch(createSemanticSourceBatch(
+          identity, 'read-v1-111111', 1, [editorRecord(7, 'typed words', overrides)],
+        ));
+        return [text.nodeValue, receiver.records().length];
+      };
+      const note = '<div id="note"><p id="typed">*</p></div>';
+      const marked = { contentEditable: SEMANTIC_PAGE_EDITOR_MARK };
+      expect(take(note, marked)).toEqual(['typed words', 1]);
+      // A design-mode document: the root is the editor.
+      expect(take('<p id="typed">*</p>', { ...marked, tagName: 'html' }))
+        .toEqual(['typed words', 1]);
+      // Without the mark the mirror's element is no editor, as before.
+      expect(take(note, { contentEditable: 'true' })).toEqual(['*', 0]);
+      // No element of the tag above the text, or a secret around it.
+      expect(take(note, { ...marked, tagName: 'section' })).toEqual(['*', 0]);
+      expect(take(`<section autocomplete="current-password">${note}</section>`, marked))
+        .toEqual(['*', 0]);
     });
   });
 
@@ -2320,6 +2352,11 @@ describe('semantic source receiver', () => {
     ]);
     expect(receiver.applyBatch(deltaBatch(first, second))).toBeDefined();
     expect(installs).toEqual([1, 1, 2, 1]);
+    // Its relation is written again with it (D185): the page shows it now.
+    expect(document.querySelector('#t2')!.getAttribute('aria-controls'))
+      .toBe(numberedMenuProof(2, true, 2).relationId);
+    expect(document.querySelector('#t2')!.getAttribute('data-simul-source-disclosure-state'))
+      .toBe('v1');
     // Menu 0 leaves: the others stay as they are.
     const third = createSemanticSourceBatch(identity, 'read-v1-111111', 3, texts.slice(1), [
       numberedMenuProof(1, false, 1), numberedMenuProof(2, true, 2),
@@ -2418,6 +2455,258 @@ describe('semantic source receiver', () => {
         '<li><a id="item" href="/a">***</a></li><li><input type="password"></li>',
       );
       expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+    });
+  });
+
+  // D185: after a live patch only what the patch touched is asked again.
+  describe('a refresh of what a live patch touched (D185)', () => {
+    const replica = () => {
+      const { document, window } = parseHTML(`<html><body><button id="flip" aria-label="Play">Play</button><nav><ul>${
+        Array.from({ length: 4 }, (_, index) =>
+          `<li id="w${index}"><button id="t${index}">Menu ${index}</button>` +
+          `<div id="p${index}"><a href="/${index}">***</a></div></li>`).join('')
+      }</ul></nav><iframe id="frame"></iframe></body></html>`);
+      const nodes = new Map<number, Node>([[90, document.querySelector('#flip')!]]);
+      const installs = [0, 0, 0, 0];
+      for (let index = 0; index < 4; index += 1) {
+        nodes.set(200 + index * 4, document.querySelector(`#w${index}`)!);
+        nodes.set(201 + index * 4, document.querySelector(`#t${index}`)!);
+        const panel = document.querySelector<HTMLElement>(`#p${index}`)!;
+        nodes.set(202 + index * 4, panel);
+        nodes.set(203 + index * 4, document.querySelector(`#p${index} a`)!.firstChild!);
+        const listen = panel.addEventListener.bind(panel);
+        panel.addEventListener = ((type: string, ...rest: unknown[]) => {
+          if (type === 'pointerenter') installs[index]! += 1;
+          return (listen as (...args: unknown[]) => void)(type, ...rest);
+        }) as typeof panel.addEventListener;
+      }
+      const presenter = new SemanticProofPresenter({
+        document: document as unknown as Document,
+        iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+      });
+      let resolved = 0;
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => {
+          resolved += 1;
+          return nodes.get(nodeId);
+        },
+        applyProofs: (proofs) => presenter.apply(proofs),
+        takeDownTouchedProofs: (roots) => presenter.takeDownMenusTouching(roots),
+      });
+      expect(receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [0, 1, 2, 3].map((index) => menuTextRecord(203 + index * 4, `Item ${index}`)),
+        [
+          ...[0, 1, 2, 3].map((index) => numberedMenuProof(index, false, 1)),
+          {
+            kind: 'control-state', bridge: 'isolated-html', nodeId: 90, revision: 1,
+            gate: 'controlSemantics', disabled: true, classifierVersion: 1,
+          },
+        ],
+      ))).toBeDefined();
+      expect(installs).toEqual([1, 1, 1, 1]);
+      /** A live patch of `roots`, as the engine runs it around the patch. */
+      const patch = (
+        roots: readonly Element[],
+        change: () => void,
+        styleChanged = false,
+      ) => {
+        receiver.beforeLivePatch(roots);
+        disposeReadOnlyReplicaDisclosures(document as unknown as Document, true);
+        change();
+        return receiver.refreshBindings(true, { roots, styleChanged });
+      };
+      return { document, window, receiver, installs, patch, resolved: () => resolved };
+    };
+
+    it('puts up again only the menu and the state a patch touched', () => {
+      const { document, window, receiver, installs, patch, resolved } = replica();
+      const flip = document.querySelector('#flip')!;
+      // The reader hovers menu 1; the page changes a label elsewhere.
+      const trigger1 = document.querySelector('#t1')!;
+      trigger1.dispatchEvent(new window.Event('pointerenter'));
+      expect(trigger1.getAttribute('aria-expanded')).toBe('true');
+      const before = resolved();
+      patch([flip], () => {
+        // A patch writes the page's attributes over what was shown on it.
+        flip.setAttribute('aria-label', 'Pause');
+        flip.removeAttribute('aria-disabled');
+        flip.removeAttribute('data-simul-source-control-state');
+      });
+      expect(installs).toEqual([1, 1, 1, 1]);
+      // The four menu texts are looked up, and the touched proof resolved
+      // again; a whole refresh resolves every menu's three nodes too.
+      expect(resolved() - before).toBe(5);
+      expect(flip.getAttribute('aria-disabled')).toBe('true');
+      expect(trigger1.getAttribute('aria-expanded')).toBe('true');
+      // A patch inside menu 2's panel: that menu alone comes down and up.
+      // The presenter names a menu's panel by its relation: found by its place.
+      const link2 = document.querySelector('#w2 > div a')!;
+      patch([link2], () => link2.setAttribute('title', 'Two'));
+      expect(installs).toEqual([1, 1, 2, 1]);
+      const trigger2 = document.querySelector('#t2')!;
+      expect(trigger2.getAttribute('data-simul-replica-disclosure-trigger')).toBe('v1');
+      // Its relation is written again with it.
+      expect(trigger2.getAttribute('aria-controls')).toBe(numberedMenuProof(2, false, 1).relationId);
+      expect(trigger2.getAttribute('aria-haspopup')).toBe('menu');
+      // A change of style, or no word of what changed: everything again.
+      patch([flip], () => undefined, true);
+      expect(installs).toEqual([2, 2, 3, 2]);
+      receiver.refreshBindings(true);
+      expect(installs).toEqual([3, 3, 4, 3]);
+    });
+
+    it('still drops what a patch made secret under what it touched', () => {
+      const { document, receiver, installs, patch } = replica();
+      const panel0 = document.querySelector('#w0 > div')!;
+      patch([panel0], () => panel0.querySelector('a')!.setAttribute('contenteditable', 'true'));
+      // The menu's only text is gone, and the menu with it; the others stay.
+      expect(receiver.records().map(({ source }) => source))
+        .toEqual(['Item 1', 'Item 2', 'Item 3']);
+      expect(document.querySelector('#t0')!.hasAttribute('data-simul-replica-disclosure-trigger'))
+        .toBe(false);
+      expect(installs).toEqual([1, 1, 1, 1]);
+    });
+
+    // D188: a sheet whose selectors reach past the changed nodes.
+    // The flag stands before the menu, outside it: what a change of it
+    // touches holds neither the menu nor its text.
+    const secretBySheet = (
+      sheet: string,
+      secretSelector: string,
+      head = `<style>${sheet}</style>`,
+      linkedSheets?: { reach: 'subtree' | 'siblings' | 'everything'; hrefs: string[] },
+    ) => {
+      const { document, window } = parseHTML(
+        `<html><head>${head}</head><body><span class="flag"></span><nav><ul>` +
+          '<li id="w0"><button id="t0">Menu 0</button><div id="p0">' +
+          '<a href="/0">***</a></div></li></ul></nav><iframe id="frame"></iframe></body></html>',
+      );
+      Object.defineProperty(window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => ({
+          getPropertyValue: (name: string) =>
+            name === '-webkit-text-security' && element.matches(secretSelector) ? 'disc' : '',
+        }),
+      });
+      onTestFinished(() => {
+        Reflect.deleteProperty(window, 'getComputedStyle');
+      });
+      const nodes = new Map<number, Node>([
+        [200, document.querySelector('#w0')!],
+        [201, document.querySelector('#t0')!],
+        [202, document.querySelector('#p0')!],
+        [203, document.querySelector('#p0 a')!.firstChild!],
+      ]);
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => nodes.get(nodeId),
+      });
+      receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [menuTextRecord(203, 'Item 0')],
+        [numberedMenuProof(0, false, 1)],
+        linkedSheets ? { linkedSheets } : {},
+      ));
+      expect(receiver.records().map(({ source }) => source)).toEqual(['Item 0']);
+      const flagElement = document.querySelector('.flag')!;
+      flagElement.classList.add('on');
+      return { receiver, flag: flagElement };
+    };
+
+    it('asks again the siblings a `+` or `~` rule reaches from what changed (D188)', () => {
+      for (const sheet of [
+        '.flag.on + nav { -webkit-text-security: disc }',
+        '.flag.on~nav{-webkit-text-security:disc}',
+      ]) {
+        const { receiver, flag } = secretBySheet(sheet, '.flag.on ~ nav a');
+        receiver.refreshBindings(true, { roots: [flag], styleChanged: false });
+        expect(receiver.records()).toEqual([]);
+      }
+    });
+
+    it('asks everything again where a sheet has `:has()` (D188)', () => {
+      const { receiver, flag } = secretBySheet(
+        'body:has(.flag.on) nav { -webkit-text-security: disc }', 'body:has(.flag.on) nav a',
+      );
+      receiver.refreshBindings(true, { roots: [flag], styleChanged: false });
+      expect(receiver.records()).toEqual([]);
+    });
+
+    it('keeps to what changed where no rule reaches past it (D188)', () => {
+      // `~=` and `2n+1` are no combinators, nor is what a comment or a
+      // string holds: only what is under the flag is asked (the secret here
+      // is drawn by no rule of the sheet, so it shows what was asked).
+      const { receiver, flag } = secretBySheet(
+        'a[class~="x"], li:nth-child(2n+1) .flag.on { -webkit-text-security: disc } /* a + b */ ' +
+          '.c::after { content: "~" } .flag.on ~ nav { color: red } body:has(.on) { color: red }',
+        '.flag.on ~ nav a',
+      );
+      receiver.refreshBindings(true, { roots: [flag], styleChanged: false });
+      expect(receiver.records().map(({ source }) => source)).toEqual(['Item 0']);
+    });
+
+    it('takes the page\'s word for a link of another origin the frame cannot read (D191)', () => {
+      const href = 'https://cdn.example/site.css';
+      const link = `<link rel="stylesheet" href="${href}">`;
+      const ask = (linkedSheets?: { reach: 'subtree' | 'siblings' | 'everything'; hrefs: string[] }) => {
+        const { receiver, flag } = secretBySheet('', '.flag.on ~ nav a', link, linkedSheets);
+        receiver.refreshBindings(true, { roots: [flag], styleChanged: false });
+        return receiver.records().map(({ source }) => source);
+      };
+      // The page read it and found no rule that reaches: only what changed.
+      expect(ask({ reach: 'subtree', hrefs: [href] })).toEqual(['Item 0']);
+      // It reaches, the page did not name it, or said nothing: everything.
+      expect(ask({ reach: 'siblings', hrefs: [href] })).toEqual([]);
+      expect(ask({ reach: 'subtree', hrefs: ['https://cdn.example/other.css'] })).toEqual([]);
+      expect(ask()).toEqual([]);
+    });
+
+    it('reads how far a sheet reaches, from the rules that declare text security (D188)', () => {
+      const secret = '{ -webkit-text-security: disc }';
+      expect(styleSheetTextReach(`a b > c ${secret} @media (min-width: 1px) { p ${secret} }`))
+        .toBe('subtree');
+      expect(styleSheetTextReach(`a { & + b ${secret} }`)).toBe('siblings');
+      expect(styleSheetTextReach(`a + b { color: red } a ${secret}`)).toBe('subtree');
+      expect(styleSheetTextReach('a:has(b) { color: red } li:has(> a:hover) { outline: 1px solid }'))
+        .toBe('subtree');
+      expect(styleSheetTextReach(`a:has(b) { & c { all: unset } }`)).toBe('everything');
+      expect(styleSheetTextReach(`@container (width > 1px) { p ${secret} }`)).toBe('everything');
+      expect(styleSheetTextReach(`li:nth-child(2 of .on) ${secret}`)).toBe('everything');
+      expect(styleSheetTextReach('@import url(x.css); p { color: red }')).toBe('everything');
+      expect(styleSheetTextReach(`p { background: url(data:image/svg+xml;utf8,x) } p ${secret}`))
+        .toBe('subtree');
+      expect(styleSheetTextReach(`.c::after { content: "a + b { -webkit-text-security: disc }" }`))
+        .toBe('subtree');
+    });
+
+    it('names the nodes a patch changed, and a change of style', () => {
+      const { document } = parseHTML(
+        '<html><head><style id="sheet">p{}</style></head><body><p id="p">x</p></body></html>',
+      );
+      const nodes = new Map<number, Node>([
+        [1, document.querySelector('#p')!],
+        [2, document.querySelector('#p')!.firstChild!],
+        [3, document.querySelector('#sheet')!],
+        [4, document.querySelector('#sheet')!.firstChild!],
+      ]);
+      const attributes = (nodeId: number, tagName: string) => ({
+        kind: 'attributes' as const, nodeId, namespace: 'html' as const, tagName, attributes: [],
+      });
+      const scope = (operations: Parameters<typeof semanticRefreshScope>[0]) =>
+        semanticRefreshScope(operations, (nodeId) => nodes.get(nodeId));
+      expect(scope([attributes(1, 'p'), attributes(9, 'p')]))
+        .toEqual({ roots: [nodes.get(1)], styleChanged: false });
+      expect(scope([attributes(3, 'style')]).styleChanged).toBe(true);
+      expect(scope([{ kind: 'text', nodeId: 4, node: { kind: 'text', id: 4, value: 'p{}' } } as never])
+        .styleChanged).toBe(true);
+      expect(scope([{ kind: 'text', nodeId: 2, node: { kind: 'text', id: 2, value: 'y' } } as never])
+        .styleChanged).toBe(false);
+      expect(scope([{ kind: 'dimensions', viewportWidth: 1, viewportHeight: 1 } as never])
+        .styleChanged).toBe(true);
     });
   });
 

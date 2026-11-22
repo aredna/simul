@@ -585,6 +585,118 @@ describe('visible isolated replay host', () => {
     ).scrollTop).toBe(0);
   });
 
+  it('scrolls the pane under the wheel in the mirror, and the mirror at the pane\'s end (D186)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    const listeners: Array<(event: WheelEvent) => void> = [];
+    Object.defineProperty(iframe, 'contentWindow', {
+      configurable: true,
+      value: {
+        scrollX: 0, scrollY: 0, scrollTo: vi.fn(),
+        addEventListener: (type: string, listener: (event: WheelEvent) => void, options: unknown) => {
+          expect(type).toBe('wheel');
+          expect(options).toMatchObject({ capture: true, passive: false });
+          listeners.push(listener);
+        },
+        removeEventListener: vi.fn(),
+      },
+    });
+    const replica = attachReplica(
+      iframe,
+      '<html><body><div id="list"><div id="code"></div></div><p id="text"></p></body></html>',
+    );
+    const pane = (id: string, rect: [number, number, number, number], range: [number, number]) => {
+      const element = replica.querySelector(`#${id}`) as HTMLElement;
+      const place = { left: 0, top: 0 };
+      const [left, top, width, height] = rect;
+      Object.defineProperties(element, {
+        clientWidth: { configurable: true, value: width },
+        clientHeight: { configurable: true, value: height },
+        scrollLeft: {
+          configurable: true,
+          get: () => place.left,
+          set: (value: number) => { place.left = Math.min(Math.max(value, 0), range[0]); },
+        },
+        scrollTop: {
+          configurable: true,
+          get: () => place.top,
+          set: (value: number) => { place.top = Math.min(Math.max(value, 0), range[1]); },
+        },
+        getBoundingClientRect: {
+          configurable: true,
+          value: () => ({
+            x: left, y: top, left, top, right: left + width, bottom: top + height,
+            width, height, toJSON: () => ({}),
+          }),
+        },
+      });
+      return place;
+    };
+    const list = pane('list', [0, 0, 400, 600], [0, 300]);
+    const code = pane('code', [50, 100, 300, 200], [500, 100]);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 700 }, resolver([
+      [3, replica.querySelector('#list')!],
+      [4, replica.querySelector('#code')!],
+      [5, replica.querySelector('#text')!],
+    ]));
+    expect(listeners).toHaveLength(1);
+    // Each call a gesture of its own unless `gap` says it follows the last.
+    let time = 0;
+    const wheel = (clientX: number, clientY: number, deltaY: number, deltaX = 0, gap = 1_000) => {
+      time += gap;
+      const event = {
+        type: 'wheel', clientX, clientY, deltaX, deltaY, deltaMode: 0, timeStamp: time,
+        cancelable: true, target: null,
+        preventDefault: vi.fn(), stopImmediatePropagation: vi.fn(),
+      };
+      listeners[0]!(event as unknown as WheelEvent);
+      return event.stopImmediatePropagation.mock.calls.length > 0;
+    };
+    // Before the tab names its panes the mirror takes every wheel.
+    expect(wheel(100, 150, 40)).toBe(false);
+
+    fixture.host.notePaneBoxes({
+      boxes: [
+        { nodeId: 3 }, { nodeId: 4 },
+      ],
+    });
+    // Over the inner pane: it scrolls, the outer one and the mirror do not.
+    expect(wheel(100, 150, 60)).toBe(true);
+    expect(code).toEqual({ left: 0, top: 60 });
+    expect(list).toEqual({ left: 0, top: 0 });
+    // At its end the next pane out takes the wheel, then the mirror.
+    expect(wheel(100, 150, 60)).toBe(true);
+    expect(code.top).toBe(100);
+    expect(wheel(100, 150, 60)).toBe(true);
+    expect(list.top).toBe(60);
+    list.top = 300;
+    expect(wheel(100, 150, 60)).toBe(false);
+    // Sideways inside the inner pane, and outside every pane.
+    expect(wheel(100, 150, 0, 80)).toBe(true);
+    expect(code.left).toBe(80);
+    expect(wheel(700, 150, 60)).toBe(false);
+
+    // A gesture stays with what it began on (D193): a fling that reaches
+    // the inner pane's end moves neither the outer pane nor the mirror.
+    Object.assign(code, { left: 0, top: 0 });
+    list.top = 0;
+    expect(wheel(100, 150, 60)).toBe(true);
+    for (let step = 0; step < 5; step += 1) expect(wheel(100, 150, 60, 0, 16)).toBe(true);
+    expect(code.top).toBe(100);
+    expect(list.top).toBe(0);
+    // Even once the pointer has left it.
+    expect(wheel(700, 150, 60, 0, 16)).toBe(true);
+    // A gesture begun beside the panes stays with the mirror over them.
+    expect(wheel(700, 150, 60)).toBe(false);
+    expect(wheel(100, 150, -60, 0, 16)).toBe(false);
+    expect(code.top).toBe(100);
+    // After a pause the next gesture finds the pane under it anew.
+    expect(wheel(100, 150, -60, 0, 400)).toBe(true);
+    expect(code.top).toBe(40);
+  });
+
   it('keeps the document at its own share while a pane is scrolled', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());

@@ -109,6 +109,7 @@ import type {
 } from './semantic-source-client';
 import {
   SemanticSourceReceiver,
+  semanticRefreshScope,
   semanticSelectionTextFor,
 } from './semantic-source-receiver';
 import { SemanticProofPresenter } from './semantic-proof-presenter';
@@ -247,9 +248,19 @@ export type IsolatedMirrorInfoStage =
   | 'recovery'
   | 'failed';
 
+/**
+ * Who asked for a recovery's whole read (D183): the page reader (`page`),
+ * the panel because a patch came out of order (`out-of-order`), or the
+ * panel because it refused a patch (`refused`, with the check that did).
+ */
+export type IsolatedMirrorRecoveryCause = 'page' | 'out-of-order' | 'refused';
+
 export interface IsolatedMirrorInfo {
   readonly stage: IsolatedMirrorInfoStage;
   readonly code?: ReplicaDiagnosticCode;
+  readonly recoveryCause?: IsolatedMirrorRecoveryCause;
+  /** For a refused patch: the check that refused it, a fixed label. */
+  readonly refusal?: string;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
   readonly replicaRequestsMayOccur: boolean;
   readonly nodeCount: number;
@@ -1100,6 +1111,7 @@ export class IsolatedHtmlReplicaEngine
         'stream_gap',
         EMPTY_PATCH_METRICS,
         batch.representability,
+        'out-of-order',
       );
       return;
     }
@@ -1126,6 +1138,9 @@ export class IsolatedHtmlReplicaEngine
       ? snapshotOpenReadOnlyReplicaDisclosures(replicaDocument)
       : undefined;
     if (replicaDocument && disclosureBindingsMayHaveChanged) {
+      // The site menus on or around what the patch changes come down; the
+      // rest stay up through it (D185).
+      this.#semanticReceiver?.beforeLivePatch(changedRoots);
       disposeReadOnlyReplicaDisclosures(replicaDocument, true);
     }
     const retainedPaintedLabelIds = [...state.paintedLabelHosts.keys()];
@@ -1135,6 +1150,7 @@ export class IsolatedHtmlReplicaEngine
       ? documentContentLanguage(replicaDocument)
       : undefined;
     let applied: AppliedPatchBatch | undefined;
+    takePatchRefusal();
     try {
       applied = applyPatchFrame(state, frame.map((patch) => patch.operations));
     } finally {
@@ -1158,6 +1174,8 @@ export class IsolatedHtmlReplicaEngine
           reconciliationRejectedCount: reconciliationRejected ? 1 : 0,
         }),
         last.representability,
+        'refused',
+        takePatchRefusal(),
       );
       return;
     }
@@ -1188,7 +1206,11 @@ export class IsolatedHtmlReplicaEngine
       ({ kind }) => kind !== 'dimensions' && kind !== 'text',
     );
     let semanticChanges = semanticBindingsMayHaveChanged
-      ? semanticReceiver?.refreshBindings(semanticProofsMayHaveChanged) ?? []
+      ? semanticReceiver?.refreshBindings(
+        semanticProofsMayHaveChanged,
+        // Only what the patch touched is asked again (D185).
+        semanticRefreshScope(operations, (nodeId) => state.nodes.get(nodeId)),
+      ) ?? []
       : [];
     if (
       semanticReceiver && semanticBindingsMayHaveChanged &&
@@ -1439,15 +1461,16 @@ export class IsolatedHtmlReplicaEngine
     if (code === 'stream_failed') {
       this.#failLive(code, representability);
     } else {
-      this.#requestRecovery(code, EMPTY_PATCH_METRICS, representability);
+      this.#requestRecovery(code, EMPTY_PATCH_METRICS, representability, 'page');
     }
   }
 
   #requestRecovery(
     code: ReplicaDiagnosticCode,
-    metrics: IsolatedMirrorPatchMetrics = EMPTY_PATCH_METRICS,
-    eventRepresentability: HtmlMirrorRepresentabilitySummary =
-      EMPTY_REPRESENTABILITY,
+    metrics: IsolatedMirrorPatchMetrics,
+    eventRepresentability: HtmlMirrorRepresentabilitySummary,
+    cause: IsolatedMirrorRecoveryCause,
+    refusal?: string,
   ): void {
     const state = this.#committed;
     if (this.#recoveryRequested) return;
@@ -1461,14 +1484,11 @@ export class IsolatedHtmlReplicaEngine
     this.#recoveryAbort?.abort();
     this.#recoveryAbort = new AbortController();
     this.#armRecoveryTimer(token);
-    this.options.onInfo?.(stateInfo(
-      'recovery',
-      state,
-      0,
-      code,
-      metrics,
-      eventRepresentability,
-    ));
+    this.options.onInfo?.(Object.freeze({
+      ...stateInfo('recovery', state, 0, code, metrics, eventRepresentability),
+      recoveryCause: cause,
+      ...(refusal ? { refusal } : {}),
+    }));
     this.#stream.requestCheckpoint(state.sequence);
   }
 
@@ -1632,6 +1652,7 @@ export class IsolatedHtmlReplicaEngine
       replicaDocument,
       resolveNode: (nodeId) => state.nodes.get(nodeId),
       applyProofs: (proofs) => presenter.apply(proofs),
+      takeDownTouchedProofs: (roots) => presenter.takeDownMenusTouching(roots),
       reportDroppedItems: (records, proofs) => {
         if (import.meta.env?.DEV) {
           console.info(
@@ -2038,13 +2059,108 @@ function applyDocumentGraph(
     }
     anchor = child;
   }
-  appendOwnedAdoptedStyles(
-    body,
-    adoptedStyleSheets,
-    ownedAdoptedStyles,
-    'document',
-  );
+  if (
+    adoptedStyleSheets.length > 0 &&
+    !adoptOwnedSheets(target, adoptedStyleSheets)
+  ) {
+    appendOwnedAdoptedStyles(
+      body,
+      adoptedStyleSheets,
+      ownedAdoptedStyles,
+      'document',
+    );
+  }
   assignIsolatedManualSlots(target, nodes);
+}
+
+/**
+ * A frame in which the page put a new head or body in place of its own (a
+ * Turbo-style visit: `document.body.replaceWith(next)`), read for the
+ * mirror (D190). The mirror keeps its own two, which hold what Simul puts
+ * there, so `<html>`'s list keeps the mirror's element where the new one
+ * stands, and a part after it brings the new element's attributes and
+ * children to the mirror's: the same checks as any list of children sent.
+ * Then the mirror's element takes the new one's id (`rebinds`, by the index
+ * of that part). Anything else of the kind stays refused: a head or body
+ * added beside the page's own, one moved, or one with a shadow root.
+ */
+function splitDocumentShellReplacement(
+  state: HtmlMirrorDomState,
+  parts: readonly (readonly HtmlMirrorPatchOperation[])[],
+): {
+  readonly parts: readonly (readonly HtmlMirrorPatchOperation[])[];
+  readonly rebinds: ReadonlyMap<number, readonly (readonly [number, number])[]>;
+} {
+  const html = state.iframe.contentDocument?.documentElement;
+  const htmlId = html ? state.nodes.idOf(html) : undefined;
+  if (htmlId === undefined) return { parts, rebinds: new Map() };
+  const split: (readonly HtmlMirrorPatchOperation[])[] = [];
+  const rebinds = new Map<number, Array<readonly [number, number]>>();
+  for (const operations of parts) {
+    const index = operations.findIndex((operation) =>
+      operation.kind === 'reconcile-children' && operation.nodeId === htmlId);
+    const operation = operations[index] as Extract<
+      HtmlMirrorPatchOperation,
+      { kind: 'reconcile-children' }
+    > | undefined;
+    if (!operation) {
+      split.push(operations);
+      continue;
+    }
+    const children = [...operation.children];
+    const following: HtmlMirrorPatchOperation[] = [];
+    const pairs: Array<readonly [number, number]> = [];
+    for (const element of replicaDocumentShell(html!.childNodes)) {
+      const oldId = state.nodes.idOf(element);
+      const tagName = (element as Element).localName;
+      const at = children.findIndex((entry) =>
+        entry.kind === 'graph' && isDocumentShellChild(entry.node) &&
+        entry.node.tagName === tagName);
+      if (oldId === undefined || at < 0) continue;
+      const node = (children[at] as { readonly node: HtmlMirrorElementNode }).node;
+      if (
+        children.some((entry) => entry.kind === 'retain' && entry.nodeId === oldId) ||
+        children.some((entry, other) => other !== at && entry.kind === 'graph' &&
+          isDocumentShellChild(entry.node) && entry.node.tagName === tagName) ||
+        node.shadowRoot || (element as Element).shadowRoot ||
+        node.childrenFollow || node.placeholder || node.opaquePlaceholder ||
+        state.nodes.has(node.id)
+      ) continue;
+      children[at] = Object.freeze({ kind: 'retain', nodeId: oldId });
+      following.push(Object.freeze({
+        kind: 'attributes',
+        nodeId: oldId,
+        namespace: node.namespace,
+        tagName: node.tagName,
+        attributes: node.attributes,
+        ...(node.visuallyHidden ? { visuallyHidden: true as const } : {}),
+        ...(node.canvasBackgroundColor
+          ? { canvasBackgroundColor: node.canvasBackgroundColor }
+          : {}),
+        ...(node.customElementDefined
+          ? { customElementDefined: true as const }
+          : {}),
+      }));
+      following.push(Object.freeze({
+        kind: 'children',
+        nodeId: oldId,
+        children: node.children,
+      }));
+      pairs.push([oldId, node.id] as const);
+    }
+    if (pairs.length === 0) {
+      split.push(operations);
+      continue;
+    }
+    const changed = [...operations];
+    changed[index] = Object.freeze({ ...operation, children: Object.freeze(children) });
+    split.push(Object.freeze(changed));
+    // The head's list and the body's go in one part: each is a list of
+    // children sent whole, which a part may hold several of.
+    split.push(Object.freeze(following));
+    rebinds.set(split.length - 1, pairs);
+  }
+  return { parts: split, rebinds };
 }
 
 /**
@@ -2121,13 +2237,18 @@ function buildShadowRoot(
     );
     if (built) shadow.append(built);
   }
-  appendOwnedShadowShellStyle(shadow);
-  appendOwnedAdoptedStyles(
+  if (!adoptOwnedSheets(
     shadow,
-    input.adoptedStyleSheets,
-    ownedAdoptedStyles,
-    'shadow',
-  );
+    [ISOLATED_MEDIA_CONTROLS_CSS, ...input.adoptedStyleSheets],
+  )) {
+    appendOwnedShadowShellStyle(shadow);
+    appendOwnedAdoptedStyles(
+      shadow,
+      input.adoptedStyleSheets,
+      ownedAdoptedStyles,
+      'shadow',
+    );
+  }
 }
 
 function buildNode(
@@ -2261,7 +2382,85 @@ export function protectIsolatedOpaquePlaceholder(node: Element): void {
 }
 
 /**
- * A replica shadow root's own shell rules. The style is not a mirrored node,
+ * The sheets Simul makes in the mirror's frame, one for each text (D183).
+ * A component root's own rules and the sheets the page's roots and document
+ * adopt are adopted there too, as the page adopts them: no element of
+ * Simul's then stands among the root's children, where the page's
+ * `:last-child`, `:only-child` and `:nth-last-child()` counted it. Roots
+ * are only made with what holds them, so a refused patch takes its new
+ * roots away whole and the roots it found keep their sheets. Kept for the
+ * document's life: what the sheets hold counts toward the mirror's budget,
+ * and a mirror over it is read again whole, into a new document.
+ */
+const OWNED_SHEETS = new WeakMap<Document, OwnedSheets>();
+
+interface OwnedSheets {
+  readonly byText: Map<string, CSSStyleSheet>;
+  bytes: number;
+}
+
+/**
+ * Adopts a sheet of each text on `owner`, after what it has; false, with
+ * nothing changed, where the frame makes no sheets (an older engine, a test
+ * document): the caller writes style elements instead, as before.
+ */
+function adoptOwnedSheets(
+  owner: Document | ShadowRoot,
+  texts: readonly string[],
+): boolean {
+  const target = owner.nodeType === Node.DOCUMENT_NODE
+    ? owner as Document
+    : owner.ownerDocument;
+  const Sheet = (target?.defaultView as (Window & typeof globalThis) | null)
+    ?.CSSStyleSheet;
+  if (
+    !target || typeof Sheet !== 'function' ||
+    typeof Sheet.prototype.replaceSync !== 'function' ||
+    !('adoptedStyleSheets' in owner)
+  ) return false;
+  let owned = OWNED_SHEETS.get(target);
+  const made: Array<readonly [string, CSSStyleSheet]> = [];
+  const sheets: CSSStyleSheet[] = [];
+  try {
+    for (const text of texts) {
+      let sheet = owned?.byText.get(text) ??
+        made.find(([madeText]) => madeText === text)?.[1];
+      if (!sheet) {
+        sheet = new Sheet();
+        sheet.replaceSync(text);
+        made.push([text, sheet] as const);
+      }
+      sheets.push(sheet);
+    }
+    owner.adoptedStyleSheets = [...owner.adoptedStyleSheets, ...sheets];
+  } catch {
+    return false;
+  }
+  if (!owned) OWNED_SHEETS.set(target, owned = { byText: new Map(), bytes: 0 });
+  for (const [text, sheet] of made) {
+    owned.byText.set(text, sheet);
+    owned.bytes += text.length * 2 + 48;
+  }
+  return true;
+}
+
+/**
+ * What the sheets Simul made in `target` hold, and how many of them are
+ * the page's (the roots' own rules are Simul's).
+ */
+function ownedSheetTotals(target: Document | null | undefined): {
+  readonly bytes: number;
+  readonly count: number;
+} {
+  const owned = target ? OWNED_SHEETS.get(target) : undefined;
+  if (!owned) return { bytes: 0, count: 0 };
+  const shell = owned.byText.has(ISOLATED_MEDIA_CONTROLS_CSS) ? 1 : 0;
+  return { bytes: owned.bytes, count: owned.byText.size - shell };
+}
+
+/**
+ * A replica shadow root's own shell rules, where the frame makes no sheets
+ * (`adoptOwnedSheets`). The style is not a mirrored node,
  * so patches of the root's children and adopted sheets leave it in place.
  */
 function appendOwnedShadowShellStyle(shadow: ShadowRoot): void {
@@ -3348,11 +3547,17 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     panel.scrollLeft = scrollLeft;
   }
   const sizer = host.shadowRoot?.querySelector('[data-simul-owned-select-sizer="v1"]');
-  sizer?.replaceChildren(...labels.map((label) => {
-    const line = select.ownerDocument.createElement('div');
-    line.textContent = label;
-    return line;
-  }));
+  if (sizer) {
+    // One fragment, not an argument a label: a dropdown of tens of
+    // thousands of options passes the engine's limit on arguments (D186).
+    const lines = select.ownerDocument.createDocumentFragment();
+    for (const label of labels) {
+      const line = select.ownerDocument.createElement('div');
+      line.textContent = label;
+      lines.append(line);
+    }
+    sizer.replaceChildren(lines);
+  }
   const triggerText = exposesSelection
     ? semanticSelection || selectedLabels.join(', ') || '\u2014'
     : 'Options';
@@ -3862,6 +4067,23 @@ interface AppliedPatchBatch {
  * it. What is counted over the whole mirror (its records, its budget) is
  * counted once, after the last.
  */
+/**
+ * The check that refused the last patch, a fixed label for the diagnostics
+ * (D183): which one asked for a whole read is what a real page tells.
+ */
+let patchRefusal: string | undefined;
+
+function refusePatch(label: string): false {
+  patchRefusal ??= label;
+  return false;
+}
+
+function takePatchRefusal(): string | undefined {
+  const label = patchRefusal;
+  patchRefusal = undefined;
+  return label;
+}
+
 function applyPatchFrame(
   state: HtmlMirrorDomState,
   parts: readonly (readonly HtmlMirrorPatchOperation[])[],
@@ -3966,7 +4188,7 @@ function applyPatchFrame(
     for (const operation of operations) {
       if (operation.kind === 'dimensions') continue;
       const target = state.nodes.get(operation.nodeId);
-      if (!target) return false;
+      if (!target) return refusePatch('target-missing');
       if (
         target.nodeType === Node.ELEMENT_NODE &&
         isSourceSecretPlaceholderTagName((target as Element).localName)
@@ -3974,7 +4196,7 @@ function applyPatchFrame(
         // The placeholder is immutable for its document lifetime. Any source
         // mutation at that ID requires a fresh graph so no descendant/resource
         // patch can repopulate the erased hard-secret region.
-        return false;
+        return refusePatch('secret-placeholder');
       }
       targetOperations.push({ operation, target });
       if (
@@ -3992,7 +4214,7 @@ function applyPatchFrame(
         // channel, and nothing is drawn from this hidden native select (D132;
         // the patch was once accepted only with selected positions the page
         // has stopped sending, so every changed list rebuilt the mirror).
-        if (select && targetElement !== select) return false;
+        if (select && targetElement !== select) return refusePatch('select-part');
       }
       if (operation.kind === 'text') {
         const node = readHtmlMirrorNode(
@@ -4015,7 +4237,7 @@ function applyPatchFrame(
             domTextContext(target),
             state.fidelityPolicy,
           )
-        ) return false;
+        ) return refusePatch('text-context');
         parsedText.set(operation.nodeId, node);
         continue;
       }
@@ -4024,7 +4246,7 @@ function applyPatchFrame(
           target.nodeType !== Node.ELEMENT_NODE ||
           (target as Element).namespaceURI !== NAMESPACE_URIS[operation.namespace] ||
           (target as Element).localName.toLowerCase() !== operation.tagName
-        ) return false;
+        ) return refusePatch('attribute-target');
         const currentContext = containerContext(target);
         const prospectiveContext = batchContainerContext(
           target,
@@ -4037,14 +4259,14 @@ function applyPatchFrame(
             (target as Element).shadowRoot ||
             !childReplacementNodeIds.has(operation.nodeId)
           )
-        ) return false;
+        ) return refusePatch('attribute-shadow-host');
         if (
           prospectiveContext.privateAttributeRegion &&
           hasPrivateHtmlMirrorAttribute(operation.tagName, operation.attributes)
-        ) return false;
+        ) return refusePatch('attribute-private');
         try {
           const sentinelDocument = target.ownerDocument;
-          if (!sentinelDocument) return false;
+          if (!sentinelDocument) return refusePatch('attribute-document');
           const sentinel = createMirrorElement(
             sentinelDocument,
             operation.namespace,
@@ -4052,7 +4274,7 @@ function applyPatchFrame(
           );
           setAttributes(sentinel, operation.attributes);
         } catch {
-          return false;
+          return refusePatch('attribute-sentinel');
         }
         if (operation.resolvedStyleSheetTextFrom !== undefined) {
           // What follows the text the mirror holds for this style: the two
@@ -4064,7 +4286,7 @@ function applyPatchFrame(
             held === undefined ||
             held.length !== operation.resolvedStyleSheetTextFrom ||
             !isTransportableStyleSheetText(whole, state.fidelityPolicy)
-          ) return false;
+          ) return refusePatch('sheet-append');
           appendedSheetTexts.set(operation.nodeId, whole);
         }
         attributeOperations.set(operation.nodeId, operation);
@@ -4074,8 +4296,8 @@ function applyPatchFrame(
         if (
           target.nodeType !== Node.ELEMENT_NODE &&
           target.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
-        ) return false;
-        if (!isConnectedReplicaNode(state, target)) return false;
+        ) return refusePatch('children-target');
+        if (!isConnectedReplicaNode(state, target)) return refusePatch('children-disconnected');
         // A style the mirror holds by its sheet's text keeps that text when
         // its list of children is sent. The text nodes of such a patch hold
         // the page's own text, which is not always the sheet's (a rule put
@@ -4088,7 +4310,7 @@ function applyPatchFrame(
         if (held !== undefined) keptSheetTexts.set(operation.nodeId, held);
         continue;
       }
-      return false;
+      return refusePatch('unknown-operation');
     }
 
     // A parent replacement and a descendant operation cannot be made atomic:
@@ -4102,7 +4324,7 @@ function applyPatchFrame(
         structural: operation.kind === 'children' ||
           operation.kind === 'reconcile-children',
       }),
-    ))) return false;
+    ))) return refusePatch('structural-conflict');
 
     const structuralOperations = operations.filter(
       (operation): operation is StructuralOperation =>
@@ -4111,7 +4333,7 @@ function applyPatchFrame(
     if (
       structuralOperations.some(({ kind }) => kind === 'children') &&
       structuralOperations.some(({ kind }) => kind === 'reconcile-children')
-    ) return false;
+    ) return refusePatch('children-and-reconcile');
 
     const removedIds = new Set<number>();
     const childrenOperations = structuralOperations.filter(
@@ -4143,14 +4365,14 @@ function applyPatchFrame(
       // The whole list of `<html>`'s children would take the mirror's own
       // head and body with it: that is a whole read.
       if (isReplicaDocumentElement(state.nodes.get(operation.nodeId) as Node)) {
-        return false;
+        return refusePatch('html-children');
       }
       for (const child of operation.children) {
-        if (!collectGraphIds(child, incomingIds)) return false;
+        if (!collectGraphIds(child, incomingIds)) return refusePatch('graph-ids');
       }
     }
     for (const id of incomingIds) {
-      if (state.nodes.has(id) && !removedIds.has(id)) return false;
+      if (state.nodes.has(id) && !removedIds.has(id)) return refusePatch('graph-id-taken');
     }
 
     const retainedIds = new Set<number>();
@@ -4175,7 +4397,7 @@ function applyPatchFrame(
             retained.parentNode !== target || !directChildren.has(retained) ||
             retained.ownerDocument !== target.ownerDocument ||
             !isConnectedReplicaNode(state, retained)
-          ) return false;
+          ) return refusePatch('retain');
           retainedIds.add(entry.nodeId);
           shell?.delete(retained);
           continue;
@@ -4184,15 +4406,11 @@ function applyPatchFrame(
           !collectGraphIds(entry.node, reconcileGraphIds) ||
           (shell && isDocumentShellChild(entry.node))
         ) {
-          return false;
+          return refusePatch('reconcile-graph');
         }
       }
-      if (shell && shell.size > 0) return false;
+      if (shell && shell.size > 0) return refusePatch('reconcile-shell');
     }
-    for (const id of reconcileGraphIds) {
-      if (state.nodes.has(id) || retainedIds.has(id)) return false;
-    }
-
     const allRemovedIds = new Set(removedIds);
     for (const operation of reconcileOperations) {
       for (const child of oldChildren.get(operation.nodeId) ?? []) {
@@ -4201,12 +4419,20 @@ function applyPatchFrame(
         collectDomIds(currentNodeIds(), child, allRemovedIds);
       }
     }
+    // A child sent again in place keeps its ids: an element given a shadow
+    // root since it was sent comes again whole, with its root, and what it
+    // was is taken out first (D190).
+    for (const id of reconcileGraphIds) {
+      if (
+        retainedIds.has(id) || (state.nodes.has(id) && !allRemovedIds.has(id))
+      ) return refusePatch('reconcile-id-taken');
+    }
     const prospectiveNodeCount = state.nodes.size - allRemovedIds.size +
       incomingIds.size + reconcileGraphIds.size;
     if (
       prospectiveNodeCount < 0 ||
       prospectiveNodeCount > MAX_HTML_MIRROR_NODES
-    ) return false;
+    ) return refusePatch('node-budget');
 
     // The text the mirror would keep: what it keeps, less what the patch
     // removes, with what it brings. Counted from the maps' running totals
@@ -4231,7 +4457,7 @@ function applyPatchFrame(
       incomingText,
       incomingControls,
       parsedText,
-    ) > MAX_HTML_MIRROR_BYTES) return false;
+    ) > MAX_HTML_MIRROR_BYTES) return refusePatch('byte-budget');
 
     const childrenPlans = new Map<
       Extract<StructuralOperation, { kind: 'children' }>,
@@ -4251,7 +4477,7 @@ function applyPatchFrame(
         if (!operation.children.every(
           (child) => validGraphForContext(child, context, state.fidelityPolicy),
         )) {
-          return false;
+          return refusePatch('children-context');
         }
         if (
           context.styleRegion &&
@@ -4259,9 +4485,9 @@ function applyPatchFrame(
             operation.children,
             state.fidelityPolicy,
           )
-        ) return false;
+        ) return refusePatch('children-sheet');
         const ownerDocument = target.ownerDocument;
-        if (!ownerDocument) return false;
+        if (!ownerDocument) return refusePatch('children-document');
         const fragment = ownerDocument.createDocumentFragment();
         const nodes = new Map<number, Node>();
         const textMetadata = new Map<
@@ -4301,7 +4527,7 @@ function applyPatchFrame(
           for (const entry of operation.children) {
             if (entry.kind === 'retain') {
               const retained = state.nodes.get(entry.nodeId);
-              if (!retained) return false;
+              if (!retained) return refusePatch('reconcile-sheet-retain');
               parts.push(retained.textContent ?? '');
             } else {
               collectStyleSheetText([entry.node], parts);
@@ -4310,10 +4536,10 @@ function applyPatchFrame(
           if (!styleSheetTextIsFixedPoint(
             parts.join(''),
             state.fidelityPolicy,
-          )) return false;
+          )) return refusePatch('reconcile-sheet');
         }
         const ownerDocument = target.ownerDocument;
-        if (!ownerDocument) return false;
+        if (!ownerDocument) return refusePatch('reconcile-document');
         const nodes = new Map<number, Node>();
         const textMetadata = new Map<
           number,
@@ -4327,7 +4553,7 @@ function applyPatchFrame(
         for (const entry of operation.children) {
           if (entry.kind === 'retain') {
             const retainedSource = state.nodes.get(entry.nodeId);
-            if (!retainedSource) return false;
+            if (!retainedSource) return refusePatch('reconcile-retain-missing');
             const retained = presentationNodeForMirrorNode(retainedSource);
             retainedChildren.add(retained);
             desiredChildren.push(retained);
@@ -4337,7 +4563,7 @@ function applyPatchFrame(
             entry.node,
             context,
             state.fidelityPolicy,
-          )) return false;
+          )) return refusePatch('reconcile-context');
           const built = buildNode(
             ownerDocument,
             entry.node,
@@ -4346,7 +4572,7 @@ function applyPatchFrame(
             controlMetadata,
             ownedAdoptedStyles,
           );
-          if (!built) return false;
+          if (!built) return refusePatch('reconcile-build');
           insertedNodeCount += htmlMirrorGraphNodeCount(entry.node);
           desiredChildren.push(built);
         }
@@ -4368,7 +4594,7 @@ function applyPatchFrame(
         });
       }
     } catch {
-      return false;
+      return refusePatch('plan-threw');
     }
     if (!previous) {
       previous = state.records;
@@ -4562,16 +4788,32 @@ function applyPatchFrame(
     return true;
   };
 
-  if (!validFrameStyleSheetText(state, parts)) return undefined;
+  const shellReplacement = splitDocumentShellReplacement(state, parts);
+  parts = shellReplacement.parts;
+  if (!validFrameStyleSheetText(state, parts)) {
+    refusePatch('frame-sheet');
+    return undefined;
+  }
   try {
-    for (const operations of parts) {
+    for (const [index, operations] of parts.entries()) {
       if (!applyPart(operations)) return undo();
+      // The page's new head or body is the mirror's own from now on, under
+      // its own id (D190). Journaled, as every change of the map is.
+      for (const [oldId, newId] of shellReplacement.rebinds.get(index) ?? []) {
+        const element = state.nodes.get(oldId);
+        if (!element || state.nodes.has(newId)) return undo();
+        state.nodes.delete(oldId);
+        state.nodes.set(newId, element);
+      }
     }
     // The frame is atomic but its parts are not: a later text part can
     // complete a construct against text an earlier part inserted. Validate
     // what the whole frame left, and roll it back if the sheet is not a
     // fixed point (R1).
-    if (!validFrameStyleSheetTextAfterApply(state, parts)) return undo();
+    if (!validFrameStyleSheetTextAfterApply(state, parts)) {
+      refusePatch('frame-sheet-after');
+      return undo();
+    }
     if (!previous) return undefined;
     if (!retainedReplicaStateFitsBudget(state)) {
       throw new Error('Replica retained-state budget exceeded.');
@@ -4625,6 +4867,7 @@ function applyPatchFrame(
       removedNodeCount,
     });
   } catch {
+    refusePatch('apply-threw');
     return undo();
   } finally {
     // Applied or put back, the frame's journals end with it.
@@ -4758,7 +5001,7 @@ function recordUpdateOfFrame(
     nodeId: id,
     revision: nextRevision(state.revisions, id),
   }));
-  changes.push(...upserts);
+  for (const upsert of upserts) changes.push(upsert);
   return {
     changes: Object.freeze(changes),
     apply: (records) => {
@@ -4974,7 +5217,11 @@ function restoreOptionalAttribute(
 
 function restoreChildList(target: ParentNode, children: readonly Node[]): void {
   try {
-    target.replaceChildren(...children);
+    // A fragment, not an argument a child (D186): a list of more than about
+    // 125,000 children passes the engine's limit on arguments.
+    const fragment = (target.ownerDocument ?? (target as Document)).createDocumentFragment();
+    for (const child of children) fragment.appendChild(child);
+    target.replaceChildren(fragment);
     return;
   } catch {
     // Fall through to primitive operations so a host-level replaceChildren
@@ -5886,7 +6133,8 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
     if (!document || !root) return false;
     const maxBytes = MAX_HTML_MIRROR_BYTES * 4;
     const maxNodes = MAX_HTML_MIRROR_NODES * 3 + 32;
-    const metadataBytes = state.textMetadata.bytes + state.controlMetadata.bytes;
+    const metadataBytes = state.textMetadata.bytes + state.controlMetadata.bytes +
+      ownedSheetTotals(document).bytes;
     let ledger = state.ledger;
     if (ledger && ledger.root !== root) {
       releaseRetainedLedger(state);
@@ -6396,7 +6644,10 @@ function stateInfo(
     ...state.representability,
     eventRepresentability,
     openShadowRootCount,
-    adoptedStyleCount: state.ownedAdoptedStyles.size,
+    // Style elements where the frame makes no sheets; else the sheets made,
+    // one for each text, however many roots adopt it (D183).
+    adoptedStyleCount: state.ownedAdoptedStyles.size +
+      ownedSheetTotals(state.iframe.contentDocument).count,
     visuallyHiddenCount,
     selectedImageSourceCount,
     ...state.styleReadiness,

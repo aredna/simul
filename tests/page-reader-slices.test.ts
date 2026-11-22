@@ -682,6 +682,31 @@ describe('the preview (D163)', () => {
     })).toBeUndefined();
   });
 
+  it('gives up a preview before it reads a list that cannot fit (D193)', () => {
+    const target = page('<!doctype html><html lang="en"><head></head><body>' +
+      `<div id="box">${'<b></b>'.repeat(300)}</div>` +
+      '<x-open id="open"></x-open><x-closed id="closed"></x-closed></body></html>');
+    let styleReads = 0;
+    const viewport = {
+      innerWidth: 1200, innerHeight: 800,
+      getComputedStyle: (element: Element) => {
+        if (element.localName === 'b') styleReads += 1;
+        return target.window.getComputedStyle(element);
+      },
+    } as unknown as Window;
+    // Elements that hold nothing are read whatever the preview does: 300
+    // cannot fit in 100, so none of them is read.
+    expect(sanitizeSourcePreview(target.document, viewport, new WeakNodeIdRegistry(), {
+      maxReadNodes: 10, maxNodes: 100,
+    })).toBeUndefined();
+    expect(styleReads).toBe(0);
+    // One that fits is read whole.
+    const preview = sanitizeSourcePreview(target.document, viewport, new WeakNodeIdRegistry(), {
+      maxReadNodes: 10, maxNodes: 400,
+    })!;
+    expect(findElement(preview.root, 'box')!.children).toHaveLength(300);
+  });
+
 });
 
 describe('the preview stands one box for a run of boxes (D169)', () => {

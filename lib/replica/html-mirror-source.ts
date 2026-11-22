@@ -1,3 +1,9 @@
+import {
+  sourceAttributeList,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
 import { ImageSourceSession } from '../ocr/image-source-session';
 import { readImageSourcePortSessionId } from '../ocr/image-source-protocol';
 import { SourceImageObserver } from '../ocr/source-image-observer';
@@ -92,6 +98,7 @@ import {
   SOURCE_EVIDENCE_ATTRIBUTE_FILTER,
   SemanticSourceSession,
   eagerlyClassifySourceDocumentSubtree,
+  noteSemanticSourceStyleSheetChange,
   rememberSourceMutationSecrets,
   startSourceDocumentSecretScan,
   type SourceDocumentSecretScan,
@@ -112,6 +119,7 @@ import {
   beginSourceControlledContentPolicy,
   createSourceControlledContentPolicy,
   beginSourceSecretAncestorWalk,
+  createSourcePaintScanCache,
   hasSourceCredentialSecretAncestor,
   isSourceSelectWrapper,
   sourceControlledContentBoundaryChanged,
@@ -134,6 +142,7 @@ import {
   SourceCrossOriginSheetNames,
   type SourceCrossOriginSheetReader,
   sourceClassChangeNamesHidingRule,
+  sourceTextChangeMayRestyle,
   sourceVisibilityEventMaySkip,
   sourceVisibilityMutationMaySkip,
   type SourceStyleNames,
@@ -331,7 +340,7 @@ export function installHtmlMirrorSourceBridge(
         observedRoots.add(shadow);
       } catch {
         documentSecretClassifier.classify(shadow.host, {
-          tagName: shadow.host.localName,
+          tagName: sourceLocalName(shadow.host),
           secretAncestor: true,
         });
       }
@@ -425,7 +434,7 @@ export function installHtmlMirrorSourceBridge(
     const root = sourceDocument.documentElement;
     if (root) {
       documentSecretClassifier.classify(root, {
-        tagName: root.localName,
+        tagName: sourceLocalName(root),
         secretAncestor: true,
       });
     }
@@ -567,6 +576,12 @@ interface ShadowObservationWalk {
   readonly visited: WeakSet<Node>;
   remaining: number;
   exhausted: boolean;
+  /**
+   * A root found on a host the mirror holds is sent with its host, read
+   * again in its parent's list (D190): set for the walks of the page's
+   * changes, which a patch follows.
+   */
+  readonly resendHeldHosts?: true;
 }
 
 /** The input of a person, which comes before a field is shown in clear. */
@@ -598,7 +613,7 @@ function askAboutSourceShadowRootsAtInput(
   try {
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
     const target = path[0] ?? event.target;
-    if (!target || typeof (target as Node).nodeType !== 'number') return;
+    if (!target || typeof sourceNodeType(target as Node) !== 'number') return;
     const asked = new Set<Node>();
     found.push(...askAboutSourceShadowRootsAbove(target as Node, asked));
     const point = event.type === 'pointerdown'
@@ -607,7 +622,7 @@ function askAboutSourceShadowRootsAtInput(
     let current: Node | null = target as Node;
     let depth = 0;
     for (; current && depth < MAX_SOURCE_INPUT_ROOT_DEPTH; depth += 1) {
-      if (current.nodeType !== 1) break;
+      if (sourceNodeType(current) !== 1) break;
       const root = readSourceShadowRoot(current as Element);
       if (!root) break;
       const next: Element | null = point
@@ -619,7 +634,7 @@ function askAboutSourceShadowRootsAtInput(
     }
     // The follow stopped at its bound, not at the input: a root attached
     // deeper still is found by reading what lies below in a fresh walk.
-    if (depth === MAX_SOURCE_INPUT_ROOT_DEPTH && current?.nodeType === 1) {
+    if (depth === MAX_SOURCE_INPUT_ROOT_DEPTH && current && sourceNodeType(current) === 1) {
       beyond = current as Element;
     }
   } catch {
@@ -820,6 +835,13 @@ const HTML_MIRROR_PREVIEW_MIN_ELEMENTS = 4_000;
  */
 const CHECKPOINT_READ_SHARE = 0.5;
 /**
+ * The share of a slice that reading and staging together aim at (D186);
+ * the checks of a part and the turn's own work take the rest.
+ */
+const CHECKPOINT_STAGED_SLICE_SHARE = 0.8;
+/** The least the reader is given of a slice, whatever staging costs. */
+const MIN_CHECKPOINT_READING_MS = 3;
+/**
  * A read in slices that meets a node twice (the page moved it into what was
  * not read yet) starts again; after this many the page is read in one task,
  * as before (D163).
@@ -912,6 +934,11 @@ interface CheckpointReadSlices {
   readonly clock: SliceClock;
   /** The reader's share of the current slice is used. */
   readonly reading: { expired(): boolean };
+  /**
+   * What a step's reading and its staging took (D186): the reader's share
+   * of the next slices is what leaves the staging room in the slice.
+   */
+  noteStep(readMs: number, stageMs: number): void;
   next(): Promise<void>;
 }
 
@@ -1186,6 +1213,12 @@ export class HtmlMirrorSourceSession {
    * lacks: each such card or row was a whole read.
    */
   #rootsAwaitingPatch = new Set<ShadowRoot>();
+  /**
+   * Hosts the mirror holds that have a root since (D190): each is sent
+   * again whole, with its root, in its parent's list, as a host the mirror
+   * does not hold comes with its root (D180). It was a whole read.
+   */
+  #hostsSentAgain = new Set<Element>();
   #stopListeningForShadowRoots: (() => void) | undefined;
   #stopListeningForHeldAnimations: (() => void) | undefined;
   /**
@@ -1206,6 +1239,11 @@ export class HtmlMirrorSourceSession {
   #visibilityInteractionTargets = new Set<Element>();
   /** A person's input asked for the next comparison: it skips the share (D164). */
   #userInputPending = false;
+  /**
+   * The style names the index's kept style answers were read under (D186);
+   * none while it keeps none.
+   */
+  #styleMemoryNames: SourceStyleNames | undefined;
   /**
    * A class a hiding rule names changed since the last comparison began
    * (D180): it hides or shows a panel, which the mirror shows until the
@@ -1802,11 +1840,24 @@ export class HtmlMirrorSourceSession {
       now,
       yield: this.environment.yieldToMain ?? yieldToMain,
     });
-    const readingBudget = clock.budgetMs * CHECKPOINT_READ_SHARE;
+    const sliceBudget = clock.budgetMs * CHECKPOINT_STAGED_SLICE_SHARE;
+    let readingBudget = clock.budgetMs * CHECKPOINT_READ_SHARE;
     let startedAt = now();
     return {
       clock,
       reading: { expired: () => now() - startedAt >= readingBudget },
+      noteStep: (readMs, stageMs) => {
+        // Steps too short to tell anything leave the share as it is.
+        if (!(readMs >= 2) || !Number.isFinite(stageMs)) return;
+        // Staging costs `stageMs / readMs` of every millisecond read: on a
+        // box of 131,000 children it took 26–38 ms after 15 ms of reading,
+        // and slices ran to 58–76 ms (D186).
+        const share = sliceBudget / (1 + Math.max(0, stageMs) / readMs);
+        readingBudget = Math.min(
+          clock.budgetMs * CHECKPOINT_READ_SHARE,
+          Math.max(MIN_CHECKPOINT_READING_MS, share),
+        );
+      },
       next: async () => {
         this.#closeSliceRootWalk();
         await clock.next();
@@ -1895,7 +1946,7 @@ export class HtmlMirrorSourceSession {
         const root = target.getRootNode();
         if (
           isSourceShadowRoot(root) && staged.mirroredNodes.has(root.host) &&
-          (target.localName === 'slot' || target.querySelector('slot'))
+          (sourceLocalName(target) === 'slot' || target.querySelector('slot'))
         ) return 'restart';
       }
       if (read.policyRequeue.size > MAX_HTML_MIRROR_PENDING_TARGETS) return 'restart';
@@ -2121,7 +2172,9 @@ export class HtmlMirrorSourceSession {
     const continued = new Map<number, Node[]>();
     try {
       for (;;) {
+        const readStarted = now();
         const step = this.#withoutOwnLateRoots(() => reader.step(slices.reading));
+        const readMs = now() - readStarted;
         if (step.outcome === 'restart') return 'restart';
         if (step.outcome === 'overflow' || step.outcome === 'failed') {
           this.#failCheckpointRead(representability, step.outcome === 'overflow');
@@ -2168,7 +2221,9 @@ export class HtmlMirrorSourceSession {
         // Marked and indexed in the task that read it: the index of what is
         // painted must hold what was read, not what the page shows after a
         // turn of its own.
+        const stageStarted = now();
         this.#stageReadStep(staged, index, step.fills, step, root, continued);
+        slices.noteStep(readMs, now() - stageStarted);
         // A step whose reading and staging used the slice sends its part
         // in the next one (D163): the checks of the part are work too.
         let yielded = false;
@@ -2303,10 +2358,16 @@ export class HtmlMirrorSourceSession {
     } finally {
       this.#exchangeMirroredGraphState(staged);
     }
+    // One paint memo for the step's roots (D186): they are staged in one
+    // task, and a memo of each root's own read its ancestors' style and
+    // boxes again for every one of them (26–43 ms a step on a box of
+    // 131,000 children, whose children are each a root).
+    const paintCache = createSourcePaintScanCache();
     for (const indexRoot of step.indexRoots) {
       index.add(indexRoot.element, {
         includeSelf: indexRoot.includeSelf,
         stopAt: step.deferred,
+        paintCache,
       });
     }
   }
@@ -2706,7 +2767,10 @@ export class HtmlMirrorSourceSession {
     }
     // One bounded walk per batch: nested records share the visited set so a
     // descendant subtree is not traversed again for each ancestor record.
-    const walk = this.#createShadowObservationWalk();
+    const walk: ShadowObservationWalk = {
+      ...this.#createShadowObservationWalk(),
+      resendHeldHosts: true,
+    };
     for (const record of records) {
       // The top-document observer must never turn a same-origin embedded
       // browsing context into an accidental second mirror surface. This is a
@@ -3045,12 +3109,16 @@ export class HtmlMirrorSourceSession {
     this.#visibilityMutationOverflow = false;
     this.#visibilityFullRefreshPending = false;
     this.#visibilityInteractionTargets.clear();
+    const styleOptions = this.#comparisonStyleOptions(
+      requiresFullRefresh,
+      mutationRecords,
+    );
     // Either of the first two compares the whole page, the elements whose
     // held values changed with it.
     this.#heldAnimationTargets.clear();
     const comparison = requiresFullRefresh
-      ? index.beginRefreshAll()
-      : index.beginRefreshMutations(mutationRecords);
+      ? index.beginRefreshAll(styleOptions)
+      : index.beginRefreshMutations(mutationRecords, styleOptions);
     const now = this.environment.now;
     const clock = createSliceClock({
       now,
@@ -3073,6 +3141,57 @@ export class HtmlMirrorSourceSession {
     // The semantic scan does not start while the comparison runs (D164).
     this.environment.passShare?.begin(this);
     this.#continueComparison(run, true);
+  }
+
+  /**
+   * Whether the comparison keeps the style answers it reads, and whether it
+   * may answer from those the last one kept (D186). Kept only where a change
+   * of text alone cannot restyle anything: no sheet holds a pseudo-class
+   * that reads text or a rule that reads layout, and nothing animates.
+   * Recalled only for a batch of text changes outside any style sheet, with
+   * the very names the answers were kept under (a sheet changed since gives
+   * other names, or none), and nothing else asked for since: an event, a
+   * held animation value, a resize or a slot asks for a whole comparison,
+   * which keeps answers afresh.
+   */
+  #comparisonStyleOptions(
+    requiresFullRefresh: boolean,
+    records: readonly MutationRecord[],
+  ): { readonly keepStyles?: boolean; readonly stylesUnchanged?: boolean } {
+    const kept = this.#styleMemoryNames;
+    this.#styleMemoryNames = undefined;
+    // Only a batch of text changes is looked at: any other comparison keeps
+    // nothing, and the first of such batches keeps for the next.
+    if (
+      requiresFullRefresh || records.length === 0 ||
+      !records.every((record) => {
+        if (record.type !== 'characterData') return false;
+        const parent = record.target.parentNode;
+        return !parent || sourceNodeType(parent) !== 1 ||
+          String(sourceLocalName(parent as Element)).toLowerCase() !== 'style';
+      })
+    ) return {};
+    const names = this.#mentionedStyleNames();
+    const document = this.environment.document;
+    let quiet = !sourceTextChangeMayRestyle(names, records) &&
+      !readSourceAnimationListing(document).running;
+    if (quiet) {
+      // The ledger lists at each change sent; an animation a script started
+      // since, with no change to the page, is seen here.
+      try {
+        const read = (document as { getAnimations?: () => readonly unknown[] })
+          .getAnimations;
+        quiet = typeof read === 'function' && read.call(document).length === 0;
+      } catch {
+        quiet = false;
+      }
+    }
+    if (!quiet) return {};
+    this.#styleMemoryNames = names;
+    return {
+      keepStyles: true,
+      stylesUnchanged: kept === names && this.#heldAnimationTargets.size === 0,
+    };
   }
 
   /**
@@ -3246,8 +3365,8 @@ export class HtmlMirrorSourceSession {
    */
   #forgetStyleNamesOf(record: MutationRecord): void {
     const isSheetOwner = (node: Node | null | undefined): boolean => {
-      if (!node || node.nodeType !== 1) return false;
-      const tag = String((node as Element).localName).toLowerCase();
+      if (!node || sourceNodeType(node) !== 1) return false;
+      const tag = String(sourceLocalName(node as Element)).toLowerCase();
       return tag === 'style' || tag === 'link';
     };
     let owner: Node | null | undefined;
@@ -3435,7 +3554,7 @@ export class HtmlMirrorSourceSession {
     let child: Node | undefined;
     for (let current: Node | undefined = node; current;) {
       const parent: Node | undefined = current.parentNode ??
-        (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current
+        (sourceNodeType(current) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current
           ? (current as ShadowRoot).host
           : undefined);
       if (parent && this.#pendingChildren.has(parent)) {
@@ -3616,7 +3735,11 @@ export class HtmlMirrorSourceSession {
         }
       } else {
         for (const capture of childCaptures) {
-          const previous = new Set(capture.previous);
+          // A host sent again with its root comes as a new child (D190),
+          // under the ids it has.
+          const previous = new Set(capture.previous.filter(
+            (source) => !this.#hostsSentAgain.has(source as Element),
+          ));
           const newSources = capture.sources.filter(
             (source) => !previous.has(source),
           );
@@ -3624,9 +3747,10 @@ export class HtmlMirrorSourceSession {
             capture.target === this.environment.document.documentElement &&
             sourceDocumentShellChanged(capture.previous, capture.sources)
           ) {
-            // The page's own head or body is another element now, or
-            // `<html>` holds one more: the mirror keeps its own two in
-            // place, so this is a whole read.
+            // The page's own head or body moved, or `<html>` holds one
+            // more: the mirror keeps its own two in place, so this is a
+            // whole read. One put in place of the page's own comes as any
+            // new child does, and the mirror's takes it in (D190).
             this.#shadowReconciliationPending = true;
             this.#signalShadowReconciliation();
             return undefined;
@@ -3713,7 +3837,7 @@ export class HtmlMirrorSourceSession {
           undefined,
           this.environment.registry,
         );
-        if (target.localName.toLowerCase() === 'img') {
+        if (sourceLocalName(target).toLowerCase() === 'img') {
           this.#selectedImageSources.set(
             target,
             hints.selectedImageSource ?? '',
@@ -3735,7 +3859,7 @@ export class HtmlMirrorSourceSession {
           kind: 'attributes',
           nodeId: this.environment.registry.peekId(target) as number,
           namespace: sourceElementNamespace(target),
-          tagName: target.localName.toLowerCase(),
+          tagName: sourceLocalName(target).toLowerCase(),
           attributes,
           ...hints,
         } as const);
@@ -3932,6 +4056,7 @@ export class HtmlMirrorSourceSession {
    */
   #clearPending(comparison = true): void {
     this.#pendingChildren.clear();
+    this.#hostsSentAgain.clear();
     this.#pendingAttributes.clear();
     this.#pendingText.clear();
     this.#pendingSheets.clear();
@@ -4109,7 +4234,12 @@ export class HtmlMirrorSourceSession {
     }
     const rootWalk = beginSourceShadowRootWalk({ fresh });
     try {
-      this.#observeShadowRoots(this.environment.document.documentElement);
+      // A root found on a host the mirror holds goes with its host in a
+      // patch (D190).
+      this.#observeShadowRoots(this.environment.document.documentElement, {
+        ...this.#createShadowObservationWalk(),
+        resendHeldHosts: true,
+      });
     } finally {
       rootWalk.end();
     }
@@ -4574,7 +4704,7 @@ export class HtmlMirrorSourceSession {
     if (
       this.#disposed || !this.#identity ||
       !target || typeof target !== 'object' ||
-      (target as Node).nodeType !== 1
+      sourceNodeType(target as Node) !== 1
     ) return;
     const element = target as Element;
     this.#visibilityInteractionTargets.add(element);
@@ -4607,7 +4737,7 @@ export class HtmlMirrorSourceSession {
     if (
       this.#disposed || !this.#identity ||
       !target || typeof target !== 'object' ||
-      (target as Node).nodeType !== 1 ||
+      sourceNodeType(target as Node) !== 1 ||
       (!this.#visibilityBoundaryIndex && !this.#checkpointRead)
     ) return;
     // A pointer, focus or key event no style sheet of the page reacts to
@@ -4635,7 +4765,7 @@ export class HtmlMirrorSourceSession {
     if (this.#disposed || !this.#identity) return;
     const target = (event.composedPath?.()[0] ?? event.target) as Node | null;
     if (
-      !target || typeof target !== 'object' || target.nodeType !== 1 ||
+      !target || typeof target !== 'object' || sourceNodeType(target) !== 1 ||
       this.#credentialScrollFreezes.has(target as Element) ||
       this.#credentialScrollFreezes.size >= MAX_CREDENTIAL_SCROLL_FREEZES
     ) return;
@@ -4662,11 +4792,11 @@ export class HtmlMirrorSourceSession {
       node && depth < MAX_CREDENTIAL_SCROLL_ANCESTORS;
       depth += 1
     ) {
-      if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in node) {
+      if (sourceNodeType(node) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in node) {
         node = (node as ShadowRoot).host;
         continue;
       }
-      if (node.nodeType !== Node.ELEMENT_NODE) break;
+      if (sourceNodeType(node) !== Node.ELEMENT_NODE) break;
       const place = readPaneScrollPlace(node as Element, this.environment.document);
       if (place) panes.set(node as Element, frozen(place));
       node = node.parentNode;
@@ -4716,7 +4846,7 @@ export class HtmlMirrorSourceSession {
   #noteEditorWithoutAttribute(event: Event): void {
     if (this.#disposed || !this.#identity) return;
     const target = (event.composedPath?.()[0] ?? event.target) as Node | null;
-    if (!target || typeof target !== 'object' || target.nodeType !== 1) return;
+    if (!target || typeof target !== 'object' || sourceNodeType(target) !== 1) return;
     const editor = noteSourceEditingTarget(target as Element);
     if (!editor || !this.#mirroredNodes.has(editor) || this.#checkpointRead) {
       return;
@@ -4734,7 +4864,7 @@ export class HtmlMirrorSourceSession {
     const slot = event.target;
     if (
       this.#disposed || !this.#identity ||
-      !slot || typeof slot !== 'object' || (slot as Node).nodeType !== 1
+      !slot || typeof slot !== 'object' || sourceNodeType(slot as Node) !== 1
     ) return;
     const root = (slot as Element).getRootNode();
     if (!isSourceShadowRoot(root)) return;
@@ -4773,7 +4903,7 @@ export class HtmlMirrorSourceSession {
     const children = new Set<Node>();
     for (const changed of this.#slotChanges) {
       if (isSourceShadowRoot(changed)) {
-        for (const child of changed.host.childNodes) children.add(child);
+        for (const child of sourceChildNodeList(changed.host)) children.add(child);
       } else {
         children.add(changed);
       }
@@ -4795,7 +4925,7 @@ export class HtmlMirrorSourceSession {
     this.#queueSlotted(readOtherwise, true);
     for (const child of readOtherwise) {
       if (
-        child.nodeType === Node.ELEMENT_NODE &&
+        sourceNodeType(child) === Node.ELEMENT_NODE &&
         !this.#queueSlottedContent(child as Element)
       ) return false;
     }
@@ -4810,12 +4940,12 @@ export class HtmlMirrorSourceSession {
    */
   #queueSlotted(nodes: readonly Node[], elements: boolean): void {
     const wanted = nodes.filter((node) => this.#mirroredNodes.has(node) && (
-      node.nodeType === Node.TEXT_NODE ||
-      (elements && node.nodeType === Node.ELEMENT_NODE)
+      sourceNodeType(node) === Node.TEXT_NODE ||
+      (elements && sourceNodeType(node) === Node.ELEMENT_NODE)
     ));
     if (wanted.length <= MAX_SLOTTED_NODES) {
       for (const node of wanted) {
-        if (node.nodeType === Node.TEXT_NODE) {
+        if (sourceNodeType(node) === Node.TEXT_NODE) {
           this.#queuePending(this.#pendingText, node as Text);
         } else {
           this.#queueVisibilityTarget(node as Element);
@@ -4826,7 +4956,7 @@ export class HtmlMirrorSourceSession {
     const hosts = new Set<Element>();
     for (const node of wanted) {
       const parent = node.parentNode;
-      if (parent?.nodeType === Node.ELEMENT_NODE) hosts.add(parent as Element);
+      if (parent && sourceNodeType(parent) === Node.ELEMENT_NODE) hosts.add(parent as Element);
     }
     for (const host of hosts) {
       if (this.#mirroredNodes.has(host)) this.#queueVisibilityTarget(host);
@@ -4869,7 +4999,7 @@ export class HtmlMirrorSourceSession {
       const boxes: Element[] = [target];
       while (boxes.length > 0) {
         const box = boxes.pop() as Element;
-        const slots: Element[] = box.localName === 'slot' ? [box] : [];
+        const slots: Element[] = sourceLocalName(box) === 'slot' ? [box] : [];
         for (const item of box.querySelectorAll('slot')) slots.push(item);
         for (const slot of slots) {
           for (const node of (slot as HTMLSlotElement).assignedNodes?.({
@@ -4877,7 +5007,7 @@ export class HtmlMirrorSourceSession {
           }) ?? []) {
             if (held.has(node)) continue;
             held.add(node);
-            if (node.nodeType === Node.ELEMENT_NODE) boxes.push(node as Element);
+            if (sourceNodeType(node) === Node.ELEMENT_NODE) boxes.push(node as Element);
           }
         }
       }
@@ -4965,7 +5095,7 @@ export class HtmlMirrorSourceSession {
         this.#signalShadowReconciliation();
         return;
       }
-      if (mirrored && element.localName.toLowerCase() === 'select') {
+      if (mirrored && sourceLocalName(element).toLowerCase() === 'select') {
         this.#queuePending(this.#pendingAttributes, element);
       }
       const withheld = mirrored ? this.#declaredHiddenSent.get(element) : undefined;
@@ -5300,7 +5430,7 @@ export class HtmlMirrorSourceSession {
    */
   #noteDeclaredHidden(source: Node): void {
     const policy = this.#controlledContentPolicy;
-    if (!policy || source.nodeType !== Node.ELEMENT_NODE) return;
+    if (!policy || sourceNodeType(source) !== Node.ELEMENT_NODE) return;
     const withheld = sourceDeclaredHiddenRegionIsWithheld(source as Element, policy);
     if (withheld === undefined) {
       this.#declaredHiddenSent.delete(source as Element);
@@ -5405,7 +5535,10 @@ export class HtmlMirrorSourceSession {
     if (this.#pendingAttributes.has(target as Element)) {
       return 'attributeContextFallbackCount';
     }
-    const previousSet = new Set(previous);
+    // A host sent again with its root counts as a new child (D190).
+    const previousSet = new Set(previous.filter(
+      (child) => !this.#hostsSentAgain.has(child as Element),
+    ));
     // Something else that changed inside a child that stays would be lost,
     // so the list is read again whole. Inside a child that is new it is
     // read with that child (D143): an element added empty and filled in the
@@ -5439,6 +5572,9 @@ export class HtmlMirrorSourceSession {
         this.#emittedParent.get(child) !== target
       ) return 'missingReconciliationProofFallbackCount';
     }
+    const sentAgain = (child: Node): boolean =>
+      this.#hostsSentAgain.has(child as Element) &&
+      this.#emittedParent.get(child) === target;
     const newRoots = children.filter((child) => !previousSet.has(child));
     const incomingSources = collectLiveSubtreeNodes(newRoots);
     if (!incomingSources) return 'missingReconciliationProofFallbackCount';
@@ -5448,7 +5584,10 @@ export class HtmlMirrorSourceSession {
       // would collide with receiver state. Internal parents are allowed for a
       // whole subtree that was removed in an earlier emitted batch and is now
       // being reinserted as a graph.
-      if (oldParent && !incomingSources.has(oldParent)) {
+      if (
+        oldParent && !incomingSources.has(oldParent) &&
+        !(oldParent === target && sentAgain(current))
+      ) {
         return 'crossParentFallbackCount';
       }
     }
@@ -5456,7 +5595,7 @@ export class HtmlMirrorSourceSession {
   }
 
   #coversOwnShadowWork(target: Node): boolean {
-    if (target.nodeType !== Node.ELEMENT_NODE) return false;
+    if (sourceNodeType(target) !== Node.ELEMENT_NODE) return false;
     const shadow = readSourceShadowRoot(target as Element);
     if (!shadow) return false;
     // The root itself is read again, beside its host (D132).
@@ -5554,12 +5693,12 @@ export class HtmlMirrorSourceSession {
 
   #queueCapturedResourceRefresh(target: Element): void {
     if (
-      !CAPTURED_RESOURCE_ELEMENTS.has(target.localName.toLowerCase()) ||
+      !CAPTURED_RESOURCE_ELEMENTS.has(sourceLocalName(target).toLowerCase()) ||
       !belongsToSourceDocument(target, this.environment.document) ||
       !target.isConnected ||
       !this.#mirroredNodes.has(target)
     ) return;
-    if (target.localName.toLowerCase() === 'link') {
+    if (sourceLocalName(target).toLowerCase() === 'link') {
       this.#queuePending(this.#pendingSheets, target);
       this.#styleDerivedPending = true;
     } else {
@@ -5791,7 +5930,7 @@ export class HtmlMirrorSourceSession {
         if (this.#disposed) return;
         const element = learned.ownerNode;
         if (
-          !element || element.nodeType !== Node.ELEMENT_NODE ||
+          !element || sourceNodeType(element) !== Node.ELEMENT_NODE ||
           !(element as Element).isConnected ||
           !this.#mirroredNodes.has(element)
         ) return;
@@ -5904,6 +6043,8 @@ export class HtmlMirrorSourceSession {
             oppositeStylePollChannel(channel),
           );
           this.#advanceStylePollingCursor(processed, owners.length);
+          // A rule put into a sheet may show or hide a field (D185).
+          if (result === 'changed') noteSemanticSourceStyleSheetChange(this.environment.document);
           this.#shadowReconciliationPending = true;
           this.#signalShadowReconciliation();
           return;
@@ -6037,11 +6178,13 @@ export class HtmlMirrorSourceSession {
       walk.remaining -= 1;
       walk.visited.add(node);
       this.#shadowObservationVisitCount += 1;
-      if (isSourceShadowRoot(node)) this.#observeShadowRoot(node);
-      if (node.nodeType === Node.ELEMENT_NODE) {
+      if (isSourceShadowRoot(node)) {
+        this.#observeShadowRoot(node, walk.resendHeldHosts);
+      }
+      if (sourceNodeType(node) === Node.ELEMENT_NODE) {
         const shadow = readSourceShadowRoot(node as Element);
         if (shadow) {
-          this.#observeShadowRoot(shadow);
+          this.#observeShadowRoot(shadow, walk.resendHeldHosts);
           for (let child = shadow.lastChild; child; child = child.previousSibling) {
             stack.push(child);
           }
@@ -6053,7 +6196,7 @@ export class HtmlMirrorSourceSession {
     }
   }
 
-  #observeShadowRoot(shadow: ShadowRoot): void {
+  #observeShadowRoot(shadow: ShadowRoot, resendHeldHost = false): void {
     this.#observeImageEvents(shadow);
     if (!this.#observedShadowRoots.has(shadow)) {
       this.#observedShadowRoots.add(shadow);
@@ -6079,8 +6222,36 @@ export class HtmlMirrorSourceSession {
       this.#rootsAwaitingPatch.add(shadow);
       return;
     }
+    if (
+      this.#hostsSentAgain.has(shadow.host) ||
+      (resendHeldHost && this.#sendHostAgain(shadow.host))
+    ) return;
     this.#shadowReconciliationPending = true;
     this.#signalShadowReconciliation();
+  }
+
+  /**
+   * Queues `host`, which the mirror holds without the root it has now, to
+   * be sent again whole in its parent's list (D190). The patch reads it as
+   * any new child: its root, its children, every check. False where the
+   * mirror would not take that: a host right under `<html>`, one held in
+   * another list than its own, one inside a dropdown, a placeholder.
+   */
+  #sendHostAgain(host: Element): boolean {
+    const parent = host.parentNode;
+    if (
+      !parent || !host.isConnected ||
+      parent === this.environment.document.documentElement ||
+      !this.#mirroredNodes.has(parent) ||
+      this.#emittedParent.get(host) !== parent ||
+      !isSourceStructuralChildOf(host, parent) ||
+      sourceNativeSelectStructuralOwner(host) ||
+      this.#mirroredOpaqueSecrets.has(host)
+    ) return false;
+    this.#hostsSentAgain.add(host);
+    this.#queuePending(this.#pendingChildren, parent);
+    this.#scheduleFlush();
+    return true;
   }
 
   /**
@@ -6482,11 +6653,11 @@ function collectLiveSubtreeNodes(
       if (sources.has(current)) continue;
       if (sources.size >= MAX_HTML_MIRROR_NODES) return undefined;
       sources.add(current);
-      if (current.nodeType === Node.ELEMENT_NODE) {
+      if (sourceNodeType(current) === Node.ELEMENT_NODE) {
         const shadow = readSourceShadowRoot(current as Element);
         if (shadow) stack.push(shadow);
       }
-      for (const item of current.childNodes) stack.push(item);
+      for (const item of sourceChildNodeList(current)) stack.push(item);
     }
     return sources;
   } catch {
@@ -6514,12 +6685,12 @@ function containsComposedSource(ancestor: Node, descendant: Node): boolean {
       current = current.parentNode;
       continue;
     }
-    if (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current) {
+    if (sourceNodeType(current) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current) {
       current = (current as ShadowRoot).host;
       continue;
     }
     const root = current.getRootNode();
-    current = root !== current && root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+    current = root !== current && sourceNodeType(root) === Node.DOCUMENT_FRAGMENT_NODE &&
       'host' in root
       ? (root as ShadowRoot).host
       : undefined;
@@ -6534,7 +6705,7 @@ function containsComposedSource(ancestor: Node, descendant: Node): boolean {
 function composedChildHolding(ancestor: Node, descendant: Node): Node | undefined {
   for (let current: Node | undefined = descendant; current;) {
     const parent: Node | undefined = current.parentNode ??
-      (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current
+      (sourceNodeType(current) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current
         ? (current as ShadowRoot).host
         : undefined);
     if (parent === ancestor) return current;
@@ -6645,11 +6816,11 @@ function incrementSourceRepresentability(
 
 /** Finds the DOM owner even while its privacy role is changing. */
 function sourceNativeSelectStructuralOwner(node: Node): Element | undefined {
-  let current = node.nodeType === Node.ELEMENT_NODE
+  let current = sourceNodeType(node) === Node.ELEMENT_NODE
     ? node as Element
     : node.parentElement ?? undefined;
   for (; current; current = composedSourceParentElement(current)) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'datalist') return undefined;
     if (tagName === 'select') return current;
   }
@@ -6664,11 +6835,11 @@ function sourceMutationChangesSlots(record: MutationRecord): ShadowRoot | undefi
   const target = record.target;
   let changes = false;
   if (record.type === 'attributes') {
-    changes = record.attributeName === 'name' && target.nodeType === 1 &&
-      (target as Element).localName === 'slot';
+    changes = record.attributeName === 'name' && sourceNodeType(target) === 1 &&
+      sourceLocalName(target as Element) === 'slot';
   } else if (record.type === 'childList') {
-    const holdsSlot = (node: Node): boolean => node.nodeType === 1 && (
-      (node as Element).localName === 'slot' ||
+    const holdsSlot = (node: Node): boolean => sourceNodeType(node) === 1 && (
+      sourceLocalName(node as Element) === 'slot' ||
       (node as Element).querySelector('slot') !== null
     );
     for (const node of record.addedNodes) changes ||= holdsSlot(node);
@@ -6687,8 +6858,8 @@ function sourceMutationStyleElement(record: MutationRecord): Element | undefined
   const holder = record.type === 'childList'
     ? record.target
     : record.type === 'characterData' ? record.target.parentNode : null;
-  return holder?.nodeType === 1 &&
-      (holder as Element).localName.toLowerCase() === 'style'
+  return holder !== null && sourceNodeType(holder) === 1 &&
+      sourceLocalName(holder as Element).toLowerCase() === 'style'
     ? holder as Element
     : undefined;
 }
@@ -6696,22 +6867,29 @@ function sourceMutationStyleElement(record: MutationRecord): Element | undefined
 /**
  * Whether `<html>` has another head or body than it had: its own (the first
  * of each) is another element or gone, or it holds one more. One of several
- * taken out leaves the page's own in place.
+ * taken out leaves the page's own in place, and so does a new one put in
+ * place of the page's own, which is gone (a Turbo-style visit,
+ * `document.body.replaceWith(next)`): the mirror's own takes that one's
+ * attributes and children (D190). One with a shadow root it cannot take.
  */
 function sourceDocumentShellChanged(
   previous: readonly Node[],
   current: readonly Node[],
 ): boolean {
-  const named = (node: Node, name: string): boolean => node.nodeType === 1 &&
+  const named = (node: Node, name: string): boolean => sourceNodeType(node) === 1 &&
     (node as Element).namespaceURI === 'http://www.w3.org/1999/xhtml' &&
-    (node as Element).localName === name;
+    sourceLocalName(node as Element) === name;
   const known = new Set(previous);
   for (const name of ['head', 'body']) {
+    const before = previous.find((node) => named(node, name));
+    const now = current.find((node) => named(node, name));
+    const added = current.filter((node) => named(node, name) && !known.has(node));
+    if (before === now && added.length === 0) continue;
     if (
-      previous.find((node) => named(node, name)) !==
-        current.find((node) => named(node, name)) ||
-      current.some((node) => named(node, name) && !known.has(node))
-    ) return true;
+      before && now && added.length === 1 && added[0] === now &&
+      !current.includes(before) && !readSourceShadowRoot(now as Element)
+    ) continue;
+    return true;
   }
   return false;
 }
@@ -6720,8 +6898,8 @@ function sourceDocumentShellChanged(
 function sourceMutationChangesTextOnly(record: MutationRecord): boolean {
   if (record.type === 'characterData') return true;
   if (record.type !== 'childList') return false;
-  for (const node of record.addedNodes) if (node.nodeType !== 3) return false;
-  for (const node of record.removedNodes) if (node.nodeType !== 3) return false;
+  for (const node of record.addedNodes) if (sourceNodeType(node) !== 3) return false;
+  for (const node of record.removedNodes) if (sourceNodeType(node) !== 3) return false;
   return true;
 }
 
@@ -6735,7 +6913,7 @@ function holdsSourceNativeSelectEntries(target: Element, select: Element): boole
   for (let depth = 0; current && depth <= 32; depth += 1) {
     if (current === select) return true;
     if (
-      current.localName.toLowerCase() !== 'optgroup' &&
+      sourceLocalName(current).toLowerCase() !== 'optgroup' &&
       !isSourceSelectWrapper(current)
     ) return false;
     current = current.parentElement;
@@ -6746,7 +6924,7 @@ function holdsSourceNativeSelectEntries(target: Element, select: Element): boole
 function composedSourceParentElement(element: Element): Element | undefined {
   if (element.parentElement) return element.parentElement;
   const root = element.getRootNode();
-  return root.nodeType === 11 && 'host' in root
+  return sourceNodeType(root) === 11 && 'host' in root
     ? (root as ShadowRoot).host
     : undefined;
 }
@@ -6758,15 +6936,15 @@ function sourceMutationReadsPragma(record: MutationRecord): boolean {
   for (const added of record.addedNodes) {
     if (
       isSourceMetaElement(added) ||
-      (added.nodeType === 1 && (added as Element).querySelector?.('meta'))
+      (sourceNodeType(added) === 1 && (added as Element).querySelector?.('meta'))
     ) return true;
   }
   return false;
 }
 
 function isSourceMetaElement(node: Node): boolean {
-  return node.nodeType === 1 &&
-    (node as Element).localName.toLowerCase() === 'meta';
+  return sourceNodeType(node) === 1 &&
+    sourceLocalName(node as Element).toLowerCase() === 'meta';
 }
 
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {

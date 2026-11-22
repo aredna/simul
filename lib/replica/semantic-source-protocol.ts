@@ -1,5 +1,10 @@
 import { MAX_HTML_MIRROR_NODES_SETTING } from './html-mirror-limits';
 import {
+  MAX_PAGE_LINKED_SHEETS,
+  MAX_PAGE_LINKED_SHEET_HREF_LENGTH,
+  type PageLinkedSheets,
+} from './style-sheet-reach';
+import {
   readExactReplicaReadScope,
   replicaReadScopeFingerprint,
   type ReplicaReadScope,
@@ -25,6 +30,15 @@ import {
  * port prefix and the message kinds keep their `v2` names: they are names.
  */
 export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 3;
+
+/**
+ * The `contentEditable` fact of an editor the page made without the
+ * attribute (D192): a document in design mode, or an element typed into
+ * that the page's style makes editable (D181). The mirror's element carries
+ * no attribute, so the panel takes the page's word for it, through this
+ * mark, where the record's tag names an element above the text.
+ */
+export const SEMANTIC_PAGE_EDITOR_MARK = 'simul-page-editor';
 /** The version that knows whole-state batches only (before D179). */
 export const SEMANTIC_SOURCE_WHOLE_STATE_PROTOCOL_VERSION = 2;
 export type SemanticSourceProtocolVersion =
@@ -449,6 +463,13 @@ export interface SemanticSourceBatch {
   readonly proofs: readonly SemanticSourceProof[];
   readonly byteLength: number;
   readonly delta?: SemanticSourceBatchDelta;
+  /**
+   * Only in version 3: how far the rules of the page's stylesheet links
+   * that make text secret reach, for the links the page could read (D191).
+   * The panel cannot read a sheet of another origin in its frame; absent,
+   * or a link not named, it asks everything again at every live patch.
+   */
+  readonly linkedSheets?: PageLinkedSheets;
 }
 
 export function createSemanticSourcePortName(
@@ -587,6 +608,8 @@ export function createSemanticSourceBatch(
     readonly protocolVersion?: SemanticSourceProtocolVersion;
     /** Only in version 3: the batch carries what changed (D179). */
     readonly delta?: SemanticSourceBatchDelta;
+    /** Only in version 3: what the page read of its links (D191). */
+    readonly linkedSheets?: PageLinkedSheets;
   } = {},
 ): SemanticSourceBatch {
   if (!isPolicyFingerprint(policyFingerprint) || !positiveSafeInteger(sequence)) {
@@ -602,7 +625,11 @@ export function createSemanticSourceBatch(
     recordCount: options.delta.recordCount,
     proofCount: options.delta.proofCount,
   });
-  const byteLength = semanticSourceBatchByteLength(records, proofs, delta);
+  const linkedSheets = options.linkedSheets && Object.freeze({
+    reach: options.linkedSheets.reach,
+    hrefs: Object.freeze([...options.linkedSheets.hrefs]),
+  });
+  const byteLength = semanticSourceBatchByteLength(records, proofs, delta, linkedSheets);
   const batch = {
     protocolVersion,
     kind: 'simul:semantic-source-v2:batch' as const,
@@ -613,6 +640,7 @@ export function createSemanticSourceBatch(
     proofs: Object.freeze([...proofs]),
     byteLength,
     ...(delta ? { delta } : {}),
+    ...(linkedSheets ? { linkedSheets } : {}),
   };
   const read = readSemanticSourceBatch(batch, document, policyFingerprint);
   if (!read) throw new Error('Invalid semantic source batch.');
@@ -623,8 +651,13 @@ export function semanticSourceBatchByteLength(
   records: readonly SemanticSourceRecord[],
   proofs: readonly SemanticSourceProof[] = [],
   delta?: SemanticSourceBatchDelta,
+  linkedSheets?: PageLinkedSheets,
 ): number {
   let bytes = 0;
+  if (linkedSheets) {
+    bytes += 32;
+    for (const href of linkedSheets.hrefs) bytes += href.length * 2 + 16;
+  }
   if (delta) {
     // Each id as a record would count its number, and each proof id its
     // characters, beside a fixed part for the counts (D179).
@@ -666,10 +699,13 @@ export function readSemanticSourceBatch(
   if (!isRecord(input) ||
     !isSemanticSourceProtocolVersion(input.protocolVersion) ||
     // Only version 3 knows a batch of what changed (D179).
-    !hasExactKeys(input, input.protocolVersion === SEMANTIC_SOURCE_PROTOCOL_VERSION &&
-        Object.hasOwn(input, 'delta')
-      ? SEMANTIC_SOURCE_DELTA_BATCH_KEYS
-      : SEMANTIC_SOURCE_BATCH_KEYS) ||
+    !hasExactKeys(input, [
+      ...SEMANTIC_SOURCE_BATCH_KEYS,
+      // Only version 3 knows these (D179, D191).
+      ...input.protocolVersion === SEMANTIC_SOURCE_PROTOCOL_VERSION
+        ? (['delta', 'linkedSheets'] as const).filter((key) => Object.hasOwn(input, key))
+        : [],
+    ]) ||
     input.kind !== 'simul:semantic-source-v2:batch' ||
     !isPolicyFingerprint(input.policyFingerprint) ||
     (expectedPolicyFingerprint !== undefined &&
@@ -721,7 +757,11 @@ export function readSemanticSourceBatch(
     ? readSemanticSourceBatchDelta(input.delta, input.sequence, recordIds, proofIds)
     : undefined;
   if (Object.hasOwn(input, 'delta') && !delta) return undefined;
-  const computedBytes = semanticSourceBatchByteLength(records, proofs, delta);
+  const linkedSheets = Object.hasOwn(input, 'linkedSheets')
+    ? readPageLinkedSheetsField(input.linkedSheets)
+    : undefined;
+  if (Object.hasOwn(input, 'linkedSheets') && !linkedSheets) return undefined;
+  const computedBytes = semanticSourceBatchByteLength(records, proofs, delta, linkedSheets);
   const byteLength = Number(input.byteLength);
   if (byteLength !== computedBytes || computedBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) {
     return undefined;
@@ -736,15 +776,31 @@ export function readSemanticSourceBatch(
     proofs: Object.freeze(proofs),
     byteLength,
     ...(delta ? { delta } : {}),
+    ...(linkedSheets ? { linkedSheets } : {}),
   });
+}
+
+/** The shape of what the page says of its links (D191). */
+function readPageLinkedSheetsField(value: unknown): PageLinkedSheets | undefined {
+  if (
+    !isRecord(value) || !hasExactKeys(value, ['reach', 'hrefs']) ||
+    (value.reach !== 'subtree' && value.reach !== 'siblings' && value.reach !== 'everything') ||
+    !Array.isArray(value.hrefs) || value.hrefs.length > MAX_PAGE_LINKED_SHEETS
+  ) return undefined;
+  const hrefs: string[] = [];
+  for (const href of value.hrefs) {
+    if (
+      typeof href !== 'string' || href.length > MAX_PAGE_LINKED_SHEET_HREF_LENGTH ||
+      !/^https?:/iu.test(href) || hrefs.includes(href)
+    ) return undefined;
+    hrefs.push(href);
+  }
+  return Object.freeze({ reach: value.reach, hrefs: Object.freeze(hrefs) });
 }
 
 const SEMANTIC_SOURCE_BATCH_KEYS = Object.freeze([
   'protocolVersion', 'kind', 'document', 'policyFingerprint', 'sequence',
   'records', 'proofs', 'byteLength',
-]);
-const SEMANTIC_SOURCE_DELTA_BATCH_KEYS = Object.freeze([
-  ...SEMANTIC_SOURCE_BATCH_KEYS, 'delta',
 ]);
 /** The longest proof id: a structural menu's names three bridge ids. */
 const MAX_SEMANTIC_SOURCE_PROOF_ID_LENGTH = 128;

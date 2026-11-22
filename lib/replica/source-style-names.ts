@@ -34,10 +34,18 @@ export interface SourceStyleNames {
    * panel, and its comparison does not wait for the share.
    */
   readonly hidingClasses: ReadonlySet<string>;
+  /**
+   * A rule that can restyle an element with no change to the page's tree
+   * or to any name (D186): a container query (the size of a box moves it),
+   * or a pseudo-class or at-rule spelled with an escape, which the names
+   * above would not show.
+   */
+  readonly layoutReads?: boolean;
 }
 
 interface MutableSourceStyleNames extends SourceStyleNames {
   readonly hidingClasses: Set<string>;
+  layoutReads?: boolean;
   readonly classes: Set<string>;
   readonly ids: Set<string>;
   readonly attributes: Set<string>;
@@ -69,6 +77,66 @@ export function collectSourceStyleNames(
 ): void {
   collectNames(cssText, 0, cssText.length, into, false);
   collectHidingClasses(cssText, into);
+  if (LAYOUT_READS.test(cssText)) into.layoutReads = true;
+}
+
+/** `@container`, or `:` or `@` followed by an escape (D186). */
+const LAYOUT_READS = /@container\b|:\s*\\|@\\/iu;
+
+/** Pseudo-classes a change of text can move anywhere below or beside it. */
+const TEXT_READING_ANYWHERE = ['has', 'dir'] as const;
+/** `:empty` and `:blank`: by whether an element holds text at all. */
+const TEXT_PRESENCE = ['empty', 'blank'] as const;
+/** The states of a field, by the text that gives a `textarea` or `option` its value. */
+const FIELD_TEXT_STATES = [
+  'placeholder-shown', 'valid', 'invalid', 'user-valid', 'user-invalid',
+] as const;
+
+/**
+ * Whether `records`, changes of text, can change any element's computed
+ * style, by the names the page's sheets mention (D186). Not when no sheet
+ * holds a rule that reads layout, `:has()` or `:dir()`; `:empty` and
+ * `:blank` only where a text went from empty (or blank) to not or back;
+ * the states of a field only for text in a `textarea` or an `option`.
+ * Unknown names (a sheet that cannot be read), or an old value not kept,
+ * can.
+ */
+export function sourceTextChangeMayRestyle(
+  names: SourceStyleNames | undefined,
+  records: readonly MutationRecord[] = [],
+): boolean {
+  if (!names || names.layoutReads) return true;
+  const mentions = (list: readonly string[]) =>
+    list.some((name) => names.pseudoClasses.has(name));
+  if (mentions(TEXT_READING_ANYWHERE)) return true;
+  const presence = mentions(TEXT_PRESENCE);
+  const fields = mentions(FIELD_TEXT_STATES);
+  if (!presence && !fields) return false;
+  for (const record of records) {
+    if (record.type !== 'characterData') return true;
+    if (presence) {
+      const before = record.oldValue;
+      let now: string | null;
+      try {
+        now = (record.target as CharacterData).data;
+      } catch {
+        return true;
+      }
+      if (
+        typeof before !== 'string' || typeof now !== 'string' ||
+        (before === '') !== (now === '') ||
+        /\S/u.test(before) !== /\S/u.test(now)
+      ) return true;
+    }
+    if (fields) {
+      const parent = record.target.parentNode as Element | null;
+      const name = parent && parent.nodeType === 1
+        ? String(parent.localName).toLowerCase()
+        : '';
+      if (name === 'textarea' || name === 'option' || name === 'optgroup') return true;
+    }
+  }
+  return records.length === 0;
 }
 
 /** A declaration that hides what a rule selects (D180). */
@@ -807,6 +875,7 @@ function mergeSourceStyleNames(
   for (const name of part.pseudoClasses) names.pseudoClasses.add(name);
   for (const name of part.pseudoElements) names.pseudoElements.add(name);
   for (const name of part.hidingClasses) names.hidingClasses.add(name);
+  if (part.layoutReads) names.layoutReads = true;
 }
 
 function listSheets(

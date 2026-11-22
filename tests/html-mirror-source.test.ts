@@ -3351,6 +3351,57 @@ describe('HtmlMirrorSourceSession', () => {
     expect(recovery).toContain('root on an old element');
   });
 
+  it('sends an element the mirror holds again, with the root it was given since, in its parent\'s list (D190)', () => {
+    // A live example drawn when a `<details>` opens: the component attaches
+    // its root to an element the mirror holds. That was a whole read.
+    const fixture = sourceFixture(
+      '<main id="page"><p>before</p><x-demo id="demo"><span>light</span></x-demo><p>after</p></main>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const page = fixture.document.querySelector('#page')!;
+    const demo = fixture.document.querySelector('#demo')!;
+    const root = demo.attachShadow({ mode: 'open' });
+    Object.defineProperty(root, 'mode', { value: 'open' });
+    root.innerHTML = '<p>the live example</p><slot></slot>';
+    const added = fixture.document.createElement('span');
+    added.textContent = 'more light';
+    demo.append(added);
+    fixture.mutate(childListRecord(demo, [added]));
+    while (fixture.frames.length > 0) fixture.flushFrame();
+
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.patches()).toHaveLength(1);
+    const id = (node: Node) => fixture.registry.peekId(node);
+    const operations = fixture.patches()[0]!.operations.filter(
+      ({ kind }) => kind !== 'dimensions',
+    );
+    expect(operations).toHaveLength(1);
+    const operation = (operations as Array<Extract<
+      HtmlMirrorPatchBatch['operations'][number],
+      { kind: 'reconcile-children' }
+    >>)[0]!;
+    expect(operation).toMatchObject({ kind: 'reconcile-children', nodeId: id(page) });
+    expect(operation.children.map((entry) => entry.kind)).toEqual([
+      'retain', 'graph', 'retain',
+    ]);
+    const graph = (operation.children[1] as { node: { id: number } }).node;
+    expect(graph.id).toBe(id(demo));
+    expect(JSON.stringify(graph)).toContain('the live example');
+    expect(JSON.stringify(graph)).toContain('more light');
+
+    // What changes in the root later is a patch of the root.
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    const inside = root.querySelector('p')!.firstChild as Text;
+    inside.nodeValue = 'the example, changed';
+    fixture.mutate(characterDataRecord(inside));
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('the example, changed');
+  });
+
   it('patches a component the page made, gave an open root and filled before it put it in the page (D180)', () => {
     const fixture = sourceFixture('<main id="page"><p>page text</p></main>');
     fixture.start();
@@ -3788,14 +3839,16 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.port.posts).not.toContainEqual(expect.objectContaining({
       code: 'stream_gap',
     }));
-    fixture.flushFrame();
-    expect(fixture.port.posts).toContainEqual(expect.objectContaining({
-      kind: 'simul:html-mirror-v2:error',
+    // The element comes again with its root, in a patch (D190; it was a
+    // whole read).
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.port.posts).not.toContainEqual(expect.objectContaining({
       code: 'stream_gap',
     }));
-    // The page is read afresh and the stream runs again.
-    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(fixture.checkpoints()).toHaveLength(1);
+    const sent = fixture.patches().at(-1)!;
+    expect(JSON.stringify(sent)).toContain('late text');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, sent.identity.sequence));
     while (fixture.frames.length > 0) fixture.flushFrame();
     const askedOnce = asked(plain);
     resize();
@@ -3917,10 +3970,13 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
     expect(fixture.timers).toHaveLength(timers + 1);
 
-    // When the interval ends, the walk owed asks again.
+    // When the interval ends, the walk owed asks again, and the element
+    // comes again with its root (D190).
     now += 400;
     fixture.timers.pop()!();
-    expect(gap()).toBe(true);
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(gap()).toBe(false);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('late text');
   });
 
   it('owes only the root walk at the end of a layout interval, not the layout work again (D125)', () => {
@@ -9174,16 +9230,45 @@ describe('what is added beside body (D143)', () => {
     expect(fixture.frames).toHaveLength(0);
   });
 
-  it('reads the page afresh when html has another head or body than it had', () => {
-    // The page's own body replaced (a Turbo-style visit).
-    let { fixture, html, body, dialog } = pageFixture();
+  it('sends a body put in place of the page\'s own as a new child of html (D190)', () => {
+    // A Turbo-style visit: the new body is read as any added subtree, and
+    // a field's value in it stays out as anywhere else.
+    const { fixture, html, body, id } = pageFixture();
     const swapped = fixture.document.createElement('body');
-    swapped.textContent = 'the new body';
+    swapped.setAttribute('class', 'next');
+    swapped.innerHTML = '<p>the new body</p><input type="password" value="hunter2">';
     html.replaceChild(swapped, body);
     fixture.mutate(childListRecord(html, [swapped], [body]));
     fixture.flushFrame();
-    expect(fixture.patches()).toHaveLength(0);
-    expect(gaps(fixture)).toBe(1);
+    expect(gaps(fixture)).toBe(0);
+    expect(fixture.patches()).toHaveLength(1);
+    const [patch] = parts(fixture.patches()[0]);
+    expect(kinds(patch)).toEqual([`reconcile-children:${id(html)}`]);
+    const operation = patch!.operations.find(
+      ({ kind }) => kind === 'reconcile-children',
+    ) as Extract<HtmlMirrorPatchBatch['operations'][number], { kind: 'reconcile-children' }>;
+    const graph = operation.children.find(({ kind }) => kind === 'graph') as
+      { node: { id: number; tagName: string } } | undefined;
+    expect(graph?.node).toMatchObject({ id: id(swapped), tagName: 'body' });
+    expect(JSON.stringify(graph)).toContain('the new body');
+    expect(JSON.stringify(graph)).not.toContain('hunter2');
+    expect(operation.children.filter(({ kind }) => kind === 'retain')).toHaveLength(1);
+
+    // The next change in it is a patch of the new body.
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    const later = fixture.document.createElement('p');
+    later.textContent = 'later';
+    swapped.append(later);
+    fixture.mutate(childListRecord(swapped, [later]));
+    fixture.flushFrame();
+    expect(gaps(fixture)).toBe(0);
+    expect(kinds(parts(fixture.patches()[1])[0])).toEqual([
+      `reconcile-children:${id(swapped)}`,
+    ]);
+  });
+
+  it('reads the page afresh when html has another head or body than it had', () => {
+    let { fixture, html, body, dialog } = pageFixture();
 
     // One more body, or one more head.
     for (const tagName of ['body', 'head']) {

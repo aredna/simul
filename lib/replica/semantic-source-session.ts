@@ -1,4 +1,9 @@
 import {
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
+import {
   MAX_SEMANTIC_SOURCE_BATCH_BYTES,
   MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
   MAX_SEMANTIC_SOURCE_PROOFS,
@@ -7,6 +12,7 @@ import {
   MAX_SEMANTIC_SELECT_SIZE,
   MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS,
   MAX_SEMANTIC_MASKED_LENGTH,
+  SEMANTIC_PAGE_EDITOR_MARK,
   SEMANTIC_SOURCE_PROTOCOL_VERSION,
   createSemanticSourceBatch,
   semanticSourceOrderPlacements,
@@ -36,6 +42,11 @@ import {
   type SemanticAriaRelation,
   MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS,
 } from './semantic-source-protocol';
+import { readPageLinkedSheets, type PageLinkedSheets } from './style-sheet-reach';
+import {
+  readCrossOriginSheetFromPageCache,
+  type SourceCrossOriginSheetReader,
+} from './source-style-names';
 import {
   SOURCE_SECRET_CLASSIFIER_VERSION,
   StickySourceSecretClassifier,
@@ -52,6 +63,7 @@ import {
   createSourceSecretAncestorMemo,
   hasSourceCredentialSecretAncestor,
   isSourceSelectLabelElementPublic,
+  readSourceClosedSelectChosenLabel,
   readSourceFlatTreeElementPath,
   readSourceFlatTreeParentElement,
   readSourceSelectLabel,
@@ -66,6 +78,10 @@ import {
 import {
   isSourceSelectHiddenByItself,
   readSourceHiddenRegionState,
+  readSourceSkippedContentState,
+  sourceElementIsEditorWithoutAttribute,
+  sourceNodeIsUnslotted,
+  type SourceSkippedContentState,
 } from './html-mirror-sanitizer';
 import type { ReplicaReadScope } from './read-scope-policy';
 import {
@@ -115,6 +131,11 @@ export interface SemanticSourceSessionEnvironment {
   readonly port: SemanticSourcePort;
   readonly document: Document;
   readonly window: Window;
+  /**
+   * Reads a cross-origin stylesheet's text, for how far its rules reach
+   * (D191): `readCrossOriginSheetFromPageCache` by default.
+   */
+  readonly readCrossOriginStyleSheet?: SourceCrossOriginSheetReader;
   readonly bridge: SemanticSourceBridgeId;
   readonly getNodeId: (node: Node) => number | undefined;
   /** Shared by every reconnect for this bridge's source-document lifetime. */
@@ -216,6 +237,12 @@ interface StagedSemanticSourceScan {
    * region starts and the two boxes around it.
    */
   readonly shownAgainCandidates: WeakSet<Element>;
+  /**
+   * The box of each field or editor text the scan sent as shown, and the
+   * two around it (D185): what hides it with no change of the DOM, a hover
+   * that ends or a transition that ends there, is read.
+   */
+  readonly hiddenAgainCandidates: WeakSet<Element>;
 }
 
 /** Why a scan's steps stop before they are done. */
@@ -502,6 +529,8 @@ export class SemanticSourceSession {
   #presentationChangeCandidates = new WeakSet<Element>();
   /** See `StagedSemanticSourceScan.shownAgainCandidates` (D179). */
   #shownAgainCandidates = new WeakSet<Element>();
+  /** See `StagedSemanticSourceScan.hiddenAgainCandidates` (D185). */
+  #hiddenAgainCandidates = new WeakSet<Element>();
   readonly #stopListeningForStyleSheets: () => void;
   /**
    * Whether the last scan asked if the tab shows a field or the text of an
@@ -583,6 +612,7 @@ export class SemanticSourceSession {
     this.#controlPollCursor = 0;
     this.#presentationChangeCandidates = new WeakSet<Element>();
     this.#shownAgainCandidates = new WeakSet<Element>();
+    this.#hiddenAgainCandidates = new WeakSet<Element>();
     this.#stopListeningForStyleSheets();
     this.#popoverOpenOrder = new WeakMap<Element, number>();
     for (const root of this.#semanticEventRoots) {
@@ -611,6 +641,29 @@ export class SemanticSourceSession {
   }
 
   /** Test and bridge hook for state changes outside observable DOM mutation. */
+  /** See `readCrossOriginStyleSheet` (D191). */
+  #crossOriginSheetReader: SourceCrossOriginSheetReader | undefined | null = null;
+
+  /** What the page read of its stylesheet links, for a panel of version 3 (D191). */
+  #readLinkedSheets(): PageLinkedSheets | undefined {
+    if (this.#protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION) return undefined;
+    try {
+      if (this.#crossOriginSheetReader === null) {
+        this.#crossOriginSheetReader = this.environment.readCrossOriginStyleSheet ??
+          readCrossOriginSheetFromPageCache(this.environment.window);
+      }
+      return readPageLinkedSheets(
+        this.environment.document,
+        this.#crossOriginSheetReader,
+        () => {
+          if (!this.#disposed) this.refresh();
+        },
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
   refresh(): void {
     if (!this.#documentIdentity || this.#disposed) return;
     this.#dirty = true;
@@ -688,7 +741,10 @@ export class SemanticSourceSession {
       // or an editor the last scan withheld as hidden may show it (D179).
       // Only there: a scan at every end doubled the script time of a page
       // that animates (D145). The scan keeps to the share of time (D164).
-      !this.#presentationEventTouches(event, this.#shownAgainCandidates)
+      !this.#presentationEventTouches(event, this.#shownAgainCandidates) &&
+      // A field or an editor sent as shown that the end of a transition on
+      // its box, or a hover or focus that leaves the box, may hide (D185).
+      !this.#presentationEventMayHide(event)
     ) return;
     this.refresh();
   };
@@ -707,7 +763,7 @@ export class SemanticSourceSession {
       : retargeted ? [retargeted] : [];
     for (const candidate of candidates) {
       if (!isElementNode(candidate)) continue;
-      const select = candidate.localName.toLowerCase() === 'select'
+      const select = sourceLocalName(candidate).toLowerCase() === 'select'
         ? candidate
         : safelyRead(() => candidate.closest('select'));
       if (select?.ownerDocument !== this.environment.document) continue;
@@ -922,7 +978,7 @@ export class SemanticSourceSession {
       run.records = [];
       return;
     }
-    run.records.push(...records);
+    appendAll(run.records, records);
   }
 
   #scheduleControlPoll(): void {
@@ -1050,6 +1106,37 @@ export class SemanticSourceSession {
     else this.#scheduleControlPoll();
   }
 
+  /**
+   * Whether `event` may hide a field or editor text the last scan sent
+   * (D185): the end of a transition or an animation on one of the boxes
+   * around it, not on what they hold (a button's hover transition inside a
+   * form row would scan at every end), or a pointer or the focus leaving
+   * such a box for something outside it (`.row:hover .field`,
+   * `:focus-within`), once a leave, not at each element crossed inside.
+   */
+  #presentationEventMayHide(event: Event): boolean {
+    const target = safelyRead(() => event.target);
+    if (!isElementNode(target)) return false;
+    if (event.type !== 'pointerout' && event.type !== 'focusout') {
+      return event.type !== 'pointerover' && event.type !== 'focusin' &&
+        this.#hiddenAgainCandidates.has(target);
+    }
+    const related = safelyRead(() => (event as Event & {
+      readonly relatedTarget?: EventTarget | null;
+    }).relatedTarget);
+    for (
+      let box: Element | undefined = target, depth = 0;
+      box && depth < 64;
+      box = safelyRead(() => readSourceFlatTreeParentElement(box!)), depth += 1
+    ) {
+      if (!this.#hiddenAgainCandidates.has(box)) continue;
+      const stays = isElementNode(related) &&
+        safelyRead(() => readSourceFlatTreeElementPath(related)?.includes(box!)) === true;
+      if (!stays) return true;
+    }
+    return false;
+  }
+
   #presentationEventTouches(event: Event, candidates: WeakSet<Element>): boolean {
     let path: readonly EventTarget[] = [];
     try {
@@ -1063,7 +1150,7 @@ export class SemanticSourceSession {
     let current = safelyRead(() => event.target) as Node | null | undefined;
     for (let depth = 0; current && depth < 64; depth += 1) {
       if (
-        current.nodeType === ELEMENT_NODE &&
+        sourceNodeType(current) === ELEMENT_NODE &&
         candidates.has(current as Element)
       ) return true;
       const parent: Node | null | undefined = safelyRead(() => current?.parentNode);
@@ -1072,7 +1159,7 @@ export class SemanticSourceSession {
         continue;
       }
       const root: Node | undefined = safelyRead(() => current?.getRootNode());
-      current = root?.nodeType === 11 && 'host' in root
+      current = root !== undefined && root !== null && sourceNodeType(root) === 11 && 'host' in root
         ? (root as ShadowRoot).host
         : null;
     }
@@ -1426,7 +1513,13 @@ export class SemanticSourceSession {
       this.#continueScan(run);
       return;
     }
-    const scanSignature = semanticSourceScanSignature(scan);
+    // What the page read of its stylesheet links goes with the batch, for
+    // the panel, which cannot read a link of another origin (D191); a sheet
+    // read since makes the next scan a batch.
+    const linkedSheets = this.#readLinkedSheets();
+    const scanSignature = semanticSourceScanSignature(scan) + (linkedSheets
+      ? `\u0000${linkedSheets.reach}\u0000${linkedSheets.hrefs.join('\u0000')}`
+      : '');
     if (scanSignature === this.#lastEmittedScanSignature) {
       this.#commitScan(scan);
       this.#endScan(run);
@@ -1443,7 +1536,7 @@ export class SemanticSourceSession {
             sequence,
             change.records,
             change.proofs,
-            { delta: change.delta },
+            { delta: change.delta, linkedSheets },
           )
         : createSemanticSourceBatch(
             documentIdentity,
@@ -1451,7 +1544,7 @@ export class SemanticSourceSession {
             sequence,
             scan.records,
             scan.proofs,
-            { protocolVersion: this.#protocolVersion },
+            { protocolVersion: this.#protocolVersion, linkedSheets },
           );
       this.environment.port.postMessage(batch);
       if (now) run.busyMs += now() - startedAt;
@@ -1598,6 +1691,7 @@ export class SemanticSourceSession {
     );
     this.#presentationChangeCandidates = scan.presentationCandidates;
     this.#shownAgainCandidates = scan.shownAgainCandidates;
+    this.#hiddenAgainCandidates = scan.hiddenAgainCandidates;
   }
 
   #foundRootsAbove(nodes: readonly Node[]): boolean {
@@ -1646,6 +1740,7 @@ export class SemanticSourceSession {
         pollFingerprints: new WeakMap<Element, string>(),
         presentationCandidates: new WeakSet<Element>(),
         shownAgainCandidates: new WeakSet<Element>(),
+        hiddenAgainCandidates: new WeakSet<Element>(),
       });
     }
     // Whether the slice has done its share: asked between units of work,
@@ -1674,7 +1769,7 @@ export class SemanticSourceSession {
       if (!current) break;
       visited += 1;
       const node = current.node;
-      if (node.nodeType !== ELEMENT_NODE) continue;
+      if (sourceNodeType(node) !== ELEMENT_NODE) continue;
       const element = node as Element;
       const classification = this.#classifyElement(
         element,
@@ -1685,11 +1780,11 @@ export class SemanticSourceSession {
       elements.push(element);
       const secret = classification.category === 'secret';
       if (secret) continue;
-      const children: Node[] = [...element.childNodes];
+      const children: Node[] = Array.from(sourceChildNodeList(element));
       const shadowRoot = safelyReadShadowRoot(element);
       if (shadowRoot) {
         this.#observeSemanticRoot(shadowRoot);
-        children.push(...shadowRoot.childNodes);
+        appendAll(children, shadowRoot.childNodes);
       }
       for (let index = children.length - 1; index >= 0; index -= 1) {
         stack.push({ node: children[index]!, secretAncestor: secret });
@@ -1788,22 +1883,43 @@ export class SemanticSourceSession {
       }
       return state;
     };
+    // What a closed `<details>` or `content-visibility: hidden` keeps
+    // undrawn, which none of those states says (D187).
+    const skippedStates = new Map<Element, SourceSkippedContentState>();
+    const skippedState = (element: Element): SourceSkippedContentState => {
+      let state = skippedStates.get(element);
+      if (!state) {
+        state = readSourceSkippedContentState(
+          element,
+          (current) => hiddenState(current).contentVisibilityHidden === true,
+        );
+        skippedStates.set(element, state);
+      }
+      return state;
+    };
     // For each box asked, where the hidden region around it starts, or null.
     const hiddenRegions = new Map<Element, Element | null>();
     // What the tab hides is read again in each slice (D164).
-    attempt.sliceCaches.push(hiddenStates, hiddenRegions);
+    attempt.sliceCaches.push(hiddenStates, skippedStates, hiddenRegions);
     // Where a field or an editor the scan withholds is hidden from: a change
     // of presentation there may show it with no change of the DOM (D179).
     const hiddenStarts = new Set<Element>();
     const noteHiddenStart = (start: Element): void => {
       if (hiddenStarts.size < MAX_SEMANTIC_SHOWN_AGAIN_STARTS) hiddenStarts.add(start);
     };
+    // The boxes of the fields and editor text sent as shown (D185).
+    const shownBoxes = new Set<Element>();
     /** Whether the tab does not show what `box` itself draws. */
     const boxIsHidden = (box: Element | undefined): boolean => {
       // The answer can change with no change of the DOM: see
       // `#scanSoonForWhatIsShown`.
       askedWhatIsShown = true;
       if (!box) return true;
+      // A field or editor that skips its own contents draws none of them.
+      if (skippedState(box).skipsText) {
+        noteHiddenStart(box);
+        return true;
+      }
       if (hiddenState(box).visibilityHidden) {
         // Visibility is inherited: it is hidden from the outermost box of
         // the run that hides it, which is the one a fade changes.
@@ -1826,12 +1942,25 @@ export class SemanticSourceSession {
         start = hiddenRegions.get(around);
         if (start !== undefined) break;
         asked.push(around);
+        // A child of a host that its root gives no slot is drawn nowhere,
+        // as the mirror channel withholds it (D192; D181 for that channel).
+        if (safelyRead(() => sourceNodeIsUnslotted(around!)) === true) {
+          start = around;
+          break;
+        }
+        if (skippedState(around).skipped) {
+          // Hidden from the element that skips it: opening the details, or
+          // a change of its style, shows it.
+          start = readSourceFlatTreeParentElement(around) ?? around;
+          break;
+        }
         if (!hiddenState(around).starts) continue;
         start = around;
         break;
       }
       for (const element of asked) hiddenRegions.set(element, start ?? null);
       if (start) noteHiddenStart(start);
+      else if (shownBoxes.size < MAX_SEMANTIC_SHOWN_AGAIN_STARTS) shownBoxes.add(box);
       return Boolean(start);
     };
     const proofs: SemanticSourceProof[] = [];
@@ -2239,7 +2368,7 @@ export class SemanticSourceSession {
       if (turn()) yield 'turn';
       const current = textStack.pop();
       if (!current) break;
-      if (current.node.nodeType === TEXT_NODE) {
+      if (sourceNodeType(current.node) === TEXT_NODE) {
         // A light-DOM Text node may render through a default slot beneath a
         // secret shadow ancestor. Classify that flat-tree path before any
         // content accessor is evaluated, and keep the node decision sticky.
@@ -2278,7 +2407,7 @@ export class SemanticSourceSession {
         }
         continue;
       }
-      if (current.node.nodeType !== ELEMENT_NODE) continue;
+      if (sourceNodeType(current.node) !== ELEMENT_NODE) continue;
       const element = current.node as Element;
       const classification = classifications.get(element);
       if (!classification) continue;
@@ -2294,9 +2423,9 @@ export class SemanticSourceSession {
         ? classification
         : current.editable;
       const disclosure = current.disclosure || disclosurePanels.has(element);
-      const children: Node[] = [...element.childNodes];
+      const children: Node[] = Array.from(sourceChildNodeList(element));
       const shadowRoot = safelyReadShadowRoot(element);
-      if (shadowRoot) children.push(...shadowRoot.childNodes);
+      if (shadowRoot) appendAll(children, shadowRoot.childNodes);
       for (let index = children.length - 1; index >= 0; index -= 1) {
         const child = children[index]!;
         textStack.push({
@@ -2551,7 +2680,7 @@ export class SemanticSourceSession {
     if (complete && (scope.formValues || scope.controlSemantics)) {
       pollCandidates = [];
       for (const element of elements) {
-        const tagName = element.localName.toLowerCase();
+        const tagName = sourceLocalName(element).toLowerCase();
         if (tagName !== 'input' && tagName !== 'textarea' && tagName !== 'select') {
           continue;
         }
@@ -2572,7 +2701,7 @@ export class SemanticSourceSession {
         // wrapper. Marking only that immediate neighborhood catches the panel
         // transition without turning body-level pointer movement into scans.
         const parent = safelyRead(() => element.parentElement);
-        const parentTagName = parent?.localName.toLowerCase();
+        const parentTagName = parent ? sourceLocalName(parent).toLowerCase() : undefined;
         if (parent && parentTagName !== 'body' && parentTagName !== 'html') {
           presentationCandidates.add(parent);
         }
@@ -2588,9 +2717,25 @@ export class SemanticSourceSession {
         // the page would start a scan.
         let around: Element | undefined = start;
         for (let depth = 0; around && depth < 3; depth += 1) {
-          const tagName = around.localName.toLowerCase();
+          const tagName = sourceLocalName(around).toLowerCase();
           if (tagName === 'body' || tagName === 'html') break;
           shownAgainCandidates.add(around);
+          const box: Element = around;
+          around = safelyRead(() => readSourceFlatTreeParentElement(box));
+        }
+      }
+    }
+    const hiddenAgainCandidates = new WeakSet<Element>();
+    if (complete) {
+      for (const shown of shownBoxes) {
+        if (turn()) yield 'turn';
+        let around: Element | undefined = shown;
+        for (let depth = 0; around && depth < 3; depth += 1) {
+          const tagName = sourceLocalName(around).toLowerCase();
+          if (tagName === 'body' || tagName === 'html') break;
+          // Boxes side by side share what is around them: asked once.
+          if (depth > 0 && hiddenAgainCandidates.has(around)) break;
+          hiddenAgainCandidates.add(around);
           const box: Element = around;
           around = safelyRead(() => readSourceFlatTreeParentElement(box));
         }
@@ -2610,6 +2755,7 @@ export class SemanticSourceSession {
       pollFingerprints,
       presentationCandidates,
       shownAgainCandidates,
+      hiddenAgainCandidates,
     });
   }
 
@@ -2897,7 +3043,7 @@ export class SemanticSourceSession {
     classifications: WeakMap<Element, ElementClassification>,
     classification: ElementClassification,
   ): SelectStateSnapshot | undefined {
-    if (element.localName.toLowerCase() !== 'select') return undefined;
+    if (sourceLocalName(element).toLowerCase() !== 'select') return undefined;
     let optionElements: readonly HTMLOptionElement[];
     try {
       optionElements = [...(element as HTMLSelectElement).selectedOptions];
@@ -2907,29 +3053,44 @@ export class SemanticSourceSession {
     if (optionElements.length > MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS) {
       return undefined;
     }
+    const multiple = safelyRead(() => (element as HTMLSelectElement).multiple);
+    if (typeof multiple !== 'boolean') return undefined;
+    const size = safelyRead(() => (element as HTMLSelectElement).size);
+    // A closed box: one chosen option drawn in it, the list only when open.
+    const closedBox = !multiple && (typeof size !== 'number' || size <= 1);
+    const chosenElements: HTMLOptionElement[] = [];
     const optionNodeIds: number[] = [];
     const optionLabels: string[] = [];
     const seen = new Set<number>();
     for (const option of optionElements) {
-      if (option.localName.toLowerCase() !== 'option' ||
+      if (sourceLocalName(option).toLowerCase() !== 'option' ||
         option.ownerDocument !== element.ownerDocument ||
         !element.contains(option) ||
-        classifications.get(option)?.category !== 'public-semantic' ||
-        !isSourceSelectLabelElementPublic(option)) {
+        classifications.get(option)?.category !== 'public-semantic') {
         return undefined;
       }
-      const label = readSourceSelectLabel(option);
+      let labelText: string;
+      if (isSourceSelectLabelElementPublic(option)) {
+        labelText = readSourceSelectLabel(option)?.text ?? '';
+      } else {
+        // Public but for what hides it (D187): a closed box still draws
+        // its label; a list box draws no row for it, and the rows it
+        // draws are marked as the tab marks them.
+        const drawn = readSourceClosedSelectChosenLabel(option);
+        if (!drawn) return undefined;
+        if (!closedBox) continue;
+        labelText = drawn.text;
+      }
       const optionNodeId = this.#nodeId(option);
       if (!optionNodeId || seen.has(optionNodeId)) return undefined;
       seen.add(optionNodeId);
+      chosenElements.push(option);
       optionNodeIds.push(optionNodeId);
-      optionLabels.push(label?.text ?? '');
+      optionLabels.push(labelText);
     }
-    const multiple = safelyRead(() => (element as HTMLSelectElement).multiple);
-    if (typeof multiple !== 'boolean') return undefined;
     return Object.freeze({
       classification,
-      optionElements: Object.freeze([...optionElements]),
+      optionElements: Object.freeze(chosenElements),
       optionLabels: Object.freeze(optionLabels),
       optionNodeIds: Object.freeze(optionNodeIds),
       multiple,
@@ -3201,10 +3362,10 @@ function classifySourceSecretScanSlice(
         rememberSourceNodeSecret(current.node, classifier);
       }
       const secret = current.secretAncestor || flatTreeSecret;
-      const children = [...current.node.childNodes];
-      if (current.node.nodeType === ELEMENT_NODE) {
+      const children = Array.from(sourceChildNodeList(current.node));
+      if (sourceNodeType(current.node) === ELEMENT_NODE) {
         const shadowRoot = safelyReadShadowRoot(current.node as Element);
-        if (shadowRoot) children.push(...[...shadowRoot.childNodes]);
+        if (shadowRoot) appendAll(children, shadowRoot.childNodes);
       }
       for (let index = children.length - 1; index >= 0; index -= 1) {
         stack.push({ node: children[index]!, secretAncestor: secret });
@@ -3250,7 +3411,7 @@ export function rememberSourceMutationSecrets(
 ): void {
   const addedRoots: Node[] = [];
   for (const record of records) {
-    if (record.type === 'childList') addedRoots.push(...record.addedNodes);
+    if (record.type === 'childList') appendAll(addedRoots, record.addedNodes);
   }
   for (const record of records) {
     if (record.type !== 'attributes' || !isElementNode(record.target)) {
@@ -3304,7 +3465,7 @@ export function rememberSourceMutationSecrets(
     }
   }
   for (const root of addedRoots) {
-    if (root.nodeType !== ELEMENT_NODE) continue;
+    if (sourceNodeType(root) !== ELEMENT_NODE) continue;
     const element = root as Element;
     eagerlyClassifySourceDocumentSubtree(element, sourceWindow, classifier, options);
   }
@@ -3331,10 +3492,10 @@ function rememberRemovedSourceSubtreeSecret(
       seen.add(current);
       budget.visited += 1;
       rememberSourceNodeSecret(current, classifier);
-      stack.push(...[...current.childNodes]);
-      if (current.nodeType === ELEMENT_NODE) {
+      appendAll(stack, sourceChildNodeList(current));
+      if (sourceNodeType(current) === ELEMENT_NODE) {
         const shadowRoot = safelyReadShadowRoot(current as Element);
-        if (shadowRoot) stack.push(...[...shadowRoot.childNodes]);
+        if (shadowRoot) appendAll(stack, shadowRoot.childNodes);
       }
     }
     return true;
@@ -3349,14 +3510,14 @@ function rememberSourceNodeSecret(
   classifier: StickySourceSecretClassifier,
 ): void {
   classifier.classify(node, {
-    tagName: node.nodeType === TEXT_NODE ? '#text' : '#node',
+    tagName: sourceNodeType(node) === TEXT_NODE ? '#text' : '#node',
     secretAncestor: true,
   });
 }
 
 function sourceDocumentElementForNode(node: Node): Element | undefined {
   try {
-    if (node.nodeType === 9) {
+    if (sourceNodeType(node) === 9) {
       return (node as Document).documentElement ?? undefined;
     }
     return node.ownerDocument?.documentElement ?? undefined;
@@ -3394,7 +3555,7 @@ export function rememberSourceEventSecret(
 
 function isElementNode(value: unknown): value is Element {
   return typeof value === 'object' && value !== null &&
-    (value as Node).nodeType === ELEMENT_NODE;
+    sourceNodeType(value as Node) === ELEMENT_NODE;
 }
 
 /** The attributes an old value of which is credential evidence (D75). */
@@ -3442,6 +3603,15 @@ function oldStyleUsedTextSecurity(value: string): boolean {
   return Boolean(match && normalizedToken(match[1]) !== 'none');
 }
 
+/**
+ * Puts every item of `items` at the end of `target`, one at a time: spread
+ * into one call, a list of more than about 125,000 items overflows the
+ * stack (D187).
+ */
+function appendAll<T>(target: T[], items: Iterable<T>): void {
+  for (const item of items) target.push(item);
+}
+
 function sourceClassificationFacts(
   element: Element,
   sourceWindow: Window,
@@ -3474,13 +3644,17 @@ function sourceClassificationFacts(
     }
   }
   return {
-    tagName: element.localName.toLowerCase(),
+    tagName: sourceLocalName(element).toLowerCase(),
     type: safelyReadAttribute(element, 'type'),
     autocomplete: safelyReadAttribute(element, 'autocomplete'),
     role: safelyReadAttribute(element, 'role'),
     contentEditable: sourceContentEditableFact(
       safelyRead(() => element.getAttribute('contenteditable')),
-    ),
+    ) || (safelyRead(() => sourceElementIsEditorWithoutAttribute(element))
+      // An editor the page made without the attribute: its text is editor
+      // text, which the mirror withholds, and the panel takes it (D192).
+      ? SEMANTIC_PAGE_EDITOR_MARK
+      : ''),
     computedTextSecurity,
     secretAncestor,
     valueBearing,
@@ -3644,7 +3818,7 @@ function semanticGateAdmits(
 }
 
 function isDisclosureActivationController(element: Element): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   const role = normalizedToken(safelyReadAttribute(element, 'role'));
   if (SEMANTIC_ACTIVATION_ROLES.has(role)) return true;
   if (tagName === 'button' || tagName === 'summary') return true;
@@ -3722,7 +3896,7 @@ function isBoundedSafeDisclosurePanel(
     const node = pending.pop();
     if (!node || node.ownerDocument !== panel.ownerDocument) return false;
     admitted.push(node);
-    if (node.nodeType !== ELEMENT_NODE) continue;
+    if (sourceNodeType(node) !== ELEMENT_NODE) continue;
     const element = node as Element;
     const classification = classifications.get(element);
     if (
@@ -3731,12 +3905,12 @@ function isBoundedSafeDisclosurePanel(
     ) return false;
     const children = panelWalkChildren(element);
     if (!children) return false;
-    pending.push(...children.nodes);
+    appendAll(pending, children.nodes);
   }
   let textUnits = 0;
   let hasText = false;
   for (const node of admitted) {
-    if (node.nodeType !== TEXT_NODE) continue;
+    if (sourceNodeType(node) !== TEXT_NODE) continue;
     const value = safelyRead(() => node.nodeValue);
     if (typeof value !== 'string') return false;
     textUnits += value.length;
@@ -3767,7 +3941,7 @@ function isBoundedSafeMenuPanel(
       !node || ++visited > MAX_SEMANTIC_MENU_PANEL_NODES ||
       node.ownerDocument !== panel.ownerDocument
     ) return false;
-    if (node.nodeType === TEXT_NODE) {
+    if (sourceNodeType(node) === TEXT_NODE) {
       const value = safelyRead(() => node.nodeValue);
       if (typeof value !== 'string') return false;
       textUnits += value.length;
@@ -3775,7 +3949,7 @@ function isBoundedSafeMenuPanel(
       if (value.trim() !== '') hasText = true;
       continue;
     }
-    if (node.nodeType !== ELEMENT_NODE) continue;
+    if (sourceNodeType(node) !== ELEMENT_NODE) continue;
     const element = node as Element;
     const category = classifications.get(element)?.category;
     if (category === undefined || category === 'secret' || category === 'withheld') {
@@ -3784,7 +3958,7 @@ function isBoundedSafeMenuPanel(
     const children = panelWalkChildren(element);
     if (!children) return false;
     slotted ||= children.slotted;
-    pending.push(...children.nodes);
+    appendAll(pending, children.nodes);
   }
   // What is slotted is a menu's text where it is drawn (D179).
   return hasText && hasMenuSizedText(panel, slotted);
@@ -3801,13 +3975,13 @@ function isBoundedSafeMenuPanel(
 function panelWalkChildren(
   element: Element,
 ): { readonly nodes: Node[]; readonly slotted: boolean } | undefined {
-  const nodes: Node[] = [...element.childNodes];
+  const nodes: Node[] = Array.from(sourceChildNodeList(element));
   const shadowRoot = safelyReadShadowRoot(element);
-  if (shadowRoot) nodes.push(...shadowRoot.childNodes);
-  if (element.localName.toLowerCase() !== 'slot') return { nodes, slotted: false };
+  if (shadowRoot) appendAll(nodes, shadowRoot.childNodes);
+  if (sourceLocalName(element).toLowerCase() !== 'slot') return { nodes, slotted: false };
   const assigned = readSlotAssignedNodes(element);
   if (!assigned) return undefined;
-  nodes.push(...assigned);
+  appendAll(nodes, assigned);
   return { nodes, slotted: assigned.length > 0 };
 }
 
@@ -3840,14 +4014,14 @@ function readDrawnPanelText(
     const current = pending.pop()!;
     if (++visited > MAX_SEMANTIC_MENU_PANEL_NODES) return undefined;
     const node = current.node;
-    if (node.nodeType === TEXT_NODE) {
+    if (sourceNodeType(node) === TEXT_NODE) {
       const value = safelyRead(() => node.nodeValue);
       if (typeof value !== 'string') return undefined;
       parts.push(value);
       current.item?.push(value);
       continue;
     }
-    if (node.nodeType !== ELEMENT_NODE) continue;
+    if (sourceNodeType(node) !== ELEMENT_NODE) continue;
     const element = node as Element;
     let item = current.item;
     if (!item && node !== panel && safelyRead(() => element.matches(MENU_ITEM_SELECTOR))) {
@@ -3857,13 +4031,13 @@ function readDrawnPanelText(
     let children: readonly Node[] | undefined;
     const shadowRoot = safelyReadShadowRoot(element);
     if (shadowRoot) {
-      children = [...shadowRoot.childNodes];
-    } else if (element.localName.toLowerCase() === 'slot') {
+      children = Array.from(shadowRoot.childNodes);
+    } else if (sourceLocalName(element).toLowerCase() === 'slot') {
       const assigned = readSlotAssignedNodes(element);
       if (!assigned) return undefined;
-      children = assigned.length > 0 ? assigned : [...element.childNodes];
+      children = assigned.length > 0 ? assigned : Array.from(sourceChildNodeList(element));
     } else {
-      children = [...element.childNodes];
+      children = Array.from(sourceChildNodeList(element));
     }
     for (let index = children.length - 1; index >= 0; index -= 1) {
       pending.push({ node: children[index]!, item });
@@ -3930,7 +4104,7 @@ function isBoundedSafeTabPanel(
       !node || ++visited > MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES ||
       node.ownerDocument !== panel.ownerDocument
     ) return false;
-    if (node.nodeType !== ELEMENT_NODE) continue;
+    if (sourceNodeType(node) !== ELEMENT_NODE) continue;
     const element = node as Element;
     const classification = classifications.get(element);
     if (
@@ -3939,13 +4113,13 @@ function isBoundedSafeTabPanel(
     ) return false;
     const children = panelWalkChildren(element);
     if (!children) return false;
-    pending.push(...children.nodes);
+    appendAll(pending, children.nodes);
   }
   return true;
 }
 
 function disclosureElementCanCarryUserState(element: Element): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (
     tagName === 'input' || tagName === 'textarea' || tagName === 'select' ||
     tagName === 'option' || tagName === 'output'

@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import {
   FULL_VISIBLE_REPLICA_READ_SCOPE,
@@ -11,6 +11,7 @@ import {
   createSemanticSourceAck,
   createSemanticSourcePortName,
   createSemanticSourceStart,
+  SEMANTIC_PAGE_EDITOR_MARK,
   semanticSourceProofSignature,
   type SemanticSourceBatch,
 } from '../lib/replica/semantic-source-protocol';
@@ -23,6 +24,7 @@ import {
   type SemanticSourcePort,
 } from '../lib/replica/semantic-source-session';
 import { SemanticSourceReceiver } from '../lib/replica/semantic-source-receiver';
+import { noteSourceEditingTarget } from '../lib/replica/html-mirror-sanitizer';
 import { StickySourceSecretClassifier } from '../lib/replica/source-secret-classifier';
 import { hasSourceCredentialSecretAncestor } from '../lib/replica/source-privacy-policy';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
@@ -4159,7 +4161,7 @@ describe('semantic source session', () => {
         node.parentElement ??
         ((node.getRootNode() as Partial<ShadowRoot>).host ?? null);
       const declared = (element: Element, property: string): string | undefined =>
-        new RegExp(`${property}:\\s*([a-z]+)`, 'u')
+        new RegExp(`(?:^|[;\\s])${property}:\\s*([a-z]+)`, 'u')
           .exec(element.getAttribute('style') ?? '')?.[1];
       const styleReads = new Map<Element, number>();
       Object.defineProperty(window, 'getComputedStyle', {
@@ -4179,7 +4181,9 @@ describe('semantic source session', () => {
                 ? 'none'
                 : element.localName === 'slot' ? 'contents' : 'block'),
             visibility,
-            getPropertyValue: () => '',
+            getPropertyValue: (name: string) => name === 'content-visibility'
+              ? declared(element, 'content-visibility') ?? 'visible'
+              : '',
           };
         },
       });
@@ -4332,6 +4336,27 @@ describe('semantic source session', () => {
       [
         'an editor of the page itself that is not visible',
         '<div contenteditable="true" style="visibility: hidden"><p>slotted draft</p>direct draft</div>',
+        {},
+      ],
+      // Chrome 158 draws none of these (D187).
+      [
+        'an editor inside a closed details',
+        '<details><summary>More</summary><div contenteditable="true"><p>slotted draft</p>direct draft</div></details>',
+        {},
+      ],
+      [
+        'an editor that is a closed details\'s own content',
+        '<details contenteditable="true"><p>slotted draft</p>direct draft</details>',
+        {},
+      ],
+      [
+        'an editor inside a box of content-visibility: hidden',
+        '<div style="content-visibility: hidden"><div contenteditable="true"><p>slotted draft</p>direct draft</div></div>',
+        {},
+      ],
+      [
+        'an editor of content-visibility: hidden',
+        '<div contenteditable="true" style="content-visibility: hidden"><p>slotted draft</p>direct draft</div>',
         {},
       ],
     ] as const) {
@@ -4593,6 +4618,43 @@ describe('semantic source session', () => {
         fixture.session.dispose();
       });
 
+      it('takes back a field a transition on its box, or a hover that leaves it, hides (D185)', () => {
+        const fixture = editors(
+          `<section id="card"><div id="row"><span id="label">Name</span><b id="go">Go</b>${FIELD}</div></section>` +
+            '<p id="elsewhere">words</p>',
+        );
+        fixture.start();
+        expect(values(fixture)).toEqual(['narrow value', 'narrow placeholder']);
+        const Event = (fixture.document.defaultView as unknown as { Event: typeof globalThis.Event }).Event;
+        const dispatch = (selector: string, type: string, related?: string): void => {
+          const event = new Event(type, { bubbles: true });
+          Object.defineProperty(event, 'relatedTarget', {
+            value: related ? fixture.document.querySelector(related) : null,
+          });
+          fixture.document.querySelector(selector)!.dispatchEvent(event);
+        };
+        const row = fixture.document.querySelector('#row')!;
+        // Moving inside the card, or a transition of what the row holds, hides nothing.
+        dispatch('#label', 'pointerout', '#field');
+        dispatch('#go', 'transitionend');
+        dispatch('#elsewhere', 'transitionend');
+        expect(fixture.port.messages).toHaveLength(1);
+        // `.card:hover .row { display: block }`: the pointer leaves the card.
+        fixture.restyleSilently(row, 'display: none');
+        dispatch('#label', 'pointerout', '#elsewhere');
+        expect(fixture.port.messages).toHaveLength(2);
+        expect(values(fixture).filter((text) => text.startsWith('narrow value'))).toEqual([]);
+        // Shown again, then faded out by a transition on its own box.
+        fixture.restyle(row, null);
+        expect(fixture.port.messages.at(-1)!.records.map(({ text }) => text))
+          .toContain('narrow value');
+        fixture.restyleSilently(row, 'visibility: hidden');
+        dispatch('#row', 'transitionend');
+        expect(fixture.port.messages.at(-1)!.records.map(({ text }) => text))
+          .not.toContain('narrow value');
+        fixture.session.dispose();
+      });
+
       it('starts none at a pointer or a focus event away from what it withheld', () => {
         const fixture = editors(
           `<div id="box" style="display: none">${FIELD}</div><p id="other">words</p>`,
@@ -4672,10 +4734,19 @@ describe('semantic source session', () => {
         ['a box that is not visible', `<div style="visibility: hidden">${FIELDS}</div>`, {}],
         ['a box that is declared hidden and has no box', `<div hidden>${FIELDS}</div>`, {}],
         ['a dialog that is not open', `<dialog>${FIELDS}</dialog>`, {}],
+        // Chrome 158 draws none of these (D187).
+        ['a closed details', `<details><summary>More</summary><p>${FIELDS}</p></details>`, {}],
+        ['a box of content-visibility: hidden', `<div style="content-visibility: hidden">${FIELDS}</div>`, {}],
         [
           'a box of a root that is not displayed, slotted there',
           `<x-note id="note">${FIELDS}</x-note>`,
           { '#note': '<div style="display: none"><slot></slot></div>' },
+        ],
+        [
+          // Drawn nowhere: the mirror channel withholds it too (D192).
+          'a child that its host\'s root gives no slot',
+          `<x-note id="note"><div slot="nowhere">${FIELDS}</div></x-note>`,
+          { '#note': '<div><slot></slot></div>' },
         ],
       ] as const) {
         it(`sends nothing of fields in ${shape}`, () => {
@@ -4686,6 +4757,15 @@ describe('semantic source session', () => {
           fixture.session.dispose();
         });
       }
+
+      it('sends the fields in a closed details\'s summary, and of an open one (D187)', () => {
+        const fixture = editors(
+          `<details><summary>${FIELDS}</summary><p>words</p></details>` +
+            '<details open><summary>More</summary><input type="text" value="open value"></details>',
+        );
+        expect(values(fixture)).toEqual([...SENT, 'open value']);
+        fixture.session.dispose();
+      });
 
       it('sends nothing of a field that hides itself, and the one beside it', () => {
         const fixture = editors(
@@ -5657,6 +5737,198 @@ describe('semantic batches of what changed', () => {
     ack(port, 3);
     expect(port.disconnects).toBe(1);
     expect(port.posted).toHaveLength(2);
+    session.dispose();
+  });
+});
+
+describe('what the semantic scan reads as the tab draws it (D187)', () => {
+  function scan(markup: string, prepare?: (document: Document) => void) {
+    const { document, window } = parseHTML(`<html><body>${markup}</body></html>`);
+    prepare?.(document as unknown as Document);
+    installPaintedTabFixture(document as unknown as Document, window as unknown as Window);
+    // The label rules ask the page's own window (linkedom's windows share
+    // what is put on one) and name `Node`.
+    const style = (element: Element) => ({
+      display: element.hasAttribute('hidden') ? 'none' : 'block',
+      visibility: 'visible',
+      getPropertyValue: () => '',
+    }) as unknown as CSSStyleDeclaration;
+    const ownStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle');
+    Object.defineProperty(window, 'getComputedStyle', { configurable: true, value: style });
+    onTestFinished(() => {
+      if (ownStyle) Object.defineProperty(window, 'getComputedStyle', ownStyle);
+      else Reflect.deleteProperty(window, 'getComputedStyle');
+    });
+    const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+    Object.defineProperty(globalThis, 'Node', {
+      configurable: true,
+      writable: true,
+      value: (window as unknown as { Node: typeof Node }).Node,
+    });
+    onTestFinished(() => {
+      if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+      else delete (globalThis as { Node?: unknown }).Node;
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html', undefined, style,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    onTestFinished(() => session.dispose());
+    return { document, message: port.messages[0]! };
+  }
+  function choose(select: Element, chosen: readonly Element[], multiple: boolean): void {
+    Object.defineProperties(select, {
+      selectedOptions: { configurable: true, get: () => chosen },
+      multiple: { configurable: true, get: () => multiple },
+    });
+  }
+
+  it('reads the label a closed dropdown draws for a hidden chosen option', () => {
+    const { document, message } = scan(`
+      <select id="a"><option id="a0" hidden disabled>Choose one</option><option>A1</option></select>
+      <select id="b"><optgroup hidden label="g"><option id="b0">Hidden group</option></optgroup><option>B1</option></select>
+      <select id="c"><option id="c0" hidden role="textbox">Editor option</option><option>C1</option></select>`,
+    (document) => {
+      for (const id of ['a', 'b', 'c']) {
+        choose(document.querySelector(`#${id}`)!, [document.querySelector(`#${id}0`)!], false);
+      }
+    });
+    const at = (id: string) => document.querySelector(`#${id}`)!;
+    const state = (id: string) => message.proofs.find((proof) =>
+      proof.kind === 'select-state' && proof.nodeId === nodeId(at(id)));
+    const selection = (id: string) => message.records.find((record) =>
+      record.nodeId === nodeId(at(id)) && record.presentation === 'selection')?.text;
+    expect(state('a')).toMatchObject({ selectedOptionNodeIds: [nodeId(at('a0'))] });
+    expect(selection('a')).toBe('Choose one');
+    expect(selection('b')).toBe('Hidden group');
+    // What makes a label private still does, hidden or not.
+    expect(state('c')).toBeUndefined();
+    expect(JSON.stringify(message)).not.toContain('Editor option');
+  });
+
+  it('marks the rows a list box draws when a chosen option is hidden', () => {
+    const { document, message } = scan(`
+      <select id="f" multiple><option id="f0" hidden>F hidden</option><option id="f1">F shown</option><option>F other</option></select>`,
+    (document) => {
+      choose(document.querySelector('#f')!,
+        [document.querySelector('#f0')!, document.querySelector('#f1')!], true);
+    });
+    const at = (id: string) => document.querySelector(`#${id}`)!;
+    expect(message.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      nodeId: nodeId(at('f')),
+      selectedOptionNodeIds: [nodeId(at('f1'))],
+    }));
+    expect(JSON.stringify(message)).not.toContain('F hidden');
+  });
+});
+
+describe('what the page reads of its stylesheet links (D191)', () => {
+  const ack = (port: FakeSemanticPort) => {
+    const last = port.messages.at(-1)!;
+    port.emit(createSemanticSourceAck(identity, last.policyFingerprint, last.sequence));
+  };
+
+  it('sends how far a CORS sheet of another origin reaches, from the page\'s copy', async () => {
+    const href = 'https://cdn.example/site.css';
+    const { document, window } = parseHTML(
+      `<html><head><link rel="stylesheet" href="${href}"></head><body><button>Go</button></body></html>`,
+    );
+    const sheet = {
+      href,
+      ownerNode: document.querySelector('link'),
+      get cssRules(): never {
+        throw new Error('SecurityError');
+      },
+    };
+    Object.defineProperty(document, 'styleSheets', { configurable: true, value: [sheet] });
+    const fetched: string[] = [];
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, {
+      ...window,
+      performance: { getEntriesByName: () => [{}] },
+      fetch: async (url: string, init: RequestInit) => {
+        fetched.push(`${url} ${init.cache} ${init.credentials} ${init.mode}`);
+        return {
+          ok: true,
+          headers: { get: () => null },
+          text: async () => '.flag.on + nav { -webkit-text-security: disc } p:has(a) { color: red }',
+        };
+      },
+    });
+    port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+    // Not read yet: named nowhere, the panel asks everything for it.
+    expect(port.posted[0]!.linkedSheets).toEqual({ reach: 'subtree', hrefs: [] });
+    ack(port);
+    await vi.waitFor(() => expect(port.posted).toHaveLength(2));
+    expect(fetched).toEqual([`${href} force-cache omit cors`]);
+    expect(port.posted[1]!.linkedSheets).toEqual({ reach: 'siblings', hrefs: [href] });
+    // Read once: the next scan sends nothing new.
+    session.refresh();
+    ack(port);
+    expect(port.posted).toHaveLength(2);
+    expect(fetched).toHaveLength(1);
+    session.dispose();
+  });
+});
+
+describe('editors a page makes without the attribute (D192)', () => {
+  const editorRecords = (port: FakeSemanticPort) =>
+    port.posted[0]!.records.filter(({ category }) => category === 'editable');
+
+  it('sends what is typed into one as editor text, with the page\'s mark, under Full visible only', () => {
+    for (const scope of [
+      FULL_VISIBLE_REPLICA_READ_SCOPE, STANDARD_REPLICA_READ_SCOPE, PAGE_ONLY_REPLICA_READ_SCOPE,
+    ]) {
+      const { document, window } = parseHTML(
+        '<html><body><div id="note"><p>typed words</p></div></body></html>',
+      );
+      const note = document.querySelector('#note')!;
+      // Editable by the page's style (`-webkit-user-modify`), and typed into.
+      Object.defineProperty(note, 'isContentEditable', { configurable: true, value: true });
+      expect(noteSourceEditingTarget(note)).toBe(note);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      port.emit(createSemanticSourceStart('isolated-html', identity, scope));
+      if (scope === FULL_VISIBLE_REPLICA_READ_SCOPE) {
+        expect(editorRecords(port)).toEqual([expect.objectContaining({
+          text: 'typed words',
+          tagName: 'div',
+          contentEditable: SEMANTIC_PAGE_EDITOR_MARK,
+          gate: 'editableContent',
+          presentation: 'text',
+        })]);
+      } else {
+        expect(JSON.stringify(port.posted)).not.toContain('typed words');
+      }
+      session.dispose();
+    }
+  });
+
+  it('takes the root of a document in design mode for one', () => {
+    const { document, window } = parseHTML(
+      '<html><body><h1>A letter</h1><p>typed words</p></body></html>',
+    );
+    Object.defineProperty(document, 'designMode', { configurable: true, value: 'on' });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart('isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE));
+    expect(editorRecords(port).map(({ text, tagName, contentEditable }) =>
+      [text, tagName, contentEditable])).toEqual([
+      ['A letter', 'html', SEMANTIC_PAGE_EDITOR_MARK],
+      ['typed words', 'html', SEMANTIC_PAGE_EDITOR_MARK],
+    ]);
     session.dispose();
   });
 });

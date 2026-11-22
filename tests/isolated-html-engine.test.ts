@@ -2935,6 +2935,93 @@ describe('IsolatedHtmlReplicaEngine', () => {
       .not.toBeNull();
   });
 
+  // D183: where the frame makes sheets, Simul's rules in a root and the
+  // sheets the page adopts are adopted there too, so no element of Simul's
+  // stands among the root's children for the page's `:last-child`.
+  it('adopts the root\'s own rules and the page\'s adopted sheets where the frame makes sheets', async () => {
+    class FakeSheet {
+      text = '';
+      replaceSync(text: string): void {
+        this.text = text;
+      }
+    }
+    const adopted = new WeakMap<object, unknown[]>();
+    const install = (proto: object): void => {
+      Object.defineProperty(proto, 'adoptedStyleSheets', {
+        configurable: true,
+        get(this: object) { return adopted.get(this) ?? []; },
+        set(this: object, sheets: unknown[]) { adopted.set(this, [...sheets]); },
+      });
+    };
+    const stream = new FakeHtmlStream(makeReconciliationCheckpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document, window } = parseHTML(shell);
+        const shadowProto = Object.getPrototypeOf(
+          document.createElement('div').attachShadow({ mode: 'open' }),
+        ) as object;
+        const documentProto = Object.getPrototypeOf(document) as object;
+        install(shadowProto);
+        install(documentProto);
+        Object.defineProperty(window, 'CSSStyleSheet', {
+          configurable: true, value: FakeSheet,
+        });
+        onTestFinished(() => {
+          delete (shadowProto as Record<string, unknown>).adoptedStyleSheets;
+          delete (documentProto as Record<string, unknown>).adoptedStyleSheets;
+          delete (window as unknown as Record<string, unknown>).CSSStyleSheet;
+        });
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onInfo: (info) => infos.push(info),
+    });
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+    const shadow = replica.querySelector('x-card')!.shadowRoot!;
+    const texts = (owner: object) => (adopted.get(owner) as FakeSheet[] | undefined)
+      ?.map(({ text }) => text);
+    expect(texts(shadow)).toEqual([ISOLATED_MEDIA_CONTROLS_CSS, ':host{display:block}']);
+    expect(texts(replica)).toEqual(['body{display:block}']);
+    expect(shadow.querySelectorAll('style')).toHaveLength(0);
+    expect(replica.body.querySelectorAll('style')).toHaveLength(0);
+    expect(shadow.lastElementChild?.localName).toBe('slot');
+    expect(infos.at(-1)?.adoptedStyleCount).toBe(2);
+
+    // A patch of the root's children keeps its sheets; a refused one
+    // leaves them as they were.
+    const sheets = adopted.get(shadow);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }), 1, 1,
+      [{
+        kind: 'children', nodeId: 8,
+        children: [{
+          kind: 'element', id: 20, namespace: 'html', tagName: 'p',
+          attributes: [], children: [{
+            kind: 'text', id: 21, text: 'new shadow content', translatable: true,
+          }],
+        }],
+      }],
+    )!);
+    expect(stream.acknowledged).toContain(1);
+    expect(shadow.lastElementChild?.localName).toBe('p');
+    expect(adopted.get(shadow)).toBe(sheets);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }), 2, 2,
+      [{
+        kind: 'reconcile-children', nodeId: 8,
+        children: [{ kind: 'retain', nodeId: 999 }],
+      }],
+    )!);
+    expect(stream.requested).toEqual([1]);
+    expect(adopted.get(shadow)).toBe(sheets);
+    expect(shadow.lastElementChild?.localName).toBe('p');
+  });
+
   it('rejects cross-parent retain references before changing the last-good DOM', async () => {
     const stream = new FakeHtmlStream(makeCrossParentCheckpoint());
     const host = new FakePresentationHost();
@@ -4998,6 +5085,205 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.requested).toEqual([0]);
     expect(host.resolveNode?.(3)?.textContent).toBe('in body');
     expect(host.resolveNode?.(12)).toBeUndefined();
+  });
+
+  it('takes a body put in place of the page\'s own into its own body, all or none (D190)', async () => {
+    const start = async () => {
+      const checkpoint = createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: {
+            kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+            attributes: [], children: [
+              {
+                kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+                attributes: [], children: [],
+              },
+              {
+                kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+                attributes: [['class', 'old']], children: [{
+                  kind: 'text', id: 4, text: 'in body', translatable: true,
+                }],
+              },
+              {
+                kind: 'element', id: 5, namespace: 'html', tagName: 'div',
+                attributes: [], children: [],
+              },
+            ],
+          },
+          adoptedStyleSheets: [],
+          captureMs: 1,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1000,
+        },
+      )!;
+      const stream = new FakeHtmlStream(checkpoint);
+      const host = new FakePresentationHost();
+      const commits: Array<Parameters<NonNullable<
+        ConstructorParameters<typeof IsolatedHtmlReplicaEngine>[0]['onSourceCommit']
+      >>[0]> = [];
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: host,
+        openStream: async () => stream,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+        onSourceCommit: (commit) => commits.push(commit),
+      });
+      await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+      return { stream, host, commits, body: host.resolveNode?.(3) as Element };
+    };
+    const swapOperation: HtmlMirrorPatchOperation = {
+        kind: 'reconcile-children',
+        nodeId: 1,
+        children: [
+          { kind: 'retain', nodeId: 2 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 20, namespace: 'html', tagName: 'body',
+              attributes: [['class', 'next']], children: [{
+                kind: 'element', id: 21, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 22, text: 'the new body', translatable: true,
+                }],
+              }],
+            },
+          },
+          { kind: 'retain', nodeId: 5 },
+        ],
+    };
+    const swap = (later: HtmlMirrorPatchOperation[] = []) =>
+      [[swapOperation], ...(later.length > 0 ? [later] : [])].map((operations) =>
+        createHtmlMirrorPatch(
+          createReplicaIdentity({ ...identityParts, sequence: 1 }), 1, 1,
+          operations,
+          undefined,
+          'passive',
+        )!);
+
+    let { stream, host, commits, body } = await start();
+    stream.observer?.onPatch(swap()[0]!);
+    expect(stream.requested).toEqual([]);
+    expect(host.resolveNode?.(20)).toBe(body);
+    expect(host.resolveNode?.(3)).toBeUndefined();
+    expect(host.resolveNode?.(4)).toBeUndefined();
+    expect(body.getAttribute('class')).toBe('next');
+    expect(body.textContent).toBe('the new body');
+    expect(body.ownerDocument.body).toBe(body);
+    expect(commits.at(-1)?.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'remove', nodeId: 4 }),
+      expect.objectContaining({
+        kind: 'upsert', record: expect.objectContaining({ nodeId: 22 }),
+      }),
+    ]));
+    // The next patch names the new body.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }), 2, 2,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 20,
+        children: [
+          { kind: 'retain', nodeId: 21 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'text', id: 23, text: ' later', translatable: true,
+            },
+          },
+        ],
+      }],
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(body.textContent).toBe('the new body later');
+
+    // A frame whose later patch the mirror refuses: nothing changes, the
+    // body's id not either.
+    ({ stream, host, body } = await start());
+    stream.observer?.onPatch(createHtmlMirrorPatchFrame(swap([{
+      kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'span', attributes: [],
+    }]))!);
+    expect(stream.requested).toEqual([0]);
+    expect(host.resolveNode?.(3)).toBe(body);
+    expect(host.resolveNode?.(20)).toBeUndefined();
+    expect(body.getAttribute('class')).toBe('old');
+    expect(body.textContent).toBe('in body');
+  });
+
+  it('takes an element it holds sent again in place, with a root, under the ids it has (D190)', async () => {
+    const stream = new FakeHtmlStream(makeReconciliationCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+    const paragraph = replica.querySelector('p')!;
+    const oldDemo = host.resolveNode?.(6);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }), 1, 1,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 3,
+        children: [
+          { kind: 'retain', nodeId: 4 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 6, namespace: 'html', tagName: 'p',
+              attributes: [], children: [{
+                kind: 'text', id: 7, text: 'translated source', translatable: true,
+              }],
+              shadowRoot: {
+                id: 30, mode: 'open', adoptedStyleSheets: [], children: [
+                  {
+                    kind: 'element', id: 31, namespace: 'html', tagName: 'b',
+                    attributes: [], children: [{
+                      kind: 'text', id: 32, text: 'the live example', translatable: true,
+                    }],
+                  },
+                  {
+                    kind: 'element', id: 33, namespace: 'html', tagName: 'slot',
+                    attributes: [], children: [],
+                  },
+                ],
+              },
+            },
+          },
+        ],
+      }],
+    )!);
+    expect(stream.requested).toEqual([]);
+    const demo = host.resolveNode?.(6) as Element;
+    expect(demo).not.toBe(oldDemo);
+    expect(demo).not.toBe(paragraph);
+    expect(demo.parentNode).toBe(replica.body);
+    expect(demo.shadowRoot?.querySelector('b')?.textContent).toBe('the live example');
+    expect((host.resolveNode?.(7) as Text).parentNode).toBe(demo);
+    expect(host.resolveNode?.(30)).toBe(demo.shadowRoot);
+
+    // An id held elsewhere stays refused.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }), 2, 2,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 30,
+        children: [
+          { kind: 'retain', nodeId: 31 },
+          { kind: 'retain', nodeId: 33 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 4, namespace: 'html', tagName: 'i',
+              attributes: [], children: [],
+            },
+          },
+        ],
+      }],
+    )!);
+    expect(stream.requested).toEqual([1]);
   });
 
   it('takes an element named head in another namespace for no head of the page (D143)', async () => {

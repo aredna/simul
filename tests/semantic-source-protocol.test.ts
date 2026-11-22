@@ -713,3 +713,29 @@ describe('semantic source protocol', () => {
     expect(whole.protocolVersion).toBe(2);
   });
 });
+
+describe('what the page says of its stylesheet links (D191)', () => {
+  const href = 'https://cdn.example/site.css';
+
+  it('carries it in version 3 only, and only in its exact shape', () => {
+    const batch = createSemanticSourceBatch(
+      documentIdentity, 'read-v1-111111', 1, [], [],
+      { linkedSheets: { reach: 'siblings', hrefs: [href] } },
+    );
+    expect(batch.linkedSheets).toEqual({ reach: 'siblings', hrefs: [href] });
+    expect(readSemanticSourceBatch(JSON.parse(JSON.stringify(batch)), documentIdentity))
+      .toEqual(batch);
+    const plain = createSemanticSourceBatch(documentIdentity, 'read-v1-111111', 1, []);
+    const refused = (linkedSheets: unknown, protocolVersion = 3) => readSemanticSourceBatch({
+      ...plain,
+      protocolVersion,
+      linkedSheets,
+      byteLength: plain.byteLength + 32 + href.length * 2 + 16,
+    }, documentIdentity);
+    expect(refused({ reach: 'siblings', hrefs: [href] })).toBeDefined();
+    expect(refused({ reach: 'siblings', hrefs: [href] }, 2)).toBeUndefined();
+    expect(refused({ reach: 'far', hrefs: [href] })).toBeUndefined();
+    expect(refused({ reach: 'subtree', hrefs: ['javascript:x'] })).toBeUndefined();
+    expect(refused({ reach: 'subtree', hrefs: [href], more: 1 })).toBeUndefined();
+  });
+});

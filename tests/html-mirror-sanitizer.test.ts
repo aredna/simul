@@ -223,6 +223,26 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       // A sheet is read as before.
       expect(sanitizeCss('.a{color:red} /* note', 'about:blank')).toBeUndefined();
     });
+
+    it('closes the blocks a style attribute ends in, a quoted url( too (D187)', () => {
+      const cases: Array<[string, string]> = [
+        ['color: blue; background: url("a.png',
+          'color: blue; background: url("https://example.test/app/a.png")'],
+        ["color: blue; background: url( 'a.png",
+          'color: blue; background: url("https://example.test/app/a.png")'],
+        ['color: blue; background-image: image-set("a.png" 1x',
+          'color: blue; background-image: image-set(url("https://example.test/app/a.png") 1x)'],
+        ['width: calc(1px + (2px', 'width: calc(1px + (2px))'],
+        ['--a: (1px [2px', '--a: (1px [2px])'],
+        ['color: blue; /* a ( in a comment', 'color: blue; '],
+      ];
+      for (const [style, expected] of cases) {
+        const sanitized = sanitizeCss(style, 'https://example.test/app/', true);
+        expect(sanitized, style).toBe(expected);
+        expect(sanitizeCss(sanitized!, 'about:blank', true), style).toBe(sanitized);
+      }
+      expect(sanitizeCss('.a{background:url("a.png', 'about:blank')).toBeUndefined();
+    });
   });
 
   it('asks about the regions above an element once for a flush', () => {

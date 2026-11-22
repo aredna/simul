@@ -1,4 +1,9 @@
 import {
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
+import {
   sourceDocumentSecretClassifier,
   sourceFactsAreSecret,
   type StickySourceSecretClassifier,
@@ -195,14 +200,72 @@ export interface SourcePaintScanCache {
   readonly inputs: Map<Element, SourceElementPaintInputs>;
   /** Per-element painted-path facts, each derived from its parent's. */
   readonly paintedPaths: Map<Element, SourcePaintedPathMemo>;
+  /** The computed-style answers kept across scans, if any (D186). */
+  readonly styles?: SourcePaintStyleMemory;
 }
 
-export function createSourcePaintScanCache(): SourcePaintScanCache {
+/**
+ * The computed-style answers a comparison read, kept for the next one
+ * (D186). `recall`: the caller knows no computed style of the page can
+ * have changed since they were read (only text changed, and no rule reads
+ * text or layout, and nothing animates), so they answer in place of the
+ * style; boxes are always read afresh. Otherwise each answer read is kept.
+ */
+export interface SourcePaintStyleMemory {
+  readonly facts: WeakMap<Element, SourcePaintStyleFacts>;
+  readonly recall: boolean;
+}
+
+/** What `sourcePaintInputs` takes from an element's computed style. */
+export interface SourcePaintStyleFacts {
+  readonly display: string;
+  readonly visibility: string;
+  readonly opacity: string;
+  readonly contentVisibility: string;
+  readonly clip: string;
+  readonly clipPath: string;
+  readonly overflowX: string;
+  readonly overflowY: string;
+}
+
+export function createSourcePaintScanCache(
+  styles?: SourcePaintStyleMemory,
+): SourcePaintScanCache {
   return {
     paths: new Map(),
     inputs: new Map(),
     paintedPaths: new Map(),
+    ...(styles ? { styles } : {}),
   };
+}
+
+/** The style answers of `element`, recalled or read (D186). */
+function sourcePaintStyleFacts(
+  element: Element,
+  sourceWindow: Window,
+  getComputedStyle: Window['getComputedStyle'],
+  memory: SourcePaintStyleMemory | undefined,
+): SourcePaintStyleFacts {
+  if (memory?.recall) {
+    const recalled = memory.facts.get(element);
+    if (recalled) return recalled;
+  }
+  const style = getComputedStyle.call(sourceWindow, element);
+  const facts: SourcePaintStyleFacts = {
+    display: style.display.trim().toLowerCase(),
+    visibility: style.visibility.trim().toLowerCase(),
+    opacity: style.opacity.trim(),
+    contentVisibility: style.getPropertyValue('content-visibility')
+      .trim().toLowerCase(),
+    clip: style.getPropertyValue('clip').trim().toLowerCase(),
+    clipPath: style.getPropertyValue('clip-path').trim().toLowerCase(),
+    overflowX: (style.overflowX || style.getPropertyValue('overflow-x'))
+      .trim().toLowerCase(),
+    overflowY: (style.overflowY || style.getPropertyValue('overflow-y'))
+      .trim().toLowerCase(),
+  };
+  memory?.facts.set(element, facts);
+  return facts;
 }
 
 /**
@@ -468,11 +531,11 @@ implements SourceControlledContentPolicyBuilder {
   #index(node: Node): void {
     const pending = this.#pending;
     this.#visited += 1;
-    if (node.nodeType === 11) {
-      for (const item of node.childNodes) pending.push(item);
+    if (sourceNodeType(node) === 11) {
+      for (const item of sourceChildNodeList(node)) pending.push(item);
       return;
     }
-    if (node.nodeType !== 1) return;
+    if (sourceNodeType(node) !== 1) return;
     const element = node as Element;
     const scope = element.getRootNode();
     const id = safelyReadSourceAttribute(element, 'id');
@@ -499,7 +562,7 @@ implements SourceControlledContentPolicyBuilder {
     // One by one (D180): spread into one call, an element with more than
     // about 125,000 children threw past the engine's limit on arguments,
     // and the page was refused as too large.
-    for (const item of element.childNodes) pending.push(item);
+    for (const item of sourceChildNodeList(element)) pending.push(item);
     const shadowRoot = safelyReadSourceShadowRoot(element);
     if (shadowRoot) pending.push(shadowRoot);
   }
@@ -638,7 +701,7 @@ export function sourceControlledContentMutationsMayChange(
 ): boolean {
   for (const record of records) {
     if (record.type === 'attributes') {
-      if (record.target.nodeType !== 1) continue;
+      if (sourceNodeType(record.target) !== 1) continue;
       const element = record.target as Element;
       const name = record.attributeName?.toLowerCase() ?? '';
       if (name === 'aria-controls') {
@@ -678,16 +741,18 @@ export function sourceControlledContentMutationsMayChange(
     if (record.type === 'characterData') {
       if (
         (policy.controllers.size > 0 || policy.targets.size > 0) &&
-        record.target.parentElement?.localName.toLowerCase() === 'style'
+        record.target.parentElement !== null &&
+        sourceLocalName(record.target.parentElement).toLowerCase() === 'style'
       ) return true;
       continue;
     }
     if (record.type !== 'childList') continue;
-    const mutationElement = record.target.nodeType === 1
+    const mutationElement = sourceNodeType(record.target) === 1
       ? record.target as Element
       : undefined;
     if (
-      (mutationElement?.localName.toLowerCase() === 'style' &&
+      (mutationElement !== undefined &&
+        sourceLocalName(mutationElement).toLowerCase() === 'style' &&
         (policy.controllers.size > 0 || policy.targets.size > 0)) ||
       (mutationElement && (
         policy.controllers.has(mutationElement) ||
@@ -781,11 +846,11 @@ function controlledMutationNodesMayChange(
     const node = pending.pop();
     if (!node) break;
     visited += 1;
-    if (node.nodeType === 11) {
-      for (const item of node.childNodes) pending.push(item);
+    if (sourceNodeType(node) === 11) {
+      for (const item of sourceChildNodeList(node)) pending.push(item);
       continue;
     }
-    if (node.nodeType !== 1) continue;
+    if (sourceNodeType(node) !== 1) continue;
     const element = node as Element;
     if (
       policy.controllers.has(element) || policy.targets.has(element) ||
@@ -798,9 +863,9 @@ function controlledMutationNodesMayChange(
         policy.withheldIdRoots.has(element.getRootNode()) ||
         policy.referencedIds.has(id))
     ) return true;
-    if (element.localName.toLowerCase() === 'style' &&
+    if (sourceLocalName(element).toLowerCase() === 'style' &&
       (policy.controllers.size > 0 || policy.targets.size > 0)) return true;
-    for (const item of element.childNodes) pending.push(item);
+    for (const item of sourceChildNodeList(element)) pending.push(item);
     const shadowRoot = safelyReadSourceShadowRoot(element);
     if (shadowRoot) pending.push(shadowRoot);
   }
@@ -1348,8 +1413,8 @@ function readSourceElementsHeldWithoutBox(
       const holder = pending.pop()!;
       // The element whose box would hold the text: a root's is its host.
       const textHolder = holder === root ? element : holder as Element;
-      for (const node of holder.childNodes) {
-        if (node.nodeType === 3) {
+      for (const node of sourceChildNodeList(holder)) {
+        if (sourceNodeType(node) === 3) {
           if ((node.nodeValue ?? '').trim() === '') continue;
           if (
             !sourceTextIsPaintedOnPage(
@@ -1362,9 +1427,9 @@ function readSourceElementsHeldWithoutBox(
           paintedText = true;
           continue;
         }
-        if (node.nodeType !== 1) continue;
+        if (sourceNodeType(node) !== 1) continue;
         const child = node as Element;
-        if (child.localName.toLowerCase() === 'slot') pending.push(child);
+        if (sourceLocalName(child).toLowerCase() === 'slot') pending.push(child);
         else held.push(child);
         if (held.length + pending.length > MAX_SOURCE_PAINT_RECTS) return undefined;
       }
@@ -1630,18 +1695,15 @@ function sourcePaintInputs(
     const ariaHidden = rawAriaHidden === null || rawAriaHidden.trim() === ''
       ? false
       : normalizedSourceBoolean(rawAriaHidden);
-    const style = getComputedStyle.call(sourceWindow, element);
-    const display = style.display.trim().toLowerCase();
-    const visibility = style.visibility.trim().toLowerCase();
-    const opacity = style.opacity.trim();
-    const contentVisibility = style.getPropertyValue('content-visibility')
-      .trim().toLowerCase();
-    const clip = style.getPropertyValue('clip').trim().toLowerCase();
-    const clipPath = style.getPropertyValue('clip-path').trim().toLowerCase();
-    const overflowX = (style.overflowX || style.getPropertyValue('overflow-x'))
-      .trim().toLowerCase();
-    const overflowY = (style.overflowY || style.getPropertyValue('overflow-y'))
-      .trim().toLowerCase();
+    const {
+      display, visibility, opacity, contentVisibility, clip, clipPath,
+      overflowX, overflowY,
+    } = sourcePaintStyleFacts(
+      element,
+      sourceWindow!,
+      getComputedStyle,
+      paintCache.styles,
+    );
     const rects = readSourceElementPaintRects(element);
     if (!rects) throw new Error('Paint geometry is unreadable.');
     const contents = display === 'contents';
@@ -1734,10 +1796,17 @@ function readSourceElementDisplay(
   try {
     const getComputedStyle = sourceWindow?.getComputedStyle;
     if (typeof getComputedStyle !== 'function') return NOT_DISPLAYED;
-    const style = getComputedStyle.call(sourceWindow, element);
-    const display = style.display.trim().toLowerCase();
+    // Kept answers first (D186); the visibility is read only for what is
+    // displayed.
+    const recalled = paintCache.styles?.recall
+      ? paintCache.styles.facts.get(element)
+      : undefined;
+    const style = recalled ?? getComputedStyle.call(sourceWindow, element);
+    const display = recalled ? recalled.display : style.display.trim().toLowerCase();
     if (display === 'none' || display === '') return NOT_DISPLAYED;
-    const visibility = style.visibility.trim().toLowerCase();
+    const visibility = recalled
+      ? recalled.visibility
+      : style.visibility.trim().toLowerCase();
     return {
       displayed: true,
       visibilityHidden: visibility === 'hidden' || visibility === 'collapse',
@@ -1909,7 +1978,7 @@ export function readSourceFlatTreeElementPath(
   try {
     const path: Element[] = [];
     const seen = new Set<Element>();
-    let current = node.nodeType === 1
+    let current = sourceNodeType(node) === 1
       ? node as Element
       : readSourceFlatTreeParentElement(node);
     while (current) {
@@ -1935,8 +2004,8 @@ export function readSourceFlatTreeParentElement(node: Node): Element | undefined
   const assignedSlot = readSourceAssignedSlot(node);
   if (assignedSlot !== undefined && assignedSlot !== null) {
     if (
-      assignedSlot.nodeType !== 1 ||
-      assignedSlot.localName.toLowerCase() !== 'slot' ||
+      sourceNodeType(assignedSlot) !== 1 ||
+      sourceLocalName(assignedSlot).toLowerCase() !== 'slot' ||
       assignedSlot.ownerDocument !== node.ownerDocument
     ) throw new Error('Invalid assigned-slot ancestry.');
     return assignedSlot;
@@ -1944,9 +2013,9 @@ export function readSourceFlatTreeParentElement(node: Node): Element | undefined
   const parent = node.parentElement;
   if (parent) return parent;
   const root = node.getRootNode();
-  if (root.nodeType !== 11 || !('host' in root)) return undefined;
+  if (sourceNodeType(root) !== 11 || !('host' in root)) return undefined;
   const host = (root as ShadowRoot).host;
-  if (host.nodeType !== 1 || host.ownerDocument !== node.ownerDocument) {
+  if (sourceNodeType(host) !== 1 || host.ownerDocument !== node.ownerDocument) {
     throw new Error('Invalid shadow-host ancestry.');
   }
   return host;
@@ -2050,9 +2119,9 @@ export function isSourceNativeSelectImplicitRole(
 
 /** Standalone/datalist options stay private; only select descendants are public. */
 export function isSourceOptionInsideNativeSelect(element: Element): boolean {
-  if (element.localName.toLowerCase() !== 'option') return false;
+  if (sourceLocalName(element).toLowerCase() !== 'option') return false;
   for (let current = element.parentElement; current; current = current.parentElement) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'select') return true;
     if (tagName === 'datalist') return false;
   }
@@ -2063,7 +2132,7 @@ export function isSourceOptionInsideNativeSelect(element: Element): boolean {
 export function readSourceSelectLabel(
   element: Element,
 ): SourceControlText | undefined {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (!isSourceSelectLabelElementPublic(element)) return undefined;
   if (isSourceSelectEntryVisuallyHidden(element)) return undefined;
   try {
@@ -2105,6 +2174,39 @@ export interface SourceSelectLabelWalk {
    * for that moment): where given, a dropdown it does not draw is unread.
    */
   reveal(panels: Iterable<Element>, drawn?: (select: Element) => boolean): void;
+}
+
+/** See `readSourceClosedSelectChosenLabel`; set only while it reads. */
+let closedBoxChosenOption:
+  { readonly option: Element; readonly select: Element } | undefined;
+
+/**
+ * The label a closed dropdown draws for its chosen option, also when the
+ * option is hidden (D187, owner ruling D175): Chrome 158 draws it in the box
+ * for an option with `hidden`, `display: none` or `visibility: hidden`, and
+ * for one in a group that is hidden ("Choose one" written as `<option
+ * hidden disabled selected>` is the common case). Every other rule for a
+ * label holds: the option and what is between it and its dropdown are no
+ * editor, secret or control, and the dropdown itself is not hidden.
+ * `undefined` when the label may not be read; an empty text when it has
+ * none.
+ */
+export function readSourceClosedSelectChosenLabel(
+  option: Element,
+): { readonly text: string } | undefined {
+  if (sourceLocalName(option).toLowerCase() !== 'option') return undefined;
+  const select = option.closest('select');
+  if (!select) return undefined;
+  const outer = closedBoxChosenOption;
+  closedBoxChosenOption = Object.freeze({ option, select });
+  try {
+    if (!isSourceSelectLabelElementPublic(option)) return undefined;
+    return Object.freeze({ text: readSourceSelectLabel(option)?.text ?? '' });
+  } catch {
+    return undefined;
+  } finally {
+    closedBoxChosenOption = outer;
+  }
 }
 
 let selectLabelWalk: {
@@ -2153,11 +2255,24 @@ export function beginSourceSelectLabelWalk(): SourceSelectLabelWalk {
 
 export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   const view = element.ownerDocument?.defaultView;
-  const remembered = selectLabelWalk?.hidden;
+  const chosen = closedBoxChosenOption;
+  const remembered = chosen ? undefined : selectLabelWalk?.hidden;
   const known = remembered?.get(element);
   if (known !== undefined) return known;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
+  // The chosen option a closed dropdown draws (D187): what hides the option,
+  // or a group or wrapper between it and its dropdown, does not hide the
+  // label the box draws; what hides the dropdown, or what is inside the
+  // option, still counts.
+  const chosenAt = chosen
+    ? path.findIndex((current) =>
+      current !== chosen.select && chosen.select.contains(current) &&
+      current.contains(chosen.option))
+    : -1;
+  const chosenSelectAt = chosen && chosenAt >= 0
+    ? path.indexOf(chosen.select, chosenAt)
+    : -1;
   // Inside a panel the mirror may open, only what stays hidden once it is
   // open counts; the panel and what is above it are shown then.
   const revealed = selectLabelWalk?.revealed;
@@ -2167,6 +2282,10 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   const walked: Element[] = [];
   let hidden = false;
   for (let index = 0; index < (opened < 0 ? path.length : opened); index += 1) {
+    if (chosenAt >= 0 && index === chosenAt) {
+      if (chosenSelectAt < 0) break;
+      index = chosenSelectAt;
+    }
     const current = path[index]!;
     const above = remembered?.get(current);
     if (above !== undefined) {
@@ -2178,7 +2297,7 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
       opened < 0
         ? sourceSelectEntryIsItselfHidden(current, view)
         : sourceSelectEntryStaysHidden(current, view) ||
-          (current.localName.toLowerCase() === 'select' &&
+          (sourceLocalName(current).toLowerCase() === 'select' &&
             selectLabelWalk?.drawn?.(current) === false)
     ) {
       hidden = true;
@@ -2216,7 +2335,7 @@ export function isSourceSelectEntryLeftOutOfList(entry: Element): boolean {
     current && depth <= MAX_SOURCE_SELECT_ENTRY_DEPTH;
     depth += 1
   ) {
-    if (current.localName.toLowerCase() === 'select') {
+    if (sourceLocalName(current).toLowerCase() === 'select') {
       return between.some((element) => sourceSelectEntryStaysHidden(element, view));
     }
     between.push(current);
@@ -2274,7 +2393,7 @@ function sourceSelectEntryStaysHidden(
       style.getPropertyValue('content-visibility').trim().toLowerCase() ===
         'hidden'
     ) return true;
-    if (current.localName.toLowerCase() !== 'select') return false;
+    if (sourceLocalName(current).toLowerCase() !== 'select') return false;
     const opacity = style.opacity.trim();
     if (opacity !== '' && Number(opacity) === 0) return true;
     // Under `display: none` it has no box at all: none to judge.
@@ -2306,7 +2425,7 @@ function sourceSelectEntryIsItselfHidden(
       style.getPropertyValue('content-visibility').trim().toLowerCase() ===
         'hidden'
     ) return true;
-    return current.localName.toLowerCase() === 'select' &&
+    return sourceLocalName(current).toLowerCase() === 'select' &&
       sourceSelectHasNoRenderedDocumentBox(current, view, style);
   } catch {
     // A browser-inaccessible computed style is not proof of invisibility.
@@ -2328,7 +2447,7 @@ export function isSourceTransparentSelectClickTarget(
 ): boolean {
   try {
     const opacity = style.opacity.trim();
-    return select.localName.toLowerCase() === 'select' &&
+    return sourceLocalName(select).toLowerCase() === 'select' &&
       opacity !== '' && Number(opacity) === 0 &&
       style.pointerEvents.trim().toLowerCase() !== 'none' &&
       !sourceSelectHasNoRenderedDocumentBox(select, view, style);
@@ -2381,14 +2500,14 @@ function sourceSelectOptionPathIsPublic(
 ): boolean {
   const optionAttributes = readSourceStructuralAttributes(option);
   if (
-    option.localName.toLowerCase() !== 'option' ||
+    sourceLocalName(option).toLowerCase() !== 'option' ||
     sourceAttributesArePrivate(optionAttributes) ||
     isSourceActivationRoleValue(optionAttributes.role) ||
     isSourceSelectEntryVisuallyHidden(option)
   ) return false;
   let current = option.parentElement;
-  while (current && current.localName.toLowerCase() !== 'select') {
-    if (current.localName.toLowerCase() !== 'optgroup') {
+  while (current && sourceLocalName(current).toLowerCase() !== 'select') {
+    if (sourceLocalName(current).toLowerCase() !== 'optgroup') {
       if (!isSourceSelectWrapper(current)) return false;
       current = current.parentElement;
       continue;
@@ -2397,7 +2516,7 @@ function sourceSelectOptionPathIsPublic(
     if (
       isSourceSelectEntryVisuallyHidden(current) ||
       sourceElementStartsPrivateRegionInContext(
-        current.localName,
+        sourceLocalName(current),
         attributes,
         true,
       ) ||
@@ -2409,14 +2528,14 @@ function sourceSelectOptionPathIsPublic(
     (!expectedSelect || current === expectedSelect) &&
     !isSourceSelectEntryVisuallyHidden(current) &&
     isEligibleSourceSelect(
-      current.localName,
+      sourceLocalName(current),
       readSourceStructuralAttributes(current),
     ) &&
     sourceSelectLabelSubtreeIsPublic(option);
 }
 
 export function isSourceSelectLabelElementPublic(element: Element): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (tagName !== 'option' && tagName !== 'optgroup') return false;
   const attributes = readSourceStructuralAttributes(element);
   if (
@@ -2424,7 +2543,8 @@ export function isSourceSelectLabelElementPublic(element: Element): boolean {
     isSourceActivationRoleValue(attributes.role) ||
     !isSourceElementInsideNativeSelect(element)
   ) return false;
-  const parentTag = readSourceSelectEntryOwner(element)?.localName.toLowerCase();
+  const owner = readSourceSelectEntryOwner(element);
+  const parentTag = owner ? sourceLocalName(owner).toLowerCase() : undefined;
   if (
     (tagName === 'optgroup' && parentTag !== 'select') ||
     (tagName === 'option' && parentTag !== 'select' && parentTag !== 'optgroup')
@@ -2444,7 +2564,7 @@ const MAX_SOURCE_SELECT_WRAPPER_DEPTH = 16;
  * makes what it holds private, or that acts, is not passed.
  */
 export function isSourceSelectWrapper(element: Element): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (
     element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
     tagName === 'select' || tagName === 'option' || tagName === 'optgroup' ||
@@ -2463,11 +2583,11 @@ export function isSourceSelectWrapper(element: Element): boolean {
  * when what is between them is not a plain wrapper, or there are too many.
  */
 export function readSourceSelectEntryOwner(entry: Element): Element | undefined {
-  const group = entry.localName.toLowerCase() === 'optgroup';
+  const group = sourceLocalName(entry).toLowerCase() === 'optgroup';
   let outer: Element | undefined;
   let current = entry.parentElement;
   for (let depth = 0; current && depth <= MAX_SOURCE_SELECT_WRAPPER_DEPTH; depth += 1) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'select') return outer ?? current;
     if (tagName === 'optgroup') {
       if (group) return undefined;
@@ -2489,11 +2609,11 @@ export function readSourceSelectEntryOwner(entry: Element): Element | undefined 
 export function readSourceSelectEntries(
   owner: Element,
 ): readonly Element[] | undefined {
-  const ownerTag = owner.localName.toLowerCase();
+  const ownerTag = sourceLocalName(owner).toLowerCase();
   if (ownerTag !== 'select' && ownerTag !== 'optgroup') return undefined;
   let wrapped = false;
   for (let child = owner.firstElementChild; child; child = child.nextElementSibling) {
-    const tagName = child.localName.toLowerCase();
+    const tagName = sourceLocalName(child).toLowerCase();
     if (tagName === 'option' || tagName === 'optgroup') continue;
     if (
       isSourceSelectWrapper(child) &&
@@ -2517,7 +2637,7 @@ export function readSourceSelectEntries(
     const { element, depth } = pending.pop()!;
     inspected += 1;
     if (inspected > MAX_SOURCE_SELECT_DESCENDANTS) break;
-    const tagName = element.localName.toLowerCase();
+    const tagName = sourceLocalName(element).toLowerCase();
     if (tagName === 'option') {
       entries.push(element);
     } else if (tagName === 'optgroup') {
@@ -2539,7 +2659,7 @@ function directOptgroupLegend(element: Element): Element | undefined {
   for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
     inspected += 1;
     if (inspected > MAX_SOURCE_SELECT_LABEL_DESCENDANTS) return undefined;
-    if (child.localName.toLowerCase() === 'legend') return child;
+    if (sourceLocalName(child).toLowerCase() === 'legend') return child;
   }
   return undefined;
 }
@@ -2552,7 +2672,7 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
         element, undefined, undefined, selectLabelWalk?.secretAncestors,
       )
     ) return false;
-    const rootTag = element.localName.toLowerCase();
+    const rootTag = sourceLocalName(element).toLowerCase();
     const rootAttributes = readSourceStructuralAttributes(element);
     if (
       SOURCE_NON_CONTENT_TAGS.has(rootTag) ||
@@ -2571,7 +2691,7 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
       inspected += 1;
       if (inspected > MAX_SOURCE_SELECT_LABEL_DESCENDANTS) return false;
       if (isSourceSelectEntryVisuallyHidden(descendant)) continue;
-      const descendantTag = descendant.localName.toLowerCase();
+      const descendantTag = sourceLocalName(descendant).toLowerCase();
       const descendantAttributes = readSourceStructuralAttributes(descendant);
       if (
         hasSourceCredentialSecretAncestor(
@@ -2613,7 +2733,7 @@ function readBoundedSourceSelectText(element: Element): string | undefined {
     inspected += 1;
     if (inspected > MAX_SOURCE_SELECT_LABEL_NODES) break;
     if (
-      current.nodeType === Node.ELEMENT_NODE &&
+      sourceNodeType(current) === Node.ELEMENT_NODE &&
       isSourceSelectEntryVisuallyHidden(current as Element)
     ) {
       while (current && current !== element && !current.nextSibling) {
@@ -2623,7 +2743,7 @@ function readBoundedSourceSelectText(element: Element): string | undefined {
       current = current.nextSibling;
       continue;
     }
-    if (current.nodeType === Node.TEXT_NODE) {
+    if (sourceNodeType(current) === Node.TEXT_NODE) {
       // A directly slotted Text node can render under a credential boundary
       // that is absent from its DOM-parent chain. Classify its flat-tree
       // ancestry before evaluating nodeValue.
@@ -2722,7 +2842,7 @@ export function hasSourcePrivateElementAncestor(element: Element): boolean {
   if (!path) return true;
   for (const current of path) {
     if (sourceElementStartsPrivateRegionInContext(
-      current.localName,
+      sourceLocalName(current),
       readSourceStructuralAttributes(current),
       isSourceOptionInsideNativeSelect(current),
     )) return true;
@@ -2797,7 +2917,7 @@ function readSourceUnmemoizedPath(
 } | undefined {
   try {
     const path: Element[] = [];
-    let current = node.nodeType === 1
+    let current = sourceNodeType(node) === 1
       ? node as Element
       : readSourceFlatTreeParentElement(node);
     while (current) {
@@ -2855,7 +2975,7 @@ export function hasSourceCredentialSecretAncestor(
       })();
   if (!unmemoized) {
     classifier.classify(node, {
-      tagName: node.nodeType === 3 ? '#text' : '#node',
+      tagName: sourceNodeType(node) === 3 ? '#text' : '#node',
       secretAncestor: true,
     });
     return true;
@@ -2897,7 +3017,7 @@ export function hasSourceCredentialSecretAncestor(
     if (computedStyleUnreadable) computedTextSecurity = 'simul-unreadable';
     const attributes = readSourceStructuralAttributes(current);
     const category = classifier.classify(current, {
-      tagName: current.localName,
+      tagName: sourceLocalName(current),
       type: attributes.type,
       autocomplete: attributes.autocomplete,
       role: attributes.role,
@@ -2918,9 +3038,9 @@ export function hasSourceCredentialSecretAncestor(
   // Elements are classified while walking `path`. A directly slotted Text
   // node is not an element path member, so persist the same document-lifetime
   // decision on its own identity before any caller may read its content.
-  if (secretAncestor && node.nodeType !== 1) {
+  if (secretAncestor && sourceNodeType(node) !== 1) {
     classifier.classify(node, {
-      tagName: node.nodeType === 3 ? '#text' : '#node',
+      tagName: sourceNodeType(node) === 3 ? '#text' : '#node',
       secretAncestor: true,
     });
   }
@@ -2938,11 +3058,11 @@ export function hasSourcePrivateOrActivationElementAncestor(
   for (const current of path) {
     if (
       sourceElementStartsPrivateRegionInContext(
-        current.localName,
+        sourceLocalName(current),
         readSourceStructuralAttributes(current),
         isSourceOptionInsideNativeSelect(current),
       ) ||
-      isSourcePrivateTagName(current.localName) ||
+      isSourcePrivateTagName(sourceLocalName(current)) ||
       isSourceActivationTagName(current.tagName) ||
       isSourceActivationRoleValue(current.getAttribute('role'))
     ) return true;
@@ -2963,7 +3083,7 @@ export function hasSourceControlOrEditableElementAncestor(
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
   for (const current of path) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     const attributes = readSourceStructuralAttributes(current);
     const nativeNavigation = (tagName === 'a' || tagName === 'area') &&
       safelyHasSourceAttribute(current, 'href');
@@ -2999,11 +3119,11 @@ export function hasSourceImageCaptureBlockingAncestor(
     const role = attributes.role;
     if (
       sourceElementStartsPrivateRegionInContext(
-        current.localName,
+        sourceLocalName(current),
         attributes,
         isSourceOptionInsideNativeSelect(current),
       ) ||
-      isSourcePrivateTagName(current.localName) ||
+      isSourcePrivateTagName(sourceLocalName(current)) ||
       (
         !options.allowActivationControls &&
         isSourceActivationTagName(current.tagName)
@@ -3030,7 +3150,7 @@ function isSourceHttpNavigationAnchor(element: Element): boolean {
   try {
     if (
       element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
-      element.localName.toLowerCase() !== 'a'
+      sourceLocalName(element).toLowerCase() !== 'a'
     ) return false;
     if (
       SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES.some((attribute) =>
@@ -3061,7 +3181,7 @@ function isSourceHttpNavigationAnchor(element: Element): boolean {
 
 function isSourceElementInsideNativeSelect(element: Element): boolean {
   for (let current = element.parentElement; current; current = current.parentElement) {
-    const tagName = current.localName.toLowerCase();
+    const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'select') {
       return isEligibleSourceSelect(
         tagName,

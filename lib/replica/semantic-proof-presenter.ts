@@ -4,8 +4,11 @@ import {
   type ReadOnlyReplicaDisclosure,
 } from './read-only-disclosure';
 import {
+  changedReplicaRegion,
+  resolvedProofTouchesRegion,
   sameResolvedSemanticSourceProof,
   semanticProofSetComesFromBatch,
+  semanticProofSetComesFromScopedRefresh,
   semanticSourceProofIdentityOfResolved,
   type ResolvedSemanticSourceProof,
 } from './semantic-source-receiver';
@@ -21,7 +24,12 @@ export interface SemanticProofPresenterOptions {
 
 /** Applies only receiver-resolved state and owns every reversible DOM change. */
 export class SemanticProofPresenter {
-  readonly #cleanups: Array<() => void> = [];
+  /**
+   * What takes each proof's state down, by proof id, in the order put up
+   * (D185: kept by proof, so that a refresh puts up again only the proofs a
+   * live patch touched).
+   */
+  readonly #cleanups = new Map<string, () => void>();
   /**
    * The site menus shown, by proof id, each with what takes it down (D179):
    * kept apart from the other cleanups so that a batch can change one menu
@@ -50,6 +58,10 @@ export class SemanticProofPresenter {
     if (semanticProofSetComesFromBatch(proofs) && this.#applyMenusInPlace(proofs)) {
       return true;
     }
+    if (
+      semanticProofSetComesFromScopedRefresh(proofs) &&
+      this.#applyTouchedInPlace(proofs)
+    ) return true;
     try {
       this.options.beforeApply?.();
     } catch {
@@ -73,6 +85,35 @@ export class SemanticProofPresenter {
       }
     }
     return false;
+  }
+
+  /**
+   * Before a live patch: takes down the site menus on or around what the
+   * patch will change, and only those (D185). A menu's controller writes on
+   * its trigger and panel; one the patch writes over is put up again after
+   * it. The others stay up through the patch: the engine's own pass leaves
+   * them (`survivesRefresh`) unless their nodes are gone. With a region too
+   * large to walk, every menu is taken down.
+   */
+  takeDownMenusTouching(roots: readonly Node[]): void {
+    if (this.#menus.size === 0) return;
+    const region = changedReplicaRegion(roots);
+    const resolvedById = new Map<string, ResolvedSemanticSourceProof>();
+    if (region) {
+      for (const resolved of this.#proofs) {
+        resolvedById.set(semanticSourceProofIdentityOfResolved(resolved), resolved);
+      }
+    }
+    for (const [proofId, installed] of [...this.#menus]) {
+      const resolved = resolvedById.get(proofId);
+      if (region && resolved && !resolvedProofTouchesRegion(resolved, region)) continue;
+      this.#menus.delete(proofId);
+      try {
+        installed.dispose();
+      } catch {
+        // The next presentation puts the menu up again or presents whole.
+      }
+    }
   }
 
   clear(): void {
@@ -139,11 +180,17 @@ export class SemanticProofPresenter {
       this.#proofs = Object.freeze([...proofs]);
       return true;
     }
+    // The menu's relation (`aria-controls`, `aria-expanded`, the panel's
+    // id) is written by its typed proof, and is written again with it
+    // (D185: a menu the page opened kept the `aria-expanded` it had).
     for (const proofId of [...goneMenus, ...changedMenus]) {
       const installed = this.#menus.get(proofId);
       this.#menus.delete(proofId);
+      const cleanup = this.#cleanups.get(proofId);
+      this.#cleanups.delete(proofId);
       try {
         installed?.dispose();
+        cleanup?.();
       } catch {
         // Continue: the menu is shown again or the set is presented whole.
       }
@@ -151,11 +198,107 @@ export class SemanticProofPresenter {
     for (const proofId of changedMenus) {
       const resolved = next.get(proofId);
       if (resolved?.kind !== 'structural-menu') return false;
+      const cleanup = applyTypedProof(resolved, new Set());
+      if (!cleanup) return false;
+      this.#cleanups.set(proofId, cleanup);
       const installed = installStructuralMenuDisclosure(resolved);
       // Presented whole instead, which takes down what was put up here.
       if (!installed) return false;
       this.#menus.set(proofId, installed);
     }
+    this.#proofs = Object.freeze([...proofs]);
+    return true;
+  }
+
+  /**
+   * After a live patch, puts up again only the proofs the refresh resolved
+   * again, and the menus the patch took down (D185). Every proof used to be
+   * taken down and put up again at each patch: on a page of 3,000 menus,
+   * every change of one label. A proof that is the same object as the one
+   * shown was not touched by the patch, and what was written for it stands.
+   * Anything that the engine's own pass reads (a dropdown's shape or state,
+   * a disclosure's relation, the popovers' order), or a set with no
+   * interactive proof, is presented whole (false). The engine's pass has run
+   * with the patch, so it is not run again here.
+   */
+  #applyTouchedInPlace(proofs: readonly ResolvedSemanticSourceProof[]): boolean {
+    if (!this.#firewallCleanup) return false;
+    const previous = new Map<string, ResolvedSemanticSourceProof>();
+    const previousPopovers: string[] = [];
+    for (const resolved of this.#proofs) {
+      const proofId = semanticSourceProofIdentityOfResolved(resolved);
+      previous.set(proofId, resolved);
+      if (resolved.kind === 'popover-open') previousPopovers.push(proofId);
+    }
+    const next = new Map<string, ResolvedSemanticSourceProof>();
+    const nextPopovers: string[] = [];
+    let interactive = false;
+    const changed: string[] = [];
+    for (const resolved of proofs) {
+      const proofId = semanticSourceProofIdentityOfResolved(resolved);
+      if (next.has(proofId)) return false;
+      next.set(proofId, resolved);
+      if (resolved.kind === 'popover-open') nextPopovers.push(proofId);
+      interactive ||= resolved.kind === 'select-presentation' ||
+        resolved.kind === 'disclosure-state' ||
+        resolved.kind === 'structural-menu';
+      const before = previous.get(proofId);
+      if (resolved.kind === 'structural-menu') {
+        const installed = this.#menus.get(proofId);
+        if (before !== resolved || !installed || installed.isDisposed()) {
+          changed.push(proofId);
+        }
+        continue;
+      }
+      if (before === resolved && this.#cleanups.has(proofId)) continue;
+      if (!PUT_UP_ALONE.has(resolved.kind)) return false;
+      changed.push(proofId);
+    }
+    const gone: string[] = [];
+    for (const [proofId, resolved] of previous) {
+      if (next.has(proofId)) continue;
+      if (resolved.kind !== 'structural-menu' && !PUT_UP_ALONE.has(resolved.kind)) {
+        return false;
+      }
+      gone.push(proofId);
+    }
+    if (
+      !interactive ||
+      previousPopovers.join('\u0000') !== nextPopovers.join('\u0000')
+    ) return false;
+    for (const proofId of [...gone, ...changed]) {
+      const installed = this.#menus.get(proofId);
+      this.#menus.delete(proofId);
+      const cleanup = this.#cleanups.get(proofId);
+      this.#cleanups.delete(proofId);
+      try {
+        installed?.dispose();
+        cleanup?.();
+      } catch {
+        // Continue: the proof is put up again or the set is presented whole.
+      }
+    }
+    const presentedSelects = new Set<number>();
+    for (const resolved of proofs) {
+      if (resolved.kind === 'select-presentation') presentedSelects.add(resolved.proof.nodeId);
+    }
+    // What each proof writes, a menu's relation included, then the menus'
+    // controllers, as a whole presentation does.
+    for (const proofId of changed) {
+      const resolved = next.get(proofId)!;
+      const cleanup = applyTypedProof(resolved, presentedSelects);
+      // Presented whole instead, which takes down what was put up here.
+      if (!cleanup) return false;
+      this.#cleanups.set(proofId, cleanup);
+    }
+    for (const proofId of changed) {
+      const resolved = next.get(proofId)!;
+      if (resolved.kind !== 'structural-menu') continue;
+      const installed = installStructuralMenuDisclosure(resolved);
+      if (!installed) return false;
+      this.#menus.set(proofId, installed);
+    }
+    this.#presentPopovers(proofs);
     this.#proofs = Object.freeze([...proofs]);
     return true;
   }
@@ -228,13 +371,13 @@ export class SemanticProofPresenter {
       for (const resolved of selectPresentations) {
         const cleanup = applyTypedProof(resolved, presentedSelects);
         if (!cleanup) throw new Error('Typed semantic proof could not apply.');
-        this.#cleanups.push(cleanup);
+        this.#cleanups.set(semanticSourceProofIdentityOfResolved(resolved), cleanup);
       }
       for (const resolved of proofs) {
         if (resolved.kind === 'select-presentation') continue;
         const cleanup = applyTypedProof(resolved, presentedSelects);
         if (!cleanup) throw new Error('Typed semantic proof could not apply.');
-        this.#cleanups.push(cleanup);
+        this.#cleanups.set(semanticSourceProofIdentityOfResolved(resolved), cleanup);
       }
       this.#presentPopovers(proofs);
       if (hasInteractiveProof) {
@@ -285,14 +428,14 @@ export class SemanticProofPresenter {
     this.#ancestorCleanup = undefined;
     this.#firewallCleanup?.();
     this.#firewallCleanup = undefined;
-    for (let index = this.#cleanups.length - 1; index >= 0; index -= 1) {
+    for (const cleanup of [...this.#cleanups.values()].reverse()) {
       try {
-        this.#cleanups[index]?.();
+        cleanup();
       } catch {
         // Continue restoring every independent renderer-owned state slot.
       }
     }
-    this.#cleanups.length = 0;
+    this.#cleanups.clear();
     if (notify) {
       try {
         this.options.afterApply?.();
@@ -302,6 +445,17 @@ export class SemanticProofPresenter {
     }
   }
 }
+
+/**
+ * What a refresh may put up again by itself (D185): state written on its
+ * own element that the engine's pass does not read. A dropdown's shape and
+ * state, a disclosure's relation and a popover go through a whole
+ * presentation.
+ */
+const PUT_UP_ALONE = new Set<ResolvedSemanticSourceProof['kind']>([
+  'choice-state', 'masked-length', 'control-state', 'aria-state',
+  'aria-relationship', 'tab-state',
+]);
 
 function applyTypedProof(
   resolved: ResolvedSemanticSourceProof,
@@ -689,6 +843,10 @@ function installStructuralMenuDisclosure(
       panel,
       presentation: 'inline',
       manageTriggerExpanded: true,
+      // The engine's pass after a live patch leaves it up unless its nodes
+      // are gone (D185): one the patch touches is taken down before it
+      // (`takeDownMenusTouching`), and the refresh puts it up again.
+      survivesRefresh: true,
       openOnHover: opensOnHover,
       shownByPage: proof.expanded,
       initiallyOpen: opensOnHover && (

@@ -27,6 +27,8 @@
  * (`probeSourceShadowRoot`).
  */
 
+import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+
 /** `chrome.dom.openOrClosedShadowRoot`, or a stand-in under test. */
 export type SourceShadowRootReader = (
   element: HTMLElement,
@@ -149,7 +151,7 @@ export function chromeSourceShadowRootReader(): SourceShadowRootReader | undefin
  */
 export function canHostAuthorShadowRoot(element: Element): boolean {
   if (element.namespaceURI !== HTML_NAMESPACE) return false;
-  const name = element.localName;
+  const name = sourceLocalName(element);
   if (name === 'body') {
     return element.ownerDocument?.contentType !== 'application/pdf';
   }
@@ -247,12 +249,12 @@ export function askAboutSourceShadowRootsAbove(
   for (let steps = 0; current && steps < MAX_SOURCE_ROOT_CHAIN; steps += 1) {
     if (asked.has(current)) return found;
     asked.add(current);
-    const own = current.nodeType === 1 ? (current as Element).shadowRoot : null;
+    const own = sourceNodeType(current) === 1 ? (current as Element).shadowRoot : null;
     if (own) {
       if (!activeLedger?.noted.has(own) && noteOwnSourceShadowRoot(current as Element, own)) {
         found.push(own);
       }
-    } else if (current.nodeType === 1) {
+    } else if (sourceNodeType(current) === 1) {
       const element = current as Element;
       const ledger = sourceShadowRootLedger(element.ownerDocument);
       const at = ledger?.absent.get(element);
@@ -295,7 +297,7 @@ export function askAboutSourceShadowRootsWithin(
     if (budget.nodes <= 0) return undefined;
     budget.nodes -= 1;
     asked.add(current);
-    if (current.nodeType === 1) {
+    if (sourceNodeType(current) === 1) {
       const element = current as Element;
       let root = element.shadowRoot ?? undefined;
       if (root) {
@@ -319,7 +321,7 @@ export function askAboutSourceShadowRootsWithin(
 
 /** Whether a node is a shadow root, open or closed. */
 export function isSourceShadowRoot(node: Node): node is ShadowRoot {
-  return node.nodeType === 11 &&
+  return sourceNodeType(node) === 11 &&
     (node as ShadowRoot).host?.nodeType === 1;
 }
 
@@ -339,7 +341,7 @@ export function readSourceAssignedSlot(node: Node): Element | null | undefined {
   }).assignedSlot;
   if (own !== null || installedLedgers === 0) return own;
   const parent = node.parentNode;
-  if (!parent || parent.nodeType !== 1) return null;
+  if (!parent || sourceNodeType(parent) !== 1) return null;
   const host = parent as Element;
   // The common case: the parent is known to have no closed root.
   const at = activeLedger?.absent.get(host);
@@ -370,7 +372,7 @@ export function readSourceAssignedSlot(node: Node): Element | null | undefined {
     }
     return assigned.get(node) ?? null;
   }
-  const name = node.nodeType === 1
+  const name = sourceNodeType(node) === 1
     ? (node as Element).getAttribute('slot') ?? ''
     : '';
   for (const slot of slots) {

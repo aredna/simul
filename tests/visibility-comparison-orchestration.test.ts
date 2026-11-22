@@ -525,6 +525,53 @@ describe('the comparison of what the page paints, in slices (D164)', () => {
     expect(target.probe()).toBe(compared + 1);
   });
 
+  it('answers a comparison of text changes from the styles kept, only where text cannot restyle (D186)', () => {
+    const run = (sheets: unknown[], animations: unknown[] = []) => {
+      const target = fixture(SMALL, { tick: 0, sheets });
+      const document = target.byId('first').ownerDocument as Document & {
+        getAnimations?: () => unknown[];
+      };
+      Object.defineProperty(document, 'getAnimations', {
+        configurable: true,
+        value: () => animations,
+      });
+      onTestFinished(() => {
+        delete (document as unknown as Record<string, unknown>).getAnimations;
+      });
+      target.open();
+      target.runTimers();
+      const text = target.byId('first').firstChild as Text;
+      const reads: number[] = [];
+      for (const value of ['Two ', 'Three ', 'Four ']) {
+        const before = target.probe();
+        target.ack();
+        target.mutate(textRecord(text, value));
+        target.flushFrames();
+        reads.push(target.probe() - before);
+      }
+      // A class change is compared with styles read again.
+      const before = target.probe();
+      target.ack();
+      target.mutate(attributeRecord(target.byId('panel'), 'class', ''));
+      target.flushFrames();
+      reads.push(target.probe() - before);
+      return reads;
+    };
+    // The first text change keeps what it reads; the next two answer from it.
+    expect(run([sheet('.gone { display: none }')])).toEqual([1, 0, 0, 1]);
+    // A pseudo-class that reads text, a container query, a sheet that cannot
+    // be named, or something that animates: read every time.
+    expect(run([sheet('.gone { display: none } main:has(.x) { display: none }')]))
+      .toEqual([1, 1, 1, 1]);
+    // `:empty` reads only whether there is text: a text that stays text
+    // cannot change it.
+    expect(run([sheet('.gone { display: none } p:empty { display: none }')]))
+      .toEqual([1, 0, 0, 1]);
+    expect(run([sheet('@container (width > 1px) { .gone { display: none } }')]))
+      .toEqual([1, 1, 1, 1]);
+    expect(run([sheet('.gone { display: none }')], [{}])).toEqual([1, 1, 1, 1]);
+  });
+
   it('compares at once for a class a hiding rule names, while the share owes little (D180)', () => {
     const target = fixture(SMALL, {
       tick: 1,

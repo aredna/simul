@@ -7,6 +7,7 @@ import {
   createSourceStyleNames,
   createSourceStyleSheetCollection,
   sourceClassChangeNamesHidingRule,
+  sourceTextChangeMayRestyle,
   sourceVisibilityEventMaySkip,
   sourceVisibilityMutationMaySkip,
   type SourceStyleNames,
@@ -114,6 +115,38 @@ describe('the classes of the rules that hide (D180)', () => {
     expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'class', 'wide'), names)).toBe(true);
     expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'data-x', null), names)).toBe(false);
     expect(sourceClassChangeNamesHidingRule(attributeRecord(target, 'class', 'wide'), undefined)).toBe(false);
+  });
+});
+
+describe('whether a change of text alone can restyle (D186)', () => {
+  it('can where a sheet reads text or layout, or cannot be named', () => {
+    expect(sourceTextChangeMayRestyle(namesOf('.a { color: red } p > b { opacity: 0 }'))).toBe(false);
+    for (const text of [
+      'p:empty { display: none }', 'main:has(.x) { color: red }',
+      'b:dir(rtl) { color: red }', 'textarea:placeholder-shown + p { display: none }',
+      'input:invalid ~ p { display: none }',
+      '@container (width > 30em) { .a { display: none } }',
+      '.a:\\65 mpty { color: red }', '@\\63 ontainer (width > 1px) {}',
+    ]) {
+      expect(sourceTextChangeMayRestyle(namesOf(text)), text).toBe(true);
+    }
+    expect(sourceTextChangeMayRestyle(undefined)).toBe(true);
+  });
+
+  it('reads `:empty` and the states of a field only where the text can move them', () => {
+    const { document } = parseHTML('<p id="p">text</p><textarea id="t">draft</textarea>');
+    const record = (text: Text, oldValue: string | null) =>
+      ({ type: 'characterData', target: text, oldValue }) as unknown as MutationRecord;
+    const p = document.getElementById('p')!.firstChild as unknown as Text;
+    const t = document.getElementById('t')!.firstChild as unknown as Text;
+    const empty = namesOf('b:empty { display: none } i:blank { display: none }');
+    expect(sourceTextChangeMayRestyle(empty, [record(p, 'old')])).toBe(false);
+    expect(sourceTextChangeMayRestyle(empty, [record(p, '')])).toBe(true);
+    expect(sourceTextChangeMayRestyle(empty, [record(p, '   ')])).toBe(true);
+    expect(sourceTextChangeMayRestyle(empty, [record(p, null)])).toBe(true);
+    const fields = namesOf('textarea:invalid { outline: 0 }');
+    expect(sourceTextChangeMayRestyle(fields, [record(p, 'old')])).toBe(false);
+    expect(sourceTextChangeMayRestyle(fields, [record(t, 'old')])).toBe(true);
   });
 });
 

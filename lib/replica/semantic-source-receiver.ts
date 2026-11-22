@@ -1,4 +1,14 @@
 import type { ReplicaTextProjection } from '../translation/replica-translation-coordinator';
+import type { HtmlMirrorPatchOperation } from './html-mirror-protocol';
+import {
+  cssRulesReach,
+  styleSheetTextReach,
+  widerReach,
+  type PageLinkedSheets,
+  type ReplicaSelectorReach,
+} from './style-sheet-reach';
+
+export { styleSheetTextReach, type ReplicaSelectorReach } from './style-sheet-reach';
 import type {
   ReplicaSourceTextChange,
   ReplicaSourceTextRecord,
@@ -12,6 +22,7 @@ import {
   type SourceClassificationFacts,
 } from './source-secret-classifier';
 import {
+  SEMANTIC_PAGE_EDITOR_MARK,
   applySemanticSourceOrderPlacements,
   semanticSourceProofIdentity,
   semanticSourceProofSignature,
@@ -39,6 +50,7 @@ import {
   structuralMenuPanelCandidates,
   type StructuralMenuOpening,
 } from './structural-menu-shape';
+import { sourceChildNodeList, sourceLocalName, sourceNodeType } from './source-node-accessors';
 
 export interface SemanticSourceReceiverEnvironment {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -50,6 +62,11 @@ export interface SemanticSourceReceiverEnvironment {
   ) => boolean;
   /** Told how many records and proofs a committed batch dropped (D96). */
   readonly reportDroppedItems?: (records: number, proofs: number) => void;
+  /**
+   * Takes down, before a live patch, what the presenter shows on or around
+   * the nodes the patch will change (D185); see `beforeLivePatch`.
+   */
+  readonly takeDownTouchedProofs?: (roots: readonly Node[]) => void;
 }
 
 export type ResolvedSemanticSourceProof =
@@ -169,6 +186,245 @@ const SEMANTIC_SELECTION_TEXT = new WeakMap<Element, string>();
  */
 const PROOF_SETS_FROM_BATCHES = new WeakSet<readonly ResolvedSemanticSourceProof[]>();
 
+/**
+ * The proof sets a refresh that asked only what a live patch touched hands
+ * to `applyProofs` (D185). A proof in such a set that is the same object as
+ * the one presented before was not touched: its node, its panel and what
+ * the presenter wrote on them are as they were. One the refresh resolved
+ * again is a new object, put up again.
+ */
+const PROOF_SETS_FROM_SCOPED_REFRESHES =
+  new WeakSet<readonly ResolvedSemanticSourceProof[]>();
+
+export function semanticProofSetComesFromScopedRefresh(
+  proofs: readonly ResolvedSemanticSourceProof[],
+): boolean {
+  return PROOF_SETS_FROM_SCOPED_REFRESHES.has(proofs);
+}
+
+/** What a live patch touched in the replica, for `refreshBindings` (D185). */
+export interface SemanticRefreshScope {
+  /** The node each operation names, as the replica holds it after the patch. */
+  readonly roots: readonly Node[];
+  /**
+   * A sheet, a `<style>` or `<link>`, or the viewport changed: a style may
+   * have changed anywhere, so everything is asked again.
+   */
+  readonly styleChanged: boolean;
+}
+
+/**
+ * The scope of a live patch (D185): the replica node each operation names
+ * and whether it may have changed a style beyond them. The patch is applied
+ * before this is asked.
+ */
+export function semanticRefreshScope(
+  operations: readonly HtmlMirrorPatchOperation[],
+  resolveNode: (nodeId: number) => Node | undefined,
+): SemanticRefreshScope {
+  const roots: Node[] = [];
+  let styleChanged = false;
+  for (const operation of operations) {
+    // The viewport: a media query may change any style.
+    if (operation.kind === 'dimensions') {
+      styleChanged = true;
+      continue;
+    }
+    if (
+      operation.kind === 'attributes' &&
+      (operation.resolvedStyleSheetText !== undefined ||
+        STYLE_ELEMENT_TAGS.has(operation.tagName.toLowerCase()))
+    ) styleChanged = true;
+    const node = resolveNode(operation.nodeId);
+    // Gone in the same patch: what it held is disconnected, and an entry
+    // there is asked again for that.
+    if (!node) continue;
+    const element = sourceNodeType(node) === 1 ? node as Element : node.parentElement;
+    if (element && STYLE_ELEMENT_TAGS.has(sourceLocalName(element).toLowerCase())) {
+      styleChanged = true;
+    }
+    roots.push(node);
+  }
+  return Object.freeze({ roots: Object.freeze(roots), styleChanged });
+}
+
+const STYLE_ELEMENT_TAGS = new Set(['style', 'link']);
+/** How many nodes a scoped refresh walks before it asks everything (D185). */
+const MAX_CHANGED_REGION_NODES = 20_000;
+const MAX_CHANGED_REGION_ROOTS = 512;
+
+export interface ChangedReplicaRegion {
+  /** Every node at or below a root, as drawn: roots, slots and their nodes. */
+  readonly inside: ReadonlySet<Node>;
+  /** Every element above a root, as drawn: what holds a change. */
+  readonly around: ReadonlySet<Node>;
+}
+
+/**
+ * The nodes a patch's roots hold and the elements that hold them, as the
+ * replica draws them (D185). Undefined, so everything is asked, when the
+ * region is past its bound, holds a `<style>` or a `<link>`, or cannot be
+ * read. A slot's root host is taken whole: the nodes it was assigned before
+ * are drawn elsewhere now.
+ */
+export function changedReplicaRegion(
+  roots: readonly Node[],
+): ChangedReplicaRegion | undefined {
+  if (roots.length > MAX_CHANGED_REGION_ROOTS) return undefined;
+  const inside = new Set<Node>();
+  const around = new Set<Node>();
+  try {
+    const pending: Node[] = [];
+    for (const root of roots) {
+      pending.push(root);
+      if (sourceNodeType(root) === 1 && sourceLocalName((root as Element)).toLowerCase() === 'slot') {
+        const host = (root.getRootNode() as Partial<ShadowRoot>).host;
+        if (host) pending.push(host);
+      }
+    }
+    for (const root of pending) {
+      for (
+        let current = readSourceFlatTreeParentElement(root);
+        current && !around.has(current);
+        current = readSourceFlatTreeParentElement(current)
+      ) around.add(current);
+    }
+    while (pending.length > 0) {
+      const node = pending.pop()!;
+      if (inside.has(node)) continue;
+      inside.add(node);
+      if (inside.size > MAX_CHANGED_REGION_NODES) return undefined;
+      if (sourceNodeType(node) === 11) {
+        pending.push(...sourceChildNodeList(node));
+        continue;
+      }
+      if (sourceNodeType(node) !== 1) continue;
+      const element = node as Element;
+      const tagName = sourceLocalName(element).toLowerCase();
+      if (STYLE_ELEMENT_TAGS.has(tagName)) return undefined;
+      pending.push(...sourceChildNodeList(element));
+      if (element.shadowRoot) pending.push(element.shadowRoot);
+      if (tagName === 'slot') {
+        const assigned = (element as Partial<HTMLSlotElement>).assignedNodes;
+        if (typeof assigned === 'function') pending.push(...assigned.call(element));
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return { inside, around };
+}
+
+/** Simul's own sheets in the frame, which hold no rule of the page's. */
+function isSimulOwnedStyle(element: Element): boolean {
+  return element.hasAttribute('data-simul-owned-shell') ||
+    element.hasAttribute('data-simul-owned-shadow-shell') ||
+    element.hasAttribute('data-simul-owned-select-style');
+}
+
+const DATA_CSS_PREFIX = /^data:text\/css(?:;charset=utf-8)?,/iu;
+
+/**
+ * How far the replica's sheets let a change reach (D188): every `<style>`,
+ * stylesheet `<link>` and adopted sheet of the document and of the shadow
+ * roots it holds, read once after a change of style. A link sheet the frame
+ * cannot read counts as far as the page says it reaches (`page`, D191);
+ * one the page has not read either (not readable, still loading) reaches
+ * everywhere.
+ */
+export function replicaSelectorReach(
+  document: Document,
+  page?: PageLinkedSheets,
+): ReplicaSelectorReach {
+  let reach: ReplicaSelectorReach = 'subtree';
+  try {
+    const owners: Array<Document | ShadowRoot> = [document];
+    for (let index = 0; index < owners.length; index += 1) {
+      const owner = owners[index]!;
+      for (const sheet of (owner as Partial<DocumentOrShadowRoot>).adoptedStyleSheets ?? []) {
+        reach = widerReach(reach, cssRulesReach(sheet));
+      }
+      for (const element of Array.from(owner.querySelectorAll('*'))) {
+        if (reach === 'everything') return reach;
+        if (element.shadowRoot) owners.push(element.shadowRoot);
+        const tagName = sourceLocalName(element).toLowerCase();
+        if (tagName === 'style') {
+          if (isSimulOwnedStyle(element)) continue;
+          const text = element.textContent ?? '';
+          const sheet = (element as Partial<HTMLStyleElement>).sheet;
+          reach = widerReach(reach, /@import\b/iu.test(text) && sheet
+            ? cssRulesReach(sheet)
+            : styleSheetTextReach(text));
+        } else if (tagName === 'link') {
+          if (!/(?:^|\s)stylesheet(?:\s|$)/iu.test(element.getAttribute('rel') ?? '')) continue;
+          const href = element.getAttribute('href') ?? '';
+          if (DATA_CSS_PREFIX.test(href)) {
+            reach = widerReach(
+              reach,
+              styleSheetTextReach(decodeURIComponent(href.replace(DATA_CSS_PREFIX, ''))),
+            );
+            continue;
+          }
+          const sheet = (element as Partial<HTMLLinkElement>).sheet;
+          let own: ReplicaSelectorReach | undefined;
+          try {
+            own = sheet ? cssRulesReach(sheet) : undefined;
+          } catch {
+            own = undefined;
+          }
+          if (own !== undefined) {
+            reach = widerReach(reach, own);
+            continue;
+          }
+          // A sheet of another origin, which the frame may not read: the
+          // page's word for it, where the page read it (D191).
+          const listed = page !== undefined &&
+            [href, (element as Partial<HTMLLinkElement>).href ?? '']
+              .some((value) => value !== '' && page.hrefs.includes(value));
+          reach = widerReach(reach, listed ? page.reach : 'everything');
+        }
+      }
+    }
+  } catch {
+    return 'everything';
+  }
+  return reach;
+}
+
+/**
+ * The roots, and the siblings after each, and after the element that holds
+ * a text root, whose `:empty` it changes (D188): what `+` and `~` reach.
+ */
+function withFollowingSiblings(roots: readonly Node[]): readonly Node[] {
+  const widened = new Set<Node>(roots);
+  for (const root of roots) {
+    const from = sourceNodeType(root) === 1 ? root : root.parentElement;
+    for (let sibling = from?.nextSibling; sibling; sibling = sibling.nextSibling) {
+      if (widened.size > MAX_CHANGED_REGION_ROOTS) return [...widened];
+      widened.add(sibling);
+    }
+  }
+  return [...widened];
+}
+
+/** Whether a resolved proof names a node in the region or one that holds it. */
+export function resolvedProofTouchesRegion(
+  resolved: ResolvedSemanticSourceProof,
+  region: ChangedReplicaRegion,
+): boolean {
+  const touches = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(touches);
+    if (!('nodeType' in value)) return false;
+    const node = value as Node;
+    return !node.isConnected || region.inside.has(node) || region.around.has(node);
+  };
+  for (const [key, value] of Object.entries(resolved)) {
+    if (key !== 'proof' && touches(value)) return true;
+  }
+  return false;
+}
+
 export function semanticProofSetComesFromBatch(
   proofs: readonly ResolvedSemanticSourceProof[],
 ): boolean {
@@ -271,7 +527,20 @@ export class SemanticSourceReceiver {
     if (!changes) return undefined;
     this.#lastSequence = batch.sequence;
     this.#lastBatch = whole;
+    this.#notePageLinkedSheets(batch.linkedSheets);
     return changes;
+  }
+
+  /** What the page said last of its stylesheet links (D191). */
+  #pageLinkedSheets: PageLinkedSheets | undefined;
+
+  #notePageLinkedSheets(next: PageLinkedSheets | undefined): void {
+    const key = (value: PageLinkedSheets | undefined): string =>
+      value ? `${value.reach}\u0000${value.hrefs.join('\u0000')}` : '';
+    if (key(next) === key(this.#pageLinkedSheets)) return;
+    this.#pageLinkedSheets = next;
+    // Read again at the next scoped refresh, with the page's word.
+    this.#selectorReach = undefined;
   }
 
   /**
@@ -670,14 +939,66 @@ export class SemanticSourceReceiver {
    * Called after base replay patches. Unsafe or disconnected bindings are
    * purged; safe translated/source presentations are reasserted.
    */
+  /**
+   * Before a live patch that may change more than text: the presenter takes
+   * down what it shows on or around `roots`, the nodes the patch names, and
+   * leaves the rest up (D185). `refreshBindings` puts it up again after.
+   */
+  beforeLivePatch(roots: readonly Node[]): void {
+    try {
+      this.environment.takeDownTouchedProofs?.(roots);
+    } catch {
+      // The presenter takes down everything at its next whole presentation.
+    }
+  }
+
+  /**
+   * How far the replica's sheets let a change reach (D188), read again
+   * after a change of style and after a refresh of everything.
+   */
+  #selectorReach: ReplicaSelectorReach | undefined;
+
+  /**
+   * What a refresh asks again: the region of what the patch touched, and,
+   * where a sheet has a sibling combinator, the siblings after it (D188).
+   * Undefined, so everything is asked, without a scope, at a change of
+   * style, where a sheet has `:has()` or cannot be read, or past the bound.
+   */
+  #changedRegion(scope: SemanticRefreshScope | undefined): ChangedReplicaRegion | undefined {
+    if (!scope || scope.styleChanged) {
+      this.#selectorReach = undefined;
+      return undefined;
+    }
+    this.#selectorReach ??= replicaSelectorReach(
+      this.environment.replicaDocument,
+      this.#pageLinkedSheets,
+    );
+    if (this.#selectorReach === 'everything') return undefined;
+    const region = changedReplicaRegion(this.#selectorReach === 'siblings'
+      ? withFollowingSiblings(scope.roots)
+      : scope.roots);
+    // A `<style>` among what changed, or a region too large: the sheets
+    // are read again before the next scoped refresh.
+    if (!region) this.#selectorReach = undefined;
+    return region;
+  }
+
   refreshBindings(
     refreshProofPresentation = true,
+    /**
+     * What the live patch touched (D185). Without it, with a change of
+     * style, or with more than a bounded region, everything is asked again.
+     */
+    scope?: SemanticRefreshScope,
   ): readonly ReplicaSourceTextChange[] {
     // A node that has gone may come back, as one that never came may arrive.
     this.#missingNodeNotes = this.#missingNodeIds;
     this.#passSecretAncestors = new Map();
     try {
-      return this.#refreshBindings(refreshProofPresentation);
+      return this.#refreshBindings(
+        refreshProofPresentation,
+        this.#changedRegion(scope),
+      );
     } finally {
       this.#missingNodeNotes = undefined;
       this.#passSecretAncestors = undefined;
@@ -686,9 +1007,15 @@ export class SemanticSourceReceiver {
 
   #refreshBindings(
     refreshProofPresentation: boolean,
+    region: ChangedReplicaRegion | undefined,
   ): readonly ReplicaSourceTextChange[] {
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
+      // Outside what the patch touched nothing an entry is checked by has
+      // changed (D185): its node, the element that shows it, the boxes
+      // around it and their styles are as they were when it was checked.
+      const target = entry.binding.target;
+      if (region && target.isConnected && !region.inside.has(target)) continue;
       if (this.#entryIsStillSafe(entry) && entry.binding.reapply()) continue;
       const rebound = this.#rebind(entry);
       if (rebound) {
@@ -717,6 +1044,13 @@ export class SemanticSourceReceiver {
     if (!refreshProofPresentation) return Object.freeze(changes);
     const retainedProofs = new Map<string, ResolvedSemanticSourceProof>();
     for (const resolved of this.#proofs.values()) {
+      // A proof none of whose nodes the patch touched, or holds what it
+      // touched, is kept as it was resolved (D185): the same object, which
+      // the presenter leaves up as it is.
+      if (region && !resolvedProofTouchesRegion(resolved, region)) {
+        retainedProofs.set(semanticSourceProofIdentity(resolved.proof), resolved);
+        continue;
+      }
       const refreshed = this.#resolveProof(resolved.proof);
       if (refreshed) {
         retainedProofs.set(semanticSourceProofIdentity(resolved.proof), refreshed);
@@ -737,9 +1071,9 @@ export class SemanticSourceReceiver {
     }
     let presented = true;
     try {
-      presented = this.environment.applyProofs?.(
-        Object.freeze([...retainedProofs.values()]),
-      ) ?? true;
+      const retained = Object.freeze([...retainedProofs.values()]);
+      if (region) PROOF_SETS_FROM_SCOPED_REFRESHES.add(retained);
+      presented = this.environment.applyProofs?.(retained) ?? true;
     } catch {
       presented = false;
     }
@@ -785,8 +1119,8 @@ export class SemanticSourceReceiver {
     const binding = this.#entries.get(nodeId)?.binding;
     if (!binding) return undefined;
     const { target, presentation } = binding;
-    if (target.nodeType === 3) return target.parentElement ?? undefined;
-    return target.nodeType === 1 && presentation !== 'editable'
+    if (sourceNodeType(target) === 3) return target.parentElement ?? undefined;
+    return sourceNodeType(target) === 1 && presentation !== 'editable'
       ? target as Element
       : undefined;
   }
@@ -938,12 +1272,12 @@ export class SemanticSourceReceiver {
   ): ResolvedSemanticSourceProof | undefined {
     if (proof.kind === 'select-state') {
       const target = this.#resolveElement(proof.nodeId);
-      if (!target || target.localName.toLowerCase() !== 'select' ||
+      if (!target || sourceLocalName(target).toLowerCase() !== 'select' ||
         !this.#proofTargetIsSafe(target, true)) return undefined;
       const selectedOptions: HTMLOptionElement[] = [];
       for (const nodeId of proof.selectedOptionNodeIds) {
         const option = this.#resolveElement(nodeId);
-        if (!option || option.localName.toLowerCase() !== 'option' ||
+        if (!option || sourceLocalName(option).toLowerCase() !== 'option' ||
           option.ownerDocument !== target.ownerDocument ||
           !target.contains(option) || !this.#proofTargetIsSafe(option, false)) {
           return undefined;
@@ -959,7 +1293,7 @@ export class SemanticSourceReceiver {
     }
     if (proof.kind === 'select-presentation') {
       const target = this.#resolveElement(proof.nodeId);
-      if (!target || target.localName.toLowerCase() !== 'select' ||
+      if (!target || sourceLocalName(target).toLowerCase() !== 'select' ||
         !this.#proofTargetIsSafe(target, false)) return undefined;
       return Object.freeze({
         kind: proof.kind,
@@ -970,7 +1304,7 @@ export class SemanticSourceReceiver {
     if (proof.kind === 'choice-state') {
       const target = this.#resolveElement(proof.nodeId);
       const type = target ? safeAttribute(target, 'type').trim().toLowerCase() : '';
-      if (!target || target.localName.toLowerCase() !== 'input' ||
+      if (!target || sourceLocalName(target).toLowerCase() !== 'input' ||
         (type !== 'checkbox' && type !== 'radio') ||
         (type === 'radio' && proof.indeterminate) ||
         !this.#proofTargetIsSafe(target, true)) return undefined;
@@ -985,7 +1319,7 @@ export class SemanticSourceReceiver {
       // field must simply be one that draws its value as text.
       const target = this.#resolveElement(proof.nodeId);
       if (!target || !isMaskableInputFacts({
-        tagName: target.localName.toLowerCase(),
+        tagName: sourceLocalName(target).toLowerCase(),
         type: safeAttribute(target, 'type'),
       })) return undefined;
       return Object.freeze({
@@ -1255,7 +1589,7 @@ export class SemanticSourceReceiver {
       !target.isConnected
     ) return undefined;
     const element = evidenceElement(target, record);
-    if (!element || element.localName.toLowerCase() !== record.tagName) {
+    if (!element || sourceLocalName(element).toLowerCase() !== record.tagName) {
       if (
         record.category === 'editable' && record.presentation === 'text' &&
         (this.#unplacedEditorTextNotes?.length ?? MAX_UNPLACED_EDITOR_TEXT) <
@@ -1263,17 +1597,20 @@ export class SemanticSourceReceiver {
       ) this.#unplacedEditorTextNotes?.push(record);
       return undefined;
     }
-    const facts = this.#classificationFacts(element, record.presentation);
+    const facts = withPageEditorFact(
+      this.#classificationFacts(element, record.presentation),
+      record,
+    );
     const stickyCategory = this.#classifier.classify(element, facts);
     if (sourceFactsAreSecret(facts) ||
       !replicaCategoryIsConsistent(record.category, classifySourceEvidence(facts)) ||
       stickyCategory === 'secret') return undefined;
-    if (record.presentation === 'text' && target.nodeType !== 3) return undefined;
+    if (record.presentation === 'text' && sourceNodeType(target) !== 3) return undefined;
     if ((record.presentation === 'value' || record.presentation === 'placeholder') &&
-      element.localName.toLowerCase() !== 'input' &&
-      element.localName.toLowerCase() !== 'textarea') return undefined;
+      sourceLocalName(element).toLowerCase() !== 'input' &&
+      sourceLocalName(element).toLowerCase() !== 'textarea') return undefined;
     if (record.presentation === 'selection' &&
-      element.localName.toLowerCase() !== 'select') return undefined;
+      sourceLocalName(element).toLowerCase() !== 'select') return undefined;
     return target;
   }
 
@@ -1284,12 +1621,12 @@ export class SemanticSourceReceiver {
       target.ownerDocument !== this.environment.replicaDocument
     ) return false;
     const element = evidenceElement(target, entry.sourceRecord);
-    if (!element || element.localName.toLowerCase() !== entry.sourceRecord.tagName) {
+    if (!element || sourceLocalName(element).toLowerCase() !== entry.sourceRecord.tagName) {
       return false;
     }
-    const facts = this.#classificationFacts(
-      element,
-      entry.sourceRecord.presentation,
+    const facts = withPageEditorFact(
+      this.#classificationFacts(element, entry.sourceRecord.presentation),
+      entry.sourceRecord,
     );
     const stickyCategory = this.#classifier.classify(element, facts);
     return !sourceFactsAreSecret(facts) &&
@@ -1337,14 +1674,14 @@ export class SemanticSourceReceiver {
     presentation: SemanticSourcePresentation,
   ): SemanticBinding | undefined {
     if (presentation === 'text') return textBinding(target);
-    if (target.nodeType !== 1) return undefined;
+    if (sourceNodeType(target) !== 1) return undefined;
     const element = target as Element;
     if (presentation === 'value') return propertyBinding(element, 'value');
     if (presentation === 'placeholder') {
       return propertyBinding(element, 'placeholder');
     }
     if (presentation === 'label') {
-      const tag = element.localName.toLowerCase();
+      const tag = sourceLocalName(element).toLowerCase();
       if (tag === 'option' || tag === 'optgroup') {
         return attributeBinding(element, 'label');
       }
@@ -1540,7 +1877,7 @@ function replicaClassificationFacts(
   }
   if (computedStyleUnreadable) computedTextSecurity = 'simul-unreadable';
   return {
-    tagName: element.localName.toLowerCase(),
+    tagName: sourceLocalName(element).toLowerCase(),
     type: safeAttribute(element, 'type'),
     autocomplete: safeAttribute(element, 'autocomplete'),
     role: safeAttribute(element, 'role'),
@@ -1602,7 +1939,7 @@ const RECEIVER_DISCLOSURE_STATE_ROLES = new Set([
 ]);
 
 function receiverControlCanBeDisabled(element: Element): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   const role = safeAttribute(element, 'role').trim().toLowerCase();
   return RECEIVER_DISABLEABLE_TAGS.has(tagName) ||
     RECEIVER_CONTROL_ROLES.has(role);
@@ -1618,7 +1955,7 @@ function receiverAriaStateMatches(
   // the attribute wherever the page wrote it.
   if (state === 'expanded') return true;
   const role = safeAttribute(element, 'role').trim().toLowerCase();
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (state === 'selected') return RECEIVER_ARIA_SELECTED_ROLES.has(role);
   if (state === 'checked') {
     return RECEIVER_ARIA_CHECKED_ROLES.has(role) &&
@@ -1637,7 +1974,7 @@ function receiverAriaStateMatches(
 }
 
 function receiverDisclosureTriggerIsSafe(element: Element): boolean {
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   const role = safeAttribute(element, 'role').trim().toLowerCase();
   if (tagName === 'button' || tagName === 'summary' ||
     RECEIVER_ACTIVATION_ROLES.has(role)) return true;
@@ -1750,23 +2087,23 @@ function receiverUniqueBoundedPanelId(panel: Element): string | undefined {
     return undefined;
   }
   const root = panel.getRootNode();
-  const pending: Node[] = root.nodeType === 9
+  const pending: Node[] = sourceNodeType(root) === 9
     ? [((root as Document).documentElement as Node | null)].filter(
         (node): node is Node => Boolean(node),
       )
-    : [...root.childNodes];
+    : [...sourceChildNodeList(root)];
   let visited = 0;
   let match: Element | undefined;
   while (pending.length > 0) {
     const node = pending.pop();
     if (!node || ++visited > 50_000) return undefined;
-    if (node.nodeType !== 1) continue;
+    if (sourceNodeType(node) !== 1) continue;
     const element = node as Element;
     if (safeAttribute(element, 'id') === id) {
       if (match) return undefined;
       match = element;
     }
-    pending.push(...element.childNodes);
+    pending.push(...sourceChildNodeList(element));
   }
   return match === panel ? id : undefined;
 }
@@ -1802,13 +2139,13 @@ function receiverDisclosureSubtreeIsSafe(
     if (!node || ++visited > maxNodes || node.ownerDocument !== panel.ownerDocument) {
       return false;
     }
-    if (node.nodeType === 11) {
-      pending.push(...node.childNodes);
+    if (sourceNodeType(node) === 11) {
+      pending.push(...sourceChildNodeList(node));
       continue;
     }
-    if (node.nodeType !== 1) continue;
+    if (sourceNodeType(node) !== 1) continue;
     const element = node as Element;
-    const tagName = element.localName.toLowerCase();
+    const tagName = sourceLocalName(element).toLowerCase();
     const role = safeAttribute(element, 'role').trim().toLowerCase();
     const contentEditable = safeContentEditable(element).trim().toLowerCase();
     if (!classify(element)) return false;
@@ -1819,7 +2156,7 @@ function receiverDisclosureSubtreeIsSafe(
         (contentEditable !== '' && contentEditable !== 'false')
       )
     ) return false;
-    pending.push(...element.childNodes);
+    pending.push(...sourceChildNodeList(element));
     try {
       if (element.shadowRoot?.mode === 'open') pending.push(element.shadowRoot);
       // What a slot is assigned is drawn in the panel, though it is the
@@ -1840,24 +2177,46 @@ function evidenceElement(
   record: SemanticSourceRecord,
 ): Element | undefined {
   if (record.presentation !== 'text') {
-    return target.nodeType === 1 ? target as Element : undefined;
+    return sourceNodeType(target) === 1 ? target as Element : undefined;
   }
   if (record.category !== 'editable') return target.parentElement ?? undefined;
   // The editor the text is drawn in: above it in the page's own tree, around
   // the slot that takes it, or the host of the root it sits in.
+  // An editor the page made without the attribute (D192) is the nearest
+  // element of the record's tag: the page names it, the mirror cannot.
+  const pageEditor = record.contentEditable === SEMANTIC_PAGE_EDITOR_MARK;
   for (const element of readSourceFlatTreeElementPath(target) ?? []) {
     const contentEditable = safeContentEditable(element).trim().toLowerCase();
     const role = safeAttribute(element, 'role').trim().toLowerCase();
     if (
       (contentEditable !== '' && contentEditable !== 'false') ||
-      role === 'textbox' || role === 'searchbox'
+      role === 'textbox' || role === 'searchbox' ||
+      (pageEditor && sourceLocalName(element).toLowerCase() === record.tagName)
     ) return element;
   }
   return undefined;
 }
 
+/**
+ * The facts of the element a record's text is checked by, with the page's
+ * word that it is an editor where the page made it without the attribute
+ * (D192): an editor's text is editor text, never page text, so the secret
+ * checks, which come first, and the scope's gate for editor text decide.
+ */
+function withPageEditorFact(
+  facts: SourceClassificationFacts,
+  record: SemanticSourceRecord,
+): SourceClassificationFacts {
+  if (
+    record.category !== 'editable' || record.presentation !== 'text' ||
+    record.contentEditable !== SEMANTIC_PAGE_EDITOR_MARK ||
+    (facts.contentEditable ?? '') !== ''
+  ) return facts;
+  return { ...facts, contentEditable: SEMANTIC_PAGE_EDITOR_MARK };
+}
+
 function textBinding(target: Node): SemanticBinding | undefined {
-  if (target.nodeType !== 3) return undefined;
+  if (sourceNodeType(target) !== 3) return undefined;
   let original = target.nodeValue;
   let lastWritten: string | undefined;
   return {

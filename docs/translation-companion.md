@@ -1011,10 +1011,18 @@ shell and the mirror has nothing to copy (D103).
     (an id and their order, D184): the surface makes them one record, the
     pieces' text joined, so the translator gets the line as one text, and
     splits the translation across them in reading order
-    (`splitAcrossPieces`): each takes the share of the words its width
-    has of all the pieces', at word boundaries (characters where the text
-    has no spaces). Each piece's font then shrinks to fit as any block's
-    does. A line's flow does not continue onto the line below. A line whose words are all covered is
+    (`splitAcrossPieces`): each takes the share of the text its room has
+    of all the pieces', at word boundaries (characters where the text has
+    no spaces), the text measured in the first piece's font on a canvas
+    (`PdfView.measureText`, characters where it cannot be, D189). Each
+    piece's font then shrinks to fit as any block's does, and the pieces
+    of one line take the smallest size any of them needed (D189). Where
+    the cut line runs on into the block below it, that block is the
+    flow's last part, its room its width times its lines (D189): the line
+    must not end a sentence, the block must start at once below it where
+    the line starts and end no further right, and it must be the only
+    block there, so two columns or a caption beside leave the line alone.
+    A line whose words are all covered is
     left out, and so is a piece with no letter or digit (a dash between
     typed words). Beside a line that is mostly typed text (which D111 left
     out whole), a piece of a single letter or digit is left out too: it is
@@ -1260,9 +1268,11 @@ shell and the mirror has nothing to copy (D103).
         under its 56 px toolbar at every zoom, so the bridge takes the zoom
         as the viewer's height (viewport and toolbar) over the tab's
         `innerHeight`, and sends the scrollbar times it and the scale over
-        it (`pdfViewerPageZoom`, D184). A viewport as tall as the tab is a
-        hidden toolbar at 100%; under another zoom a hidden toolbar reads
-        a little high.
+        it (`pdfViewerPageZoom`, D184). A toolbar the PDF's address hides
+        (`#toolbar=0`) leaves the viewport the viewer's whole height, which
+        is then the height taken (`pdfViewerShowsToolbar`, D189: 83% had
+        read as 89%). A viewport as tall as the tab is a toolbar hidden
+        some other way at 100%.
       - Chrome 158 also fits a PDF to width beside a scrollbar a pixel
         narrower than the tab's (965 px of PDF in a view of 979 beside 15),
         which a default zoom of 120% or more opens a wide PDF in. A PDF
@@ -1372,6 +1382,10 @@ shell and the mirror has nothing to copy (D103).
       CPU slowdown tried (none, 4 and 8 times), and none passed for steps
       (D184): the scrollbar's whole pixels make its frames 2 to 3 px
       unequal, and the first frame after the grab is of another length.
+      A wheel step over half a page (a default zoom of 175% makes
+      Chrome's steps that long) cannot be read either: the wheel's events
+      go to the viewer's frame, not to the tab's document the bridge runs
+      in, so nothing tells the step's length but the reports (D189).
       A lone report at a page key's step from the place before that also
       fits the top or the bottom of the PDF is a doubt (D177): Home or
       End with no animation send one report, which can land there. That is

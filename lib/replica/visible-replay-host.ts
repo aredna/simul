@@ -1,5 +1,7 @@
 import { displayScale } from '../display-scale';
 import type { MirrorDisplayMode } from '../preferences';
+import { isReadOnlyReplicaDisclosureEvent } from './read-only-disclosure';
+import { ReplicaPaneWheelLatch } from './replica-pane-wheel';
 import {
   MAX_SCROLL_PANES,
   PRIMARY_SCROLL_MAX,
@@ -155,6 +157,13 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #readerScroll: { readonly left: number; readonly top: number } | undefined;
   /** The last source position the replica followed, to tell real moves apart. */
   #lastFollowedScroll: VisibleReplayScroll | undefined;
+  /**
+   * The node ids of the panes the tab can scroll, at their start or not,
+   * from its last `paneBoxes` (D186): what the wheel is tested against.
+   */
+  #wheelPaneIds: readonly number[] = [];
+  /** The wheel gesture under way, kept with what it began on (D193). */
+  readonly #wheelLatch = new ReplicaPaneWheelLatch();
   #disposed = false;
   #resizeObserver: ResizeObserver | undefined;
 
@@ -325,6 +334,44 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     }
   }
 
+  /**
+   * Keeps the panes the tab says the reader can scroll (D186), whether or
+   * not the mirror follows the tab's scrolling: the wheel over one of them
+   * scrolls it in the mirror.
+   */
+  notePaneBoxes(
+    paneBoxes: { readonly boxes: readonly { readonly nodeId: number }[] } | undefined,
+  ): void {
+    if (!paneBoxes) return;
+    const ids: number[] = [];
+    for (const box of paneBoxes.boxes) {
+      if (ids.length >= MAX_SCROLL_PANES) break;
+      if (Number.isSafeInteger(box.nodeId)) ids.push(box.nodeId);
+    }
+    this.#wheelPaneIds = ids;
+  }
+
+  /**
+   * The wheel inside the replica's frame (D186): the pane under it scrolls
+   * and the mirror does not; with no pane that can move, the event goes on
+   * to the guard that scrolls the mirror.
+   */
+  #onReplicaWheel(candidate: CandidateLease, event: WheelEvent): void {
+    if (
+      this.#committed !== candidate || candidate.released ||
+      this.#wheelPaneIds.length === 0 ||
+      isReadOnlyReplicaDisclosureEvent(event)
+    ) return;
+    const panes: HTMLElement[] = [];
+    for (const nodeId of this.#wheelPaneIds) {
+      const element = candidate.paneElement(nodeId);
+      if (element) panes.push(element);
+    }
+    if (!this.#wheelLatch.route(event, panes)) return;
+    if (event.cancelable) event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
   /** The document, a pane standing in for it, or the pinch zoom moved. */
   #followPage(scroll: VisibleReplayScroll): void {
     this.#readerScroll = undefined;
@@ -375,6 +422,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#sourcePanes = new Map();
     this.#sourcePaneList = undefined;
     this.#primaryPane = undefined;
+    this.#wheelPaneIds = [];
     this.#hasSourceScroll = false;
     this.#sourceVisual = NO_VISUAL_ZOOM;
     this.#readerScroll = undefined;
@@ -531,6 +579,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       };
       this.#projectScroll(candidate);
     });
+    this.#wheelLatch.reset();
+    candidate.installWheelListener((event) => this.#onReplicaWheel(candidate, event));
     this.#applyLayout(candidate);
 
     // Reveal the already-connected candidate synchronously. Never move its
@@ -807,6 +857,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
   projectedScroll: { readonly left: number; readonly top: number } | undefined;
   canvasBackgroundColor: string | undefined;
   #scrollListener: (() => void) | undefined;
+  #wheelListener: { readonly view: Window; readonly listener: (event: WheelEvent) => void } | undefined;
 
   constructor(
     private readonly host: VisibleReplayHost,
@@ -918,12 +969,32 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.scroller.addEventListener('scroll', listener, { passive: true });
   }
 
+  /**
+   * Hears the wheel inside the replica's frame before the frame's own
+   * guards do (on its window, in the capture phase), D186.
+   */
+  installWheelListener(listener: (event: WheelEvent) => void): void {
+    const view = this.iframe?.contentWindow;
+    if (!view || typeof view.addEventListener !== 'function') return;
+    view.addEventListener('wheel', listener, { capture: true, passive: false });
+    this.#wheelListener = { view, listener };
+  }
+
   release(): void {
     if (this.released) return;
     this.released = true;
     if (this.#scrollListener) {
       this.scroller.removeEventListener('scroll', this.#scrollListener);
       this.#scrollListener = undefined;
+    }
+    if (this.#wheelListener) {
+      const { view, listener } = this.#wheelListener;
+      try {
+        view.removeEventListener('wheel', listener, true);
+      } catch {
+        // A frame that is gone holds no listener.
+      }
+      this.#wheelListener = undefined;
     }
     this.resolveNode = undefined;
     this.placedPanes.clear();

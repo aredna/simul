@@ -742,6 +742,37 @@ describe('source visibility boundary index', () => {
     index.dispose();
   });
 
+  it('takes no change of the root\'s own box for a change of the page (D183)', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <p id="text">Page text</p><dialog id="search">Search box</dialog>
+    </body></html>`);
+    const html = document.documentElement as unknown as HTMLElement;
+    installPositivePaintRects(document);
+    // A search dialog locks the page: the root's own box leaves the view.
+    Object.defineProperty(html, 'getClientRects', {
+      configurable: true,
+      value: () => paintRectList(html.classList.contains('locked')
+        ? []
+        : [{ left: 0, right: 100 }]),
+    });
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: () => paintedStyle(),
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+    html.classList.add('locked');
+    expect(index.refreshMutations([attributeRecord(html, 'class')]))
+      .toEqual({ changedTargets: [], overflow: false });
+    html.classList.remove('locked');
+    expect(index.refreshMutations([attributeRecord(html, 'class')]))
+      .toEqual({ changedTargets: [], overflow: false });
+    index.dispose();
+  });
+
   it('reads each element paint input once during a full mutation scan', () => {
     const { document, window } = parseHTML(`<html><body>
       <img id="slide"><section><span>Public panel text</span></section>
@@ -887,6 +918,64 @@ describe('source visibility boundary index', () => {
       changedTargets: [],
       overflow: false,
     });
+    index.dispose();
+  });
+
+  it('answers a comparison of a text change from the styles the last one kept, and reads the boxes (D186)', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <div id="clip" class="clip"><p id="line">Some text</p></div>
+      <p id="other">Other</p></body></html>`);
+    const line = document.querySelector<HTMLElement>('#line')!;
+    const text = line.firstChild as Text;
+    let lineRects = paintRectList([{ left: 0, right: 100 }]);
+    installPositivePaintRects(document);
+    Object.defineProperty(line, 'getClientRects', {
+      configurable: true,
+      value: () => lineRects,
+    });
+    let styleReads = 0;
+    let lineHidden = false;
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        styleReads += 1;
+        return paintedStyle({
+          display: element === line && lineHidden ? 'none' : 'block',
+        });
+      },
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+    const compare = (options: { keepStyles?: boolean; stylesUnchanged?: boolean }) =>
+      index.beginRefreshMutations([characterDataRecord(text)], options).step(() => false)!;
+
+    // The first keeps what it reads; the next answers from it.
+    styleReads = 0;
+    compare({ keepStyles: true });
+    expect(styleReads).toBeGreaterThan(0);
+    styleReads = 0;
+    text.data = 'Longer text';
+    lineRects = paintRectList([]);
+    expect(compare({ keepStyles: true, stylesUnchanged: true }).changedTargets)
+      .toEqual([line]);
+    expect(styleReads).toBe(0);
+    expect(index.recalledComparisons).toBe(1);
+
+    // Without the caller's word, or after a comparison that kept nothing,
+    // or one of an attribute, the styles are read again.
+    lineRects = paintRectList([{ left: 0, right: 100 }]);
+    compare({ keepStyles: true });
+    expect(styleReads).toBeGreaterThan(0);
+    index.refreshMutations([attributeRecord(line, 'class')]);
+    styleReads = 0;
+    lineHidden = true;
+    expect(compare({ keepStyles: true, stylesUnchanged: true }).changedTargets)
+      .toEqual([line]);
+    expect(styleReads).toBeGreaterThan(0);
+    expect(index.recalledComparisons).toBe(1);
     index.dispose();
   });
 });
