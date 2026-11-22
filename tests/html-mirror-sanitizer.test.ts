@@ -415,6 +415,26 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       expect(read('.a:has(> NOSCRIPT){x:1}'))
         .toBe('.a:has(> :is(NOSCRIPT,:where([data-simul-left-out="noscript"]))){x:1}');
     });
+    it('reads a sheet of many group rules once (D226)', () => {
+      // Wikipedia's main sheet: each `@media` read the rest of the sheet
+      // again, and the page reader never finished it.
+      const group = '@media screen{.a:last-child{x:1}}@supports (x:1){p select{x:1}}';
+      const css = `${group.repeat(60)}li:last-child{x:1}`;
+      const started = performance.now();
+      const out = read(css)!;
+      expect(performance.now() - started).toBeLessThan(2_000);
+      const once = `@media screen{.a:nth-last-child(1 of ${NOT_LABEL}){x:1}}` +
+        `@supports (x:1){p ${STAND_IN}{x:1}}`;
+      expect(out).toBe(`${once.repeat(60)}li:nth-last-child(1 of ${NOT_LABEL}){x:1}`);
+      // A stray `}` in the sheet's own list closes nothing.
+      expect(read('}li:last-child{x:1}')).toBe(`}li:nth-last-child(1 of ${NOT_LABEL}){x:1}`);
+    });
+    it('reads a sheet of many group rules once for cut strings too (D226)', () => {
+      const css = `${'@media screen{.a{color:red}}'.repeat(60)}.b{content:"x\n;color:blue}`;
+      const started = performance.now();
+      expect(read(css)).toBe(`${'@media screen{.a{color:red}}'.repeat(60)}.b{color:blue}`);
+      expect(performance.now() - started).toBeLessThan(2_000);
+    });
     it('writes the bounds of an `@scope` too (D208)', () => {
       expect(read('@scope (.card:last-child) to (select){p{x:1}}')).toBe(
         `@scope (.card:nth-last-child(1 of ${NOT_LABEL})) to (${STAND_IN}){p{x:1}}`,

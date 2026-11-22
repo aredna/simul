@@ -5675,7 +5675,17 @@ function rewriteStandInSelectors(css: string): string {
       }
     }
   };
-  const readList = (index: number, top: boolean, depth: number): number => {
+  // `top`: a list of rules, where a `;` ends no rule; `outermost`: the
+  // sheet's own list, where a stray `}` closes nothing. Every other list
+  // ends at its block's `}`, a group rule's too (D226: a group rule's read
+  // ran on past its `}`, and each group rule after it read the rest of the
+  // sheet again, so a sheet's time doubled with each one).
+  const readList = (
+    index: number,
+    top: boolean,
+    depth: number,
+    outermost = false,
+  ): number => {
     if (depth > MAX_CSS_BAD_STRING_NESTING) return tokens.length;
     while (index < tokens.length) {
       const token = tokens[index]!;
@@ -5684,7 +5694,7 @@ function rewriteStandInSelectors(css: string): string {
         continue;
       }
       if (token.kind === 'close' && token.closer === '}') {
-        if (!top) return index;
+        if (!outermost) return index;
         index += 1;
         continue;
       }
@@ -5726,7 +5736,7 @@ function rewriteStandInSelectors(css: string): string {
     }
     return index;
   };
-  readList(0, true, 0);
+  readList(0, true, 0, true);
   if (edits.length === 0) return css;
   edits.sort((left, right) => left.start - right.start);
   const parts: string[] = [];
@@ -6669,9 +6679,16 @@ export function readCssSheetBadStrings(
   };
   /**
    * Reads a list of rules and declarations from `index` to the closer of
-   * its block (or the end); returns the index of that closer.
+   * its block (or the end); returns the index of that closer. `top`: a list
+   * of rules; `outermost`: the sheet's own, where a stray `}` closes
+   * nothing. A group rule's list ends at its `}` (D226).
    */
-  const readList = (index: number, top: boolean, depth: number): number => {
+  const readList = (
+    index: number,
+    top: boolean,
+    depth: number,
+    outermost = false,
+  ): number => {
     if (depth > MAX_CSS_BAD_STRING_NESTING) throw new Error('nesting');
     while (index < tokens.length) {
       const token = tokens[index]!;
@@ -6680,7 +6697,7 @@ export function readCssSheetBadStrings(
         continue;
       }
       if (token.kind === 'close' && token.closer === '}') {
-        if (!top) return index;
+        if (!outermost) return index;
         index += 1;
         continue;
       }
@@ -6740,7 +6757,7 @@ export function readCssSheetBadStrings(
     return index;
   };
   try {
-    if (!declarationList) readList(0, true, 0);
+    if (!declarationList) readList(0, true, 0, true);
     else {
       // A `}` of the attribute's own closes nothing: what follows is read on.
       for (let index = 0; index < tokens.length; index += 1) {
