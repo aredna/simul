@@ -374,6 +374,27 @@ describe('the first read of a page in slices (D163)', () => {
     expect(target.errors()).toEqual([]);
   });
 
+  it('installs the copy in a task of its own, after the last part (D221)', async () => {
+    const target = fixture(LARGE, { tick: 0.02 });
+    target.start();
+    // What each task posted: the start's, then one list a turn.
+    const tasks: string[][] = [];
+    let seen = 0;
+    const take = (): void => {
+      tasks.push(target.port.posts.slice(seen).map((message) =>
+        (message as { kind: string }).kind.replace('simul:html-mirror-v2:', '')));
+      seen = target.port.posts.length;
+    };
+    await target.settle(take);
+    take();
+    const closing = tasks.findIndex((kinds, index) =>
+      index > 0 && kinds.includes('checkpoint') &&
+      tasks.slice(0, index).some((earlier) => earlier.includes('checkpoint-part')));
+    expect(closing).toBeGreaterThan(0);
+    expect(tasks[closing]).not.toContain('checkpoint-part');
+    expect(tasks[closing - 1]).toContain('checkpoint-part');
+  });
+
   it('resumes the stream at the copy\'s ACK, not the preview\'s, and patches what changed in a part read', async () => {
     const target = fixture(LARGE, { tick: 0.2 });
     const texts = [...target.document.querySelectorAll('section > p:first-child')]

@@ -8681,26 +8681,67 @@ function readSourceSlotRegion(
   if (!slot) {
     return sourceNodeIsUnslotted(child) ? SOURCE_SLOT_REGION_UNSLOTTED : undefined;
   }
-  const kept = known.get(slot);
-  if (kept) return kept;
+  // In a flush, what one read learned of a slot and of the boxes above it
+  // serves every read of it: many roots that reassign their slots at once
+  // had the body, and every box they share, asked again for each (D222).
+  const shared = ambientSlotRegions(controlledContent);
+  const kept = known.get(slot) ?? shared?.regions.get(slot);
+  if (kept) {
+    known.set(slot, kept);
+    return kept;
+  }
   let region = SOURCE_SLOT_REGION_UNREADABLE;
   const path = readSourceFlatTreeElementPath(slot);
   if (path) {
+    const starts = shared?.starts ?? createSourceSlotPathStarts();
     region = Object.freeze({
-      withheld: path.some((current) =>
+      withheld: memoizedPathStartsRegion(path, starts.withheld, (current) =>
         elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent)),
       // A dropdown too: what is slotted into one of its options is not
       // drawn, and nothing inside a dropdown is page text.
-      privacy: path.some((current) =>
+      privacy: memoizedPathStartsRegion(path, starts.privacy, (current) =>
         elementStartsPrivateRegion(current, secretAncestors) ||
         sourceLocalName(current).toLowerCase() === 'select'),
-      activation: path.some(elementStartsActivationRegion),
+      activation: memoizedPathStartsRegion(
+        path,
+        starts.activation,
+        elementStartsActivationRegion,
+      ),
       visibilityHidden:
         readSourceHiddenRegionState(slot, controlledContent).visibilityHidden,
     });
   }
   known.set(slot, region);
+  shared?.regions.set(slot, region);
   return region;
+}
+
+/** Of each element: whether it, or a box above it, starts such a region. */
+interface SourceSlotPathStarts {
+  readonly withheld: Map<Element, boolean>;
+  readonly privacy: Map<Element, boolean>;
+  readonly activation: Map<Element, boolean>;
+}
+
+function createSourceSlotPathStarts(): SourceSlotPathStarts {
+  return { withheld: new Map(), privacy: new Map(), activation: new Map() };
+}
+
+/** What a flush knows of slots under `controlledContent`; see above. */
+function ambientSlotRegions(
+  controlledContent: SourceControlledContentPolicy,
+): {
+  readonly regions: Map<Element, SourceSlotRegion>;
+  readonly starts: SourceSlotPathStarts;
+} | undefined {
+  const memo = ambientWithheldAncestors;
+  if (!memo) return undefined;
+  let known = memo.slots.get(controlledContent);
+  if (!known) {
+    known = { regions: new Map(), starts: createSourceSlotPathStarts() };
+    memo.slots.set(controlledContent, known);
+  }
+  return known;
 }
 
 /**
@@ -8892,6 +8933,11 @@ interface SourceWithheldAncestorMemo {
   readonly privacy: Map<Element, boolean>;
   readonly withheld: Map<SourceControlledContentPolicy, Map<Element, boolean>>;
   readonly privateAttributes: Map<Element, boolean>;
+  /** The boxes around slots (D222); see `readSourceSlotRegion`. */
+  readonly slots: Map<SourceControlledContentPolicy, {
+    readonly regions: Map<Element, SourceSlotRegion>;
+    readonly starts: SourceSlotPathStarts;
+  }>;
 }
 
 let ambientWithheldAncestors: SourceWithheldAncestorMemo | undefined;
@@ -8908,6 +8954,7 @@ export function beginSourceWithheldAncestorWalk(): { end(): void } {
     privacy: new Map(),
     withheld: new Map(),
     privateAttributes: new Map(),
+    slots: new Map(),
   };
   let ended = false;
   return {

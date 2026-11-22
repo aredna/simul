@@ -227,6 +227,12 @@ export interface SourcePaintScanCache {
 export interface SourcePaintStyleMemory {
   readonly facts: WeakMap<Element, SourcePaintStyleFacts>;
   readonly recall: boolean;
+  /**
+   * While recalling: whether `element` is read afresh all the same (D221),
+   * being in what a change of an attribute may have restyled. Its answer
+   * read now is kept in place of the one before.
+   */
+  readonly fresh?: (element: Element) => boolean;
 }
 
 /** What `sourcePaintInputs` takes from an element's computed style. */
@@ -252,6 +258,10 @@ export function createSourcePaintScanCache(
   };
 }
 
+/** The elements a recalling comparison read afresh (D221), by its memory. */
+const sourceStylesReadAfresh =
+  new WeakMap<SourcePaintStyleMemory, WeakSet<Element>>();
+
 /** The style answers of `element`, recalled or read (D186). */
 function sourcePaintStyleFacts(
   element: Element,
@@ -260,8 +270,15 @@ function sourcePaintStyleFacts(
   memory: SourcePaintStyleMemory | undefined,
 ): SourcePaintStyleFacts {
   if (memory?.recall) {
-    const recalled = memory.facts.get(element);
-    if (recalled) return recalled;
+    // Read afresh once a comparison (D221), then recalled as any other.
+    let read = sourceStylesReadAfresh.get(memory);
+    if (memory.fresh?.(element) === true && !read?.has(element)) {
+      if (!read) sourceStylesReadAfresh.set(memory, read = new WeakSet());
+      read.add(element);
+    } else {
+      const recalled = memory.facts.get(element);
+      if (recalled) return recalled;
+    }
   }
   const style = getComputedStyle.call(sourceWindow, element);
   const facts: SourcePaintStyleFacts = {
@@ -326,12 +343,120 @@ export function createSourceControlledContentPolicy(
   sourceDocument: Document | null | undefined,
   sourceWindow: Window | null | undefined = sourceDocumentView(sourceDocument),
   maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
+  reuse?: SourceControlledContentReuse,
 ): SourceControlledContentPolicy {
   return beginSourceControlledContentPolicy(
     sourceDocument,
     sourceWindow,
     maximumNodes,
+    reuse,
   ).step() as SourceControlledContentPolicy;
+}
+
+/**
+ * What the walk of the whole document indexed (D221): every element with an
+ * id, by root and across roots, and every element with `aria-controls`. Kept
+ * with each policy whose walk went to the end, to build the next policy on
+ * while no change since may have moved it. The stages after the walk (the
+ * relations, the tabs, what is painted, what is looked through) read only
+ * the controllers and their panels, and are read again every time.
+ */
+interface SourceControlledContentIndex {
+  readonly root: Element;
+  readonly maximumNodes: number;
+  readonly visited: number;
+  readonly indexedIdBytes: number;
+  readonly idElements: ReadonlySet<Element>;
+  readonly unindexableIdTargets: ReadonlySet<Element>;
+  readonly idsByRoot: ReadonlyMap<Node, ReadonlyMap<string, readonly Element[]>>;
+  readonly idsAcrossRoots: ReadonlyMap<string, readonly Element[]>;
+  readonly controllers: ReadonlySet<Element>;
+  /** The shadow roots the walk went into: changes in them must be heard. */
+  readonly shadowRoots: readonly ShadowRoot[];
+}
+
+const keptSourceControlledIndexes =
+  new WeakMap<SourceControlledContentPolicy, SourceControlledContentIndex>();
+
+/**
+ * A policy to build the next one on, without walking the document again
+ * (D221). The caller vouches that every change since `policy`'s walk began
+ * went through `sourceControlledContentIndexChange` and none moved it: that
+ * it hears the changes in every root the walk went into
+ * (`sourceControlledContentIndexedShadowRoots`), and that no shadow root was
+ * attached since (that makes no record); `addedSince` is the sum of the
+ * nodes those changes put in.
+ */
+export interface SourceControlledContentReuse {
+  readonly policy: SourceControlledContentPolicy;
+  readonly addedSince: number;
+}
+
+/** What a batch of changes does to the walk's index (D221). */
+export interface SourceControlledContentIndexChange {
+  /**
+   * An id or an `aria-controls` written, or an element that bears one put
+   * in or taken out, or more nodes than are checked: the next policy walks
+   * the document again.
+   */
+  readonly moved: boolean;
+  /** The nodes put in, to tell when the walk would pass its bound. */
+  readonly added: number;
+}
+
+/**
+ * Whether `records` may move what the walk of a policy indexed (D221). Any
+ * other change (an attribute other than `id` and `aria-controls`, a text, a
+ * child list that neither puts in nor takes out an element bearing one) may
+ * change what is painted, and the selection of a tab, but those are read
+ * again by every build, from its index on.
+ */
+export function sourceControlledContentIndexChange(
+  records: readonly MutationRecord[],
+): SourceControlledContentIndexChange {
+  let added = 0;
+  let checked = 0;
+  // An element put in or taken out, with what it holds and its open root.
+  const bears = (nodes: NodeList | readonly Node[], count: boolean): boolean => {
+    const pending = Array.from(nodes);
+    while (pending.length > 0) {
+      const node = pending.pop();
+      if (!node) continue;
+      if (checked >= MAX_SOURCE_CONTROLLED_MUTATION_NODES) return true;
+      checked += 1;
+      if (count) added += 1;
+      const type = sourceNodeType(node);
+      if (type === 11) {
+        for (const item of sourceChildNodeList(node)) pending.push(item);
+        continue;
+      }
+      if (type !== 1) continue;
+      const element = node as Element;
+      if (
+        safelyReadSourceAttribute(element, 'id') ||
+        safelyHasSourceAttribute(element, 'aria-controls')
+      ) return true;
+      for (const item of sourceChildNodeList(element)) pending.push(item);
+      const shadowRoot = safelyReadSourceShadowRoot(element);
+      if (shadowRoot) pending.push(shadowRoot);
+    }
+    return false;
+  };
+  for (const record of records) {
+    if (record.type === 'attributes') {
+      const name = record.attributeName?.toLowerCase() ?? '';
+      if (
+        (name === 'id' || name === 'aria-controls') &&
+        !record.attributeNamespace
+      ) return { moved: true, added };
+      continue;
+    }
+    if (record.type !== 'childList') continue;
+    if (bears(record.addedNodes, true) || bears(record.removedNodes, false)) {
+      return { moved: true, added };
+    }
+  }
+  return { moved: false, added };
 }
 
 /** `createSourceControlledContentPolicy`, built a slice at a time (D163). */
@@ -360,12 +485,28 @@ export function beginSourceControlledContentPolicy(
   sourceDocument: Document | null | undefined,
   sourceWindow: Window | null | undefined = sourceDocumentView(sourceDocument),
   maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
+  reuse?: SourceControlledContentReuse,
 ): SourceControlledContentPolicyBuilder {
   return new SlicedSourceControlledContentPolicy(
     sourceDocument,
     sourceWindow,
     maximumNodes,
+    reuse,
   );
+}
+
+/** Whether `policy` keeps the index of a walk that went to the end (D221). */
+export function sourceControlledContentKeepsIndex(
+  policy: SourceControlledContentPolicy,
+): boolean {
+  return keptSourceControlledIndexes.has(policy);
+}
+
+/** The shadow roots the walk of `policy`'s kept index went into (D221). */
+export function sourceControlledContentIndexedShadowRoots(
+  policy: SourceControlledContentPolicy,
+): readonly ShadowRoot[] {
+  return keptSourceControlledIndexes.get(policy)?.shadowRoots ?? [];
 }
 
 class SlicedSourceControlledContentPolicy
@@ -375,14 +516,19 @@ implements SourceControlledContentPolicyBuilder {
   readonly #root: Element | null | undefined;
   readonly #targets = new Map<Element, SourceControlledTargetState>();
   readonly #tabs: SourceControlledTabRelationship[] = [];
-  readonly #controllers = new Set<Element>();
+  // The walk's index: its own, or the one of the policy it is built on
+  // (D221), which no build writes to after its walk.
+  readonly #controllers: Set<Element>;
   readonly #referencedIds = new Set<string>();
-  readonly #idElements = new Set<Element>();
-  readonly #unindexableIdTargets = new Set<Element>();
+  readonly #idElements: Set<Element>;
+  readonly #unindexableIdTargets: Set<Element>;
   readonly #withheldIdRoots = new Set<Node>();
   readonly #withheldTexts = new Set<Node>();
-  readonly #idsByRoot = new Map<Node, Map<string, Element[]>>();
-  readonly #idsAcrossRoots = new Map<string, Element[]>();
+  readonly #idsByRoot: Map<Node, Map<string, Element[]>>;
+  readonly #idsAcrossRoots: Map<string, Element[]>;
+  /** The index this build keeps once its walk ends, if it does. */
+  #keptIndex: SourceControlledContentIndex | undefined;
+  readonly #shadowRoots: ShadowRoot[] = [];
   readonly #pending: Node[] = [];
   #visited = 0;
   #indexedIdBytes = 0;
@@ -406,17 +552,34 @@ implements SourceControlledContentPolicyBuilder {
     sourceDocument: Document | null | undefined,
     sourceWindow: Window | null | undefined,
     maximumNodes: number,
+    reuse?: SourceControlledContentReuse,
   ) {
     this.#sourceWindow = sourceWindow;
     this.#maximumNodes = maximumNodes;
+    const root = sourceDocument
+      ? sourceProperty(sourceDocument, 'documentElement')
+      : undefined;
+    const kept = reuse && keptSourceControlledIndexes.get(reuse.policy);
+    const usable = kept !== undefined && root !== undefined && root !== null &&
+      kept.root === root && kept.maximumNodes === maximumNodes &&
+      Number.isSafeInteger(reuse!.addedSince) && reuse!.addedSince >= 0 &&
+      kept.visited + reuse!.addedSince < maximumNodes;
+    this.#controllers = usable ? kept.controllers as Set<Element> : new Set();
+    this.#idElements = usable ? kept.idElements as Set<Element> : new Set();
+    this.#unindexableIdTargets = usable
+      ? kept.unindexableIdTargets as Set<Element>
+      : new Set();
+    this.#idsByRoot = usable
+      ? kept.idsByRoot as Map<Node, Map<string, Element[]>>
+      : new Map();
+    this.#idsAcrossRoots = usable
+      ? kept.idsAcrossRoots as Map<string, Element[]>
+      : new Map();
     this.#lookThrough = sourceControlledLookThrough(
       this.#targets,
       sourceWindow,
       this.#withheldTexts,
     );
-    const root = sourceDocument
-      ? sourceProperty(sourceDocument, 'documentElement')
-      : undefined;
     this.#root = root;
     if (!root || !Number.isSafeInteger(maximumNodes) || maximumNodes < 1) {
       this.#policy = this.#finish(
@@ -424,6 +587,17 @@ implements SourceControlledContentPolicyBuilder {
         Boolean(root),
         Boolean(root),
       );
+      return;
+    }
+    if (usable) {
+      // Built on the index of a walk no change since may have moved (D221):
+      // on from the relations, which read the page as it is now.
+      this.#keptIndex = kept;
+      this.#visited = kept.visited;
+      this.#indexedIdBytes = kept.indexedIdBytes;
+      this.#stage = 'relations';
+      this.#units = [...this.#controllers];
+      this.#unit = 0;
       return;
     }
     this.#pending.push(root);
@@ -486,6 +660,18 @@ implements SourceControlledContentPolicyBuilder {
       this.#stage = 'relations';
       this.#units = [...this.#controllers];
       this.#unit = 0;
+      this.#keptIndex = Object.freeze({
+        root: this.#root as Element,
+        maximumNodes: this.#maximumNodes,
+        visited: this.#visited,
+        indexedIdBytes: this.#indexedIdBytes,
+        idElements: this.#idElements,
+        unindexableIdTargets: this.#unindexableIdTargets,
+        idsByRoot: this.#idsByRoot,
+        idsAcrossRoots: this.#idsAcrossRoots,
+        controllers: this.#controllers,
+        shadowRoots: Object.freeze(this.#shadowRoots),
+      });
     }
     if (this.#stage === 'relations') {
       while (this.#unit < this.#units.length) {
@@ -544,7 +730,9 @@ implements SourceControlledContentPolicyBuilder {
       this.#lookThrough(this.#units[this.#unit] as Element, paintCache);
       this.#unit += 1;
     }
-    return this.#finish(this.#withheldIdRoots, this.#unresolved, false);
+    const policy = this.#finish(this.#withheldIdRoots, this.#unresolved, false);
+    if (this.#keptIndex) keptSourceControlledIndexes.set(policy, this.#keptIndex);
+    return policy;
   }
 
   /** One node of the walk: its id and `aria-controls`, and what it holds. */
@@ -586,7 +774,10 @@ implements SourceControlledContentPolicyBuilder {
     // and the page was refused as too large.
     for (const item of sourceChildNodeList(element)) pending.push(item);
     const shadowRoot = safelyReadSourceShadowRoot(element);
-    if (shadowRoot) pending.push(shadowRoot);
+    if (shadowRoot) {
+      pending.push(shadowRoot);
+      this.#shadowRoots.push(shadowRoot);
+    }
   }
 
   /** The panels one controller names, and how. */
@@ -1865,8 +2056,11 @@ function readSourceElementDisplay(
     if (typeof getComputedStyle !== 'function') return NOT_DISPLAYED;
     // Kept answers first (D186); the visibility is read only for what is
     // displayed.
-    const recalled = paintCache.styles?.recall
-      ? paintCache.styles.facts.get(element)
+    const styles = paintCache.styles;
+    // Recalling, every answer goes through the memory (D221): what a change
+    // of an attribute may have restyled is read, and kept for the next.
+    const recalled = styles?.recall
+      ? sourcePaintStyleFacts(element, sourceWindow!, getComputedStyle, styles)
       : undefined;
     const style = recalled ?? getComputedStyle.call(sourceWindow, element);
     const display = recalled ? recalled.display : style.display.trim().toLowerCase();

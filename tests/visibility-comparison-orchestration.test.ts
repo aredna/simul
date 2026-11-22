@@ -572,6 +572,45 @@ describe('the comparison of what the page paints, in slices (D164)', () => {
     expect(run([sheet('.gone { display: none }')], [{}])).toEqual([1, 1, 1, 1]);
   });
 
+  it('answers a comparison of an attribute change from the styles kept outside its element (D221)', () => {
+    const run = (sheets: unknown[], name = 'href') => {
+      const target = fixture(`${SMALL}<a id="link" href="/a">Link</a>`, { tick: 0, sheets });
+      const document = target.byId('first').ownerDocument as Document & {
+        getAnimations?: () => unknown[];
+      };
+      Object.defineProperty(document, 'getAnimations', { configurable: true, value: () => [] });
+      onTestFinished(() => {
+        delete (document as unknown as Record<string, unknown>).getAnimations;
+      });
+      target.open();
+      target.runTimers();
+      const text = target.byId('first').firstChild as Text;
+      const reads: number[] = [];
+      const step = (record: () => MutationRecord) => {
+        const before = target.probe();
+        target.ack();
+        target.mutate(record());
+        target.flushFrames();
+        reads.push(target.probe() - before);
+      };
+      step(() => textRecord(text, 'Two '));
+      step(() => attributeRecord(target.byId('link'), name, '/b'));
+      step(() => attributeRecord(target.byId('link'), name, '/c'));
+      step(() => textRecord(text, 'Three '));
+      return reads;
+    };
+    // The text change keeps; the link's address restyles only the link.
+    expect(run([sheet('.gone { display: none }')])).toEqual([1, 0, 0, 0]);
+    // A sibling combinator, a rule that names the attribute, or an
+    // attribute that reaches past the element: read, and the text change
+    // after keeps afresh.
+    expect(run([sheet('.gone { display: none } .a + .b { color: red }')]))
+      .toEqual([1, 1, 1, 1]);
+    expect(run([sheet('.gone { display: none } a[href$="c"] { display: none }')]))
+      .toEqual([1, 1, 1, 1]);
+    expect(run([sheet('.gone { display: none }')], 'style')).toEqual([1, 1, 1, 1]);
+  });
+
   it('compares at once for a class a hiding rule names, while the share owes little (D180)', () => {
     const target = fixture(SMALL, {
       tick: 1,

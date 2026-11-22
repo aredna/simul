@@ -6,6 +6,7 @@ import {
   collectSourceStyleNames,
   createSourceStyleNames,
   createSourceStyleSheetCollection,
+  sourceAttributeChangesRestyleWithin,
   sourceClassChangeNamesHidingRule,
   sourceTextChangeMayRestyle,
   sourceVisibilityEventMaySkip,
@@ -147,6 +148,69 @@ describe('whether a change of text alone can restyle (D186)', () => {
     const fields = namesOf('textarea:invalid { outline: 0 }');
     expect(sourceTextChangeMayRestyle(fields, [record(p, 'old')])).toBe(false);
     expect(sourceTextChangeMayRestyle(fields, [record(t, 'old')])).toBe(true);
+  });
+});
+
+describe('whether a change of an attribute restyles only inside its element (D221)', () => {
+  it('knows the selectors that reach beside or above, by the D188 reach rules', () => {
+    for (const text of [
+      '.a + .b { color: red }',
+      '.a ~ .b { color: red }',
+      'main:has(.x) { display: none }',
+      'li:nth-child(2 of .on) { color: red }',
+      '.card { & + .card { margin: 0 } }',
+    ]) expect(namesOf(text).reachesBeside, text).toBe(true);
+    for (const text of [
+      '[class~=a] { color: red }',
+      'tr:nth-child(2n+1) { color: red }',
+      '.a { width: calc(1px + 2px) }',
+      '.a > .b .c { content: "+ ~" }',
+      '@media (min-width: 1px) { .a { color: red } }',
+      '/* .a + .b */ .c { color: red }',
+    ]) expect(namesOf(text).reachesBeside, text).toBeFalsy();
+  });
+
+  it('gives the elements whose attributes changed where nothing reaches past them', () => {
+    const { byId } = page(
+      '<a id="link" href="/a">A</a><img id="picture" src="a.png">' +
+        '<table><tr><td id="cell">c</td></tr></table>' +
+        '<input id="field"><div id="box">b</div>',
+    );
+    const names = namesOf('.gone { display: none } a[title] { color: red } [data-on] { color: red }');
+    expect(sourceAttributeChangesRestyleWithin(names, [
+      attributeRecord(byId('link'), 'href'),
+      attributeRecord(byId('picture'), 'src'),
+      attributeRecord(byId('cell'), 'bgcolor'),
+    ])).toEqual([byId('link'), byId('picture'), byId('cell')]);
+    // A text change beside them is the text rule's.
+    expect(sourceAttributeChangesRestyleWithin(names, [
+      { type: 'characterData', target: byId('box').firstChild } as unknown as MutationRecord,
+      attributeRecord(byId('box'), 'lang'),
+    ])).toEqual([byId('box')]);
+    const refused = (record: MutationRecord, ...given: [SourceStyleNames?]) =>
+      sourceAttributeChangesRestyleWithin(given.length > 0 ? given[0] : names, [record]);
+    // Named by a selector, or read with attr().
+    expect(refused(attributeRecord(byId('link'), 'title'))).toBeUndefined();
+    expect(refused(attributeRecord(byId('box'), 'data-on'))).toBeUndefined();
+    expect(refused(attributeRecord(byId('box'), 'data-label'),
+      namesOf('.a::before { content: attr(data-label) }'))).toBeUndefined();
+    // What hides, names, moves or groups.
+    for (const name of ['style', 'class', 'id', 'hidden', 'open', 'slot', 'disabled', 'aria-hidden']) {
+      expect(refused(attributeRecord(byId('box'), name)), name).toBeUndefined();
+    }
+    // A field, whose state reaches its form and its group.
+    expect(refused(attributeRecord(byId('field'), 'placeholder'))).toBeUndefined();
+    // In a namespace, or a change of the tree.
+    expect(refused(attributeRecord(byId('box'), 'lang', null, 'http://www.w3.org/XML/1998/namespace')))
+      .toBeUndefined();
+    expect(refused({ type: 'childList', target: byId('box') } as unknown as MutationRecord))
+      .toBeUndefined();
+    // A sheet that reaches beside, reads layout, or cannot be named.
+    expect(refused(attributeRecord(byId('link'), 'href'), namesOf('.a + .b { color: red }')))
+      .toBeUndefined();
+    expect(refused(attributeRecord(byId('link'), 'href'),
+      namesOf('@container (width > 1px) { .a { color: red } }'))).toBeUndefined();
+    expect(refused(attributeRecord(byId('link'), 'href'), undefined)).toBeUndefined();
   });
 });
 

@@ -700,6 +700,8 @@ describe('one way to a shadow root (D125)', () => {
       'adoptedStyleSignature(node.shadowRoot.adoptedStyleSheets),',
       'for (const child of node.shadowRoot.children) this.#markMirroredGraph(child);',
       'if (shadow) this.#setEmittedChildren(shadow, node.shadowRoot.children);',
+      // A list read in place, against what was sent (D222).
+      'const graphRoot = node.shadowRoot;',
     ],
     'lib/replica/html-mirror-sanitizer.ts': [
       'input.shadowRoot !== undefined',

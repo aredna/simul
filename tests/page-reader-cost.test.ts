@@ -367,7 +367,10 @@ describe('the page reader does a frame\'s work once (D144)', () => {
   });
 
   it('looks for roots and reads the relationships once a frame, however many events tell of a layout change', async () => {
-    const fixture = sessionFixture('<main><p id="probe">text</p><img id="picture"></main>');
+    const fixture = sessionFixture(
+      '<main><button id="tab" aria-controls="panel">tab</button><div id="panel">panel</div>' +
+        '<p id="probe">text</p><img id="picture"></main>',
+    );
     fixture.start();
     fixture.settle();
     const before = fixture.relationshipReads();
@@ -390,7 +393,10 @@ describe('the page reader does a frame\'s work once (D144)', () => {
   });
 
   it('looks at once in a tab that is not shown, where no frame comes', async () => {
-    const fixture = sessionFixture('<main><p id="probe">text</p></main>');
+    const fixture = sessionFixture(
+      '<main><button id="tab" aria-controls="panel">tab</button><div id="panel">panel</div>' +
+        '<p id="probe">text</p></main>',
+    );
     fixture.start();
     fixture.settle();
     let visibility = 'hidden';
@@ -905,15 +911,22 @@ function sessionFixture(body: string, head = '') {
   let resizeCallback: (() => void) | undefined;
   const relationshipProbe = page.byId('probe');
   let relationshipReads = 0;
-  const hasAttribute = relationshipProbe.hasAttribute.bind(relationshipProbe);
-  Object.defineProperty(relationshipProbe, 'hasAttribute', {
-    configurable: true,
-    value: (name: string) => {
-      // Each read of the relationships asks every element this, once.
-      if (name === 'aria-controls') relationshipReads += 1;
-      return hasAttribute(name);
-    },
-  });
+  // Each read of the relationships asks each control what it controls, once
+  // (its relations stage): also one built on the index of the read before
+  // (D221), which asks nothing of the other elements. Other readers (the
+  // observer's check for a change to the same value) are not counted.
+  for (const control of [...document.querySelectorAll('[aria-controls]')]) {
+    const getAttribute = control.getAttribute.bind(control);
+    Object.defineProperty(control, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'aria-controls' && /#relate\b/u.test(new Error().stack ?? '')) {
+          relationshipReads += 1;
+        }
+        return getAttribute(name);
+      },
+    });
+  }
   new HtmlMirrorSourceSession({
     port: port as never,
     document,

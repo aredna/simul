@@ -8,6 +8,7 @@ import {
   createSourcePaintScanCache,
   readSourceElementPathPaint,
   readSourceFlatTreeElementPath,
+  readSourceFlatTreeParentElement,
   sourceControlledPanelBoxIsPlaced,
   sourceElementPaintInputsAreReadable,
   type SourcePaintScanCache,
@@ -108,6 +109,13 @@ export interface SourceVisibilityComparisonOptions {
    * a change of text. Boxes are read afresh all the same.
    */
   readonly stylesUnchanged?: boolean;
+  /**
+   * The elements whose attributes the records changed, each by a change
+   * the caller proved can restyle nothing outside its flat subtree (D221):
+   * with `stylesUnchanged`, a batch of such changes and of text is answered
+   * from the kept styles outside them, and read afresh inside.
+   */
+  readonly restyledWithin?: readonly Element[];
 }
 
 interface SourceVisibilityRunState {
@@ -122,6 +130,9 @@ interface SourceVisibilityRunState {
 }
 
 const NEVER_EXPIRED = (): boolean => false;
+
+/** Ancestors climbed to tell whether an element is under a changed one (D221). */
+const MAX_SOURCE_FLAT_SUBTREE_CLIMB = 1_024;
 
 /**
  * Content-free index of the visibility floor used by both source mirrors.
@@ -245,9 +256,15 @@ export class SourceVisibilityBoundaryIndex {
     this.#cancelRun();
     let global = false;
     let imageSelectorSurface = false;
-    let textOnly = records.length > 0;
+    // Only text changed, or attributes of the elements the caller gives
+    // (D221).
+    const within = new Set(options.restyledWithin ?? []);
+    let recallable = records.length > 0;
     for (const record of records) {
-      if (record.type !== 'characterData') textOnly = false;
+      if (
+        record.type !== 'characterData' &&
+        !(record.type === 'attributes' && within.has(record.target as Element))
+      ) recallable = false;
       if (record.type === 'attributes') {
         if (sourceNodeType(record.target) !== 1) continue;
         // Every authored attribute is CSS selector surface. Attribute
@@ -277,11 +294,19 @@ export class SourceVisibilityBoundaryIndex {
     }
     if (global) {
       // Only text changed, and nothing else can have restyled the page:
-      // the styles kept answer, the boxes are read (D186).
+      // the styles kept answer, the boxes are read (D186). Attributes that
+      // restyle only inside their elements: inside them styles are read
+      // (D221).
       const memory = this.#styleMemory;
-      if (textOnly && options.stylesUnchanged && memory) {
+      if (recallable && options.stylesUnchanged && memory) {
         this.#recalledComparisons += 1;
-        return this.#beginWholeComparison(false, { facts: memory, recall: true });
+        return this.#beginWholeComparison(imageSelectorSurface, {
+          facts: memory,
+          recall: true,
+          ...(within.size > 0
+            ? { fresh: readSourceFlatSubtreesOf(this.document, within) }
+            : {}),
+        });
       }
       return this.#beginWholeComparison(imageSelectorSurface, options.keepStyles
         ? { facts: new WeakMap(), recall: false }
@@ -993,4 +1018,45 @@ function minimizeVisibilityRoots(elements: readonly Element[]): Element[] {
     }
     return true;
   });
+}
+
+/**
+ * Whether an element is one of `roots` or in the flat tree under one
+ * (D221): inheritance and slotting follow the flat tree. Each element is
+ * asked once a comparison; an element whose way up cannot be read, short of
+ * the document's root, counts as under one.
+ */
+function readSourceFlatSubtreesOf(
+  document: Document,
+  roots: ReadonlySet<Element>,
+): (element: Element) => boolean {
+  const known = new Map<Element, boolean>();
+  for (const root of roots) known.set(root, true);
+  const top = sourceProperty(document, 'documentElement');
+  return (element) => {
+    const path: Element[] = [];
+    let answer = true;
+    for (let at: Element | undefined = element; ;) {
+      const seen = known.get(at);
+      if (seen !== undefined) {
+        answer = seen;
+        break;
+      }
+      path.push(at);
+      if (at === top) {
+        answer = false;
+        break;
+      }
+      let parent: Element | undefined;
+      try {
+        parent = readSourceFlatTreeParentElement(at);
+      } catch {
+        parent = undefined;
+      }
+      if (!parent || path.length > MAX_SOURCE_FLAT_SUBTREE_CLIMB) break;
+      at = parent;
+    }
+    for (const at of path) known.set(at, answer);
+    return answer;
+  };
 }

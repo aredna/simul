@@ -45,11 +45,19 @@ export interface SourceStyleNames {
    * above would not show.
    */
   readonly layoutReads?: boolean;
+  /**
+   * A selector that reaches past an element and what it holds (D221), by
+   * the D188 reach rules: a sibling combinator (`+`, `~`), `:has()`, or
+   * `:nth-child(… of …)`. A change of an element's attribute may then
+   * restyle elements beside it or above it.
+   */
+  readonly reachesBeside?: boolean;
 }
 
 interface MutableSourceStyleNames extends SourceStyleNames {
   readonly hidingClasses: Set<string>;
   layoutReads?: boolean;
+  reachesBeside?: boolean;
   readonly classes: Set<string>;
   readonly ids: Set<string>;
   readonly attributes: Set<string>;
@@ -82,6 +90,106 @@ export function collectSourceStyleNames(
   collectNames(cssText, 0, cssText.length, into, false);
   collectHidingClasses(cssText, into);
   if (LAYOUT_READS.test(cssText)) into.layoutReads = true;
+  if (!into.reachesBeside && selectorsReachBeside(cssText)) into.reachesBeside = true;
+}
+
+/**
+ * Whether a prelude of `cssText` (the text before each `{`, comments and
+ * strings left out) reaches beside or above what it selects (D221): the
+ * D188 reach rules (`preludeReach` in `style-sheet-reach.ts`) over every
+ * rule, not only those that declare text security.
+ */
+function selectorsReachBeside(cssText: string): boolean {
+  if (!/[+~]|:has\(|:nth-/iu.test(cssText)) return false;
+  const plain = cssText.replace(
+    /\/\*[\s\S]*?(?:\*\/|$)|"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'/gu,
+    (match) => (match.startsWith('/*') ? ' ' : '""'),
+  );
+  let start = 0;
+  for (let index = 0; index < plain.length; index += 1) {
+    const character = plain[index];
+    if (character !== '{' && character !== '}' && character !== ';') continue;
+    if (character === '{') {
+      const prelude = plain.slice(start, index);
+      if (/:has\(/iu.test(prelude)) return true;
+      if (/:nth-(?:last-)?child\([^)]*\bof\b/iu.test(prelude)) return true;
+      // What may hold `+` or `~` and is no combinator: attribute selectors
+      // (`[class~=a]`) and `an+b` arguments.
+      const bare = prelude
+        .replace(/\[[^\]]*\]/gu, '')
+        .replace(/:nth-[a-z-]+\([^)]*\)/giu, '');
+      if (!/^\s*@/u.test(bare) && /[+~]/u.test(bare)) return true;
+    }
+    start = index + 1;
+  }
+  return false;
+}
+
+/**
+ * Attributes that restyle other elements than their own and what it holds
+ * with no selector that names them (D221): the style and the names
+ * selectors are written with, what hides or opens, what moves an element
+ * in the flat tree or into a group (a slot, a radio's name, a form), what
+ * takes focus away (and so `:focus-within` above), and what the policies
+ * read for themselves.
+ */
+const ATTRIBUTES_REACHING_BESIDE = new Set([
+  'style', 'class', 'id', 'hidden', 'open', 'slot', 'name', 'form', 'type',
+  'checked', 'selected', 'disabled', 'inert', 'popover', 'tabindex',
+  'contenteditable', 'dir', 'part', 'exportparts', 'aria-hidden', 'is',
+  'for', 'span', 'autofocus',
+]);
+
+/**
+ * Elements an attribute of which reaches past what they hold, or which hold
+ * the page's rules: a field's state reaches its form and its group
+ * (`:invalid` above it, `:default`, `:checked`), a column the cells of its
+ * rows, a slot what is assigned to it.
+ */
+const ELEMENTS_REACHING_BESIDE = new Set([
+  'html', 'head', 'body', 'link', 'style', 'meta', 'base', 'title', 'slot',
+  'template', 'col', 'colgroup', 'dialog', 'details', 'summary', 'select',
+  'option', 'optgroup', 'datalist', 'input', 'textarea', 'button', 'form',
+  'fieldset', 'legend', 'label', 'output', 'progress', 'meter',
+]);
+
+/**
+ * The elements whose attributes `records` changed, when no such change can
+ * restyle anything outside each element's flat subtree (D221); undefined
+ * when one may, or when a record is neither a change of an attribute nor
+ * of text (text is `sourceTextChangeMayRestyle`'s). Inheritance and the
+ * element's own presentational hints stay inside it; what reaches past it
+ * is a selector that names the attribute (or reads it with `attr()`), a
+ * selector that reaches beside or above (`reachesBeside`), a rule that
+ * reads layout (`layoutReads`), or an attribute or element of the lists
+ * above. Unknown names (a sheet that cannot be read) can.
+ */
+export function sourceAttributeChangesRestyleWithin(
+  names: SourceStyleNames | undefined,
+  records: readonly MutationRecord[],
+): readonly Element[] | undefined {
+  if (!names || names.layoutReads || names.reachesBeside) return undefined;
+  const within: Element[] = [];
+  for (const record of records) {
+    if (record.type === 'characterData') continue;
+    if (record.type !== 'attributes' || record.attributeNamespace) return undefined;
+    const target = record.target as Element;
+    if (target.nodeType !== 1) return undefined;
+    const name = record.attributeName?.toLowerCase();
+    if (
+      !name || ATTRIBUTES_REACHING_BESIDE.has(name) ||
+      names.attributes.has(name) || names.attributeReads.has(name)
+    ) return undefined;
+    let local: string;
+    try {
+      local = String(target.localName).toLowerCase();
+    } catch {
+      return undefined;
+    }
+    if (ELEMENTS_REACHING_BESIDE.has(local)) return undefined;
+    within.push(target);
+  }
+  return within;
 }
 
 /** `@container`, or `:` or `@` followed by an escape (D186). */
@@ -880,6 +988,7 @@ function mergeSourceStyleNames(
   for (const name of part.pseudoElements) names.pseudoElements.add(name);
   for (const name of part.hidingClasses) names.hidingClasses.add(name);
   if (part.layoutReads) names.layoutReads = true;
+  if (part.reachesBeside) names.reachesBeside = true;
 }
 
 function listSheets(

@@ -6,8 +6,12 @@ import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
 import { hasSourceAriaControlledRegionAncestor } from '../lib/ocr/image-source-session';
 import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 import {
+  beginSourceControlledContentPolicy,
   createSourceControlledContentPolicy,
   sourceControlledContentChangedTargets,
+  sourceControlledContentIndexChange,
+  sourceControlledContentIndexedShadowRoots,
+  sourceControlledContentKeepsIndex,
   sourceControlledContentIsControlledRegion,
   sourceControlledContentIsWithheld,
 } from '../lib/replica/source-privacy-policy';
@@ -899,5 +903,162 @@ describe('painted controlled regions', () => {
     hanging = false;
     expect(state('zero')).toBe('withheld');
     expect(state('clip')).toBe('withheld');
+  });
+});
+
+describe('a policy built on the index of the one before (D221)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, { Node: window.Node, Element: window.Element, Text: window.Text });
+  });
+
+  const TABS = CAROUSEL.replace('</body>', `
+    <div role="tablist">
+      <button id="tab-a" role="tab" aria-selected="true" aria-controls="panel-a">A</button>
+      <button id="tab-b" role="tab" aria-selected="false" aria-controls="panel-b">B</button>
+    </div>
+    <div id="panel-a" role="tabpanel">Panel A text</div>
+    <div id="panel-b" role="tabpanel" hidden>Panel B text</div>
+    <p id="far">Far away <b>text</b></p>
+  </body>`);
+
+  const attribute = (target: Element, attributeName: string) =>
+    ({ type: 'attributes', target, attributeName, attributeNamespace: null }) as unknown as MutationRecord;
+  const children = (target: Node, added: Node[], removed: Node[] = []) =>
+    ({ type: 'childList', target, addedNodes: added, removedNodes: removed }) as unknown as MutationRecord;
+
+  const shape = (policy: ReturnType<typeof createSourceControlledContentPolicy>) => ({
+    targets: [...policy.targets].map(([element, state]) => [element.id, state]),
+    tabs: policy.tabs.map((tab) => [tab.trigger.id, tab.panel.id, tab.selected]),
+    controllers: [...policy.controllers].map((element) => element.id),
+    referencedIds: [...policy.referencedIds],
+    idElements: [...policy.idElements].map((element) => element.id),
+    overflow: policy.overflow,
+    incomplete: policy.incomplete,
+  });
+
+  it('reads the tabs and what is painted again, and gives what a whole build gives', () => {
+    const { document, window } = load(TABS);
+    const byId = (id: string) => document.getElementById(id)!;
+    const before = createSourceControlledContentPolicy(document, window);
+    expect(sourceControlledContentKeepsIndex(before)).toBe(true);
+    expect(before.targets.get(byId('panel-a'))).toBe('open-tab');
+    // The other tab is chosen: states and paint, no id and no control.
+    byId('tab-a').setAttribute('aria-selected', 'false');
+    byId('tab-b').setAttribute('aria-selected', 'true');
+    byId('panel-a').setAttribute('hidden', '');
+    byId('panel-b').removeAttribute('hidden');
+    const text = document.createElement('i');
+    text.textContent = 'more';
+    byId('far').append(text);
+    const records = [
+      attribute(byId('tab-a'), 'aria-selected'),
+      attribute(byId('tab-b'), 'aria-selected'),
+      attribute(byId('panel-a'), 'hidden'),
+      attribute(byId('panel-b'), 'hidden'),
+      children(byId('far'), [text]),
+    ];
+    const change = sourceControlledContentIndexChange(records);
+    expect(change).toEqual({ moved: false, added: 2 });
+    const reused = createSourceControlledContentPolicy(document, window, undefined, {
+      policy: before,
+      addedSince: change.added,
+    });
+    const whole = createSourceControlledContentPolicy(document, window);
+    expect(shape(reused)).toEqual(shape(whole));
+    expect(reused.targets.get(byId('panel-b'))).toBe('open-tab');
+    expect(reused.targets.get(byId('panel-a'))).toBe('withheld');
+    expect(sourceControlledContentKeepsIndex(reused)).toBe(true);
+  });
+
+  it('does not walk the document again', () => {
+    const { document, window } = load(TABS);
+    const before = createSourceControlledContentPolicy(document, window);
+    const far = document.getElementById('far')!;
+    let asked = 0;
+    Object.defineProperty(far, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        asked += 1;
+        return Element.prototype.getAttribute.call(far, name);
+      },
+    });
+    createSourceControlledContentPolicy(document, window, undefined, { policy: before, addedSince: 0 });
+    expect(asked).toBe(0);
+    createSourceControlledContentPolicy(document, window);
+    expect(asked).toBeGreaterThan(0);
+  });
+
+  it('walks again past its bound, on another document, and from a walk cut short', () => {
+    const { document, window } = load(TABS);
+    const far = document.getElementById('far')!;
+    let asked = 0;
+    Object.defineProperty(far, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        asked += 1;
+        return Element.prototype.getAttribute.call(far, name);
+      },
+    });
+    const count = document.querySelectorAll('*').length;
+    const before = createSourceControlledContentPolicy(document, window, 10_000);
+    asked = 0;
+    createSourceControlledContentPolicy(document, window, 10_000, {
+      policy: before,
+      addedSince: 10_000 - count,
+    });
+    expect(asked).toBeGreaterThan(0);
+    asked = 0;
+    const other = load(TABS);
+    createSourceControlledContentPolicy(other.document, other.window, 10_000, { policy: before, addedSince: 0 });
+    createSourceControlledContentPolicy(document, window, 10_000, { policy: before, addedSince: 0 });
+    expect(asked).toBe(0);
+    // A walk that met its bound keeps no index.
+    const cut = createSourceControlledContentPolicy(document, window, 5);
+    expect(cut.overflow).toBe(true);
+    expect(sourceControlledContentKeepsIndex(cut)).toBe(false);
+    asked = 0;
+    const builder = beginSourceControlledContentPolicy(document, window, 10_000, { policy: cut, addedSince: 0 });
+    expect(builder.step()?.overflow).toBe(false);
+    expect(asked).toBeGreaterThan(0);
+  });
+
+  it('names the shadow roots its walk went into, whose changes its caller must hear', () => {
+    const { document, window } = load(TABS);
+    const host = document.getElementById('far')!;
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = '<span id="inside">in a root</span>';
+    const policy = createSourceControlledContentPolicy(document, window);
+    expect(sourceControlledContentIndexedShadowRoots(policy)).toEqual([root]);
+    const reused = createSourceControlledContentPolicy(document, window, undefined, { policy, addedSince: 0 });
+    expect(sourceControlledContentIndexedShadowRoots(reused)).toEqual([root]);
+  });
+
+  it('says a change moved the index when it writes an id or a control, or brings or takes one', () => {
+    const { document } = load(TABS);
+    const byId = (id: string) => document.getElementById(id)!;
+    const moved = (records: MutationRecord[]) => sourceControlledContentIndexChange(records).moved;
+    expect(moved([attribute(byId('far'), 'id')])).toBe(true);
+    expect(moved([attribute(byId('far'), 'aria-controls')])).toBe(true);
+    expect(moved([attribute(byId('far'), 'class')])).toBe(false);
+    expect(moved([attribute(byId('tab-a'), 'aria-expanded')])).toBe(false);
+    const deep = document.createElement('div');
+    deep.innerHTML = '<section><span><em id="new-target">x</em></span></section>';
+    expect(moved([children(byId('far'), [deep])])).toBe(true);
+    const control = document.createElement('div');
+    control.innerHTML = '<button aria-controls="panel-a">c</button>';
+    expect(moved([children(byId('far'), [control])])).toBe(true);
+    const plain = document.createElement('div');
+    plain.innerHTML = '<span>plain <b>text</b></span>';
+    expect(sourceControlledContentIndexChange([children(byId('far'), [plain])]))
+      .toEqual({ moved: false, added: 5 });
+    // Taken out: an element bearing an id leaves the index stale.
+    const panel = byId('panel-b');
+    panel.remove();
+    expect(moved([children(document.body, [], [panel])])).toBe(true);
+    expect(moved([children(document.body, [], [plain])])).toBe(false);
+    // More than is checked is a move.
+    const many = Array.from({ length: 2_100 }, () => document.createTextNode('t'));
+    expect(moved([children(byId('far'), many)])).toBe(true);
   });
 });

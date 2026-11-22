@@ -16,6 +16,7 @@ import {
   MAX_HTML_MIRROR_PANE_BOXES,
   MAX_HTML_MIRROR_SCROLL_PANES,
   MAX_HTML_MIRROR_UNACKED_BATCHES,
+  MAX_HTML_MIRROR_PATCH_OPERATIONS,
   HtmlMirrorCheckpointAssembly,
   createHtmlMirrorCheckpoint,
   createHtmlMirrorCheckpointPart,
@@ -77,6 +78,7 @@ import {
   type HtmlMirrorIdRegistry,
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
+  type HtmlMirrorNode,
   type HtmlMirrorRepresentabilityCollector,
   type HtmlMirrorRepresentabilitySummary,
   type HtmlMirrorStyleWorkBudget,
@@ -119,7 +121,6 @@ import {
 } from './source-secret-classifier';
 import {
   beginSourceControlledContentPolicy,
-  createSourceControlledContentPolicy,
   beginSourceSecretAncestorWalk,
   createSourcePaintScanCache,
   hasSourceCredentialSecretAncestor,
@@ -129,6 +130,9 @@ import {
   sourceControlledContentChangedTargets,
   sourceControlledContentLayoutMayChange,
   sourceControlledContentMutationsMayChange,
+  sourceControlledContentIndexChange,
+  sourceControlledContentIndexedShadowRoots,
+  type SourceControlledContentReuse,
   type SourceControlledContentPolicy,
 } from './source-privacy-policy';
 import {
@@ -145,6 +149,7 @@ import {
   type SourceCrossOriginSheetReader,
   sourceClassChangeNamesHidingRule,
   sourceTextChangeMayRestyle,
+  sourceAttributeChangesRestyleWithin,
   sourceVisibilityEventMaySkip,
   sourceVisibilityMutationMaySkip,
   type SourceStyleNames,
@@ -1042,6 +1047,14 @@ export class HtmlMirrorSourceSession {
    * patch of the frame (see `#holdBack`).
    */
   #readWithChildren = new Set<Element>();
+  /**
+   * Nodes whose list is read again because what they hold was shown or
+   * hidden, or slotted otherwise (D222): the mirror holds every node of it
+   * already, so what of it reads otherwise than it was sent travels alone
+   * (`#inPlaceOperations`), not the list whole. Cleared with
+   * `#readWithChildren`.
+   */
+  #readInPlace = new Set<Node>();
   #pendingText = new Set<Text>();
   /**
    * Elements whose style sheet is sent again: a `<style>` whose text
@@ -1247,6 +1260,19 @@ export class HtmlMirrorSourceSession {
   /** The walk that follows a checkpoint is noting those roots. */
   #notingUnheldShadowRoots = false;
   #controlledContentPolicy: SourceControlledContentPolicy | undefined;
+  /**
+   * What may have moved the walk's index of a policy (D221): a batch of
+   * records that writes an id or an `aria-controls`, or puts in or takes out
+   * an element bearing one, and a shadow root met; and the nodes put in.
+   * Each policy is marked with the counts its walk began at, and the next
+   * policy is built on its index while no move came since.
+   */
+  #policyIndexMoves = 0;
+  #policyIndexAdded = 0;
+  readonly #policyIndexMarks = new WeakMap<
+    SourceControlledContentPolicy,
+    { readonly moves: number; readonly added: number }
+  >();
   #controlledLayoutSettlePending = false;
   #visibilityBoundaryIndex: SourceVisibilityBoundaryIndex | undefined;
   #visibilityMutationRecords: MutationRecord[] = [];
@@ -1612,6 +1638,8 @@ export class HtmlMirrorSourceSession {
       this.#stopListeningForShadowRoots = listenForSourceShadowRoots(
         this.environment.document,
         (shadow, late) => {
+          // A root met is one the policy's walk may not have indexed (D221).
+          this.#policyIndexMoves += 1;
           if (!late || this.#disposed) return;
           this.#lateShadowRoots.push(shadow);
           this.#scheduleFlush();
@@ -1892,11 +1920,7 @@ export class HtmlMirrorSourceSession {
     read.policyRebuilds = 0;
     read.policyStale = false;
     read.policyRequeue.clear();
-    return beginSourceControlledContentPolicy(
-      this.environment.document,
-      this.environment.window,
-      MAX_HTML_MIRROR_NODES,
-    );
+    return this.#beginMarkedPolicy();
   }
 
   /**
@@ -1927,11 +1951,7 @@ export class HtmlMirrorSourceSession {
         return undefined;
       }
       read.policyRebuilds += 1;
-      const builder = beginSourceControlledContentPolicy(
-        this.environment.document,
-        this.environment.window,
-        MAX_HTML_MIRROR_NODES,
-      );
+      const builder = this.#beginMarkedPolicy();
       const expired = (): boolean => slices.clock.expired();
       let next = this.#withoutOwnLateRoots(() => builder.step(expired));
       while (!next) {
@@ -2249,6 +2269,14 @@ export class HtmlMirrorSourceSession {
           }
         }
         if (step.outcome === 'done') {
+          // The copy is installed in a task of its own (D221): with the last
+          // step's reading, staging and part it made a task of 39 ms on a
+          // page of 54,000 elements, 15 of them the install.
+          if (!yielded) {
+            await slices.next();
+            const turned = await afterTurn();
+            if (turned) return turned;
+          }
           const values = step.document;
           const checkpoint = values && sequence !== undefined &&
             assembly.readAdoptedStyleSheets(values.adoptedStyleSheets) &&
@@ -2474,11 +2502,8 @@ export class HtmlMirrorSourceSession {
     try {
       heldPass.list(document);
       const sizeAtStart = this.#readObservedSize();
-      const controlledContentPolicy = createSourceControlledContentPolicy(
-        document,
-        window,
-        MAX_HTML_MIRROR_NODES,
-      );
+      const controlledContentPolicy = this.#beginMarkedPolicy().step() as
+        SourceControlledContentPolicy;
       // Built after every change kept so far, as the copy is read (D171).
       read.policyChecked = read.records.length;
       read.policyStale = false;
@@ -2649,6 +2674,7 @@ export class HtmlMirrorSourceSession {
     // its element is inside a secret, and the elements above are shared.
     const secretWalk = beginSourceSecretAncestorWalk();
     try {
+      this.#notePolicyIndexChange(records);
       const read = this.#checkpointRead;
       if (read) this.#keepForCheckpointRead(read, records);
       else this.#queueMutationRecords(records);
@@ -3159,28 +3185,50 @@ export class HtmlMirrorSourceSession {
    * the very names the answers were kept under (a sheet changed since gives
    * other names, or none), and nothing else asked for since: an event, a
    * held animation value, a resize or a slot asks for a whole comparison,
-   * which keeps answers afresh.
+   * which keeps answers afresh. Since D221 a batch may hold changes of
+   * attributes too, each of which can restyle only inside its element
+   * (`sourceAttributeChangesRestyleWithin`: no selector names it or reaches
+   * beside or above, and neither it nor its element is one that reaches
+   * past what the element holds): the answers kept answer outside those
+   * elements, and inside them styles are read.
    */
   #comparisonStyleOptions(
     requiresFullRefresh: boolean,
     records: readonly MutationRecord[],
-  ): { readonly keepStyles?: boolean; readonly stylesUnchanged?: boolean } {
+  ): {
+    readonly keepStyles?: boolean;
+    readonly stylesUnchanged?: boolean;
+    readonly restyledWithin?: readonly Element[];
+  } {
     const kept = this.#styleMemoryNames;
     this.#styleMemoryNames = undefined;
-    // Only a batch of text changes is looked at: any other comparison keeps
-    // nothing, and the first of such batches keeps for the next.
-    if (
-      requiresFullRefresh || records.length === 0 ||
-      !records.every((record) => {
-        if (record.type !== 'characterData') return false;
-        const parent = record.target.parentNode;
-        return !parent || sourceNodeType(parent) !== 1 ||
-          String(sourceLocalName(parent as Element)).toLowerCase() !== 'style';
-      })
-    ) return {};
+    // Only a batch of text changes and of attributes is looked at: any
+    // other comparison keeps nothing, and the first of such batches keeps
+    // for the next.
+    if (requiresFullRefresh || records.length === 0) return {};
+    const texts: MutationRecord[] = [];
+    let attributes = false;
+    for (const record of records) {
+      if (record.type === 'attributes') {
+        attributes = true;
+        continue;
+      }
+      if (record.type !== 'characterData') return {};
+      const parent = record.target.parentNode;
+      if (
+        parent && sourceNodeType(parent) === 1 &&
+        String(sourceLocalName(parent as Element)).toLowerCase() === 'style'
+      ) return {};
+      texts.push(record);
+    }
     const names = this.#mentionedStyleNames();
     const document = this.environment.document;
-    let quiet = !sourceTextChangeMayRestyle(names, records) &&
+    const restyledWithin = attributes
+      ? sourceAttributeChangesRestyleWithin(names, records)
+      : [];
+    let quiet = restyledWithin !== undefined &&
+      !!names && !names.layoutReads &&
+      (texts.length === 0 || !sourceTextChangeMayRestyle(names, texts)) &&
       !readSourceAnimationListing(document).running;
     if (quiet) {
       // The ledger lists at each change sent; an animation a script started
@@ -3198,6 +3246,7 @@ export class HtmlMirrorSourceSession {
     return {
       keepStyles: true,
       stylesUnchanged: kept === names && this.#heldAnimationTargets.size === 0,
+      ...(restyledWithin && restyledWithin.length > 0 ? { restyledWithin } : {}),
     };
   }
 
@@ -3460,6 +3509,7 @@ export class HtmlMirrorSourceSession {
       this.#takeBack(held, patch);
     }
     this.#readWithChildren.clear();
+    this.#readInPlace.clear();
     if (!this.#rootsAwaitingPatchHeld()) return false;
     const frame = createHtmlMirrorPatchFrame(patches);
     if (!frame) return false;
@@ -3625,8 +3675,19 @@ export class HtmlMirrorSourceSession {
     // root, so the root is read again whole, beside its host (D135; it was
     // the whole page, at every such change). A root the mirror does not
     // hold cannot be patched: the page is read afresh.
+    // The roots that hold something pending are found once, each pending
+    // node's way up, not each host against every pending node: many roots
+    // that reassign their slots at once made that a pass a root (D222).
+    const rootsWithWork = new Set<Node>();
+    for (const pending of [
+      this.#pendingChildren,
+      this.#pendingAttributes,
+      this.#pendingText,
+    ] as Iterable<Node>[]) {
+      for (const node of pending) noteComposedShadowRootsAbove(node, rootsWithWork);
+    }
     for (const target of [...this.#pendingChildren]) {
-      if (!this.#coversOwnShadowWork(target)) continue;
+      if (!this.#coversOwnShadowWork(target, rootsWithWork)) continue;
       const shadow = readSourceShadowRoot(target as Element);
       if (!shadow || !this.#mirroredNodes.has(shadow)) {
         this.#shadowReconciliationPending = true;
@@ -3635,15 +3696,25 @@ export class HtmlMirrorSourceSession {
       }
       this.#queuePending(this.#pendingChildren, shadow);
       if (this.#paused) return undefined;
+      noteComposedShadowRootsAbove(shadow, rootsWithWork);
     }
     const childrenTargets = minimizeConnectedComposedTargets(
       this.#pendingChildren,
     );
+    const childrenTargetSet = new Set<Node>(childrenTargets);
     const covered = (node: Node): boolean =>
-      childrenTargets.some(
-        (target) => target !== node && containsComposedSource(target, node),
-      );
+      hasComposedSourceAncestorIn(node, childrenTargetSet);
     const operations: HtmlMirrorPatchOperation[] = [];
+    // Lists read in place (D222): where their changes sit among the
+    // operations, and the list whole, which takes their place in a patch
+    // that would be too long.
+    const inPlaceRuns: Array<{
+      readonly start: number;
+      readonly count: number;
+      readonly whole: HtmlMirrorPatchOperation;
+      readonly target: Node;
+      readonly children: readonly HtmlMirrorNode[];
+    }> = [];
     const representability = createHtmlMirrorRepresentabilityCollector();
     const batchBudget = createHtmlMirrorReadBudget();
     const styleWork = createHtmlMirrorStyleWorkBudget();
@@ -3743,11 +3814,26 @@ export class HtmlMirrorSourceSession {
           if (sources.some(
             (source) => !source || !isSourceStructuralChildOf(source, capture.target),
           )) throw new Error('Unstable children patch.');
-          operations.push(Object.freeze({
+          const whole = Object.freeze({
             kind: 'children',
             nodeId: capture.nodeId,
             children,
-          }));
+          } as const);
+          const inPlace = this.#readInPlace.has(capture.target)
+            ? this.#inPlaceOperations(capture.target, children)
+            : undefined;
+          if (!inPlace) {
+            operations.push(whole);
+            continue;
+          }
+          inPlaceRuns.push({
+            start: operations.length,
+            count: inPlace.length,
+            whole,
+            target: capture.target,
+            children,
+          });
+          operations.push(...inPlace);
         }
       } else {
         for (const capture of childCaptures) {
@@ -3831,9 +3917,7 @@ export class HtmlMirrorSourceSession {
           !target.isConnected || !this.#mirroredNodes.has(target) ||
           (this.#pendingAttributes.has(target)
             ? covered(target)
-            : childrenTargets.some(
-                (above) => readsSourceSlotAgain(above, target),
-              ))
+            : readsSourceSlotAgainIn(target, childrenTargetSet))
         ) continue;
         const attributes = sanitizeSourceAttributes(
           target,
@@ -3948,6 +4032,30 @@ export class HtmlMirrorSourceSession {
       }
       // A root found while the patch was read: the replica lacks it.
       if (this.#takeLateShadowRoots()) return undefined;
+      // Lists read in place that make the patch too long for one batch go
+      // whole, the longest first: a list is one change (D222).
+      if (operations.length > MAX_HTML_MIRROR_PATCH_OPERATIONS) {
+        let length = operations.length;
+        const swapped = new Set<number>();
+        for (const index of inPlaceRuns
+          .map((_, at) => at)
+          .sort((a, b) => inPlaceRuns[b]!.count - inPlaceRuns[a]!.count)) {
+          if (length <= MAX_HTML_MIRROR_PATCH_OPERATIONS) break;
+          const run = inPlaceRuns[index]!;
+          if (run.count <= 1) break;
+          swapped.add(index);
+          length -= run.count - 1;
+        }
+        for (let index = inPlaceRuns.length - 1; index >= 0; index -= 1) {
+          if (!swapped.has(index)) continue;
+          const run = inPlaceRuns[index]!;
+          operations.splice(run.start, run.count, run.whole);
+        }
+        for (let index = inPlaceRuns.length - 1; index >= 0; index -= 1) {
+          if (swapped.has(index)) inPlaceRuns.splice(index, 1);
+        }
+      }
+      for (const run of inPlaceRuns) this.#noteReadInPlace(run.target, run.children);
       if (operations.length === 0) {
         this.#clearPending(false);
         return undefined;
@@ -4085,6 +4193,7 @@ export class HtmlMirrorSourceSession {
     // takes back keeps its mark (`#readAndPostInTurns` clears it).
     if (!comparison) return;
     this.#readWithChildren.clear();
+    this.#readInPlace.clear();
     this.#cancelComparison();
     this.#visibilityMutationRecords = [];
     this.#visibilityMutationOverflow = false;
@@ -4938,7 +5047,33 @@ export class HtmlMirrorSourceSession {
         sourceSlotReadingChanged(child, walk)
       ) readOtherwise.push(child);
     }
-    this.#queueSlotted(readOtherwise, true);
+    // A host of which more than one child reads otherwise (a slot that
+    // takes one child in place of another) has its list read again in one
+    // piece, in place: what reads otherwise travels alone, or, where a
+    // patch would hold too many changes, the list whole. Many roots that
+    // reassign their slots at once took three changes a root, and from 334
+    // roots the whole page was read afresh (D222).
+    const byHost = new Map<Node, Node[]>();
+    for (const child of readOtherwise) {
+      const host = child.parentNode;
+      if (!host) continue;
+      const held = byHost.get(host);
+      if (held) held.push(child);
+      else byHost.set(host, [child]);
+    }
+    const alone: Node[] = [];
+    for (const [host, held] of byHost) {
+      if (
+        held.length > 1 && sourceNodeType(host) === Node.ELEMENT_NODE &&
+        this.#mirroredNodes.has(host)
+      ) {
+        this.#queueReadWithChildren(host as Element);
+        this.#readInPlace.add(host);
+      } else {
+        alone.push(...held);
+      }
+    }
+    this.#queueSlotted(alone, true);
     for (const child of readOtherwise) {
       if (
         sourceNodeType(child) === Node.ELEMENT_NODE &&
@@ -4988,12 +5123,16 @@ export class HtmlMirrorSourceSession {
       return;
     }
     this.#queueReadWithChildren(target);
+    // The mirror holds what the box draws: what reads otherwise travels
+    // (D222).
+    this.#readInPlace.add(target);
     // What a host's own root holds is hidden and shown with the host, and
     // a patch for the host's children does not carry it: the text of a
     // menu a web component shows by `:host([open])` never arrived (D132).
     const shadow = readSourceShadowRoot(target);
     if (shadow && this.#mirroredNodes.has(shadow)) {
       this.#queuePending(this.#pendingChildren, shadow);
+      this.#readInPlace.add(shadow);
     }
   }
 
@@ -5180,12 +5319,67 @@ export class HtmlMirrorSourceSession {
     if (!previous) return false;
     // Built whole in this task: one read in slices is not needed any more.
     this.#cancelPolicyRefresh();
-    const next = createSourceControlledContentPolicy(
+    // On the index of the policy in force when nothing since moved it
+    // (D221): the walk of the whole document was most of this task.
+    const next = this.#beginMarkedPolicy(this.#policyReuse()).step() as
+      SourceControlledContentPolicy;
+    return this.#adoptControlledContentPolicy(previous, next);
+  }
+
+  /** Counts what `records` may do to the index of a policy (D221). */
+  #notePolicyIndexChange(records: readonly MutationRecord[]): void {
+    // Nothing to keep count for: the policy in force was moved already, and
+    // none is built that a record now could move.
+    const policy = this.#controlledContentPolicy;
+    const mark = policy && this.#policyIndexMarks.get(policy);
+    if (
+      (!mark || mark.moves !== this.#policyIndexMoves) &&
+      !this.#policyRefreshRunning && !this.#checkpointRead
+    ) return;
+    const change = sourceControlledContentIndexChange(records);
+    if (change.moved) this.#policyIndexMoves += 1;
+    this.#policyIndexAdded += change.added;
+  }
+
+  /** The policy in force, to build the next on, if nothing moved its index. */
+  #policyReuse(): SourceControlledContentReuse | undefined {
+    const policy = this.#controlledContentPolicy;
+    const mark = policy && this.#policyIndexMarks.get(policy);
+    if (!policy || !mark || mark.moves !== this.#policyIndexMoves) return undefined;
+    // Records from a root not listened to (past the bound of the walk for
+    // roots) never come: what the index holds of it may be stale.
+    for (const root of sourceControlledContentIndexedShadowRoots(policy)) {
+      if (!this.#observedShadowRoots.has(root)) return undefined;
+    }
+    return { policy, addedSince: this.#policyIndexAdded - mark.added };
+  }
+
+  /**
+   * Begins a policy, on `reuse`'s index if given (D221), and marks it once
+   * built with the counts its index dates from.
+   */
+  #beginMarkedPolicy(
+    reuse?: SourceControlledContentReuse,
+  ): ReturnType<typeof beginSourceControlledContentPolicy> {
+    const mark = (reuse && this.#policyIndexMarks.get(reuse.policy)) ?? {
+      moves: this.#policyIndexMoves,
+      added: this.#policyIndexAdded,
+    };
+    const builder = beginSourceControlledContentPolicy(
       this.environment.document,
       this.environment.window,
       MAX_HTML_MIRROR_NODES,
+      reuse,
     );
-    return this.#adoptControlledContentPolicy(previous, next);
+    return {
+      step: (expired) => {
+        const policy = builder.step(expired);
+        if (policy && !this.#policyIndexMarks.has(policy)) {
+          this.#policyIndexMarks.set(policy, mark);
+        }
+        return policy;
+      },
+    };
   }
 
   /**
@@ -5203,13 +5397,9 @@ export class HtmlMirrorSourceSession {
     const hold = holdFlush ||
       (this.#policyRefreshRunning && this.#policyRefreshHoldsFlush);
     const generation = (this.#policyRefreshGeneration += 1);
+    const builder = this.#beginMarkedPolicy(this.#policyReuse());
     this.#policyRefreshRunning = true;
     this.#policyRefreshHoldsFlush = hold;
-    const builder = beginSourceControlledContentPolicy(
-      this.environment.document,
-      this.environment.window,
-      MAX_HTML_MIRROR_NODES,
-    );
     const clock = createSliceClock({
       now: this.environment.now,
       yield: this.environment.yieldToMain ?? yieldToMain,
@@ -5502,6 +5692,120 @@ export class HtmlMirrorSourceSession {
     this.#setEmittedChildren(target, children);
   }
 
+  /**
+   * What a list read in place changes (D222): the mirror holds every node of
+   * `children`, under the same parents and in the same order, as they were
+   * last sent; a text that reads otherwise goes as a text, an element whose
+   * attributes or hints do as its attributes, and nothing else. A list of
+   * a box that is shown or hidden had all it holds sent whole: opening the
+   * first dropdown of a component sent its menu again, 42 KB with the roots
+   * of its items and their icons, for the 1.3 KB of text the closed menu
+   * withheld, and closing it sent the menu twice more. Undefined where the
+   * list is to go whole: anything put in, taken out or moved, a root met
+   * or restyled since, an element that differs in what its attributes do
+   * not carry, or more than half of the list's nodes reading otherwise.
+   */
+  #inPlaceOperations(
+    target: Node,
+    children: readonly HtmlMirrorNode[],
+  ): HtmlMirrorPatchOperation[] | undefined {
+    const registry = this.environment.registry;
+    const operations: HtmlMirrorPatchOperation[] = [];
+    let nodes = 0;
+    const sameList = (
+      parent: Node | undefined,
+      list: readonly HtmlMirrorNode[],
+    ): boolean => {
+      const sent = parent ? this.#emittedChildren.get(parent) : undefined;
+      if (!sent || sent.length !== list.length) return false;
+      for (let index = 0; index < list.length; index += 1) {
+        if (registry.getNode(list[index]!.id) !== sent[index]) return false;
+      }
+      return true;
+    };
+    const visit = (node: HtmlMirrorNode): boolean => {
+      nodes += 1;
+      const source = registry.getNode(node.id);
+      if (
+        !source || !this.#mirroredNodes.has(source) ||
+        this.#hostsSentAgain.has(source as Element)
+      ) return false;
+      const sent = this.#emittedNodeSignatures.get(source);
+      if (node.kind === 'text') {
+        if (emittedTextSignature(node) !== sent) {
+          operations.push(Object.freeze({ kind: 'text', nodeId: node.id, node }));
+        }
+        return true;
+      }
+      if (
+        node.opaquePlaceholder || node.childrenFollow || node.placeholder
+      ) return emittedElementSignature(node) === sent;
+      if (emittedElementSignature(node) !== sent) {
+        const operation = inPlaceAttributesOperation(node, sent);
+        if (!operation) return false;
+        operations.push(operation);
+      }
+      const shadow = readSourceShadowRoot(source as Element);
+      const graphRoot = node.shadowRoot;
+      if (graphRoot) {
+        const root = registry.getNode(graphRoot.id);
+        if (
+          !root || root !== shadow || graphRoot.childrenFollow ||
+          !sameList(root, graphRoot.children) ||
+          !this.#adoptedStyleSignatures.isBaseline(
+            root,
+            adoptedStyleSignature(graphRoot.adoptedStyleSheets),
+          )
+        ) return false;
+        for (const child of graphRoot.children) {
+          if (!visit(child)) return false;
+        }
+      } else if (shadow && this.#mirroredNodes.has(shadow)) {
+        return false;
+      }
+      if (!sameList(source, node.children)) return false;
+      for (const child of node.children) {
+        if (!visit(child)) return false;
+      }
+      return true;
+    };
+    if (!sameList(target, children)) return undefined;
+    for (const child of children) {
+      if (!visit(child)) return undefined;
+    }
+    return operations.length * 2 <= nodes ? operations : undefined;
+  }
+
+  /**
+   * A list read in place is noted as a list sent whole notes it: whether
+   * what an element the page declares hidden holds is withheld, and the
+   * image an `<img>` shows (D222).
+   */
+  #noteReadInPlace(
+    target: Node,
+    children: readonly HtmlMirrorNode[],
+  ): void {
+    this.#noteDeclaredHidden(target);
+    const pending = [...children];
+    while (pending.length > 0) {
+      const node = pending.pop() as HtmlMirrorNode;
+      if (node.kind === 'text') continue;
+      const source = this.environment.registry.getNode(node.id);
+      if (source) {
+        this.#noteDeclaredHidden(source);
+        if (node.tagName === 'img' && sourceNodeType(source) === Node.ELEMENT_NODE) {
+          this.#registerMirroredImageCandidate(
+            source as Element,
+            node.selectedImageSource ?? '',
+          );
+        }
+      }
+      const graphRoot = node.shadowRoot;
+      if (graphRoot) pending.push(...graphRoot.children);
+      pending.push(...node.children);
+    }
+  }
+
   #recordReconciledChildren(
     target: Node,
     children: readonly HtmlMirrorReconcileChild[],
@@ -5610,15 +5914,14 @@ export class HtmlMirrorSourceSession {
     return 'reconcile';
   }
 
-  #coversOwnShadowWork(target: Node): boolean {
+  /** `rootsWithWork`: the roots above what is pending (D222). */
+  #coversOwnShadowWork(target: Node, rootsWithWork: ReadonlySet<Node>): boolean {
     if (sourceNodeType(target) !== Node.ELEMENT_NODE) return false;
     const shadow = readSourceShadowRoot(target as Element);
     if (!shadow) return false;
     // The root itself is read again, beside its host (D132).
     if (this.#pendingChildren.has(shadow)) return false;
-    return iterableContainsComposedSource(this.#pendingChildren, shadow) ||
-      iterableContainsComposedSource(this.#pendingAttributes, shadow) ||
-      iterableContainsComposedSource(this.#pendingText, shadow);
+    return rootsWithWork.has(shadow);
   }
 
   #registerShadowHostCandidate(element: Element): void {
@@ -6220,6 +6523,8 @@ export class HtmlMirrorSourceSession {
     this.#observeImageEvents(shadow);
     if (!this.#observedShadowRoots.has(shadow)) {
       this.#observedShadowRoots.add(shadow);
+      // Records from it came to no policy's walk before (D221).
+      this.#policyIndexMoves += 1;
       // The same options as for the document (D125).
       this.#observer?.observe(shadow, SOURCE_SECRET_RECORD_OPTIONS);
     }
@@ -6698,22 +7003,80 @@ function readsSourceSlotAgain(target: Node, slot: Element): boolean {
     target !== slot && containsComposedSource(target, slot);
 }
 
-function containsComposedSource(ancestor: Node, descendant: Node): boolean {
-  for (let current: Node | undefined = descendant; current;) {
-    if (current === ancestor) return true;
-    if (current.parentNode) {
-      current = current.parentNode;
-      continue;
-    }
-    if (sourceNodeType(current) === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current) {
-      current = (current as ShadowRoot).host;
-      continue;
-    }
-    const root = current.getRootNode();
-    current = root !== current && sourceNodeType(root) === Node.DOCUMENT_FRAGMENT_NODE &&
+/**
+ * Whether the list of one of `targets` read again reads the slot again:
+ * `readsSourceSlotAgain` for each, in one way up from the slot (D222).
+ */
+function readsSourceSlotAgainIn(slot: Element, targets: ReadonlySet<Node>): boolean {
+  if (targets.size === 0) return false;
+  const root = slot.getRootNode();
+  const ownHost = isSourceShadowRoot(root) ? root.host : undefined;
+  for (
+    let current = composedSourceParent(slot);
+    current;
+    current = composedSourceParent(current)
+  ) {
+    if (current !== ownHost && targets.has(current)) return true;
+  }
+  return false;
+}
+
+/** Whether a node above `node` in the composed tree is one of `targets`. */
+function hasComposedSourceAncestorIn(node: Node, targets: ReadonlySet<Node>): boolean {
+  if (targets.size === 0) return false;
+  for (
+    let current = composedSourceParent(node);
+    current;
+    current = composedSourceParent(current)
+  ) {
+    if (targets.has(current)) return true;
+  }
+  return false;
+}
+
+/**
+ * Adds to `into` every shadow root above `node` (D222). A root met that is
+ * there already has every root above it there too.
+ */
+function noteComposedShadowRootsAbove(node: Node, into: Set<Node>): void {
+  for (
+    let current = composedSourceParent(node);
+    current;
+    current = composedSourceParent(current)
+  ) {
+    if (!isSourceShadowRoot(current)) continue;
+    if (into.has(current)) return;
+    into.add(current);
+  }
+}
+
+/**
+ * The next node up the composed tree, past a root to its host. Nothing
+ * above the document, whose own `getRootNode` an element of that name
+ * takes (D213).
+ */
+function composedSourceParent(current: Node): Node | undefined {
+  const type = sourceNodeType(current);
+  if (type === Node.DOCUMENT_NODE) return undefined;
+  const parent = current.parentNode;
+  if (parent) return parent;
+  if (type === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current) {
+    return (current as ShadowRoot).host;
+  }
+  const root = current.getRootNode();
+  return root !== current && sourceNodeType(root) === Node.DOCUMENT_FRAGMENT_NODE &&
       'host' in root
-      ? (root as ShadowRoot).host
-      : undefined;
+    ? (root as ShadowRoot).host
+    : undefined;
+}
+
+function containsComposedSource(ancestor: Node, descendant: Node): boolean {
+  for (
+    let current: Node | undefined = descendant;
+    current;
+    current = composedSourceParent(current)
+  ) {
+    if (current === ancestor) return true;
   }
   return false;
 }
@@ -6778,6 +7141,53 @@ function emittedElementSignature(
     element.customElementDefined === true,
     element.assignedNodeIds ?? null,
   ]);
+}
+
+/**
+ * An element of a list read in place as an attributes operation (D222), or
+ * undefined where that would not leave the mirror's element as the list
+ * sent whole would: what the element shows or was sent with of a dropdown's
+ * choices or a control's text, which no attributes operation carries.
+ */
+function inPlaceAttributesOperation(
+  node: HtmlMirrorElementNode,
+  sent: string | undefined,
+): HtmlMirrorPatchOperation | undefined {
+  if (
+    node.selectedOptionIndexes || node.selectPickerOpen || node.controlText ||
+    node.leftOutTagName
+  ) return undefined;
+  try {
+    const previous = sent === undefined ? undefined : JSON.parse(sent) as unknown[];
+    if (
+      !previous || previous[5] !== null || previous[6] !== false ||
+      previous[8] !== null
+    ) return undefined;
+  } catch {
+    return undefined;
+  }
+  return Object.freeze({
+    kind: 'attributes',
+    nodeId: node.id,
+    namespace: node.namespace,
+    tagName: node.tagName,
+    attributes: node.attributes,
+    ...(node.visuallyHidden ? { visuallyHidden: true as const } : {}),
+    ...(node.selectedImageSource !== undefined
+      ? { selectedImageSource: node.selectedImageSource }
+      : {}),
+    ...(node.selectPresentationStyle !== undefined
+      ? { selectPresentationStyle: node.selectPresentationStyle }
+      : {}),
+    ...(node.canvasBackgroundColor !== undefined
+      ? { canvasBackgroundColor: node.canvasBackgroundColor }
+      : {}),
+    ...(node.resolvedStyleSheetText !== undefined
+      ? { resolvedStyleSheetText: node.resolvedStyleSheetText }
+      : {}),
+    ...(node.customElementDefined ? { customElementDefined: true as const } : {}),
+    ...(node.assignedNodeIds ? { assignedNodeIds: node.assignedNodeIds } : {}),
+  });
 }
 
 /** The sheet text in what was last sent for an element, if it had one. */
@@ -6982,17 +7392,6 @@ function scrolledTarget(event: Event): EventTarget | null {
     // Fall back to the event's own target.
   }
   return event.target;
-}
-
-function iterableContainsComposedSource(
-  values: Iterable<Node>,
-  root: Node,
-  excluded?: Node,
-): boolean {
-  for (const value of values) {
-    if (value !== excluded && containsComposedSource(root, value)) return true;
-  }
-  return false;
 }
 
 function readSourceDimensions(document: Document, window: Window): {

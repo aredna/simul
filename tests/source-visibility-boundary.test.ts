@@ -978,6 +978,63 @@ describe('source visibility boundary index', () => {
     expect(index.recalledComparisons).toBe(1);
     index.dispose();
   });
+
+  it('answers a comparison of an attribute change from the styles kept outside its element, and reads them inside (D221)', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <table><tr><td id="cell"><span id="inner">Cell</span></td></tr></table>
+      <p id="other">Other <b id="bold">text</b></p></body></html>`);
+    const cell = document.querySelector<HTMLElement>('#cell')!;
+    const inner = document.querySelector<HTMLElement>('#inner')!;
+    const other = document.querySelector<HTMLElement>('#other')!;
+    installPositivePaintRects(document);
+    const reads = new Map<Element, number>();
+    // The cell's color hides what it holds, as an inherited property does.
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        reads.set(element, (reads.get(element) ?? 0) + 1);
+        const hidden = element.closest('[bgcolor="none"]') !== null;
+        return paintedStyle({ visibility: hidden ? 'hidden' : 'visible' });
+      },
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+    const text = (other.firstChild as Text);
+    index.beginRefreshMutations([characterDataRecord(text)], { keepStyles: true })
+      .step(() => false);
+    reads.clear();
+    cell.setAttribute('bgcolor', 'none');
+    const refresh = index.beginRefreshMutations([attributeRecord(cell, 'bgcolor')], {
+      keepStyles: true,
+      stylesUnchanged: true,
+      restyledWithin: [cell],
+    }).step(() => false)!;
+    expect(refresh.changedTargets).toEqual([cell]);
+    expect(index.recalledComparisons).toBe(1);
+    expect(reads.get(inner)).toBeGreaterThan(0);
+    expect(reads.get(other)).toBeUndefined();
+    expect(reads.get(document.querySelector('#bold')!)).toBeUndefined();
+    // What was read inside is kept for the next: a text change after it
+    // recalls the hidden cell, and finds nothing changed.
+    reads.clear();
+    expect(index.beginRefreshMutations([characterDataRecord(text)], {
+      keepStyles: true,
+      stylesUnchanged: true,
+    }).step(() => false)!.changedTargets).toEqual([]);
+    expect(reads.size).toBe(0);
+    // Without the caller's word for the element, the styles are read again.
+    cell.removeAttribute('bgcolor');
+    expect(index.beginRefreshMutations([attributeRecord(cell, 'bgcolor')], {
+      keepStyles: true,
+      stylesUnchanged: true,
+    }).step(() => false)!.changedTargets).toEqual([cell]);
+    expect(reads.get(other)).toBeGreaterThan(0);
+    expect(index.recalledComparisons).toBe(2);
+    index.dispose();
+  });
 });
 
 interface PaintedStyleOptions {
