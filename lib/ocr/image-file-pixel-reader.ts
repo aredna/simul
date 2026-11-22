@@ -10,6 +10,8 @@ import {
   type RenderedImageFilePixels,
 } from './image-file-pixels';
 import type { SupportedLanguage } from '../translation-provider';
+// The page's nodes are read past a form's field names (D181, D200).
+import { sourceLocalName } from '../replica/source-node-accessors';
 
 export const MAX_IMAGE_DOWNLOAD_BYTES = 16 * 1024 * 1024;
 export const IMAGE_DOWNLOAD_TIMEOUT_MS = 15_000;
@@ -175,9 +177,9 @@ export function imageOffersUrl(image: HTMLImageElement, url: string): boolean {
   add(image.getAttribute('src'));
   for (const candidate of srcsetUrls(image.getAttribute('srcset'))) add(candidate);
   const parent = image.parentElement;
-  if (parent?.localName.toLowerCase() === 'picture') {
+  if (parent && sourceLocalName(parent).toLowerCase() === 'picture') {
     for (const source of parent.children) {
-      if (source.localName.toLowerCase() !== 'source') continue;
+      if (sourceLocalName(source).toLowerCase() !== 'source') continue;
       for (const candidate of srcsetUrls(source.getAttribute('srcset'))) {
         add(candidate);
       }

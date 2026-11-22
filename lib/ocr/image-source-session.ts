@@ -45,6 +45,12 @@ import {
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
 import type { SourceDocumentSecretScan } from '../replica/semantic-source-session';
 import { readVisualViewportSnapshot } from '../primary-scroll';
+// The page's nodes are read past a form's field names (D181, D200).
+import {
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from '../replica/source-node-accessors';
 import { canonicalizeLanguageTag } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
 import {
@@ -1693,13 +1699,14 @@ function elementHasOwnVisibleText(element: Element): boolean {
   while (pending.length > 0 && visited < MAX_TEXT_COVER_WALK_NODES) {
     const current = pending.pop()!;
     visited += 1;
-    for (const child of current.node.childNodes) {
-      if (child.nodeType === 3) {
+    for (const child of sourceChildNodeList(current.node)) {
+      const nodeType = sourceNodeType(child);
+      if (nodeType === 3) {
         if ((child.nodeValue ?? '').trim().length > 0) return true;
         continue;
       }
       if (
-        child.nodeType === 1 &&
+        nodeType === 1 &&
         current.depth < MAX_TEXT_COVER_WALK_DEPTH
       ) {
         pending.push({ node: child, depth: current.depth + 1 });
@@ -1798,9 +1805,9 @@ function rectanglesOverlap(left: DOMRect, right: DOMRect): boolean {
 function isImageElement(node: Node | null): node is HTMLImageElement {
   return Boolean(
     node &&
-    node.nodeType === 1 &&
+    sourceNodeType(node) === 1 &&
     'tagName' in node &&
-    String((node as Element).tagName).toLowerCase() === 'img',
+    String(sourceLocalName(node as Element)).toLowerCase() === 'img',
   );
 }
 

@@ -5,6 +5,13 @@ import {
   isOcrImageReadingMethod,
   type ImageReadingMethodId,
 } from './image-reading-methods';
+// The mirror's forms hold the page's fields, named as on the page: its
+// nodes are read past them (D181, D195, D200).
+import {
+  readSourceOwnAccessor,
+  sourceAnswersFieldNames,
+  sourceLocalName,
+} from '../replica/source-node-accessors';
 import type { ReplicaImageAnchor } from '../replica/contracts';
 import {
   receiverSafeAnimationFrameCanceller,
@@ -951,7 +958,7 @@ function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
     let previous = root.previousSibling;
     while (
       previous && previous !== before &&
-      (previous as Partial<Element>).localName === IMAGE_OVERLAY_ELEMENT
+      sourceLocalName(previous as Element) === IMAGE_OVERLAY_ELEMENT
     ) previous = previous.previousSibling;
     return previous === before;
   };
@@ -979,7 +986,7 @@ function giveSlotName(root: HTMLElement, name: string | null): void {
 function ancestorOverlayShadowRoot(parent: Element): ShadowRoot | undefined {
   if (
     parent.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
-    OVERLAY_SHADOW_HOSTS.has(parent.localName)
+    OVERLAY_SHADOW_HOSTS.has(sourceLocalName(parent))
   ) return undefined;
   const view = parent.ownerDocument?.defaultView;
   const getComputedStyle = view?.getComputedStyle;
@@ -987,15 +994,18 @@ function ancestorOverlayShadowRoot(parent: Element): ShadowRoot | undefined {
   let current: Element | null = parent;
   for (let depth = 0; current && depth < MAX_CLIP_ANCESTOR_DEPTH; depth += 1) {
     if (current.namespaceURI !== 'http://www.w3.org/1999/xhtml') return undefined;
-    if (current.localName === 'body' || current.localName === 'html') {
+    const localName = sourceLocalName(current);
+    if (localName === 'body' || localName === 'html') {
       return undefined;
     }
-    if (OVERLAY_SHADOW_HOSTS.has(current.localName)) {
+    if (OVERLAY_SHADOW_HOSTS.has(localName)) {
       return overlayShadowRootFor(current);
     }
     // A slot, or a root of the page's own, between: the overlay would be
     // drawn elsewhere or not at all.
-    if (current.shadowRoot || current.localName === 'slot') return undefined;
+    if (
+      nodeProperty(current, 'shadowRoot') || localName === 'slot'
+    ) return undefined;
     let style: CSSStyleDeclaration | undefined;
     try {
       style = getComputedStyle.call(view, current) ?? undefined;
@@ -1061,7 +1071,7 @@ function overlayShadowRootFor(parent: Element): ShadowRoot | undefined {
   if (known) return known;
   if (
     parent.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
-    !OVERLAY_SHADOW_HOSTS.has(parent.localName)
+    !OVERLAY_SHADOW_HOSTS.has(sourceLocalName(parent))
   ) return undefined;
   let shadow: ShadowRoot;
   try {
@@ -1360,7 +1370,7 @@ function clippingAncestors(image: Element): readonly ClipAncestor[] {
     current && depth < MAX_CLIP_ANCESTOR_DEPTH;
     current = composedParentElement(current), depth += 1
   ) {
-    const tagName = current.localName?.toLowerCase();
+    const tagName = sourceLocalName(current)?.toLowerCase();
     if (tagName === 'body' || tagName === 'html') break;
     const style = read(current);
     if (!style) continue;
@@ -1380,12 +1390,29 @@ function clippingAncestors(image: Element): readonly ClipAncestor[] {
 }
 
 function composedParentElement(element: Element): Element | undefined {
-  const slot = (element as Element & { assignedSlot?: Element | null })
-    .assignedSlot;
+  const slot = nodeProperty(
+    element as Element & { assignedSlot?: Element | null },
+    'assignedSlot',
+  );
   if (slot) return slot;
-  if (element.parentElement) return element.parentElement;
-  const host = (element.parentNode as (Node & { host?: Element }) | null)?.host;
+  const parent = nodeProperty(element, 'parentElement');
+  if (parent) return parent;
+  const host = (nodeProperty(element, 'parentNode') as
+    (Node & { host?: Element }) | null)?.host;
   return host ?? undefined;
+}
+
+/**
+ * A property of a mirror element past a form's fields: a field named
+ * `parentElement` would send the walk up into the form's own field (D200).
+ */
+function nodeProperty<T extends Element, K extends keyof T>(
+  element: T,
+  name: K,
+): T[K] {
+  return sourceAnswersFieldNames(element)
+    ? readSourceOwnAccessor(element, String(name)) as T[K]
+    : element[name];
 }
 
 function containsAbsoluteBoxes(style: CSSStyleDeclaration): boolean {

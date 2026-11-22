@@ -7735,6 +7735,7 @@ function imageIdentityKey(
     if (address.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH) return undefined;
     let fit = ['', ''];
     let background = '';
+    let orientation = '';
     try {
       const style = image.ownerDocument?.defaultView?.getComputedStyle(image);
       fit = [style?.objectFit ?? '', style?.objectPosition ?? ''];
@@ -7742,11 +7743,16 @@ function imageIdentityKey(
       // two images of one address with other backgrounds, or a background
       // a class swaps, are other pictures (D172).
       background = style?.backgroundImage ?? '';
+      // A file Chrome turns by the orientation it holds, shown unturned by
+      // `image-orientation: none`, is another picture too (D200).
+      orientation = style?.getPropertyValue?.('image-orientation') ?? '';
     } catch {
       // Without a computed style the default fit is the only one assumed.
     }
     if (background === 'none') background = '';
     if (background.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH) return undefined;
+    if (orientation === 'from-image') orientation = '';
+    if (orientation.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH) return undefined;
     return JSON.stringify([
       IMAGE_IDENTITY_SCHEMA_VERSION,
       address,
@@ -7756,6 +7762,7 @@ function imageIdentityKey(
       Math.round(renderedHeight),
       ...fit,
       background,
+      orientation,
       finalConfigurationKey,
     ]);
   } catch {

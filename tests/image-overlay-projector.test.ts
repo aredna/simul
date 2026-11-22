@@ -645,6 +645,69 @@ describe('ImageOverlayProjector', () => {
     projector.dispose();
   });
 
+  it('draws the overlay of an image in a mirror form whose fields are named for its own properties (D200)', () => {
+    // The mirror's forms hold the page's fields, named as on the page, and a
+    // form answers `form.<field name>` before its own properties (D181): the
+    // walk up the image's ancestors read a field for the form's name.
+    const { document, window } = parseHTML(
+      '<html><body><div><form id="booking"><input id="field"><img id="inside"></form></div></body></html>',
+    );
+    // linkedom windows share their properties: undone after the test.
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: () => ({
+        getPropertyValue: (name: string) =>
+          name === 'position' ? 'static' : name.startsWith('overflow') ? 'visible' : '',
+      }),
+    });
+    onTestFinished(() => {
+      delete (window as unknown as { getComputedStyle?: unknown }).getComputedStyle;
+    });
+    const form = document.querySelector('#booking')!;
+    const field = document.querySelector('#field')!;
+    // linkedom keeps these on the element: they go to a prototype as in a
+    // browser, where the form's own field then stands in front of them.
+    const prototype = Object.getPrototypeOf(form) as object;
+    Object.setPrototypeOf(form, Object.create(prototype, {
+      localName: { configurable: true, get: () => 'form' },
+      tagName: { configurable: true, get: () => 'FORM' },
+      nodeType: { configurable: true, get: () => 1 },
+    }));
+    delete (form as { localName?: string }).localName;
+    delete (form as { nodeType?: number }).nodeType;
+    for (const name of ['localName', 'parentElement', 'assignedSlot']) {
+      Object.defineProperty(form, name, { configurable: true, value: field });
+    }
+    const image = document.querySelector('#inside') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 100, height: 60,
+      right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+    });
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection({ jobOrdinal: 1, nodeId: 1 }))).toBe(true);
+    // linkedom's selectors read the name too, where a browser's do not.
+    for (const name of ['localName', 'parentElement', 'assignedSlot']) {
+      delete (form as unknown as Record<string, unknown>)[name];
+    }
+    expect(findImageOverlays(document as unknown as Document)).toHaveLength(1);
+    expect(image.nextSibling).toBe(overlayFor(document, 1));
+    // Placed over the image: the walk above it came to its end.
+    expect(overlayFor(document, 1)!.style.getPropertyValue('width')).toBe('100px');
+    projector.dispose();
+  });
+
   it('draws the overlay of an image inside a link, figure, picture or list item in the nearest ancestor\'s own root, unless an element between makes a stacking context (D182)', () => {
     const { document, window } = parseHTML(
       '<html><body>' +

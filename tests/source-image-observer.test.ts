@@ -2023,6 +2023,40 @@ describe('SourceImageObserver', () => {
     },
   );
 
+  it('reads an image inside a form whose fields are named for its own properties (D200)', () => {
+    // A form answers `form.<field name>` before its own properties, in a
+    // content script as in the page (D181): read through such a name, the
+    // form had no name and the image's facts were unreadable, so the picture
+    // CSS gives it was not followed.
+    const fixture = createFixture();
+    const form = fixture.document.createElement('form');
+    const field = fixture.document.createElement('input');
+    form.append(field, fixture.image);
+    fixture.document.body.append(form);
+    // linkedom keeps these on the element: they go to a prototype as in a
+    // browser, where the form's own field then stands in front of them.
+    const prototype = Object.getPrototypeOf(form) as object;
+    Object.setPrototypeOf(form, Object.create(prototype, {
+      localName: { configurable: true, get: () => 'form' },
+      tagName: { configurable: true, get: () => 'FORM' },
+      nodeType: { configurable: true, get: () => 1 },
+    }));
+    delete (form as { localName?: string }).localName;
+    delete (form as { nodeType?: number }).nodeType;
+    for (const name of ['localName', 'nodeType', 'childNodes']) {
+      Object.defineProperty(form, name, { configurable: true, value: field });
+    }
+    const style = pictureStyleFixture(fixture.document, fixture.image);
+    style.content = 'url("https://private.example/second.png")';
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, cssPicture: expect.any(Number) },
+    }]);
+    stop();
+  });
+
   it('reads nothing for a class token or data attribute no style rule names (D182)', () => {
     const names: SourceStyleNames = {
       classes: new Set(['open']),

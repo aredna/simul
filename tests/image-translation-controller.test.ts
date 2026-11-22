@@ -7129,6 +7129,121 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('keeps apart the words of one address turned by image-orientation and not (D200)', async () => {
+    // A file Chrome turns by its own orientation, shown unturned by
+    // `image-orientation: none`, is another picture: kept by its address
+    // alone, it was given the turned one's words.
+    const { document, window } = parseHTML(
+      '<html><body><img id="a"><img id="b"><img id="c"></body></html>',
+    );
+    // linkedom windows share their properties: undone after the test.
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        objectFit: 'fill',
+        objectPosition: '50% 50%',
+        backgroundImage: 'none',
+        getPropertyValue: (name: string) => name === 'image-orientation'
+          ? element.id === 'b' ? 'none' : 'from-image'
+          : '',
+      }),
+    });
+    onTestFinished(() => {
+      delete (window as unknown as { getComputedStyle?: unknown }).getComputedStyle;
+    });
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, id] of [[12, 'a'], [13, 'b'], [14, 'c']] as const) {
+      const image = document.getElementById(id) as unknown as HTMLImageElement;
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: 'https://assets.example.test/photo.jpg' },
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 200 },
+        naturalHeight: { configurable: true, value: 100 },
+      });
+      images.set(nodeId, image);
+    }
+    const at = (nodeId: number): SourceImageDescriptor => ({
+      ...descriptor,
+      nodeId,
+      visibility: 'visible',
+      captureRevision: 1,
+      observationRevision: 1,
+      pictureRevision: 1,
+      admissionRevision: 1,
+    });
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(current, `${current.nodeId}`.padEnd(64, 'd')),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    const recognize = vi.fn(async (pixels: AcquiredImagePixels) => ({
+      ...autoProbeRecognition(`Photo ${pixels.descriptor.nodeId}`, 0.98),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor: at(12) }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `ja:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const overlay = (nodeId: number) => overlayText(
+      document.querySelector(`[data-simul-image-overlay="${nodeId}"]`),
+    );
+    const reused = () =>
+      diagnostics.filter((entry) => entry === 'image-identity-reused').length;
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(overlay(12)).toBe('ja:Photo 12'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    // The same file, turned the same way: given the first one's words.
+    emitChange?.({ kind: 'upsert', descriptor: at(14) });
+    await vi.waitFor(() => expect(overlay(14)).toBe('ja:Photo 12'));
+    expect(reused()).toBe(1);
+    // Shown unturned: read for itself.
+    emitChange?.({ kind: 'upsert', descriptor: at(13) });
+    await vi.waitFor(() => expect(overlay(13)).toBe('ja:Photo 13'));
+    expect(reused()).toBe(1);
+    controller.dispose();
+  });
+
   it('reads once more, without busy state, an image first read while a link lay over it, once the link has gone (D172)', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

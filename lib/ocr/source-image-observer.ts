@@ -22,6 +22,15 @@ import {
   sourceVisibilityMutationMaySkip,
   type SourceStyleNames,
 } from '../replica/source-style-names';
+// A form answers for its fields' names before its own DOM properties (D181):
+// the page's nodes are read past them (D200).
+import {
+  readSourceOwnAccessor,
+  sourceAnswersFieldNames,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from '../replica/source-node-accessors';
 import type { ImageSourceReadySummary } from './image-source-protocol';
 import type { SourceImageUpsert } from './source-image-model';
 import {
@@ -1030,10 +1039,11 @@ export class SourceImageObserver {
       } catch {
         // Fall through to the bounded flat-tree identity walk.
       }
-      if (node.nodeType === 1) {
+      const nodeType = sourceNodeType(node);
+      if (nodeType === 1) {
         const path = readSourceFlatTreeElementPath(image);
         if (path?.includes(node as Element)) contained.push(image);
-      } else if (node.nodeType === 11 && image.getRootNode() === node) {
+      } else if (nodeType === 11 && image.getRootNode() === node) {
         contained.push(image);
       }
     }
@@ -1596,7 +1606,7 @@ export class SourceImageObserver {
       if (
         attributeName === 'href' &&
         record.target.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
-        record.target.localName.toLowerCase() === 'base'
+        sourceLocalName(record.target).toLowerCase() === 'base'
       ) {
         refreshAllRouting = true;
         continue;
@@ -1656,7 +1666,7 @@ export class SourceImageObserver {
           forcedContentCandidates.add(record.target);
           forcedCaptureCandidates.add(record.target);
         }
-      } else if (record.target.tagName.toLowerCase() === 'source') {
+      } else if (sourceLocalName(record.target).toLowerCase() === 'source') {
         const picture = record.target.closest('picture');
         for (const image of picture
           ? this.#scanMutationImages([picture], traversalBudget).images
@@ -2077,7 +2087,7 @@ export class SourceImageObserver {
     const view = target.ownerDocument?.defaultView;
     const getComputedStyle = view?.getComputedStyle;
     if (!view || typeof getComputedStyle !== 'function') return true;
-    const pending: Element[] = [...target.children];
+    const pending: Element[] = [...elementChildren(target)];
     let inspected = 0;
     while (pending.length > 0 && inspected < MAX_COVER_SCAN_ELEMENTS) {
       const element = pending.pop()!;
@@ -2100,7 +2110,7 @@ export class SourceImageObserver {
         if (!this.#coverMoveCandidates(element, into, false)) return false;
         continue;
       }
-      for (const child of element.children) pending.push(child);
+      for (const child of elementChildren(element)) pending.push(child);
     }
     return true;
   }
@@ -2962,16 +2972,17 @@ const CAPTURE_CONTROL_SELECTOR = [
  */
 function elementCanAffectCapturedPixels(element: Element): boolean {
   if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return true;
+  const localName = sourceLocalName(element);
   return !(
-    element.localName === 'base' ||
-    element.localName === 'head' ||
-    element.localName === 'link' ||
-    element.localName === 'meta' ||
-    element.localName === 'script' ||
-    element.localName === 'source' ||
-    element.localName === 'style' ||
-    element.localName === 'template' ||
-    element.localName === 'title'
+    localName === 'base' ||
+    localName === 'head' ||
+    localName === 'link' ||
+    localName === 'meta' ||
+    localName === 'script' ||
+    localName === 'source' ||
+    localName === 'style' ||
+    localName === 'template' ||
+    localName === 'title'
   );
 }
 function collectCaptureControlTargets(
@@ -3115,12 +3126,10 @@ function passiveImagePresentationSubtree(
       if (++inspected > MAX_CAPTURE_SAFETY_SCAN_ELEMENTS) return undefined;
       const current = pending.pop();
       if (!current) break;
-      if (
-        current.nodeType === 3 || current.nodeType === 4 ||
-        current.nodeType === 5
-      ) return false;
+      const nodeType = sourceNodeType(current);
+      if (nodeType === 3 || nodeType === 4 || nodeType === 5) return false;
       if (!isElement(current)) continue;
-      const tagName = current.localName.toLowerCase();
+      const tagName = sourceLocalName(current).toLowerCase();
       if (
         tagName === 'input' || tagName === 'option' || tagName === 'output' ||
         tagName === 'select' || tagName === 'textarea' ||
@@ -3225,7 +3234,7 @@ function appendBoundedChildNodes(
   let complete = true;
   let children: NodeListOf<ChildNode>;
   try {
-    children = node.childNodes;
+    children = sourceChildNodeList(node);
   } catch {
     return false;
   }
@@ -3394,7 +3403,7 @@ function containsHtmlBaseElement(node: Node): boolean {
   if (!isElement(node)) return false;
   if (
     node.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
-    node.localName.toLowerCase() === 'base'
+    sourceLocalName(node).toLowerCase() === 'base'
   ) return true;
   return boundedDescendantMatch(
     node,
@@ -3427,13 +3436,13 @@ function attributeAffectsExternalStyleSource(
     !['href', 'rel', 'media', 'disabled'].includes(attributeName) ||
     element.namespaceURI !== 'http://www.w3.org/1999/xhtml'
   ) return false;
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   return tagName === 'style' || tagName === 'link';
 }
 
 function isStyleSourceElement(element: Element): boolean {
   if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
-  const tagName = element.localName.toLowerCase();
+  const tagName = sourceLocalName(element).toLowerCase();
   if (tagName === 'style') return true;
   if (tagName !== 'link') return false;
   try {
@@ -3487,7 +3496,7 @@ function readPrivateProcessingTokens(image: HTMLImageElement): {
   let cssPicture: PrivateSourceToken | undefined;
   try {
     for (const current of path) {
-      routingParts.push(current.localName.toLowerCase());
+      routingParts.push(sourceLocalName(current).toLowerCase());
       const attributes = current === image
         ? ['alt', 'aria-label', 'aria-hidden', 'hidden', 'lang', 'role'] as const
         : ['aria-hidden', 'hidden', 'lang'] as const;
@@ -3981,16 +3990,23 @@ function boundedPositiveInteger(
     : fallback;
 }
 
+/** An element's child elements, past a form's field names (D200). */
+function elementChildren(element: Element): HTMLCollection {
+  return sourceAnswersFieldNames(element)
+    ? readSourceOwnAccessor(element, 'children') as HTMLCollection
+    : element.children;
+}
+
 function isElement(value: unknown): value is Element {
   return Boolean(
     value &&
     typeof value === 'object' &&
     'nodeType' in value &&
-    (value as Node).nodeType === 1 &&
+    sourceNodeType(value as Node) === 1 &&
     'querySelectorAll' in value,
   );
 }
 
 function isImageElement(value: unknown): value is HTMLImageElement {
-  return isElement(value) && value.tagName.toLowerCase() === 'img';
+  return isElement(value) && sourceLocalName(value).toLowerCase() === 'img';
 }
