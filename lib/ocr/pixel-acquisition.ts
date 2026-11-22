@@ -181,10 +181,15 @@ export class PixelAcquisitionCoordinator {
   readonly #now: () => number;
   readonly #delay: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   readonly #clippedImageQuietMs: number;
-  /** Where each clipped image was first measured, and when (D165). */
+  /**
+   * Where each clipped image was first measured, and when (D165); under
+   * which capture of it, and when it was last found there (D199).
+   */
   readonly #clippedWaits = new Map<string, {
     readonly geometry: string;
+    readonly captureRevision: number | undefined;
     readonly since: number;
+    seen: number;
   }>();
   #lastCaptureAt = Number.NEGATIVE_INFINITY;
   #lane: Promise<void> = Promise.resolve();
@@ -322,6 +327,15 @@ export class PixelAcquisitionCoordinator {
    * is the measured rectangle, so any scroll, resize or zoom starts the wait
    * again. An image larger than the view is never seen whole: its strip is
    * all the reader sees, and it is captured at once as before.
+   *
+   * D199: a wait counts only while the image has stayed there. Scrolling in
+   * even steps brings an image back to the very place it was clipped at a
+   * scroll ago, and the wait finished then is not this stay: the strip was
+   * read at once and the whole image straight after, its words replacing the
+   * strip's. So the wait is kept under the image's capture, which changes
+   * when it leaves the view and comes back, and only while it is looked at
+   * there again within two waits, for a job that still names an older
+   * capture.
    */
   #clippedWait(
     descriptor: SourceImageDescriptor,
@@ -346,7 +360,12 @@ export class PixelAcquisitionCoordinator {
     ].join(',');
     const now = this.#now();
     const known = this.#clippedWaits.get(key);
-    if (known?.geometry === geometry) {
+    if (
+      known?.geometry === geometry &&
+      known.captureRevision === descriptor.captureRevision &&
+      now - known.seen <= 2 * this.#clippedImageQuietMs
+    ) {
+      known.seen = now;
       const remaining = known.since + this.#clippedImageQuietMs - now;
       // Kept after the wait: a capture that fails for another reason and is
       // tried again at the same place does not wait a second time.
@@ -358,7 +377,12 @@ export class PixelAcquisitionCoordinator {
       const oldest = this.#clippedWaits.keys().next().value;
       if (oldest !== undefined) this.#clippedWaits.delete(oldest);
     }
-    this.#clippedWaits.set(key, { geometry, since: now });
+    this.#clippedWaits.set(key, {
+      geometry,
+      captureRevision: descriptor.captureRevision,
+      since: now,
+      seen: now,
+    });
     return {
       status: 'deferred',
       reason: 'clipped',

@@ -715,6 +715,64 @@ describe('PixelAcquisitionCoordinator', () => {
     expect(captureVisibleTab).toHaveBeenCalledOnce();
   });
 
+  it('waits again for a clipped image back at a place it waited at a scroll ago (D199)', async () => {
+    // A scroll in even steps brings the image back to the very place it was
+    // clipped at before. The wait it finished then is not this stay: a strip
+    // read at once is read again whole a step later, its words replaced.
+    let now = 1_000;
+    const captureVisibleTab = vi.fn(async () => 'data:image/png;base64,AQID');
+    const coordinator = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment({
+        measure: vi.fn(async () => metrics),
+        dispose: vi.fn(),
+      }, captureVisibleTab),
+      now: () => now,
+      clippedImageQuietMs: 1_000,
+    });
+    const first = { ...descriptor, captureRevision: 3 };
+    expect(await coordinator.acquire(first)).toMatchObject({
+      status: 'deferred',
+      reason: 'clipped',
+    });
+    now += 1_000;
+    expect(await coordinator.acquire(first)).toMatchObject({ status: 'ready' });
+    expect(captureVisibleTab).toHaveBeenCalledOnce();
+    // A capture that fails for another reason, tried again there at once,
+    // does not wait a second time.
+    now += 500;
+    expect(await coordinator.acquire(first)).toMatchObject({ status: 'ready' });
+    expect(captureVisibleTab).toHaveBeenCalledTimes(2);
+
+    // The image left the view and came back: its capture is another one.
+    now += 20_000;
+    const back = { ...descriptor, captureRevision: 9 };
+    expect(await coordinator.acquire(back)).toEqual({
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: 1_000,
+    });
+    // A job that still names the old capture, long after: it waits too.
+    now += 1_000;
+    const again = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment({
+        measure: vi.fn(async () => metrics),
+        dispose: vi.fn(),
+      }, captureVisibleTab),
+      now: () => now,
+      clippedImageQuietMs: 1_000,
+    });
+    expect(await again.acquire(first)).toMatchObject({ reason: 'clipped' });
+    now += 1_000;
+    expect(await again.acquire(first)).toMatchObject({ status: 'ready' });
+    now += 20_000;
+    expect(await again.acquire(first)).toEqual({
+      status: 'deferred',
+      reason: 'clipped',
+      retryAfterMs: 1_000,
+    });
+    expect(captureVisibleTab).toHaveBeenCalledTimes(3);
+  });
+
   it('captures at once an image wholly in view or larger than the view (D165)', async () => {
     const whole = { ...metrics, left: 10 };
     // 1,200 px wide in a 1,000 px view: never seen whole, so its strip is
