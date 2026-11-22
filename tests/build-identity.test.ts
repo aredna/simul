@@ -10,7 +10,7 @@ describe('extension build identity', () => {
   it('renders and logs the trimmed runtime manifest version name', () => {
     const identity = createExtensionBuildIdentity({
       version: '0.6.7',
-      version_name: ' 0.6.7 beta v.20261121.7 ',
+      version_name: ' 0.6.7 beta v.20261121.8 ',
     });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
@@ -18,13 +18,13 @@ describe('extension build identity', () => {
 
     expect(identity).toEqual({
       version: '0.6.7',
-      label: 'Build 0.6.7 beta v.20261121.7',
+      label: 'Build 0.6.7 beta v.20261121.8',
       companionReadyMessage:
-        '[Simul] Companion ready. Build 0.6.7 beta v.20261121.7.',
+        '[Simul] Companion ready. Build 0.6.7 beta v.20261121.8.',
       backgroundReadyMessage:
-        '[Simul] Background service worker ready. Build 0.6.7 beta v.20261121.7.',
+        '[Simul] Background service worker ready. Build 0.6.7 beta v.20261121.8.',
     });
-    expect(target.textContent).toBe('Build 0.6.7 beta v.20261121.7');
+    expect(target.textContent).toBe('Build 0.6.7 beta v.20261121.8');
   });
 
   it.each([
@@ -57,21 +57,21 @@ describe('options header build text', () => {
   it('shows the plain version in the public edition and the build in the dev one', () => {
     const publicIdentity = createExtensionBuildIdentity({
       version: '0.6.7',
-      version_name: '0.6.7 beta v.20261121.7',
+      version_name: '0.6.7 beta v.20261121.8',
     });
     const devIdentity = createExtensionBuildIdentity({
       version: '0.6.7',
-      version_name: '0.6.7 beta v.20261121.7 dev',
+      version_name: '0.6.7 beta v.20261121.8 dev',
     });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
     expect(extensionBuildHeaderText(publicIdentity, 'public')).toBe('0.6.7');
     expect(extensionBuildHeaderText(devIdentity, 'dev'))
-      .toBe('Build 0.6.7 beta v.20261121.7 dev');
+      .toBe('Build 0.6.7 beta v.20261121.8 dev');
     renderExtensionBuildIdentity(target, publicIdentity, 'public');
     expect(target.textContent).toBe('0.6.7');
     // The console line keeps the full identity in both editions.
     expect(publicIdentity.companionReadyMessage)
-      .toBe('[Simul] Companion ready. Build 0.6.7 beta v.20261121.7.');
+      .toBe('[Simul] Companion ready. Build 0.6.7 beta v.20261121.8.');
   });
 });
