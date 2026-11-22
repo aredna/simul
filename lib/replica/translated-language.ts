@@ -3,7 +3,6 @@ import {
   pageAttribute,
   setReplicaAttributeOverride,
 } from './replica-attribute-override';
-import { sourceNodeType } from './source-node-accessors';
 
 /**
  * `lang` is also what Chrome draws by. It picks fonts by it (a generic
@@ -355,7 +354,7 @@ function isInside(element: Element, roots: ReadonlySet<Element>): boolean {
     }
     // `contains` stops at a shadow root: go on from its host.
     const top: Node = current.getRootNode();
-    current = sourceNodeType(top) === 11 && 'host' in top
+    current = top.nodeType === 11 && 'host' in top
       ? (top as ShadowRoot).host
       : undefined;
   }

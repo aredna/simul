@@ -1,5 +1,4 @@
 import { sourceContentEditableFact } from './source-secret-classifier';
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
 
 export const PAINTED_SEMANTIC_LABEL_ATTRIBUTE =
   'data-simul-painted-semantic-label';
@@ -455,7 +454,7 @@ function hasSensitiveStructuralBoundary(element: HTMLElement): boolean {
 }
 
 function elementHasSensitiveStructure(element: Element): boolean {
-  const tagName = sourceLocalName(element).toLowerCase();
+  const tagName = element.localName.toLowerCase();
   if (['input', 'option', 'select', 'textarea'].includes(tagName)) return true;
   const type = safelyReadAttribute(element, 'type').toLowerCase();
   if (SENSITIVE_INPUT_TYPES.has(type)) return true;
@@ -581,7 +580,7 @@ function cssLengthInPixels(
 function readDirectSemanticText(element: HTMLElement): string | undefined {
   let output = '';
   for (let child = element.firstChild; child; child = child.nextSibling) {
-    if (sourceNodeType(child) !== 3) continue;
+    if (child.nodeType !== 3) continue;
     const value = child.nodeValue ?? '';
     const remaining = MAX_PAINTED_SEMANTIC_LABEL_TEXT + 1 - output.length;
     if (remaining <= 0) return undefined;
@@ -610,7 +609,7 @@ function ownedLabelRoot(element: HTMLElement): ShadowRoot | undefined {
   const kept = ownedLabelRoots.get(element);
   if (kept) return kept;
   if (
-    !LABEL_ROOT_HOST_TAGS.has(sourceLocalName(element).toLowerCase()) ||
+    !LABEL_ROOT_HOST_TAGS.has(element.localName.toLowerCase()) ||
     element.shadowRoot
   ) return undefined;
   let root: ShadowRoot;

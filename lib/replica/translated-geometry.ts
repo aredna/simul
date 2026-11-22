@@ -4,8 +4,6 @@
  * moves, and translated text that no longer fits is shrunk until it does.
  */
 
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
-
 /** One translated text the lock can show in either language. */
 export interface TranslatedGeometryEntry {
   /** The translated text node, or the control whose value is translated. */
@@ -220,11 +218,11 @@ function layoutBox(
   view: TranslatedGeometryView,
   displays: Map<Element, string>,
 ): HTMLElement | undefined {
-  let current: Element | undefined = sourceNodeType(node) === 1
+  let current: Element | undefined = node.nodeType === 1
     ? node as Element
     : composedParentElement(node);
   for (let depth = 0; current && depth < MAX_LAYOUT_DEPTH; depth += 1) {
-    const name = sourceLocalName(current).toLowerCase();
+    const name = current.localName.toLowerCase();
     // Options size their select and SVG text sits on its own canvas; the
     // select facsimile and the drawing keep their own geometry.
     if (

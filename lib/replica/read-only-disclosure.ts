@@ -3,8 +3,6 @@
  * page's own panel where the page draws it, as a CSS or scripted hover menu
  * does; `list` keeps a select's options inline.
  */
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
-
 export type ReplicaDisclosurePresentation = 'inline' | 'list' | 'popup';
 
 export interface ReplicaDisclosurePlacementInput {
@@ -666,7 +664,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
         continue;
       }
       const root: Node = current.getRootNode();
-      current = root !== current && sourceNodeType(root) === 11 && 'host' in root
+      current = root !== current && root.nodeType === 11 && 'host' in root
         ? (root as ShadowRoot).host
         : null;
     }
@@ -1220,7 +1218,7 @@ function isOwnedDisclosureSurface(
   if (
     !candidate || typeof candidate !== 'object' ||
     !owned.has(candidate) ||
-    !('nodeType' in candidate) || sourceNodeType(candidate) !== 1 ||
+    !('nodeType' in candidate) || candidate.nodeType !== 1 ||
     !('getAttribute' in candidate) ||
     typeof candidate.getAttribute !== 'function'
   ) return false;
@@ -1298,7 +1296,7 @@ function pointerStaysWithin(event: Event): boolean {
   if (
     !surface || !entered ||
     typeof (surface as Partial<Node>).contains !== 'function' ||
-    typeof sourceNodeType((entered as Partial<Node>)) !== 'number'
+    typeof (entered as Partial<Node>).nodeType !== 'number'
   ) return false;
   try {
     return (surface as Node).contains(entered as Node);
@@ -1337,7 +1335,7 @@ function clickChoosesPanelItem(event: Event, panel: HTMLElement): boolean {
     if (node === panel) break;
     if (
       typeof node === 'object' && node !== null && 'nodeType' in node &&
-      sourceNodeType((node as Node)) === 1 &&
+      (node as Node).nodeType === 1 &&
       (node as Element).matches(PANEL_ITEM_SELECTOR)
     ) {
       return (node as Element).getAttribute('aria-disabled') !== 'true';
@@ -1359,9 +1357,9 @@ function clickChoosesPanelItem(event: Event, panel: HTMLElement): boolean {
 }
 
 function keyboardTargetCanActivate(target: EventTarget | null): boolean {
-  if (!target || !('nodeType' in target) || sourceNodeType(target) !== 1) return false;
+  if (!target || !('nodeType' in target) || target.nodeType !== 1) return false;
   const element = target as Element;
-  const tagName = sourceLocalName(element).toLowerCase();
+  const tagName = element.localName.toLowerCase();
   if (
     tagName === 'button' || tagName === 'input' || tagName === 'select' ||
     tagName === 'summary' || tagName === 'textarea'
@@ -1371,9 +1369,9 @@ function keyboardTargetCanActivate(target: EventTarget | null): boolean {
 }
 
 function keyboardTargetTakesText(target: EventTarget | null): boolean {
-  if (!target || !('nodeType' in target) || sourceNodeType(target) !== 1) return false;
+  if (!target || !('nodeType' in target) || target.nodeType !== 1) return false;
   const element = target as Element;
-  const tagName = sourceLocalName(element).toLowerCase();
+  const tagName = element.localName.toLowerCase();
   if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
     return true;
   }

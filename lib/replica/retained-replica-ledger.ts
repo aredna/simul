@@ -19,18 +19,16 @@
  * ledger slower, never let it keep a replica the walk would refuse.
  */
 
-import { sourceAttributeList, sourceLocalName, sourceNodeType } from './source-node-accessors';
-
 /** The walk's measure of one node, without what is counted when asked. */
 export function retainedNodeBytes(node: Node): number {
   let bytes = 48;
-  const type = sourceNodeType(node);
+  const type = node.nodeType;
   if (type === 3 || type === 8) {
     bytes += (node.nodeValue?.length ?? 0) * 2;
   } else if (type === 1) {
     const element = node as Element;
-    bytes += sourceLocalName(element).length * 2;
-    const attributes = sourceAttributeList(element);
+    bytes += element.localName.length * 2;
+    const attributes = element.attributes;
     for (let index = 0; index < attributes.length; index += 1) {
       const { name, value } = attributes[index]!;
       bytes += (name.length + value.length) * 2 + 16;
@@ -40,7 +38,7 @@ export function retainedNodeBytes(node: Node): number {
 }
 
 export function isRetainedTextControl(element: Element): boolean {
-  const tagName = sourceLocalName(element).toLowerCase();
+  const tagName = element.localName.toLowerCase();
   return tagName === 'input' || tagName === 'textarea';
 }
 
@@ -83,7 +81,7 @@ export function walkRetainedReplica(
     const own = retainedNodeBytes(node);
     visit?.(node, own);
     if (
-      sourceNodeType(node) === 3 &&
+      node.nodeType === 3 &&
       ownedAdoptedStyles.has(node.parentNode as Node)
     ) {
       const text = node.nodeValue ?? '';
@@ -95,7 +93,7 @@ export function walkRetainedReplica(
     } else {
       bytes += own;
     }
-    if (sourceNodeType(node) === 1) {
+    if (node.nodeType === 1) {
       const element = node as Element;
       if (isRetainedTextControl(element)) bytes += controlBytes(element);
       const shadow = element.shadowRoot;
@@ -217,7 +215,7 @@ export class RetainedReplicaLedger {
     for (const style of this.#ownedAdoptedStyles) {
       if (!this.#counted.has(style)) continue;
       for (let child = style.firstChild; child; child = child.nextSibling) {
-        if (sourceNodeType(child) !== 3) continue;
+        if (child.nodeType !== 3) continue;
         const text = child.nodeValue ?? '';
         bytes -= text.length * 2;
         if (!adoptedTexts.has(text)) {
@@ -239,7 +237,7 @@ export class RetainedReplicaLedger {
         current = parent;
         continue;
       }
-      if (sourceNodeType(current) !== 11 || !('host' in current)) return false;
+      if (current.nodeType !== 11 || !('host' in current)) return false;
       const host = (current as ShadowRoot).host;
       if (!host || host.shadowRoot !== current) return false;
       current = host;
@@ -306,9 +304,9 @@ export class RetainedReplicaLedger {
   #count(node: Node, bytes: number): void {
     const previous = this.#counted.get(node);
     if (previous === undefined) {
-      if (sourceNodeType(node) === 11 || node === this.#root) {
+      if (node.nodeType === 11 || node === this.#root) {
         this.#observer.observe(node, observed());
-      } else if (sourceNodeType(node) === 1 && isRetainedTextControl(node as Element)) {
+      } else if (node.nodeType === 1 && isRetainedTextControl(node as Element)) {
         this.#controls.add(node as Element);
       }
     }
@@ -334,7 +332,7 @@ export class RetainedReplicaLedger {
       if (
         record.type === 'attributes' &&
         (record.attributeName === 'id' || record.attributeName === 'aria-controls') &&
-        sourceNodeType(record.target) === 1
+        record.target.nodeType === 1
       ) this.#noteAriaElement(record.target as Element);
     }
     // Where a node is now decides: one in the replica is counted with its
@@ -353,7 +351,7 @@ export class RetainedReplicaLedger {
     while (pending.length > 0) {
       const node = pending.pop()!;
       this.#count(node, retainedNodeBytes(node));
-      if (sourceNodeType(node) === 1) {
+      if (node.nodeType === 1) {
         this.#noteAriaElement(node as Element);
         const shadow = (node as Element).shadowRoot;
         if (shadow) pending.push(shadow);
@@ -372,9 +370,9 @@ export class RetainedReplicaLedger {
       if (previous !== undefined) {
         this.#counted.delete(node);
         this.#ownBytes -= previous;
-        if (sourceNodeType(node) === 1) this.#controls.delete(node as Element);
+        if (node.nodeType === 1) this.#controls.delete(node as Element);
       }
-      if (sourceNodeType(node) === 1) {
+      if (node.nodeType === 1) {
         this.#noteAriaElement(node as Element);
         const shadow = (node as Element).shadowRoot;
         if (shadow) pending.push(shadow);
