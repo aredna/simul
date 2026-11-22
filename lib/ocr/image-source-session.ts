@@ -47,9 +47,12 @@ import type { SourceDocumentSecretScan } from '../replica/semantic-source-sessio
 import { readVisualViewportSnapshot } from '../primary-scroll';
 // The page's nodes are read past a form's field names (D181, D200).
 import {
+  sourceCall,
   sourceChildNodeList,
   sourceLocalName,
+  sourceMethod,
   sourceNodeType,
+  sourceProperty,
 } from '../replica/source-node-accessors';
 import { canonicalizeLanguageTag } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
@@ -1486,7 +1489,7 @@ export function hasSourceAriaControlledRegionAncestor(
   element: Element,
   policy: SourceControlledContentPolicy = createSourceControlledContentPolicy(
     element.ownerDocument,
-    element.ownerDocument.defaultView,
+    sourceProperty(element.ownerDocument, 'defaultView'),
   ),
 ): boolean {
   const path = readSourceFlatTreeElementPath(element);
@@ -1559,8 +1562,8 @@ export function hasSafeCaptureGeometry(
     }
     if (
       current !== image &&
-      current !== sourceDocument.body &&
-      current !== sourceDocument.documentElement &&
+      current !== sourceProperty(sourceDocument, 'body') &&
+      current !== sourceProperty(sourceDocument, 'documentElement') &&
       clipsImage(style, imageRect, current)
     ) return false;
   }
@@ -1662,7 +1665,8 @@ function isCoveredByForeignText(
   imagePath: readonly Element[],
   sourceDocument: Document,
 ): boolean {
-  const elementFromPoint = sourceDocument.elementFromPoint;
+  // Past an image of that name on the page (D213).
+  const elementFromPoint = sourceMethod(sourceDocument, 'elementFromPoint');
   // Without a hit test the cover cannot be ruled out: defer the capture
   // instead of assuming it is safe (C8).
   if (typeof elementFromPoint !== 'function') return true;
@@ -1769,7 +1773,7 @@ function collectCaptureOverlapElements(
   try {
     while (roots.length > 0) {
       const root = roots.pop()!;
-      for (const element of root.querySelectorAll('*')) {
+      for (const element of sourceCall(root, 'querySelectorAll', '*')) {
         if (seen.has(element)) continue;
         if (elements.length >= MAX_CAPTURE_OVERLAP_ELEMENTS) return undefined;
         seen.add(element);

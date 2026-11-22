@@ -10,13 +10,18 @@
 export function nameOnDocument(document: Document, name: string, element: Element): () => void {
   const original = Object.getPrototypeOf(document) as object;
   const own = Object.getOwnPropertyDescriptor(document, name);
-  const prototype = Object.create(original, own
-    ? {
-        [name]: own.get || own.set
-          ? { ...own, configurable: true }
-          : { configurable: true, get: () => own.value },
-      }
-    : {}) as object;
+  // Chrome's prototypes have every name read here; linkedom lacks some
+  // (`adoptedStyleSheets`), and a layer stands in for them with what the
+  // document had before.
+  const prototype = Object.create(original, {
+    [name]: !own
+      ? { configurable: true, get: () => Reflect.get(original, name, document) as unknown }
+      : own.get || own.set
+        ? { ...own, configurable: true }
+        : typeof own.value === 'function'
+          ? { configurable: true, writable: true, value: own.value as unknown }
+          : { configurable: true, get: () => own.value as unknown },
+  }) as object;
   Object.setPrototypeOf(document, prototype);
   Object.defineProperty(document, name, {
     configurable: true,

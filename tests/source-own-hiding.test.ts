@@ -6,6 +6,7 @@ import {
   sourceElementHidesItselfByVisibility,
   sourceElementScalesItselfToNothing,
 } from '../lib/replica/source-own-hiding';
+import { nameOnDocument } from './support/named-document';
 
 interface FakeRule {
   readonly selectorText?: string;
@@ -119,6 +120,19 @@ describe('what the page itself wrote for a dropdown under something hidden', () 
     expect(scales('flat')).toBe(true);
     expect(scales('turned')).toBe(false);
     expect(scales('ruled')).toBe(false);
+  });
+
+  it('reads the page\'s window past an image named `defaultView` (D213)', () => {
+    const { document, hides, scales } = page(
+      '<img id="named" alt=""><select id="ruled" class="backing"></select>' +
+        '<select id="shrunk" class="shrunk"></select>',
+      [{ cssRules: [rule('.backing', 'visibility:hidden'), rule('.shrunk', 'transform:scale(0)')] }],
+    );
+    onTestFinished(nameOnDocument(
+      document as unknown as Document, 'defaultView', document.querySelector('#named')!,
+    ));
+    expect(hides('ruled')).toBe(true);
+    expect(scales('shrunk')).toBe(true);
   });
 
   it('reads a rule nested in another, under the rule around it', () => {

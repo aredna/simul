@@ -81,6 +81,7 @@ import {
   isSourceSelectHiddenByItself,
   readSourceHiddenRegionState,
   readSourceSkippedContentState,
+  sourceControlledTextIsWithheld,
   sourceElementIsEditorWithoutAttribute,
   sourceNodeIsUnslotted,
   type SourceSkippedContentState,
@@ -2382,6 +2383,13 @@ export class SemanticSourceSession {
             this.environment.window,
             this.#scanSecretAncestors,
           )
+        ) continue;
+        // Text the page does not paint straight in a boxless `aria-controls`
+        // target whose painted elements are read (D212): the mirror sends
+        // it empty, and the scan sends none of it either (D214).
+        if (
+          controlledContent &&
+          sourceControlledTextIsWithheld(current.node, controlledContent)
         ) continue;
         const parent = current.node.parentElement;
         const classification = parent && classifications.get(parent);

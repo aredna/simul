@@ -4,6 +4,9 @@ import {
   readCrossOriginSheetFromPageCache,
   type SourceCrossOriginSheetReader,
 } from './source-style-names';
+// A page's `<img name="defaultView">` is its `document.defaultView`: the
+// document is read through its prototypes (D213).
+import { sourceNodeType, sourceProperty } from './source-node-accessors';
 
 /**
  * What the computed style cannot say about an element under something
@@ -74,13 +77,13 @@ function sourceSheetCopyRules(
   let document: Document | null | undefined;
   try {
     href = sheet.href;
-    document = (root as Partial<Document>).nodeType === 9
+    document = sourceNodeType(root) === 9
       ? root as Document
       : root.ownerDocument;
   } catch {
     return undefined;
   }
-  const view = document?.defaultView;
+  const view = document ? sourceProperty(document, 'defaultView') : undefined;
   if (!href || !document || !view) return undefined;
   let copies = sourceSheetCopies.get(document);
   if (!copies) {
@@ -258,7 +261,8 @@ export function sourceElementHidesItselfByVisibility(
    */
   fresh = false,
 ): boolean {
-  const view = element.ownerDocument?.defaultView;
+  const owner = element.ownerDocument;
+  const view = owner ? sourceProperty(owner, 'defaultView') : undefined;
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
     if (!hidesByVisibility(view.getComputedStyle(element).visibility)) return false;
@@ -305,7 +309,8 @@ function sourceElementDeclares(
   what: 'visibility' | 'scale',
   fresh = false,
 ): boolean {
-  const view = element.ownerDocument?.defaultView;
+  const owner = element.ownerDocument;
+  const view = owner ? sourceProperty(owner, 'defaultView') : undefined;
   const candidates: Candidate[] = [];
   let showingComplete = true;
   let uncertainHides = false;
@@ -534,8 +539,8 @@ function readSourceHidingRuleSet(
 
 /** `CSS.supports` of the tree's window, where it can be asked. */
 function readSupports(root: Node): ((condition: string) => boolean) | undefined {
-  const view = (root as Partial<Document>).defaultView ??
-    root.ownerDocument?.defaultView;
+  const document = sourceNodeType(root) === 9 ? root as Document : root.ownerDocument;
+  const view = document ? sourceProperty(document, 'defaultView') : undefined;
   const css = (view as (Window & { CSS?: typeof CSS }) | null | undefined)?.CSS;
   return typeof css?.supports === 'function'
     ? (condition) => css.supports(condition)

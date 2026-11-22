@@ -4153,10 +4153,21 @@ describe('SourceImageObserver', () => {
     expect(fixture.timers.size).toBe(others + 1);
     const removed: string[] = [];
     const remove = fixture.document.removeEventListener.bind(fixture.document);
-    fixture.document.removeEventListener = ((type: string, ...rest: unknown[]) => {
-      removed.push(type);
-      return (remove as (...args: unknown[]) => void)(type, ...rest);
-    }) as typeof fixture.document.removeEventListener;
+    // On a prototype, where Chrome has it: the observer calls the document's
+    // methods through its prototypes, past a page's named images (D213).
+    Object.setPrototypeOf(fixture.document, Object.create(
+      Object.getPrototypeOf(fixture.document) as object,
+      {
+        removeEventListener: {
+          configurable: true,
+          writable: true,
+          value: (type: string, ...rest: unknown[]) => {
+            removed.push(type);
+            return (remove as (...args: unknown[]) => void)(type, ...rest);
+          },
+        },
+      },
+    ));
     stop();
     expect(removed).toEqual(expect.arrayContaining([
       'pointerover', 'pointerout', 'focusin', 'focusout',

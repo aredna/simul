@@ -128,7 +128,30 @@ function readSourceOwnMethod(
     }
     methods.set(name, method);
   }
-  return method;
+  if (method) return method;
+  // None on the prototypes (a DOM without it): the node's own, as
+  // `readSourceOwnAccessor` reads a property no prototype defines.
+  const own = (node as Record<string, unknown>)[name];
+  return typeof own === 'function'
+    ? own as (this: object, ...args: unknown[]) => unknown
+    : null;
+}
+
+/**
+ * A method of a node, past a form's fields or a document's named elements
+ * (D213), to be called later with the node: what a page's
+ * `<img name="elementFromPoint">` stands in front of. Undefined when the
+ * node has none.
+ */
+export function sourceMethod<T extends object, K extends MethodName<T>>(
+  node: T,
+  name: K,
+): T[K] | undefined {
+  if (!sourceAnswersFieldNames(node as unknown as Node)) {
+    const own = node[name] as unknown;
+    return typeof own === 'function' ? own as T[K] : undefined;
+  }
+  return (readSourceOwnMethod(node, String(name)) ?? undefined) as T[K] | undefined;
 }
 
 type MethodName<T> = {

@@ -64,6 +64,7 @@ import {
   scopedMutationObservers,
   type ScopedMutationObservers,
 } from './support/scoped-mutations';
+import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 
 const SYNTHETIC_STATIC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
 
@@ -174,10 +175,7 @@ describe('HtmlMirrorSourceSession', () => {
       '<html><body><img id="announcement" src="news.gif" alt="お知らせ"></body></html>',
     );
     Object.defineProperty(window, 'top', { configurable: true, value: window });
-    Object.defineProperty(document, 'baseURI', {
-      configurable: true,
-      value: 'https://example.test/',
-    });
+    giveDocumentBaseURI(document, 'https://example.test/');
     const image = document.querySelector<HTMLImageElement>('#announcement')!;
     setBridgeImageFacts(image);
     const registry = new WeakNodeIdRegistry();
@@ -244,10 +242,7 @@ describe('HtmlMirrorSourceSession', () => {
       `<input id="turn" type="text" value="${canary}"></body></html>`,
     );
     Object.defineProperty(window, 'top', { configurable: true, value: window });
-    Object.defineProperty(document, 'baseURI', {
-      configurable: true,
-      value: 'https://example.test/',
-    });
+    giveDocumentBaseURI(document, 'https://example.test/');
     setBridgeImageFacts(document.querySelector<HTMLImageElement>('#announcement')!);
     const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
     // The clock runs while the scan does, so each of its slices ends after
@@ -2219,6 +2214,32 @@ describe('HtmlMirrorSourceSession', () => {
     expect(patchJson).toContain('patch-company-secret');
   });
 
+  it('mirrors a page whose images take the names of its document\'s properties (D213)', () => {
+    const run = (name?: string) => {
+      const fixture = sourceFixture('<main><p id="t">Hello</p><img id="named" alt=""></main>');
+      const text = fixture.document.querySelector('#t')!.firstChild as Text;
+      const undo = name
+        ? nameOnDocument(fixture.document as unknown as Document, name, fixture.document.querySelector('#named')!)
+        : () => {};
+      try {
+        fixture.start();
+        fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+        text.data = 'Changed';
+        fixture.mutate(characterDataRecord(text));
+        fixture.flushFrame();
+        return JSON.stringify([fixture.checkpoints(), fixture.patches()]);
+      } catch (error) {
+        return String(error);
+      } finally {
+        undo();
+        fixture.session.dispose();
+      }
+    };
+    const expected = run();
+    expect(expected).toContain('Changed');
+    expect(DOCUMENT_NAMES.filter((name) => run(name) !== expected)).toEqual([]);
+  });
+
   it('keeps data srcset payloads local in live attribute patches', () => {
     const fixture = sourceFixture('<main><img id="target"></main>');
     installPaintedMirrorTabFixture(
@@ -3227,10 +3248,7 @@ describe('HtmlMirrorSourceSession', () => {
       '<html><body><x-login id="login"></x-login></body></html>',
     );
     Object.defineProperty(window, 'top', { configurable: true, value: window });
-    Object.defineProperty(document, 'baseURI', {
-      configurable: true,
-      value: 'https://example.test/',
-    });
+    giveDocumentBaseURI(document, 'https://example.test/');
     const reader = closedRootReader();
     const login = reader.attach(
       document.querySelector('#login')!,
@@ -3275,10 +3293,7 @@ describe('HtmlMirrorSourceSession', () => {
       '<html><body><main><div id="late"></div><p>page text</p></main></body></html>',
     );
     Object.defineProperty(window, 'top', { configurable: true, value: window });
-    Object.defineProperty(document, 'baseURI', {
-      configurable: true,
-      value: 'https://example.test/',
-    });
+    giveDocumentBaseURI(document, 'https://example.test/');
     const reader = closedRootReader();
     const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
     installHtmlMirrorSourceBridge({
@@ -3531,10 +3546,7 @@ describe('HtmlMirrorSourceSession', () => {
       function closedPanelPage(markup: string) {
         const { document, window } = parseHTML(`<html><body>${markup}</body></html>`);
         Object.defineProperty(window, 'top', { configurable: true, value: window });
-        Object.defineProperty(document, 'baseURI', {
-          configurable: true,
-          value: 'https://example.test/',
-        });
+        giveDocumentBaseURI(document, 'https://example.test/');
         const reader = closedRootReader();
         const observers = scopedMutationObservers();
         const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
@@ -3879,7 +3891,7 @@ describe('HtmlMirrorSourceSession', () => {
       '<html><body><x-form id="form"></x-form></body></html>',
     );
     Object.defineProperty(window, 'top', { configurable: true, value: window });
-    Object.defineProperty(document, 'baseURI', { configurable: true, value: 'https://example.test/' });
+    giveDocumentBaseURI(document, 'https://example.test/');
     const reader = closedRootReader();
     const form = document.querySelector('#form')!;
     const outer = reader.attach(form, '<div id="inner">inner</div>');
@@ -3918,7 +3930,7 @@ describe('HtmlMirrorSourceSession', () => {
       '<html><body><x-form id="form"></x-form></body></html>',
     );
     Object.defineProperty(window, 'top', { configurable: true, value: window });
-    Object.defineProperty(document, 'baseURI', { configurable: true, value: 'https://example.test/' });
+    giveDocumentBaseURI(document, 'https://example.test/');
     const reader = closedRootReader();
     const form = document.querySelector('#form')!;
     // 33 closed roots, each holding the next host, the page had at load.
@@ -9494,6 +9506,18 @@ function knownScrollState(
   return last?.scroll;
 }
 
+/**
+ * The document's base address, where Chrome keeps it: on a prototype. The
+ * session reads the page's document through its prototypes, past a page's
+ * `<img name="baseURI">` (D213); a layer of this document's own keeps
+ * linkedom's shared prototypes as they are.
+ */
+function giveDocumentBaseURI(document: Document, baseURI: string): void {
+  Object.setPrototypeOf(document, Object.create(Object.getPrototypeOf(document) as object, {
+    baseURI: { configurable: true, get: () => baseURI },
+  }));
+}
+
 function sourceFixture(
   markup: string,
   closedRoots?: ClosedRootReader,
@@ -9507,10 +9531,7 @@ function sourceFixture(
   // How the page's closed shadow roots are read (D125).
   if (closedRoots) installSourceShadowRootReader(document, closedRoots.read);
   Object.defineProperty(window, 'top', { configurable: true, value: window });
-  Object.defineProperty(document, 'baseURI', {
-    configurable: true,
-    value: 'https://example.test/',
-  });
+  giveDocumentBaseURI(document, 'https://example.test/');
   const port = new FakePort(createHtmlMirrorPortName(identity.sessionId));
   const registry = new WeakNodeIdRegistry();
   const frames: Array<() => void> = [];

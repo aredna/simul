@@ -1,8 +1,10 @@
 import {
   sourceAttributeList,
+  sourceCall,
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
+  sourceProperty,
 } from './source-node-accessors';
 import { ImageSourceSession } from '../ocr/image-source-session';
 import { readImageSourcePortSessionId } from '../ocr/image-source-protocol';
@@ -431,7 +433,7 @@ export function installHtmlMirrorSourceBridge(
     }),
   );
   if (!secretObserver) {
-    const root = sourceDocument.documentElement;
+    const root = sourceProperty(sourceDocument, 'documentElement');
     if (root) {
       documentSecretClassifier.classify(root, {
         tagName: sourceLocalName(root),
@@ -625,7 +627,8 @@ function askAboutSourceShadowRootsAtInput(
     const target = path[0] ?? event.target;
     if (!target || typeof sourceNodeType(target as Node) !== 'number') return;
     const asked = new Set<Node>();
-    found.push(...askAboutSourceShadowRootsAbove(target as Node, asked));
+    // One by one, not as arguments (D213, as D180 and D186).
+    for (const above of askAboutSourceShadowRootsAbove(target as Node, asked)) found.push(above);
     const point = event.type === 'pointerdown'
       ? [(event as PointerEvent).clientX, (event as PointerEvent).clientY] as const
       : undefined;
@@ -639,7 +642,7 @@ function askAboutSourceShadowRootsAtInput(
         ? root.elementFromPoint(point[0], point[1])
         : root.activeElement;
       if (!next || next === current) break;
-      found.push(...askAboutSourceShadowRootsAbove(next, asked));
+      for (const above of askAboutSourceShadowRootsAbove(next, asked)) found.push(above);
       current = next;
     }
     // The follow stopped at its bound, not at the input: a root attached
@@ -1386,27 +1389,19 @@ export class HtmlMirrorSourceSession {
       this.#onLayoutChange,
     );
     for (const type of CONTROLLED_LAYOUT_SETTLE_EVENTS) {
-      this.environment.document.removeEventListener(
-        type,
-        this.#onControlledLayoutSettle,
-        true,
-      );
+      sourceCall(this.environment.document, 'removeEventListener', type, this.#onControlledLayoutSettle, true);
     }
     for (const type of VISIBILITY_INTERACTION_EVENTS) {
-      this.environment.document.removeEventListener(
-        type,
-        this.#onVisibilityInteraction,
-        true,
-      );
+      sourceCall(this.environment.document, 'removeEventListener', type, this.#onVisibilityInteraction, true);
     }
     for (const root of this.#imageEventRoots) {
-      root.removeEventListener('load', this.#onCapturedResourceLoad, true);
-      root.removeEventListener('error', this.#onCapturedResourceError, true);
-      root.removeEventListener('scroll', this.#onScroll, true);
-      root.removeEventListener('slotchange', this.#onSlotChange, true);
+      sourceCall(root, 'removeEventListener', 'load', this.#onCapturedResourceLoad, true);
+      sourceCall(root, 'removeEventListener', 'error', this.#onCapturedResourceError, true);
+      sourceCall(root, 'removeEventListener', 'scroll', this.#onScroll, true);
+      sourceCall(root, 'removeEventListener', 'slotchange', this.#onSlotChange, true);
     }
     this.#imageEventRoots.clear();
-    this.environment.document.fonts?.removeEventListener?.(
+    sourceProperty(this.environment.document, 'fonts')?.removeEventListener?.(
       'loadingdone',
       this.#onFontLoadingDone,
     );
@@ -1602,7 +1597,7 @@ export class HtmlMirrorSourceSession {
       this.#observer = this.environment.createMutationObserver(
         (records) => this.#onMutations(records),
       );
-      this.#observer.observe(this.environment.document.documentElement, {
+      this.#observer.observe(sourceProperty(this.environment.document, 'documentElement'), {
         attributes: true,
         attributeOldValue: true,
         characterData: true,
@@ -1657,21 +1652,13 @@ export class HtmlMirrorSourceSession {
         this.#onLayoutChange,
       );
       for (const type of CONTROLLED_LAYOUT_SETTLE_EVENTS) {
-        this.environment.document.addEventListener(
-          type,
-          this.#onControlledLayoutSettle,
-          true,
-        );
+        sourceCall(this.environment.document, 'addEventListener', type, this.#onControlledLayoutSettle, true);
       }
       for (const type of VISIBILITY_INTERACTION_EVENTS) {
-        this.environment.document.addEventListener(
-          type,
-          this.#onVisibilityInteraction,
-          true,
-        );
+        sourceCall(this.environment.document, 'addEventListener', type, this.#onVisibilityInteraction, true);
       }
       this.#observeImageEvents(this.environment.document);
-      this.environment.document.fonts?.addEventListener?.(
+      sourceProperty(this.environment.document, 'fonts')?.addEventListener?.(
         'loadingdone',
         this.#onFontLoadingDone,
       );
@@ -1679,9 +1666,9 @@ export class HtmlMirrorSourceSession {
         this.#resizeObserver = this.environment.createResizeObserver(
           () => this.#onObservedResize(),
         );
-        this.#resizeObserver.observe(this.environment.document.documentElement);
-        if (this.environment.document.body) {
-          this.#resizeObserver.observe(this.environment.document.body);
+        this.#resizeObserver.observe(sourceProperty(this.environment.document, 'documentElement'));
+        if (sourceProperty(this.environment.document, 'body')) {
+          this.#resizeObserver.observe(sourceProperty(this.environment.document, 'body'));
         }
       }
       // The extension must construct and validate its inert iframe before it
@@ -1986,8 +1973,8 @@ export class HtmlMirrorSourceSession {
     try {
       const document = this.environment.document;
       // Outside a browser (a test's DOM) `*` may name no element at all.
-      count = document.getElementsByTagName('*').length ||
-        document.querySelectorAll('*').length;
+      count = sourceCall(document, 'getElementsByTagName', '*').length ||
+        sourceCall(document, 'querySelectorAll', '*').length;
       if (count >= HTML_MIRROR_PREVIEW_MIN_ELEMENTS) return count;
       // A page of web components holds most of itself in shadow roots,
       // which `*` does not count (D171): the roots' elements are counted
@@ -1995,7 +1982,7 @@ export class HtmlMirrorSourceSession {
       // a root, in the slice's own walk of the roots.
       return this.#withoutOwnLateRoots(() => {
         const visit = (scope: Document | ShadowRoot): void => {
-          for (const element of scope.querySelectorAll('*')) {
+          for (const element of sourceCall(scope, 'querySelectorAll', '*')) {
             if (count >= HTML_MIRROR_PREVIEW_MIN_ELEMENTS) return;
             const root = readSourceShadowRoot(element);
             if (!root) continue;
@@ -2594,7 +2581,7 @@ export class HtmlMirrorSourceSession {
     this.#rootAttachedDuringRead = false;
     this.#notingUnheldShadowRoots = true;
     try {
-      this.#observeShadowRoots(document.documentElement);
+      this.#observeShadowRoots(sourceProperty(document, 'documentElement'));
     } finally {
       this.#notingUnheldShadowRoots = false;
     }
@@ -2922,7 +2909,7 @@ export class HtmlMirrorSourceSession {
 
   /** Has the root's attributes, which carry the document's language, read again. */
   #queueDocumentLanguage(): void {
-    const root = this.environment.document.documentElement;
+    const root = sourceProperty(this.environment.document, 'documentElement');
     if (!root || !this.#mirroredNodes.has(root)) return;
     this.#queuePending(this.#pendingAttributes, root);
     this.#scheduleFlush();
@@ -3479,7 +3466,7 @@ export class HtmlMirrorSourceSession {
    * list that stays.
    */
   #holdBack(turn: 'document' | 'lists'): HeldChanges | undefined {
-    const html = this.environment.document.documentElement;
+    const html = sourceProperty(this.environment.document, 'documentElement');
     const dimensions = this.#pendingDimensions;
     if (turn === 'lists') {
       if (this.#pendingChildren.size === 0) return undefined;
@@ -3714,7 +3701,7 @@ export class HtmlMirrorSourceSession {
       if (
         !useReconciliation &&
         childCaptures.some(({ target }) =>
-          target === this.environment.document.documentElement)
+          target === sourceProperty(this.environment.document, 'documentElement'))
       ) {
         // The whole list of `<html>`'s children is the page: the mirror
         // takes it only as a whole read (an element moved between `<html>`
@@ -3731,7 +3718,7 @@ export class HtmlMirrorSourceSession {
           const children = sanitizeSourceChildren(
             capture.target,
             this.environment.registry,
-            this.environment.document.baseURI,
+            sourceProperty(this.environment.document, 'baseURI'),
             representability,
             fidelityPolicy,
             batchBudget,
@@ -3763,7 +3750,7 @@ export class HtmlMirrorSourceSession {
             (source) => !previous.has(source),
           );
           if (
-            capture.target === this.environment.document.documentElement &&
+            capture.target === sourceProperty(this.environment.document, 'documentElement') &&
             sourceDocumentShellChanged(capture.previous, capture.sources)
           ) {
             // The page's own head or body moved, or `<html>` holds one
@@ -3778,7 +3765,7 @@ export class HtmlMirrorSourceSession {
           const serialized = sanitizeSourceSubtrees(
             newSources,
             this.environment.registry,
-            this.environment.document.baseURI,
+            sourceProperty(this.environment.document, 'baseURI'),
             representability,
             batchBudget,
             styleWork,
@@ -3840,7 +3827,7 @@ export class HtmlMirrorSourceSession {
         ) continue;
         const attributes = sanitizeSourceAttributes(
           target,
-          this.environment.document.baseURI,
+          sourceProperty(this.environment.document, 'baseURI'),
           representability,
           fidelityPolicy,
           this.#controlledContentPolicy,
@@ -3848,7 +3835,7 @@ export class HtmlMirrorSourceSession {
         if (!attributes) throw new Error('Unsafe attributes patch.');
         const hints = sanitizeSourceElementHints(
           target,
-          this.environment.document.baseURI,
+          sourceProperty(this.environment.document, 'baseURI'),
           representability,
           fidelityPolicy,
           styleWork,
@@ -3917,7 +3904,7 @@ export class HtmlMirrorSourceSession {
         const node = sanitizeSourceSubtree(
           target,
           this.environment.registry,
-          this.environment.document.baseURI,
+          sourceProperty(this.environment.document, 'baseURI'),
           representability,
           fidelityPolicy,
           this.#slotReadings,
@@ -4133,7 +4120,7 @@ export class HtmlMirrorSourceSession {
   /** Whether the page is in a tab that is not shown: no frame will come. */
   #documentIsHidden(): boolean {
     try {
-      return this.environment.document.visibilityState === 'hidden';
+      return sourceProperty(this.environment.document, 'visibilityState') === 'hidden';
     } catch {
       return false;
     }
@@ -4202,8 +4189,8 @@ export class HtmlMirrorSourceSession {
       const view = this.environment.window;
       const parts: Array<string | number> = [];
       for (const element of [
-        this.environment.document.documentElement,
-        this.environment.document.body,
+        sourceProperty(this.environment.document, 'documentElement'),
+        sourceProperty(this.environment.document, 'body'),
       ]) {
         if (!element) {
           parts.push('none');
@@ -4225,7 +4212,7 @@ export class HtmlMirrorSourceSession {
           !numbers.every((value) => typeof value === 'number' && Number.isFinite(value)) ||
           !lengths.every((value) => typeof value === 'string')
         ) return undefined;
-        parts.push(...(numbers as number[]), ...(lengths as string[]));
+        for (const value of [...numbers, ...lengths]) parts.push(value as number | string);
       }
       return parts.join(' ');
     } catch {
@@ -4255,7 +4242,7 @@ export class HtmlMirrorSourceSession {
     try {
       // A root found on a host the mirror holds goes with its host in a
       // patch (D190).
-      this.#observeShadowRoots(this.environment.document.documentElement, {
+      this.#observeShadowRoots(sourceProperty(this.environment.document, 'documentElement'), {
         ...this.#createShadowObservationWalk(),
         resendHeldHosts: true,
       });
@@ -4984,7 +4971,7 @@ export class HtmlMirrorSourceSession {
 
   /** An element shown or hidden: it and what it holds are read again. */
   #queueVisibilityTarget(target: Element): void {
-    if (target === this.environment.document.documentElement) {
+    if (target === sourceProperty(this.environment.document, 'documentElement')) {
       // `<html>` shown or hidden is the page shown or hidden: a whole read.
       this.#shadowReconciliationPending = true;
       this.#signalShadowReconciliation();
@@ -5086,7 +5073,7 @@ export class HtmlMirrorSourceSession {
    */
   #readStyleDerivedAgain(): void {
     const view = this.environment.window;
-    const root = this.environment.document.documentElement;
+    const root = sourceProperty(this.environment.document, 'documentElement');
     const pending: Element[] = root ? [root] : [];
     // The children of an element are stepped through by the accessors its
     // prototype defines, never by a read on the element itself: a form
@@ -5675,7 +5662,7 @@ export class HtmlMirrorSourceSession {
       try {
         selectedSource = sanitizeSourceElementHints(
           image,
-          this.environment.document.baseURI,
+          sourceProperty(this.environment.document, 'baseURI'),
           undefined,
           this.#fidelityPolicy ?? 'conservative',
           undefined,
@@ -5744,14 +5731,14 @@ export class HtmlMirrorSourceSession {
       return;
     }
     this.#imageEventRoots.add(root);
-    root.addEventListener('load', this.#onCapturedResourceLoad, true);
-    root.addEventListener('error', this.#onCapturedResourceError, true);
-    root.addEventListener('scroll', this.#onScroll, true);
+    sourceCall(root, 'addEventListener', 'load', this.#onCapturedResourceLoad, true);
+    sourceCall(root, 'addEventListener', 'error', this.#onCapturedResourceError, true);
+    sourceCall(root, 'addEventListener', 'scroll', this.#onScroll, true);
     // A root that assigns its slots by hand: no mutation tells of it, only
     // the slot's own event, which does not leave the root. Where the browser
     // assigns by name every change is a mutation (see `#queueMutationRecords`).
     if ((root as Partial<ShadowRoot>).slotAssignment === 'manual') {
-      root.addEventListener('slotchange', this.#onSlotChange, true);
+      sourceCall(root, 'addEventListener', 'slotchange', this.#onSlotChange, true);
     }
   }
 
@@ -5761,10 +5748,10 @@ export class HtmlMirrorSourceSession {
       if (root === this.environment.document || ('host' in root && root.host.isConnected)) {
         continue;
       }
-      root.removeEventListener('load', this.#onCapturedResourceLoad, true);
-      root.removeEventListener('error', this.#onCapturedResourceError, true);
-      root.removeEventListener('scroll', this.#onScroll, true);
-      root.removeEventListener('slotchange', this.#onSlotChange, true);
+      sourceCall(root, 'removeEventListener', 'load', this.#onCapturedResourceLoad, true);
+      sourceCall(root, 'removeEventListener', 'error', this.#onCapturedResourceError, true);
+      sourceCall(root, 'removeEventListener', 'scroll', this.#onScroll, true);
+      sourceCall(root, 'removeEventListener', 'slotchange', this.#onSlotChange, true);
       this.#imageEventRoots.delete(root);
     }
   }
@@ -5882,7 +5869,7 @@ export class HtmlMirrorSourceSession {
   ): StylePollResult {
     const styles = sanitizeSourceAdoptedStyleSheets(
       owner,
-      this.environment.document.baseURI,
+      sourceProperty(this.environment.document, 'baseURI'),
       work,
       undefined,
       this.#fidelityPolicy ?? 'conservative',
@@ -5937,7 +5924,7 @@ export class HtmlMirrorSourceSession {
   #learnRedirectedSheetBases(owner: Document | ShadowRoot): void {
     let sheets: ArrayLike<CSSStyleSheet>;
     try {
-      sheets = owner.styleSheets;
+      sheets = sourceProperty(owner, 'styleSheets');
     } catch {
       return;
     }
@@ -6264,7 +6251,7 @@ export class HtmlMirrorSourceSession {
     const parent = host.parentNode;
     if (
       !parent || !host.isConnected ||
-      parent === this.environment.document.documentElement ||
+      parent === sourceProperty(this.environment.document, 'documentElement') ||
       !this.#mirroredNodes.has(parent) ||
       this.#emittedParent.get(host) !== parent ||
       !isSourceStructuralChildOf(host, parent) ||
@@ -6449,9 +6436,9 @@ function ordinaryStyleSignature(
 ): OrdinaryStyleSignatureRead {
   let sheets: ArrayLike<CSSStyleSheet>;
   try {
-    sheets = (owner as Document & {
+    sheets = sourceProperty((owner as Document & {
       readonly styleSheets: ArrayLike<CSSStyleSheet>;
-    }).styleSheets;
+    }), 'styleSheets');
   } catch {
     return Object.freeze({ kind: 'signature', signature: undefined });
   }
@@ -7005,12 +6992,12 @@ function readSourceDimensions(document: Document, window: Window): {
   documentHeight: number;
   canvasBackgroundColor?: string;
 } {
-  const html = document.documentElement;
-  const body = document.body;
+  const html = sourceProperty(document, 'documentElement');
+  const body = sourceProperty(document, 'body');
   const viewportWidth = boundedDimension(window.innerWidth || html?.clientWidth || 1);
   const viewportHeight = boundedDimension(window.innerHeight || html?.clientHeight || 1);
   const canvasBackgroundColor = html
-    ? sanitizeSourceElementHints(html, document.baseURI).canvasBackgroundColor
+    ? sanitizeSourceElementHints(html, sourceProperty(document, 'baseURI')).canvasBackgroundColor
     : undefined;
   return {
     viewportWidth,

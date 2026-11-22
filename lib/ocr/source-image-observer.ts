@@ -34,6 +34,8 @@ import {
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
+  sourceProperty,
+  sourceCall,
 } from '../replica/source-node-accessors';
 import type { ImageSourceReadySummary } from './image-source-protocol';
 import type { SourceImageUpsert } from './source-image-model';
@@ -465,7 +467,7 @@ export class SourceImageObserver {
       MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS,
       MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS,
     );
-    const view = environment.document.defaultView;
+    const view = sourceProperty(environment.document, 'defaultView');
     this.#scheduleFrame = environment.scheduleFrame
       ? receiverSafeAnimationFrameScheduler(environment.scheduleFrame)
       : (callback) => {
@@ -812,7 +814,7 @@ export class SourceImageObserver {
       const target = event.target;
       if (
         target !== this.#environment.document &&
-        target !== this.#environment.document.scrollingElement
+        target !== sourceProperty(this.#environment.document, 'scrollingElement')
       ) {
         // An inner scroller moves its own controls past the images: the
         // document index does not know where they are now.
@@ -901,12 +903,12 @@ export class SourceImageObserver {
       this.#queueLayoutSettle(undefined, true, true);
     };
     this.#observeSourceRoot(this.#environment.document);
-    this.#environment.document.defaultView?.addEventListener(
+    sourceProperty(this.#environment.document, 'defaultView')?.addEventListener(
       'resize',
       this.#viewportListener,
     );
     try {
-      this.#environment.document.fonts?.addEventListener(
+      sourceProperty(this.#environment.document, 'fonts')?.addEventListener(
         'loadingdone',
         this.#fontSettleListener,
       );
@@ -933,38 +935,38 @@ export class SourceImageObserver {
     this.#passDone = this.#passGeneration;
     this.#resolvePassWaiters();
     if (this.#viewportListener) {
-      this.#environment.document.defaultView?.removeEventListener(
+      sourceProperty(this.#environment.document, 'defaultView')?.removeEventListener(
         'resize',
         this.#viewportListener,
       );
     }
     for (const root of this.#eventRoots) {
       if (this.#loadListener) {
-        root.removeEventListener('load', this.#loadListener, true);
+        sourceCall(root, 'removeEventListener', 'load', this.#loadListener, true);
       }
       if (this.#scrollListener) {
-        root.removeEventListener('scroll', this.#scrollListener, true);
+        sourceCall(root, 'removeEventListener', 'scroll', this.#scrollListener, true);
       }
       if (this.#pictureStateListener) {
         for (const type of PICTURE_STATE_EVENT_TYPES) {
-          root.removeEventListener(type, this.#pictureStateListener, true);
+          sourceCall(root, 'removeEventListener', type, this.#pictureStateListener, true);
         }
       }
       if (this.#pictureAnimationListener) {
         for (const type of PICTURE_ANIMATION_EVENT_TYPES) {
-          root.removeEventListener(type, this.#pictureAnimationListener, true);
+          sourceCall(root, 'removeEventListener', type, this.#pictureAnimationListener, true);
         }
       }
       if (this.#layoutSettleListener) {
         for (const type of LAYOUT_SETTLE_EVENT_TYPES) {
-          root.removeEventListener(type, this.#layoutSettleListener, true);
+          sourceCall(root, 'removeEventListener', type, this.#layoutSettleListener, true);
         }
       }
     }
     this.#eventRoots.clear();
     if (this.#fontSettleListener) {
       try {
-        this.#environment.document.fonts?.removeEventListener(
+        sourceProperty(this.#environment.document, 'fonts')?.removeEventListener(
           'loadingdone',
           this.#fontSettleListener,
         );
@@ -1046,13 +1048,13 @@ export class SourceImageObserver {
     this.#observedMutationRootCount += 1;
     this.#mutationObserver.observe(root, SOURCE_IMAGE_MUTATION_OPTIONS);
     this.#eventRoots.add(root);
-    if (this.#loadListener) root.addEventListener('load', this.#loadListener, true);
+    if (this.#loadListener) sourceCall(root, 'addEventListener', 'load', this.#loadListener, true);
     if (this.#scrollListener) {
-      root.addEventListener('scroll', this.#scrollListener, true);
+      sourceCall(root, 'addEventListener', 'scroll', this.#scrollListener, true);
     }
     if (this.#pictureStateListener) {
       for (const type of PICTURE_STATE_EVENT_TYPES) {
-        root.addEventListener(type, this.#pictureStateListener, {
+        sourceCall(root, 'addEventListener', type, this.#pictureStateListener, {
           capture: true,
           passive: true,
         });
@@ -1060,7 +1062,7 @@ export class SourceImageObserver {
     }
     if (this.#pictureAnimationListener) {
       for (const type of PICTURE_ANIMATION_EVENT_TYPES) {
-        root.addEventListener(type, this.#pictureAnimationListener, {
+        sourceCall(root, 'addEventListener', type, this.#pictureAnimationListener, {
           capture: true,
           passive: true,
         });
@@ -1068,7 +1070,7 @@ export class SourceImageObserver {
     }
     if (this.#layoutSettleListener) {
       for (const type of LAYOUT_SETTLE_EVENT_TYPES) {
-        root.addEventListener(type, this.#layoutSettleListener, true);
+        sourceCall(root, 'addEventListener', type, this.#layoutSettleListener, true);
       }
     }
     return true;
@@ -2395,7 +2397,8 @@ export class SourceImageObserver {
    * (D182). Bounded: past MAX_COVER_SCAN_ELEMENTS nothing more is looked at.
    */
   #coversWithin(target: Element, into: Set<HTMLImageElement>): boolean {
-    const view = target.ownerDocument?.defaultView;
+    const owner = target.ownerDocument;
+    const view = owner ? sourceProperty(owner, 'defaultView') : undefined;
     const getComputedStyle = view?.getComputedStyle;
     if (!view || typeof getComputedStyle !== 'function') return true;
     const pending: Element[] = [...elementChildren(target)];
@@ -2746,7 +2749,7 @@ export class SourceImageObserver {
     images: ReadonlySet<HTMLImageElement>,
   ): Set<HTMLImageElement> | undefined {
     if (images.size === 0) return new Set();
-    const view = this.#environment.document.defaultView;
+    const view = sourceProperty(this.#environment.document, 'defaultView');
     const scrollX = view?.scrollX;
     const scrollY = view?.scrollY;
     if (
@@ -3416,7 +3419,7 @@ function imageObserverMaySkip(
 
 function elementCoversInFlow(element: Element): boolean {
   try {
-    const style = element.ownerDocument.defaultView?.getComputedStyle?.(element);
+    const style = sourceProperty(element.ownerDocument, 'defaultView')?.getComputedStyle?.(element);
     const position = style?.position?.trim().toLowerCase();
     const transform = style?.transform?.trim().toLowerCase() ?? '';
     return position === 'relative' || (
@@ -3452,7 +3455,7 @@ function elementSettleMayChangeCaptureOverlap(element: Element): boolean {
     // invalidating intersecting image capture evidence.
     const captureControls = collectCaptureControlTargets(element);
     if (!captureControls || captureControls.length > 0) return true;
-    const view = element.ownerDocument.defaultView;
+    const view = sourceProperty(element.ownerDocument, 'defaultView');
     const style = view?.getComputedStyle?.(element);
     const position = style?.position?.trim().toLowerCase();
     const transform = style?.transform?.trim().toLowerCase() ?? '';
@@ -3553,7 +3556,7 @@ function boundedDescendantMatch(
 function elementMatchesCaptureControl(element: Element): boolean | undefined {
   try {
     if (element.matches(CAPTURE_CONTROL_SELECTOR)) return true;
-    const view = element.ownerDocument.defaultView;
+    const view = sourceProperty(element.ownerDocument, 'defaultView');
     if (!view || !('getComputedStyle' in view)) return false;
     const getComputedStyle = view.getComputedStyle;
     if (typeof getComputedStyle !== 'function') return undefined;
@@ -3678,7 +3681,7 @@ function elementMovesWithViewport(
 ): boolean | undefined {
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return undefined;
-  const view = element.ownerDocument.defaultView;
+  const view = sourceProperty(element.ownerDocument, 'defaultView');
   const getComputedStyle = view?.getComputedStyle;
   if (typeof getComputedStyle !== 'function') return undefined;
   const walked: Element[] = [];
@@ -3713,9 +3716,10 @@ function elementMovesWithViewport(
 /** Whether any animation or transition of the document is playing now. */
 function documentHasRunningAnimation(document: Document): boolean {
   try {
-    if (typeof document.getAnimations !== 'function') return true;
-    return document.getAnimations().some(
-      (animation) => animation.playState === 'running',
+    // Through the prototypes: an image named `getAnimations` is the page's
+    // `document.getAnimations` (D213). None at all throws, and counts.
+    return sourceCall(document, 'getAnimations').some(
+      (animation: Animation) => animation.playState === 'running',
     );
   } catch {
     return true;
@@ -3955,11 +3959,11 @@ function readRoutingComputedStyle(
   image: HTMLImageElement,
   element: Element,
 ): CSSStyleDeclaration | undefined {
-  const getComputedStyle = image.ownerDocument.defaultView?.getComputedStyle;
+  const getComputedStyle = sourceProperty(image.ownerDocument, 'defaultView')?.getComputedStyle;
   if (typeof getComputedStyle !== 'function') return undefined;
   try {
     return getComputedStyle.call(
-      image.ownerDocument.defaultView,
+      sourceProperty(image.ownerDocument, 'defaultView'),
       element,
     );
   } catch {
@@ -4085,14 +4089,14 @@ function imageClippingToken(
 ): string {
   const left = finitePosition(bounds.left, bounds.x);
   const top = finitePosition(bounds.top, bounds.y);
-  const view = image.ownerDocument.defaultView;
+  const view = sourceProperty(image.ownerDocument, 'defaultView');
   const viewportWidth = finitePosition(
     view?.innerWidth,
-    image.ownerDocument.documentElement?.clientWidth,
+    sourceProperty(image.ownerDocument, 'documentElement')?.clientWidth,
   );
   const viewportHeight = finitePosition(
     view?.innerHeight,
-    image.ownerDocument.documentElement?.clientHeight,
+    sourceProperty(image.ownerDocument, 'documentElement')?.clientHeight,
   );
   let clipLeft = 0;
   let clipTop = 0;
@@ -4100,17 +4104,17 @@ function imageClippingToken(
   let clipBottom = viewportHeight;
   const path = readSourceFlatTreeElementPath(image);
   if (!path) return 'unreadable';
-  const viewStyle = image.ownerDocument.defaultView?.getComputedStyle;
+  const viewStyle = sourceProperty(image.ownerDocument, 'defaultView')?.getComputedStyle;
   for (const ancestor of path.slice(1)) {
     if (
-      ancestor === image.ownerDocument.body ||
-      ancestor === image.ownerDocument.documentElement
+      ancestor === sourceProperty(image.ownerDocument, 'body') ||
+      ancestor === sourceProperty(image.ownerDocument, 'documentElement')
     ) continue;
     if (typeof viewStyle !== 'function') break;
     let style: CSSStyleDeclaration;
     let ancestorBounds: DOMRect;
     try {
-      style = viewStyle.call(image.ownerDocument.defaultView, ancestor);
+      style = viewStyle.call(sourceProperty(image.ownerDocument, 'defaultView'), ancestor);
       ancestorBounds = ancestor.getBoundingClientRect();
     } catch {
       return 'unreadable';
@@ -4272,14 +4276,14 @@ function readVisualAttention(element: Element): ImageVisualAttention {
     const height = isBoundedDimension(bounds.height) ? bounds.height : 0;
     const left = finitePosition(bounds.left, bounds.x);
     const top = finitePosition(bounds.top, bounds.y);
-    const view = element.ownerDocument.defaultView;
+    const view = sourceProperty(element.ownerDocument, 'defaultView');
     const viewportWidth = Math.max(0, finitePosition(
       view?.innerWidth,
-      element.ownerDocument.documentElement?.clientWidth,
+      sourceProperty(element.ownerDocument, 'documentElement')?.clientWidth,
     ));
     const viewportHeight = Math.max(0, finitePosition(
       view?.innerHeight,
-      element.ownerDocument.documentElement?.clientHeight,
+      sourceProperty(element.ownerDocument, 'documentElement')?.clientHeight,
     ));
     const visibleWidth = Math.max(
       0,

@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import {
   CSS_PICTURE_DECODE_WAIT_MS,
@@ -24,6 +24,7 @@ import {
 } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
 import { createPassShareLedger } from '../lib/browser-scheduling';
+import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 
 const baseStyle = {
   display: 'block',
@@ -86,6 +87,54 @@ describe('image source capture safety', () => {
       /(?:src|url|pixels|text|hash|nodeId)/iu,
     );
     session.dispose();
+  });
+
+  it('reads a page whose images take the names of its document\'s properties (D213)', () => {
+    const run = (name?: string) => {
+      const { document, window } = parseHTML(
+        '<html><body><img id="tracked"><button><img id="private"></button><img id="named"></body></html>',
+      );
+      const tracked = document.querySelector<HTMLImageElement>('#tracked')!;
+      setImageFacts(tracked);
+      setImageFacts(document.querySelector<HTMLImageElement>('#private')!);
+      setImageFacts(document.querySelector<HTMLImageElement>('#named')!);
+      const undo = name
+        ? nameOnDocument(document as unknown as Document, name, document.querySelector('#named')!)
+        : () => {};
+      const identity: ReplicaSourceDocumentIdentity = {
+        sessionId: 'image-named-session',
+        pageEpoch: 1,
+        generation: 1,
+        documentId: 'image-named-document',
+        frameId: 0,
+      };
+      const port = new FakeImageSourcePort(createImageSourcePortName(identity.sessionId));
+      try {
+        const session = new ImageSourceSession({
+          port,
+          document: document as unknown as Document,
+          window: window as unknown as Window,
+          resolveNode: () => null,
+          getNodeId: (image) => image === tracked ? 7 : 9,
+          createObserver: (environment) => new SourceImageObserver({
+            ...environment,
+            createIntersectionObserver: () => new NoopElementObserver(),
+            createResizeObserver: () => new NoopElementObserver(),
+            createMutationObserver: () => new NoopMutationObserver(),
+          }),
+        });
+        port.emitMessage({ kind: 'simul:image-source-v2:start', document: identity });
+        session.dispose();
+        return JSON.stringify(port.messages);
+      } catch (error) {
+        return String(error);
+      } finally {
+        undo();
+      }
+    };
+    const expected = run();
+    expect(expected).toContain('candidateImages');
+    expect(DOCUMENT_NAMES.filter((name) => run(name) !== expected)).toEqual([]);
   });
 
   it('gives no rectangle for a screenshot before the pass that reads a change of the page has read the controls (D201)', async () => {
@@ -2928,6 +2977,17 @@ describe('foreign text cover detection', () => {
     expect(safe()).toBe(false);
     // Once the caption moves away the same image becomes capturable again.
     hitTest(() => image);
+    expect(safe()).toBe(true);
+  });
+
+  it('hit-tests past an image named `elementFromPoint` (D213)', () => {
+    const { document, image, safe, hitTest } = geometryFixture(
+      '<img id="image"><img id="named">',
+    );
+    hitTest(() => image);
+    onTestFinished(nameOnDocument(
+      document as unknown as Document, 'elementFromPoint', document.querySelector('#named')!,
+    ));
     expect(safe()).toBe(true);
   });
 
