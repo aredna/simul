@@ -2398,6 +2398,76 @@ describe('PdfViewerTracker and a view turned a quarter (D123)', () => {
     expect(tracker.position?.index).toBe(3);
   });
 
+  it('lets the page box tell a view turned while the tab\'s zoom lags, once Chrome was asked (D205)', () => {
+    // Fit to page after a small resize: the viewer at 71.75%, the tab still
+    // told 71.25% (Chrome passes a change on only above 0.01).
+    const viewer = new FakeViewer(pages(40), 0.7175, 757);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.7125);
+    viewer.scrollTo(viewer.pages[6]!.top * 0.7175 + 100);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 6);
+    const before = tracker.position;
+    // Ctrl+]: pages 757.7 px wide, 5 px off a page's height at 71.25%, so
+    // D123 takes no turn and the reports fit nothing upright.
+    const rotated = new FakeViewer(turned(pages(40)), 0.7175, 757);
+    rotated.time = viewer.time;
+    rotated.scrollTo(rotated.pages[6]!.top * 0.7175 + 40);
+    send(tracker, rotated, 900);
+    tracker.settle();
+    expect(tracker.zoomUnfitted).toBe(true);
+    // No look before Chrome answers the panel's ask; then the page box.
+    expect(tracker.doubt).toBeUndefined();
+    tracker.setViewerZoom(0.7125);
+    const doubt = tracker.doubt!;
+    expect(doubt.pages).toContain(6);
+    expect(tracker.place(doubt, 6)).toEqual(before);
+    expect(tracker.doubt).toBeUndefined();
+    for (let step = 0; step < 3; step += 1) {
+      rotated.scrollTo(rotated.scroll + 300);
+      send(tracker, rotated, 120);
+    }
+    tracker.settle();
+    expect(tracker.position).toEqual(before);
+    // Ctrl+[: upright again, followed.
+    viewer.time = rotated.time;
+    viewer.scrollTo(viewer.pages[9]!.top * 0.7175 + 100);
+    send(tracker, viewer, 900);
+    tracker.settle();
+    if (tracker.doubt) tracker.place(tracker.doubt, 9);
+    expect(tracker.position?.index).toBe(9);
+  });
+
+  it('tells such a turn by its burst while the tab\'s zoom lags the viewer\'s (D205)', () => {
+    // Fit to width on a Letter PDF with a landscape page, just after a
+    // small resize: the viewer at 86%, the tab still told 85.55%, so a
+    // turned page is 4.8 px off a page's height at the tab's zoom.
+    const sizes = pages(40).map((size, index) => (index === 19 ? LANDSCAPE : size));
+    const viewer = new FakeViewer(sizes, 0.86, 757);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(0.8555);
+    viewer.scrollTo(viewer.pages[4]!.top * 0.86 + 100);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 4);
+    const before = tracker.position;
+    const rotated = new FakeViewer(turned(sizes), 0.86, 757);
+    rotated.time = viewer.time;
+    rotated.scrollTo(viewer.scroll);
+    expect(send(tracker, rotated, 900).kind).toBe('hold');
+    rotated.scrollTo((rotated.pages[4]!.top - 3) * 0.86);
+    send(tracker, rotated, 4);
+    send(tracker, rotated, 1);
+    tracker.settle();
+    expect(tracker.doubt?.pages).toContain(4);
+    tracker.place(tracker.doubt!, 4);
+    for (let step = 0; step < 3; step += 1) {
+      rotated.scrollTo(rotated.scroll + 300);
+      expect(send(tracker, rotated, 120).kind).toBe('same');
+    }
+    tracker.settle();
+    expect(tracker.position).toBe(before);
+  });
+
   it('stops following while the view is turned, at a set zoom', () => {
     const viewer = new FakeViewer(pages(40), 0.8, 700);
     const tracker = new PdfViewerTracker(pages(40));

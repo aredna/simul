@@ -1226,9 +1226,19 @@ shell and the mirror has nothing to copy (D103).
       landscape pages are Letter turned (`mixed-orient.pdf`), at 86%, 100%,
       fit to page and fit to width, with quarter, half, three-quarter and
       full turns and a zoom while turned. Where the tab's zoom lags the
-      viewer's (a fit mode after a small resize) the width is not a page
-      height within 0.3 px,
-      and the view is read as before. In
+      viewer's (a fit mode after a small resize, by up to 0.01) and the
+      turn leaves the zoom as it was (pages of both shapes fitted to the
+      widest, so Chrome tells of no new one), these checks take a page's
+      height give or take that lag, as D123 takes a width upright; only
+      D123's own rule, which turns with no look, keeps its 0.3 px (D205).
+      Where no page fits a report upright even after Chrome was asked for
+      the zoom, and some page turned does within the lag, the page box is
+      asked too, once for that report. `matrix.mjs lagturn` (the D197 copy)
+      resizes the window a pixel at a time until the tab's zoom lags (0.54221
+      against 0.54315 on mixed-orient in fit to width), then turns three
+      times: the panel stays in 9 of 9 checks on mixed-orient and
+      letter-scan in fit to width and letter-40 in fit to page, where D197
+      failed the three turns on mixed-orient. In
       fit to page and fit to height Chrome then reports the old place and,
       about 40 ms later, a page's top; the two can read as a movement that
       stopped at the end of the PDF, because there one page and its insets

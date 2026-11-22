@@ -384,6 +384,14 @@ export class PdfViewerTracker {
    * scroll after all, which the page box need not settle (D197).
    */
   #signTop: { readonly viewport: PdfViewerViewport; readonly unsure: boolean } | undefined;
+  /**
+   * The last report Chrome told of a zoom after (D205): the panel's answer
+   * to its own ask (`zoomUnfitted`), or a zoom change. A report that fits
+   * no page upright even then is at the zoom held, give or take its lag.
+   */
+  #zoomToldAfter: PdfViewerViewport | undefined;
+  /** The report such a look was taken for, which is not looked into again. */
+  #laggedLooked: PdfViewerViewport | undefined;
   /** The latest report, read or not. */
   #lastReport: PdfViewerViewport | undefined;
   /** Whether the place could be whole pages off, and how many guesses there were. */
@@ -490,6 +498,7 @@ export class PdfViewerTracker {
       ? zoom
       : undefined;
     const report = this.#lastReport;
+    if (this.#viewerZoom !== undefined) this.#zoomToldAfter = report;
     if (!report || this.#viewerZoom === before) return;
     // A turn's burst came before this zoom (D197): taken where the width
     // cannot tell, now that it is told.
@@ -500,7 +509,7 @@ export class PdfViewerTracker {
       Math.abs(report.pageWidth - this.#burstWidth) < 0.01 &&
       (!this.#turned || this.#turnedByBurst) &&
       this.#upright(report, zoomNow) &&
-      this.#fitsLength(report, this.#heights, zoomNow)
+      this.#fitsSomeTurned(report, zoomNow)
     ) {
       this.#turnNow();
       if (this.#turned) this.#orientationLook = true;
@@ -568,6 +577,12 @@ export class PdfViewerTracker {
     const fix = this.#fix;
     const last = this.#lastReport;
     const zoomHeld = this.#viewerZoom;
+    const lagged = this.#laggedTurnPages();
+    if (lagged.length > 0) {
+      // A view turned while the tab's zoom lags the viewer's (D205): the page
+      // box tells.
+      return { viewport: last!, page: fix?.page ?? 0, pages: lagged, episode: this.#episode };
+    }
     if (this.#turned && this.#orientationLook && last && zoomHeld !== undefined && this.#turnPending === undefined) {
       // Which way the view stands, which the page box tells (D197).
       const pages = this.#pages.flatMap((size, page) =>
@@ -610,12 +625,47 @@ export class PdfViewerTracker {
     };
   }
 
+  /**
+   * The pages the latest report could be turned, where D123 cannot say: in
+   * a fit mode just after a small resize the tab's zoom lags the viewer's
+   * by up to 0.01 (`MIN_ZOOM_DELTA`), so a turned width is a page's height
+   * only within that lag, too loose to take a turn by. Only for a report
+   * that fits no page upright even after Chrome was asked for the zoom
+   * (D205); none while turned or unasked.
+   */
+  #laggedTurnPages(): number[] {
+    const last = this.#lastReport;
+    const zoom = this.#viewerZoom;
+    if (
+      this.#turned || !last || zoom === undefined || this.#zoomToldAfter !== last ||
+      this.#twoPageZoom !== undefined ||
+      this.#turnPending !== undefined || this.#upright(last, zoom) || this.#laggedLooked === last
+    ) return [];
+    return this.#pages.flatMap((size, page) =>
+      Math.abs(last.pageWidth - size.height * zoom) <= MIN_ZOOM_DELTA * size.height + TURNED_WIDTH_TOLERANCE
+        ? [page]
+        : []);
+  }
+
   #fitsUpright(viewport: PdfViewerViewport, width: number, zoom: number): boolean {
     return Math.abs(viewport.pageWidth - width * zoom) <= MIN_ZOOM_DELTA * width + TURNED_WIDTH_TOLERANCE;
   }
 
+  /**
+   * Whether the report is a page of `height` turned, give or take the tab's
+   * lag as for an upright page (D205): in a fit mode just after a small
+   * resize the tab's zoom lags the viewer's, and where turning leaves the
+   * zoom as it was (pages of both shapes, fitted to the widest) Chrome
+   * tells of no new one. The page box, or a turn's burst, decides; D123's
+   * own rule keeps its 0.3 px.
+   */
   #fitsTurned(viewport: PdfViewerViewport, height: number, zoom: number): boolean {
-    return Math.abs(viewport.pageWidth - height * zoom) <= TURNED_WIDTH_TOLERANCE;
+    return Math.abs(viewport.pageWidth - height * zoom) <= MIN_ZOOM_DELTA * height + TURNED_WIDTH_TOLERANCE;
+  }
+
+  /** Whether the report is some page turned, give or take the lag (D205). */
+  #fitsSomeTurned(viewport: PdfViewerViewport, zoom: number): boolean {
+    return this.#heights.some((height) => this.#fitsTurned(viewport, height, zoom));
   }
 
   /**
@@ -654,6 +704,23 @@ export class PdfViewerTracker {
     const size = this.#pages[page];
     const zoom = this.#viewerZoom;
     if (this.#lastReport !== doubt.viewport || !size || zoom === undefined && this.#turned) return undefined;
+    if (this.#laggedTurnPages().length > 0) {
+      // Turned while the tab's zoom lags (D205): the page named is as wide
+      // as the report turned and not upright. The place read since the
+      // width changed was none; the panel goes back to the place before.
+      this.#laggedLooked = doubt.viewport;
+      if (!doubt.pages.includes(page)) return undefined;
+      this.#turned = true;
+      this.#hold = undefined;
+      this.#keyStep = undefined;
+      this.#keyUndo = undefined;
+      const from = this.#lookFrom;
+      if (!from) return undefined;
+      this.#setFix(from);
+      this.#jumpFrom = undefined;
+      this.#position = this.#readingPosition(from.y);
+      return this.#position;
+    }
     if (this.#turned) {
       // Which way the view stands (D197): upright if the page fits the
       // report upright, and read from there; turned if only turned.
@@ -822,12 +889,12 @@ export class PdfViewerTracker {
     zoom: number,
   ): PdfViewerTrack | undefined {
     const upright = this.#upright(top, zoom);
-    if (!upright && !this.#fitsLength(top, this.#heights, zoom)) {
+    if (!upright && !this.#fitsSomeTurned(top, zoom)) {
       this.#burstWidth = top.pageWidth;
       this.#lookFrom = before;
       return undefined;
     }
-    if (!upright || !this.#fitsLength(top, this.#heights, zoom)) return undefined;
+    if (!upright || !this.#fitsSomeTurned(top, zoom)) return undefined;
     if (this.#turned) {
       if (!this.#turnedByBurst) return undefined;
       this.#turnNow();
@@ -871,7 +938,7 @@ export class PdfViewerTracker {
       this.#atTurnPageTop(viewport)
     ) return false;
     if (this.#turned) return false;
-    return this.#upright(viewport, zoom) && this.#fitsLength(viewport, this.#heights, zoom);
+    return this.#upright(viewport, zoom) && this.#fitsSomeTurned(viewport, zoom);
   }
 
   #atTurnPageTop(viewport: PdfViewerViewport): boolean {
@@ -1361,7 +1428,7 @@ export class PdfViewerTracker {
       if (!upright) return true;
       // Turned by a burst: upright only by the burst back, unless no page
       // turned could be this wide (D197).
-      if (this.#turnedByBurst && this.#fitsLength(viewport, this.#heights, zoom)) return true;
+      if (this.#turnedByBurst && this.#fitsSomeTurned(viewport, zoom)) return true;
       this.#turnedByBurst = false;
       // Upright again; the place is guessed from where it was.
       this.#turned = false;
