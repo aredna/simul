@@ -430,25 +430,34 @@ describe('media queries about scripts, read as the tab reads them', () => {
     expect(asked).toBe(1);
   });
 
-  it('refuses a sheet in which a line break cuts a string', () => {
+  it('reads a sheet in which a line break cuts a string as Chrome reads it (D202)', () => {
     // For a browser the string ends at the line break and what follows is
     // the sheet again. The passes that drop imports and read addresses end a
-    // string only at its quote: they took the import here for string text,
-    // and it stayed in.
-    for (const policy of ['conservative', 'passive'] as const) {
-      for (const css of [
-        '@x "a\n;@import url(https://example.test/evil0.css);.z{content:"}',
-        ".a{content:'a\n}.b{background:url(https://example.test/p0.png)}.z{content:'}",
-        '@import "https://example.test/evi\nl1.css";',
-        '.a{content:"a\nb"}',
-        '.a{content:"a\rb"}',
-        '.a{content:"a\fb"}',
-        '.a{content:"a\r\nb"}',
-        '.a{content:"a\\\\\nb"}',
-        '.a{content:"a\n}@media (scripting){.b{color:red}}.c{content:"}',
-      ]) {
-        expect(sheet(css, policy), JSON.stringify(css)).toBeUndefined();
-      }
+    // string only at its quote, so the sheet is first read as Chrome reads
+    // it: the import here is an import, dropped under Conservative. A string
+    // still open at the end of a sheet refuses it, as before.
+    const cases: Array<[string, string | undefined, string | undefined]> = [
+      ['@x "a\n;@import url(https://example.test/evil0.css);.z{content:"}', undefined, undefined],
+      ['@x "a\n;@import url(https://example.test/evil0.css);.z{content:"x"}',
+        '.z{content:"x"}',
+        '@import url("https://example.test/evil0.css");.z{content:"x"}'],
+      [".a{content:'a\n}.b{background:url(https://example.test/p0.png)}.z{content:'}", undefined, undefined],
+      [".a{content:'a\n}.b{background:url(https://example.test/p0.png)}",
+        '.a{}.b{background:url("https://example.test/p0.png")}',
+        '.a{}.b{background:url("https://example.test/p0.png")}'],
+      ['@import "https://example.test/evi\nl1.css";', '', ''],
+      ['.a{content:"a\nb"}', '.a{', '.a{'],
+      ['.a{content:"a\rb"}', '.a{', '.a{'],
+      ['.a{content:"a\fb"}', '.a{', '.a{'],
+      ['.a{content:"a\r\nb"}', '.a{', '.a{'],
+      ['.a{content:"a\\\\\nb"}', '.a{', '.a{'],
+      ['.a{content:"a\n}@media (scripting){.b{color:red}}',
+        '.a{}@media (width >= 0px){.b{color:red}}',
+        '.a{}@media (width >= 0px){.b{color:red}}'],
+    ];
+    for (const [css, conservative, passive] of cases) {
+      expect(sheet(css, 'conservative'), JSON.stringify(css)).toBe(conservative);
+      expect(sheet(css, 'passive'), JSON.stringify(css)).toBe(passive);
     }
     // A line break that a backslash escapes is part of its string; one
     // outside a string, or inside a comment, cuts none.

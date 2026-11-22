@@ -415,12 +415,38 @@ export function createSourceBaseReadPolicy(
   });
 }
 
+/**
+ * A controlled-content policy that also names text nodes to withhold apart
+ * from the element that holds them (D203): text straight in a boxless
+ * `aria-controls` target that the page does not paint, where the target's
+ * painted elements are read. Optional: a policy without it withholds no
+ * text on its own.
+ */
+export type SourceControlledContentPolicyWithTexts = SourceControlledContentPolicy & {
+  readonly withheldTexts?: ReadonlySet<Node>;
+};
+
+/**
+ * Whether the policy withholds this text node on its own (D203). It is
+ * sent as an empty text node, as text in a hidden region is, so the tree
+ * keeps its shape and a later read that paints it fills it in place.
+ */
+export function sourceControlledTextIsWithheld(
+  text: Node,
+  policy: SourceControlledContentPolicy,
+): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
+  const texts = (policy as SourceControlledContentPolicyWithTexts).withheldTexts;
+  return texts !== undefined && texts.has(text);
+}
+
 /** True only when reading this text would be admitted by the base serializer. */
 export function sourceBaseTextIsPublic(
   source: Node,
   policy: SourceBaseReadPolicy,
 ): boolean {
   if (policy.controlledContent.incomplete) return false;
+  if (sourceControlledTextIsWithheld(source, policy.controlledContent)) return false;
   try {
     const element = nearestElement(source);
     return !element || !hasSourceBaseWithheldAncestor(
@@ -2494,8 +2520,9 @@ function serializeNode(
     // text is presentation rather than page content, so a hidden or controlled
     // disclosure region keeps its CSS (those rules are often what hides it);
     // a privacy or menu boundary still withholds it.
-    const withholdText = (context.privateRegion || context.visibilityHidden) &&
-      !(context.styleRegion && !context.privacyRegion);
+    const withholdText = ((context.privateRegion || context.visibilityHidden) &&
+      !(context.styleRegion && !context.privacyRegion)) ||
+      sourceControlledTextIsWithheld(live, context.controlledContent);
     const rawText = withholdText || context.styleResolved
       ? ''
       : (live.nodeValue ?? '');
@@ -5167,6 +5194,12 @@ export function sanitizeCss(
     }
     return undefined;
   }
+  if (!declarationList) {
+    // A string that a line break cuts is read as Chrome reads it (D202).
+    const read = readCssSheetBadStrings(css);
+    if (read === undefined) return undefined;
+    css = read;
+  }
   let commentless = stripCssCommentsOutsideStrings(css, !declarationList);
   if (commentless === undefined) return undefined;
   // Queries about scripts are answered in the text as it came, where a
@@ -5282,7 +5315,7 @@ export function sanitizeCss(
     : answerCssScriptingQueries(rewritten, true);
   return answered === undefined || declarationList
     ? answered
-    : rewriteAlertRoleSelectors(answered);
+    : rewriteStandInSelectors(rewriteAlertRoleSelectors(answered));
 }
 
 /**
@@ -5330,6 +5363,193 @@ function rewriteAlertRoleSelectors(css: string): string {
   }
   if (segmentStart === 0) return css;
   parts.push(css.slice(segmentStart));
+  return parts.join('');
+}
+
+/** The mark of the label Simul adds to an image-replaced link or list item. */
+const PAINTED_LABEL_OVERLAY_SELECTOR =
+  ':where(:not([data-simul-painted-semantic-label-overlay]))';
+/** The mark of the element the mirror stands in a dropdown's place with. */
+const SELECT_STAND_IN_SELECTOR =
+  ':is(select,:where([data-simul-owned-select-host]))';
+/** Functions whose arguments are selectors. */
+const CSS_SELECTOR_FUNCTIONS = new Set([
+  'has', 'host', 'host-context', 'is', 'matches', 'not', 'slotted', 'where',
+  '-webkit-any',
+]);
+
+/**
+ * A page's selectors still count and name its own elements where the mirror
+ * adds one or stands in for one (D202), at the specificity they had:
+ *
+ * - the label Simul appends to an image-replaced link or list item (D178)
+ *   is no child to `:last-child`, `:only-child` or `:nth-last-child()`
+ *   (`:last-child` is written `:nth-last-child(1 of :where(:not([…])))`);
+ * - the type selector `select` also names the element that stands in for a
+ *   dropdown (D62), so `select + .hint` and `.field:has(select)` match.
+ *
+ * Only selectors are written so: a style rule's prelude and the selector
+ * arguments in it, never an at-rule's prelude, a declaration or an
+ * attribute selector. Written once: the text it writes reads the same when
+ * the panel reads it again. Left as they were: `:last-of-type` and the like
+ * (the label is a `span`), and type selectors on what the reader holds a
+ * place for (`script + p`): that place is an element with no attribute.
+ */
+function rewriteStandInSelectors(css: string): string {
+  if (!/last-child|only-child|select/iu.test(css)) return css;
+  const { tokens } = tokenizeCssForBadStrings(css);
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const text = (index: number): string => {
+    const token = tokens[index];
+    return token ? css.slice(token.start, token.end) : '';
+  };
+  const blockEnd = (open: number): number => {
+    const closers: string[] = [tokens[open]!.closer!];
+    let index = open + 1;
+    for (; index < tokens.length && closers.length > 0; index += 1) {
+      const token = tokens[index]!;
+      if (token.kind === 'open') closers.push(token.closer!);
+      else if (token.kind === 'close' && token.closer === closers[closers.length - 1]) {
+        closers.pop();
+      }
+    }
+    return index;
+  };
+  const rewritePrelude = (from: number, to: number): void => {
+    // For each open block: whether selectors stand in it.
+    const selectorBlocks: boolean[] = [];
+    const inSelector = () =>
+      selectorBlocks.length === 0 || selectorBlocks[selectorBlocks.length - 1]!;
+    for (let index = from; index < to; index += 1) {
+      const token = tokens[index]!;
+      if (token.kind === 'open') {
+        const before = tokens[index - 1];
+        const named = before?.kind === 'other' && before.end === token.start
+          ? text(index - 1).toLowerCase()
+          : '';
+        const colon = tokens[index - 2]?.kind === 'colon';
+        const selectors = token.closer === ')' && colon &&
+          CSS_SELECTOR_FUNCTIONS.has(named) && inSelector();
+        if (
+          token.closer === ')' && colon && named === 'nth-last-child' && inSelector()
+        ) {
+          const close = blockEnd(index) - 1;
+          let of = false;
+          for (let inner = index + 1; inner < close; inner += 1) {
+            if (text(inner).toLowerCase() === 'of') of = true;
+          }
+          if (!of && close > index && tokens[close]?.kind === 'close') {
+            edits.push({
+              start: tokens[close]!.start,
+              end: tokens[close]!.start,
+              text: ` of ${PAINTED_LABEL_OVERLAY_SELECTOR}`,
+            });
+          }
+          index = close;
+          continue;
+        }
+        selectorBlocks.push(selectors);
+        continue;
+      }
+      if (token.kind === 'close') {
+        selectorBlocks.pop();
+        continue;
+      }
+      if (token.kind !== 'other' || !inSelector()) continue;
+      const name = text(index).toLowerCase();
+      const before = tokens[index - 1];
+      const pseudoClass = before?.kind === 'colon' && before.end === token.start &&
+        tokens[index - 2]?.kind !== 'colon';
+      const followedByCall = tokens[index + 1]?.kind === 'open' &&
+        tokens[index + 1]!.closer === ')' && tokens[index + 1]!.start === token.end;
+      if (pseudoClass && !followedByCall && name === 'last-child') {
+        edits.push({
+          start: token.start,
+          end: token.end,
+          text: `nth-last-child(1 of ${PAINTED_LABEL_OVERLAY_SELECTOR})`,
+        });
+      } else if (pseudoClass && !followedByCall && name === 'only-child') {
+        edits.push({
+          start: before!.start,
+          end: token.end,
+          text: `:where(:first-child):nth-last-child(1 of ${PAINTED_LABEL_OVERLAY_SELECTOR})`,
+        });
+      } else if (name === 'select' && !followedByCall) {
+        const previous = before ? text(index - 1) : '';
+        const typePosition = !before || before.kind === 'space' ||
+          before.kind === 'comma' || (before.kind === 'open' && before.closer === ')') ||
+          previous === '>' || previous === '+' || previous === '~';
+        const next = text(index + 1);
+        // Written already: the first argument of the `:is(` this writes.
+        const written = before?.kind === 'open' && text(index - 2).toLowerCase() === 'is' &&
+          css.startsWith(SELECT_STAND_IN_SELECTOR.slice(10), token.end);
+        if (typePosition && next !== '|' && !written) {
+          edits.push({ start: token.start, end: token.end, text: SELECT_STAND_IN_SELECTOR });
+        }
+      }
+    }
+  };
+  const readList = (index: number, top: boolean, depth: number): number => {
+    if (depth > MAX_CSS_BAD_STRING_NESTING) return tokens.length;
+    while (index < tokens.length) {
+      const token = tokens[index]!;
+      if (token.kind === 'space' || token.kind === 'semicolon') {
+        index += 1;
+        continue;
+      }
+      if (token.kind === 'close' && token.closer === '}') {
+        if (!top) return index;
+        index += 1;
+        continue;
+      }
+      const start = index;
+      const atRule = token.kind === 'at';
+      const custom = !top && !atRule && text(index).startsWith('--');
+      let preludeEnd = -1;
+      let end = index;
+      for (; end < tokens.length; end += 1) {
+        const current = tokens[end]!;
+        if (current.kind === 'open') {
+          if (current.closer === '}' && !custom) {
+            preludeEnd = end;
+            break;
+          }
+          end = blockEnd(end) - 1;
+          continue;
+        }
+        if (current.kind === 'close' && current.closer === '}') break;
+        if (current.kind === 'semicolon' && (!top || atRule)) {
+          end += 1;
+          break;
+        }
+      }
+      if (preludeEnd < 0) {
+        index = end;
+        continue;
+      }
+      const close = blockEnd(preludeEnd);
+      const atName = atRule ? text(start).slice(1).toLowerCase() : '';
+      if (!atRule) rewritePrelude(start, preludeEnd);
+      // Keyframe selectors and declarations are not selectors.
+      if (atName !== 'keyframes' && atName !== '-webkit-keyframes' &&
+        !(atRule && !CSS_RULE_LIST_AT_RULES.has(atName))) {
+        readList(preludeEnd + 1, top && atRule, depth + 1);
+      }
+      index = close;
+    }
+    return index;
+  };
+  readList(0, true, 0);
+  if (edits.length === 0) return css;
+  edits.sort((left, right) => left.start - right.start);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const edit of edits) {
+    if (edit.start < cursor) continue;
+    parts.push(css.slice(cursor, edit.start), edit.text);
+    cursor = edit.end;
+  }
+  parts.push(css.slice(cursor));
   return parts.join('');
 }
 
@@ -6031,6 +6251,315 @@ function readTransportedSelectPresentationStyle(
  * A sheet in which a line break cuts a string is refused, as one whose
  * string never ends already is.
  */
+/**
+ * A sheet read past a string that a line break cuts, as Chrome's CSS parser
+ * reads it (D202). The tokenizer ends such a string at the line break (a
+ * bad string) and reads on; the parser then drops what holds it:
+ *
+ * - a declaration, from its name to its `;` at its own nesting (blocks it
+ *   opens after the bad string hold their `;`) or the end of its block;
+ * - a rule whose prelude holds it: a style rule or a keyframe with its
+ *   block (at the top of a sheet a `;` does not end a prelude; nested, it
+ *   ends the rule), an at-rule up to its `;` or with its block;
+ * - in `@media`, only the query that holds it, which reads `not all`.
+ *
+ * What it drops goes; nothing else changes. With no cut string the text is
+ * returned as it is. Undefined past the nesting this reads.
+ */
+const MAX_CSS_BAD_STRING_NESTING = 256;
+/** At-rules whose block is a list of rules. */
+const CSS_RULE_LIST_AT_RULES = new Set([
+  'container', 'document', 'keyframes', '-webkit-keyframes', 'layer', 'media',
+  'scope', 'starting-style', 'supports',
+]);
+
+interface CssScanToken {
+  readonly kind: 'open' | 'close' | 'semicolon' | 'comma' | 'colon' | 'at' |
+    'bad' | 'other' | 'space';
+  readonly start: number;
+  readonly end: number;
+  /** For `open` and `close`: the character that closes the block. */
+  readonly closer?: string;
+}
+
+function isCssScanNameCode(code: number): boolean {
+  return code >= 0x80 || code === 0x2d || code === 0x5f ||
+    (code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a);
+}
+
+function isCssScanSpaceCode(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c ||
+    code === 0x0d;
+}
+
+/** Whether a line break cuts a string of `css` (comments are skipped). */
+function cssHasCutString(css: string): boolean {
+  for (let index = 0; index < css.length; index += 1) {
+    const character = css[index]!;
+    if (character === '\\') {
+      index += 1;
+    } else if (character === '/' && css[index + 1] === '*') {
+      const close = css.indexOf('*/', index + 2);
+      if (close < 0) return false;
+      index = close + 1;
+    } else if (character === '"' || character === "'") {
+      for (index += 1; index < css.length; index += 1) {
+        const inside = css[index]!;
+        if (inside === character) break;
+        if (inside === '\\') {
+          index += 1;
+        } else if (inside === '\n' || inside === '\r' || inside === '\f') {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function tokenizeCssForBadStrings(css: string): {
+  readonly tokens: readonly CssScanToken[];
+  readonly bad: boolean;
+} {
+  const tokens: CssScanToken[] = [];
+  let bad = false;
+  const isBreak = (character: string | undefined) =>
+    character === '\n' || character === '\r' || character === '\f';
+  for (let index = 0; index < css.length;) {
+    const character = css[index]!;
+    const start = index;
+    if (character === '/' && css[index + 1] === '*') {
+      const close = css.indexOf('*/', index + 2);
+      index = close < 0 ? css.length : close + 2;
+      tokens.push({ kind: 'space', start, end: index });
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      index += 1;
+      let cut = false;
+      while (index < css.length) {
+        const inside = css[index]!;
+        if (inside === character) {
+          index += 1;
+          break;
+        }
+        if (inside === '\\') {
+          index += css[index + 1] === '\r' && css[index + 2] === '\n' ? 3 : 2;
+          continue;
+        }
+        if (isBreak(inside)) {
+          cut = true;
+          break;
+        }
+        index += 1;
+      }
+      if (cut) bad = true;
+      tokens.push({ kind: cut ? 'bad' : 'other', start, end: Math.min(index, css.length) });
+      continue;
+    }
+    if (character === '\\') {
+      index += isBreak(css[index + 1]) || index + 1 >= css.length ? 1 : 2;
+      tokens.push({ kind: 'other', start, end: index });
+      continue;
+    }
+    // An unquoted `url(`: one token to its `)`, quotes and all.
+    if (
+      (character === 'u' || character === 'U') &&
+      css.slice(index, index + 4).toLowerCase() === 'url(' &&
+      (index === 0 || !isCssScanNameCode(css.charCodeAt(index - 1)))
+    ) {
+      let scan = index + 4;
+      while (scan < css.length && isCssScanSpaceCode(css.charCodeAt(scan))) scan += 1;
+      if (css[scan] !== '"' && css[scan] !== "'") {
+        while (scan < css.length && css[scan] !== ')') {
+          scan += css[scan] === '\\' ? 2 : 1;
+        }
+        index = Math.min(scan + 1, css.length);
+        tokens.push({ kind: 'other', start, end: index });
+        continue;
+      }
+    }
+    // An at-keyword or a name: one token.
+    const nameStart = character === '@' ? index + 1 : index;
+    let nameEnd = nameStart;
+    while (nameEnd < css.length && isCssScanNameCode(css.charCodeAt(nameEnd))) {
+      nameEnd += 1;
+    }
+    if (nameEnd > nameStart) {
+      index = nameEnd;
+      tokens.push({ kind: character === '@' ? 'at' : 'other', start, end: index });
+      continue;
+    }
+    index += 1;
+    if (character === '{' || character === '(' || character === '[') {
+      tokens.push({
+        kind: 'open', start, end: index,
+        closer: character === '{' ? '}' : character === '(' ? ')' : ']',
+      });
+    } else if (character === '}' || character === ')' || character === ']') {
+      tokens.push({ kind: 'close', start, end: index, closer: character });
+    } else if (character === ';') {
+      tokens.push({ kind: 'semicolon', start, end: index });
+    } else if (character === ',') {
+      tokens.push({ kind: 'comma', start, end: index });
+    } else if (character === ':') {
+      tokens.push({ kind: 'colon', start, end: index });
+    } else if (character === '@') {
+      tokens.push({ kind: 'at', start, end: index });
+    } else if (isCssScanSpaceCode(character.charCodeAt(0))) {
+      tokens.push({ kind: 'space', start, end: index });
+    } else {
+      tokens.push({ kind: 'other', start, end: index });
+    }
+  }
+  return { tokens, bad };
+}
+
+export function readCssSheetBadStrings(css: string): string | undefined {
+  if (!cssHasCutString(css)) return css;
+  const { tokens, bad } = tokenizeCssForBadStrings(css);
+  if (!bad) return css;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  /** The token after the block `open` opens, matched by its own closer. */
+  const blockEnd = (open: number): number => {
+    const closers: string[] = [tokens[open]!.closer!];
+    let index = open + 1;
+    for (; index < tokens.length && closers.length > 0; index += 1) {
+      const token = tokens[index]!;
+      if (token.kind === 'open') closers.push(token.closer!);
+      else if (token.kind === 'close' && token.closer === closers[closers.length - 1]) {
+        closers.pop();
+      }
+    }
+    return index;
+  };
+  const holdsBad = (from: number, to: number): boolean => {
+    for (let index = from; index < to; index += 1) {
+      if (tokens[index]!.kind === 'bad') return true;
+    }
+    return false;
+  };
+  const textOf = (from: number, to: number): string =>
+    from < to ? css.slice(tokens[from]!.start, tokens[to - 1]!.end) : '';
+  const drop = (from: number, to: number): void => {
+    if (from < to) {
+      edits.push({ start: tokens[from]!.start, end: tokens[to - 1]!.end, text: '' });
+    }
+  };
+  /** The queries of an `@media` prelude that hold a bad string read `not all`. */
+  const answerMedia = (from: number, to: number): void => {
+    let segment = from;
+    const finish = (end: number) => {
+      if (!holdsBad(segment, end)) return;
+      let first = segment;
+      while (first < end && tokens[first]!.kind === 'space') first += 1;
+      edits.push({
+        start: first < end ? tokens[first]!.start : tokens[segment]!.start,
+        end: tokens[end - 1]!.end,
+        text: 'not all',
+      });
+    };
+    for (let index = from; index < to; index += 1) {
+      const token = tokens[index]!;
+      if (token.kind === 'open') {
+        index = blockEnd(index) - 1;
+      } else if (token.kind === 'comma') {
+        finish(index);
+        segment = index + 1;
+      }
+    }
+    finish(to);
+  };
+  /**
+   * Reads a list of rules and declarations from `index` to the closer of
+   * its block (or the end); returns the index of that closer.
+   */
+  const readList = (index: number, top: boolean, depth: number): number => {
+    if (depth > MAX_CSS_BAD_STRING_NESTING) throw new Error('nesting');
+    while (index < tokens.length) {
+      const token = tokens[index]!;
+      if (token.kind === 'space' || (top && token.kind === 'semicolon')) {
+        index += 1;
+        continue;
+      }
+      if (token.kind === 'close' && token.closer === '}') {
+        if (!top) return index;
+        index += 1;
+        continue;
+      }
+      const start = index;
+      const atRule = token.kind === 'at';
+      // A custom property holds blocks of any kind in its value.
+      const custom = !top && !atRule &&
+        /^--/u.test(css.slice(token.start, token.start + 2));
+      let preludeEnd = -1;
+      let end = index;
+      for (; end < tokens.length; end += 1) {
+        const current = tokens[end]!;
+        if (current.kind === 'open') {
+          if (current.closer === '}' && !custom) {
+            preludeEnd = end;
+            break;
+          }
+          end = blockEnd(end) - 1;
+          continue;
+        }
+        if (current.kind === 'close' && current.closer === '}') break;
+        if (current.kind === 'semicolon' && (!top || atRule)) {
+          end += 1;
+          break;
+        }
+      }
+      if (preludeEnd < 0) {
+        // A declaration, a statement at-rule, or a rule a `;` ended.
+        if (holdsBad(start, end)) {
+          if (atRule && /^@media$/iu.test(textOf(start, start + 1))) {
+            answerMedia(start + 1, end - (tokens[end - 1]?.kind === 'semicolon' ? 1 : 0));
+          } else {
+            drop(start, end);
+          }
+        }
+        index = end;
+        continue;
+      }
+      const close = blockEnd(preludeEnd);
+      // A group rule of the sheet's own list holds a list of rules, read as
+      // the sheet's; in a style rule, or as a style rule's block, it holds
+      // declarations and rules.
+      const listed = top && atRule &&
+        CSS_RULE_LIST_AT_RULES.has(textOf(start, start + 1).slice(1).toLowerCase());
+      if (holdsBad(start, preludeEnd)) {
+        if (atRule && /^@media$/iu.test(textOf(start, start + 1))) {
+          answerMedia(start + 1, preludeEnd);
+          readList(preludeEnd + 1, listed, depth + 1);
+        } else {
+          drop(start, close);
+        }
+      } else {
+        readList(preludeEnd + 1, listed, depth + 1);
+      }
+      index = close;
+    }
+    return index;
+  };
+  try {
+    readList(0, true, 0);
+  } catch {
+    return undefined;
+  }
+  edits.sort((left, right) => left.start - right.start);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const edit of edits) {
+    if (edit.start < cursor) continue;
+    parts.push(css.slice(cursor, edit.start), edit.text);
+    cursor = edit.end;
+  }
+  parts.push(css.slice(cursor));
+  return parts.join('');
+}
+
 function stripCssCommentsOutsideStrings(
   css: string,
   sheet = false,

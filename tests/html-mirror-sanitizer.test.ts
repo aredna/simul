@@ -11,6 +11,7 @@ import {
   sanitizeCss,
   sanitizeSourceAttributes,
   sanitizeSourceDocument,
+  sanitizeSourceSubtree,
   sourceAttributeList,
   sourceBaseTextIsPublic,
   sourceChildNodeList,
@@ -19,6 +20,7 @@ import {
   type HtmlMirrorDocumentGraph,
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
+  type SourceControlledContentPolicyWithTexts,
 } from '../lib/replica/html-mirror-sanitizer';
 import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
 import {
@@ -204,8 +206,8 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
         'about:blank',
         true,
       )).toBeUndefined();
-      // A sheet that a line break cuts in a string is still refused whole.
-      expect(sanitizeCss('.a{content:"a\n}', 'about:blank')).toBeUndefined();
+      // A sheet is read past such a string as Chrome reads it (D202).
+      expect(sanitizeCss('.a{content:"a\n}', 'about:blank')).toBe('.a{}');
     });
 
     it('closes a comment, a url( and a string that a style attribute ends in', () => {
@@ -242,6 +244,135 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
         expect(sanitizeCss(sanitized!, 'about:blank', true), style).toBe(sanitized);
       }
       expect(sanitizeCss('.a{background:url("a.png', 'about:blank')).toBeUndefined();
+    });
+  });
+
+  it('withholds a text node the policy names apart from its element (D203)', () => {
+    const { document } = parseHTML(`<!doctype html><html><body>
+      <div id="menu" style="display: contents">Unpainted words<span id="item">Painted item</span></div>
+    </body></html>`);
+    const menu = document.getElementById('menu')!;
+    const unpainted = menu.firstChild!;
+    const base = createSourceControlledContentPolicy(document as unknown as Document);
+    const policy: SourceControlledContentPolicyWithTexts = {
+      ...base,
+      withheldTexts: new Set([unpainted as unknown as Node]),
+    };
+    const registry = new WeakNodeIdRegistry();
+    const texts = (node: HtmlMirrorNode | undefined): string[] =>
+      !node ? [] : node.kind === 'text' ? [node.text]
+        : node.kind === 'element' ? node.children.flatMap(texts) : [];
+    const read = sanitizeSourceSubtree(
+      menu as unknown as Node, registry, 'https://example.test/', undefined,
+      'passive', undefined, policy,
+    );
+    // The text goes as an empty text node, in its place; the item is read.
+    expect(texts(read)).toEqual(['', 'Painted item']);
+    // A change of that text is read the same way.
+    const patch = sanitizeSourceSubtree(
+      unpainted as unknown as Node, registry, 'https://example.test/', undefined,
+      'passive', undefined, policy,
+    );
+    expect(patch).toMatchObject({ kind: 'text', text: '' });
+    expect(sourceBaseTextIsPublic(unpainted as unknown as Node, { controlledContent: policy }))
+      .toBe(false);
+    // Without the set the text is read.
+    expect(texts(sanitizeSourceSubtree(
+      menu as unknown as Node, registry, 'https://example.test/', undefined,
+      'passive', undefined, base,
+    ))).toEqual(['Unpainted words', 'Painted item']);
+  });
+
+  describe('a sheet read past a string that a line break cuts (D202)', () => {
+    // Each as Chrome 158 reads it: the same rules and the same look
+    // (`compare.mjs` in the D202 harness, 31 cases).
+    const read = (css: string, policy: 'passive' | 'conservative' = 'passive') =>
+      sanitizeCss(css, 'https://example.test/', false, undefined, policy);
+    it('drops the declaration that holds it, up to its own `;`', () => {
+      expect(read('.a{color:red;font-family:"x\n;color:blue}'))
+        .toBe('.a{color:red;color:blue}');
+      expect(read('.a{--v:("x\n;color:red);color:blue}')).toBe('.a{color:blue}');
+      expect(read('.a{color:red;content:"x\n;color:"y\n;color:green}'))
+        .toBe('.a{color:red;color:green}');
+      expect(read('.a{color:green;content:"x\n}.b{color:blue}'))
+        .toBe('.a{color:green;}.b{color:blue}');
+      expect(read('@font-face{font-family:"x\n;src:local(Arial)} .a{color:green}'))
+        .toBe('@font-face{src:local(Arial)} .a{color:green}');
+    });
+    it('drops the rule whose prelude holds it', () => {
+      expect(read('.b"x\n{color:red} .c{color:green}')).toBe(' .c{color:green}');
+      // At the top of a sheet a `;` ends no prelude; nested, it does.
+      expect(read('.b"x\n; .c{color:red} .d{color:green}')).toBe(' .d{color:green}');
+      expect(read('@media screen{.b"x\n; .c{color:red} .d{color:green}}'))
+        .toBe('@media screen{ .d{color:green}}');
+      expect(read('.p{color:green; .q"x\n{color:red} }')).toBe('.p{color:green;  }');
+      expect(read('.p{color:green; .q"x\n; color:blue}')).toBe('.p{color:green;  color:blue}');
+      expect(read('@supports "x\n{.g{color:red}} .h{color:green}')).toBe(' .h{color:green}');
+      expect(read('@import "x\n;.h{color:red}')).toBe('.h{color:red}');
+    });
+    it('reads `not all` for the query of `@media` that holds it', () => {
+      expect(read('@media screen, "x\n{.e{color:red}}'))
+        .toBe('@media screen, not all{.e{color:red}}');
+      expect(read('@media "x\n{.f{color:red}}')).toBe('@media not all{.f{color:red}}');
+    });
+    it('keeps an import that such a string hid out under Conservative', () => {
+      const css = '@x "a\n;@import url(https://example.test/evil0.css);.z{content:"x"}';
+      expect(read(css, 'conservative')).toBe('.z{content:"x"}');
+      expect(read(css, 'conservative')).not.toContain('evil0');
+    });
+    it('reads each the same when the panel reads it again', () => {
+      for (const css of [
+        '.a{content:"a\nb"}', '.b"x\n; .c{color:red} .d{color:green}',
+        '@media screen, "x\n{.e{color:red}}', '.a{content:"/*x\n;color:green}/* "y\n */.b{color:blue}',
+      ]) {
+        const once = read(css)!;
+        expect(read(once), css).toBe(once);
+      }
+    });
+  });
+
+  describe('selectors that count what the mirror adds or stands in for (D202)', () => {
+    const read = (css: string) =>
+      sanitizeCss(css, 'https://example.test/', false, undefined, 'passive');
+    const NOT_LABEL = ':where(:not([data-simul-painted-semantic-label-overlay]))';
+    const STAND_IN = ':is(select,:where([data-simul-owned-select-host]))';
+    it('counts no label Simul adds to a link or a list item', () => {
+      expect(read('a > :last-child{color:red}'))
+        .toBe(`a > :nth-last-child(1 of ${NOT_LABEL}){color:red}`);
+      expect(read('li :only-child,p{x:1}'))
+        .toBe(`li :where(:first-child):nth-last-child(1 of ${NOT_LABEL}),p{x:1}`);
+      expect(read('li:nth-last-child(2){x:1}'))
+        .toBe(`li:nth-last-child(2 of ${NOT_LABEL}){x:1}`);
+      expect(read('li:not(:last-child){x:1}'))
+        .toBe(`li:not(:nth-last-child(1 of ${NOT_LABEL})){x:1}`);
+      expect(read('a{&:last-child{x:1}}'))
+        .toBe(`a{&:nth-last-child(1 of ${NOT_LABEL}){x:1}}`);
+      // One that names its own list is left as it is.
+      expect(read('li:nth-last-child(2 of .a){x:1}')).toBe('li:nth-last-child(2 of .a){x:1}');
+    });
+    it('names the dropdown\'s stand-in where a selector names a dropdown', () => {
+      expect(read('select + .hint{x:1}')).toBe(`${STAND_IN} + .hint{x:1}`);
+      expect(read('.field:has(select){x:1}')).toBe(`.field:has(${STAND_IN}){x:1}`);
+      expect(read('div>select~p{x:1}')).toBe(`div>${STAND_IN}~p{x:1}`);
+    });
+    it('writes nothing that is no selector', () => {
+      for (const css of [
+        '.select,#select,[name=select],select-box,x|select{x:1}',
+        '@container select (min-width:1px){.a{x:1}}',
+        '@keyframes select{from{x:1}}',
+        '.a{animation-name:select}',
+        '@supports selector(:last-child){p{x:1}}',
+        '@page :first{margin:0}',
+      ]) expect(read(css), css).toBe(css);
+    });
+    it('reads what it wrote the same when the panel reads it again', () => {
+      for (const css of [
+        'a > :last-child{x:1}', 'li:only-child{x:1}', 'select + .hint{x:1}',
+        ':is(select){x:1}', 'li:nth-last-child(2n+1){x:1}',
+      ]) {
+        const once = read(css)!;
+        expect(read(once), css).toBe(once);
+      }
     });
   });
 
