@@ -51,6 +51,7 @@ import {
 } from './style-sheet-reach';
 import {
   readCrossOriginSheetFromPageCache,
+  sourceFieldValueChangeMayRestyle,
   sourceTextChangeMayRestyle,
   sourceVisibilityMutationMaySkip,
   type SourceCrossOriginSheetReader,
@@ -445,6 +446,30 @@ const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
 const SEMANTIC_DOM_CHANGE_EVENTS = Object.freeze([
   'beforeinput', 'input', 'change', 'beforetoggle', 'toggle',
 ] as const);
+/** The events that change one field's value or choice (D228). */
+const FIELD_VALUE_EVENTS: ReadonlySet<string> = new Set([
+  'beforeinput', 'input', 'change',
+]);
+
+/**
+ * The form field an event is about, from the start of its path (a field in
+ * an open root too); none for an editor, a host whose root is closed, or
+ * anything else, which is read as before.
+ */
+function sourceEventField(event: Event): Element | undefined {
+  let target: EventTarget | null | undefined;
+  try {
+    target = event.composedPath?.()[0] ?? event.target;
+  } catch {
+    target = event.target;
+  }
+  if (!target || typeof target !== 'object') return undefined;
+  if (sourceNodeType(target as Node) !== ELEMENT_NODE) return undefined;
+  const tag = String(sourceLocalName(target as Element)).toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select'
+    ? target as Element
+    : undefined;
+}
 // A menu that fades out is still painted when the change that closes it is
 // read: its opacity has only begun to fall, and `visibility` holds until the
 // transition ends. Nothing in the DOM changes when it has finished, so the
@@ -996,8 +1021,44 @@ export class SemanticSourceSession {
     // What a person typed or chose is read without waiting for the share
     // of time (D165): the value is what they look at in the mirror.
     this.#userInputPending = true;
+    // Typing into a field, or choosing in one, changes that field (D228):
+    // only it is read again, and the menus and classifications of the rest
+    // are kept unless a rule of the page reads a field's value. What the
+    // page's script does in answer comes as mutations, or in a field the
+    // poll reads.
+    const field = FIELD_VALUE_EVENTS.has(event.type) ? sourceEventField(event) : undefined;
+    if (field) {
+      this.#noteFieldValueChange(field);
+      this.#requestScan();
+      return;
+    }
     this.refresh();
   };
+
+  /**
+   * Notes a change of `field`'s value, checkedness or choice for the next
+   * scan (D228), as an attribute of it would be noted: the field is read
+   * again, and what any rule paints is taken to have changed only where a
+   * rule reads such a state (`sourceFieldValueChangeMayRestyle`).
+   */
+  #noteFieldValueChange(field: Element): void {
+    const journal = this.#journal;
+    if (journal.all) return;
+    journal.roots.add(outermostSourceHost(field));
+    if (
+      !journal.paint &&
+      safelyRead(() => sourceFieldValueChangeMayRestyle(
+        field,
+        this.environment.styleNames?.() ?? undefined,
+      )) !== false
+    ) journal.paint = true;
+    if (journal.roots.size + journal.touched.size > MAX_SEMANTIC_CHANGE_ROOTS) {
+      journal.all = true;
+      journal.paint = true;
+      journal.roots.clear();
+      journal.touched.clear();
+    }
+  }
   readonly #onPresentationChange = (event: Event): void => {
     if (
       !(this.#scope?.disclosureContent &&
@@ -1350,11 +1411,14 @@ export class SemanticSourceSession {
       if (fingerprint === undefined) continue;
       if (this.#controlPollFingerprints.get(element) !== fingerprint) {
         this.#controlPollFingerprints.set(element, fingerprint);
+        // A field whose state changed with no event: read as one a
+        // person typed into or chose in (D228).
+        this.#noteFieldValueChange(element);
         changed = true;
       }
     }
     this.#controlPollCursor = (this.#controlPollCursor + count) % retained.length;
-    if (changed) this.refresh();
+    if (changed) this.#requestScan();
   }
 
   /**

@@ -6072,7 +6072,7 @@ describe('a scan that reads only what changed (D217)', () => {
       } as MutationRecord], {} as MutationObserver);
     };
     onTestFinished(() => session.dispose());
-    return { document, port, session, flip, change, reads, securityReads, first };
+    return { document, window, port, session, flip, change, reads, securityReads, first };
   };
   const menuProofs = (batch: SemanticSourceBatch) =>
     batch.proofs.filter((proof) => proof.kind === 'structural-menu').length;
@@ -6186,6 +6186,58 @@ describe('a scan that reads only what changed (D217)', () => {
     const total = (reads: Map<Element, number>) =>
       [...reads.values()].reduce((sum, count) => sum + count, 0);
     expect(total(page.reads)).toBeLessThan(total(unnamed.reads) / 2);
+  });
+
+  describe('typing into a field (D228)', () => {
+    const FIELD_PAGE = PAGE.replace('<nav>', '<label>Search <input id="q" name="q"></label><nav>');
+    const type = (page: ReturnType<typeof started>, text: string) => {
+      const field = page.document.getElementById('q') as HTMLInputElement;
+      field.value = text;
+      page.reads.clear();
+      page.securityReads.clear();
+      const EventClass = (page.window as unknown as { Event: typeof Event }).Event;
+      field.dispatchEvent(new EventClass('input', { bubbles: true }));
+      return field;
+    };
+    const total = (reads: Map<Element, number>) =>
+      [...reads.values()].reduce((sum, count) => sum + count, 0);
+
+    it('reads the field again and keeps the rest when no rule reads a value', () => {
+      const page = started(() => NO_NAMES, FIELD_PAGE);
+      const field = type(page, 'hello world');
+      const batch = page.port.messages.at(-1)!;
+      expect(batch.sequence).toBe(page.first.sequence + 1);
+      expect(JSON.stringify(batch)).toContain('hello world');
+      expect(menuProofs(batch)).toBe(menuProofs(page.first));
+      // Only the field is asked whether it masks text.
+      expect(page.securityReads.get(field) ?? 0).toBeGreaterThan(0);
+      const others = [...page.securityReads.keys()].filter((element) =>
+        ['p', 'nav', 'div', 'a'].includes(element.localName));
+      expect(others.map((element) => element.outerHTML.slice(0, 40))).toEqual([]);
+    });
+
+    it('reads the menus again where a rule reads a field\'s value', () => {
+      const kept = started(() => NO_NAMES, FIELD_PAGE);
+      type(kept, 'hello');
+      const reading = started(() => ({
+        ...NO_NAMES, pseudoClasses: new Set(['placeholder-shown']),
+      }), FIELD_PAGE);
+      type(reading, 'hello');
+      const wrapper = (page: ReturnType<typeof started>) =>
+        page.reads.get(page.document.querySelector('.wrapper')!) ?? 0;
+      expect(wrapper(kept)).toBeLessThan(wrapper(reading));
+      expect(total(kept.reads)).toBeLessThan(total(reading.reads));
+      expect(JSON.stringify(reading.port.messages.at(-1))).toContain('hello');
+    });
+
+    it('reads everything again for an input event that is not a field\'s', () => {
+      const page = started(() => NO_NAMES, FIELD_PAGE);
+      page.securityReads.clear();
+      const EventClass = (page.window as unknown as { Event: typeof Event }).Event;
+      page.flip.dispatchEvent(new EventClass('input', { bubbles: true }));
+      const asked = [...page.securityReads.keys()].filter((element) => element.localName === 'p');
+      expect(asked.length).toBeGreaterThan(0);
+    });
   });
 });
 

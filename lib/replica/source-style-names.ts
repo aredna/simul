@@ -14,6 +14,8 @@
  */
 
 import {
+  sourceCall,
+  sourceLocalName,
   sourceProperty,
 } from './source-node-accessors';
 
@@ -642,6 +644,108 @@ export function sourceVisibilityEventMaySkip(
     if (!MUTATION_ONLY_PSEUDO_CLASSES.has(name)) return false;
   }
   return true;
+}
+
+/**
+ * The pseudo-classes a field's value or checkedness turns on or off by
+ * itself (D228): typing into a text field, choosing in a dropdown, ticking a
+ * box. `:dir()` only where the field takes its direction from its value
+ * (`dir=auto`), which `sourceFieldValueChangeMayRestyle` asks of the field.
+ */
+const FIELD_VALUE_PSEUDO_CLASSES: ReadonlySet<string> = new Set([
+  'placeholder-shown', 'valid', 'invalid', 'user-valid', 'user-invalid',
+  'in-range', 'out-of-range', 'blank', 'autofill', '-webkit-autofill',
+]);
+/**
+ * What ticking a box, choosing a radio button or an option turns on or off
+ * besides: never moved by typing into a text field.
+ */
+const FIELD_CHOICE_PSEUDO_CLASSES: ReadonlySet<string> = new Set([
+  'checked', 'indeterminate', 'default',
+]);
+
+/**
+ * Pseudo-classes a field's value cannot move, besides those only a mutation
+ * can: the pointer, the focus (typing does not move it), the address, a
+ * custom element's state and definition, the methods of popovers, dialogs,
+ * media and full screen, whether a field is read-only, the parts of a
+ * scroll bar and of a page, and the view transitions.
+ */
+const FIELD_VALUE_INDIFFERENT_PSEUDO_CLASSES: ReadonlySet<string> = new Set([
+  'hover', 'active', 'focus', 'focus-within', 'focus-visible',
+  'target', 'target-within', 'target-current', 'defined', 'state',
+  'popover-open', 'modal', 'fullscreen', '-webkit-full-screen', 'open',
+  'closed', 'playing', 'paused', 'seeking', 'buffering', 'stalled', 'muted',
+  'volume-locked', 'picture-in-picture', 'read-only', 'read-write',
+  'xr-overlay', 'has-slotted', 'active-view-transition',
+  'active-view-transition-type', '-webkit-any', '-webkit-any-link',
+  '-webkit-drag', 'horizontal', 'vertical', 'decrement', 'increment', 'start',
+  'end', 'double-button', 'single-button', 'no-button', 'corner-present',
+  'window-inactive', 'first', 'left', 'right', 'past', 'current', 'future',
+  'matches', 'interest-source', 'interest-target',
+]);
+
+/**
+ * A name a later Chrome may give a pseudo-class of a field's state: counted
+ * as one a value moves, though this does not know it.
+ */
+const FIELD_STATE_LIKE_NAME = /valid|range|placeholder|autofill|blank|checked|default|indeterminate|value/u;
+
+/**
+ * Whether a change of `field`'s value, checkedness or choice can change what
+ * any rule of the page matches (D228). A person typing into a field, or a
+ * script's write the semantic channel's poll finds, changes that field and
+ * nothing else of the page's tree: what a page's script does in answer is a
+ * mutation of its own, or a field's state the poll reads. It fails closed:
+ * no census, a rule that reads layout, or a sheet that names a pseudo-class
+ * a value turns on or off (`:dir()` for a field of `dir=auto`; a choice's
+ * for a box, a radio button or a dropdown), or a name that looks like one.
+ *
+ * The census reads every `:name` of a sheet's text, so it holds words of
+ * declarations and conditions too (`display:grid` in `@supports`, `100dvh`,
+ * `--value`). Those are left out here: the text is the CSSOM's, and Chrome
+ * keeps no rule whose selector names a pseudo-class it does not know, so a
+ * name no Chrome pseudo-class bears selects nothing.
+ */
+export function sourceFieldValueChangeMayRestyle(
+  field: Element,
+  names: SourceStyleNames | undefined,
+): boolean {
+  if (!names || names.layoutReads) return true;
+  let choice = true;
+  try {
+    const tag = String(sourceLocalName(field)).toLowerCase();
+    const type = String(sourceCall(field, 'getAttribute', 'type') ?? '').trim().toLowerCase();
+    choice = tag === 'select' || tag === 'option' ||
+      (tag === 'input' && (type === 'checkbox' || type === 'radio'));
+  } catch {
+    // A field that cannot be asked counts as one that is chosen in.
+  }
+  for (const name of names.pseudoClasses) {
+    if (FIELD_VALUE_PSEUDO_CLASSES.has(name)) return true;
+    if (FIELD_CHOICE_PSEUDO_CLASSES.has(name)) {
+      if (choice) return true;
+      continue;
+    }
+    if (name === 'dir') {
+      let auto = true;
+      try {
+        auto = String(sourceCall(field, 'getAttribute', 'dir') ?? '').trim()
+          .toLowerCase() === 'auto';
+      } catch {
+        // A field that cannot be asked counts as one of `dir=auto`.
+      }
+      if (auto) return true;
+      continue;
+    }
+    if (
+      MUTATION_ONLY_PSEUDO_CLASSES.has(name) ||
+      FIELD_VALUE_INDIFFERENT_PSEUDO_CLASSES.has(name) ||
+      name.startsWith('--') || /^[0-9]/u.test(name)
+    ) continue;
+    if (FIELD_STATE_LIKE_NAME.test(name)) return true;
+  }
+  return false;
 }
 
 /** The sheets of one owner, as the census last read them. */

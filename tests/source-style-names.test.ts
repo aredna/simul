@@ -8,6 +8,7 @@ import {
   createSourceStyleSheetCollection,
   sourceAttributeChangesRestyleWithin,
   sourceClassChangeNamesHidingRule,
+  sourceFieldValueChangeMayRestyle,
   sourceTextChangeMayRestyle,
   sourceVisibilityEventMaySkip,
   sourceVisibilityMutationMaySkip,
@@ -312,6 +313,33 @@ describe('the changes the comparison leaves out (D164)', () => {
     expect(sourceVisibilityMutationMaySkip(attributeRecord(byId('a'), 'data-x'), () => undefined))
       .toBe(false);
     expect(sourceVisibilityEventMaySkip('pointerover', () => undefined)).toBe(false);
+  });
+
+  it('tells which rules a field\'s value or choice can move (D228)', () => {
+    const { byId } = page('<input id="t"><input id="c" type="checkbox">' +
+      '<select id="s"></select><textarea id="x" dir="auto"></textarea><input id="d" dir="ltr">');
+    const moves = (id: string, css: string) =>
+      sourceFieldValueChangeMayRestyle(byId(id), namesOf(css));
+    expect(sourceFieldValueChangeMayRestyle(byId('t'), undefined)).toBe(true);
+    // The pointer, the focus and the tree: typing moves none of them.
+    expect(moves('t', 'a:hover, input:focus, li:first-child, :is(.a), p:not(.b) {}')).toBe(false);
+    for (const name of ['placeholder-shown', 'invalid', 'user-valid', 'out-of-range', 'autofill']) {
+      expect(moves('t', `input:${name} + .hint { display: block }`), name).toBe(true);
+    }
+    // A box ticked or an option chosen; never moved by typing.
+    expect(moves('t', '.toggle:checked ~ .panel {}')).toBe(false);
+    expect(moves('c', '.toggle:checked ~ .panel {}')).toBe(true);
+    expect(moves('s', 'option:checked {}')).toBe(true);
+    // A direction from the value only for a field of `dir=auto`.
+    expect(moves('x', ':dir(rtl) {}')).toBe(true);
+    expect(moves('d', ':dir(rtl) {}')).toBe(false);
+    // Inside `:has()` as well; a name it does not know counts.
+    expect(moves('t', 'form:has(input:invalid) {}')).toBe(true);
+    expect(moves('t', 'input:-moz-ui-invalid {}')).toBe(true);
+    // Words of declarations and conditions the census reads too select nothing.
+    expect(moves('t', '@supports (display:grid) { a:hover {} } .x { --v:1; clip-path:polygon(0 0) }'))
+      .toBe(false);
+    expect(moves('t', '@container (width > 1px) { p {} }')).toBe(true);
   });
 
   it('leaves out an event only when no sheet reads the pseudo-classes it changes', () => {
