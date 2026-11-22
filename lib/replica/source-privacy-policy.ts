@@ -1,8 +1,9 @@
 import {
-  readSourceOwnAccessor,
+  sourceCall,
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
+  sourceProperty,
 } from './source-node-accessors';
 import {
   sourceDocumentSecretClassifier,
@@ -158,6 +159,13 @@ export interface SourceControlledContentPolicy {
   readonly unindexableIdTargets: ReadonlySet<Element>;
   /** Only an unresolvable controller forces its own root's ID targets closed. */
   readonly withheldIdRoots: ReadonlySet<Node>;
+  /**
+   * Text nodes withheld apart from the element that holds them (D212): text
+   * straight in a boxless target, in its root or in a slot's fallback there,
+   * that the page does not paint, where what else the target holds is read.
+   * The sanitizer sends each as an empty text node.
+   */
+  readonly withheldTexts?: ReadonlySet<Node>;
   readonly overflow: boolean;
   /** True when the bounded scan did not inspect the complete source graph. */
   readonly incomplete: boolean;
@@ -317,7 +325,7 @@ const COMPLEX_CLIP: SourceChildClip = Object.freeze({ kind: 'complex' });
  */
 export function createSourceControlledContentPolicy(
   sourceDocument: Document | null | undefined,
-  sourceWindow: Window | null | undefined = sourceDocument?.defaultView,
+  sourceWindow: Window | null | undefined = sourceDocumentView(sourceDocument),
   maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
 ): SourceControlledContentPolicy {
   return beginSourceControlledContentPolicy(
@@ -351,7 +359,7 @@ export interface SourceControlledContentPolicyBuilder {
  */
 export function beginSourceControlledContentPolicy(
   sourceDocument: Document | null | undefined,
-  sourceWindow: Window | null | undefined = sourceDocument?.defaultView,
+  sourceWindow: Window | null | undefined = sourceDocumentView(sourceDocument),
   maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
 ): SourceControlledContentPolicyBuilder {
   return new SlicedSourceControlledContentPolicy(
@@ -373,6 +381,7 @@ implements SourceControlledContentPolicyBuilder {
   readonly #idElements = new Set<Element>();
   readonly #unindexableIdTargets = new Set<Element>();
   readonly #withheldIdRoots = new Set<Node>();
+  readonly #withheldTexts = new Set<Node>();
   readonly #idsByRoot = new Map<Node, Map<string, Element[]>>();
   readonly #idsAcrossRoots = new Map<string, Element[]>();
   readonly #pending: Node[] = [];
@@ -401,8 +410,14 @@ implements SourceControlledContentPolicyBuilder {
   ) {
     this.#sourceWindow = sourceWindow;
     this.#maximumNodes = maximumNodes;
-    this.#lookThrough = sourceControlledLookThrough(this.#targets, sourceWindow);
-    const root = sourceDocument?.documentElement;
+    this.#lookThrough = sourceControlledLookThrough(
+      this.#targets,
+      sourceWindow,
+      this.#withheldTexts,
+    );
+    const root = sourceDocument
+      ? sourceProperty(sourceDocument, 'documentElement')
+      : undefined;
     this.#root = root;
     if (!root || !Number.isSafeInteger(maximumNodes) || maximumNodes < 1) {
       this.#policy = this.#finish(
@@ -430,7 +445,7 @@ implements SourceControlledContentPolicyBuilder {
       this.#policy = this.#build(goOn, paintCache);
     } catch {
       this.#policy = this.#finish(
-        new Set<Node>([(this.#root as Element).getRootNode()]),
+        new Set<Node>([sourceCall((this.#root as Element), 'getRootNode')]),
         true,
         true,
       );
@@ -543,7 +558,7 @@ implements SourceControlledContentPolicyBuilder {
     }
     if (sourceNodeType(node) !== 1) return;
     const element = node as Element;
-    const scope = element.getRootNode();
+    const scope = sourceCall(element, 'getRootNode');
     const id = safelyReadSourceAttribute(element, 'id');
     if (id) {
       this.#idElements.add(element);
@@ -580,7 +595,7 @@ implements SourceControlledContentPolicyBuilder {
       rawControls === undefined || rawControls === null ||
       rawControls.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH
     ) {
-      this.#withheldIdRoots.add(trigger.getRootNode());
+      this.#withheldIdRoots.add(sourceCall(trigger, 'getRootNode'));
       this.#unresolved = true;
       return;
     }
@@ -590,13 +605,13 @@ implements SourceControlledContentPolicyBuilder {
       if (id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
         !Number.isFinite(byteLength)) continue;
       if (this.#referencedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES) {
-        this.#withheldIdRoots.add(trigger.getRootNode());
+        this.#withheldIdRoots.add(sourceCall(trigger, 'getRootNode'));
         this.#unresolved = true;
         break;
       }
       this.#referencedIdBytes += byteLength;
       this.#referencedIds.add(id);
-      const sameRoot = this.#idsByRoot.get(trigger.getRootNode())?.get(id) ?? [];
+      const sameRoot = this.#idsByRoot.get(sourceCall(trigger, 'getRootNode'))?.get(id) ?? [];
       const candidates = sameRoot.length > 0
         ? sameRoot
         : this.#idsAcrossRoots.get(id) ?? [];
@@ -629,6 +644,7 @@ implements SourceControlledContentPolicyBuilder {
       withheldIdRoots,
       overflow,
       incomplete,
+      this.#withheldTexts,
     );
   }
 }
@@ -639,7 +655,7 @@ export function sourceControlledContentIsWithheld(
 ): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (policy.unindexableIdTargets.has(element)) return true;
-  if (policy.withheldIdRoots.has(element.getRootNode()) && Boolean(
+  if (policy.withheldIdRoots.has(sourceCall(element, 'getRootNode')) && Boolean(
     safelyReadSourceAttribute(element, 'id'),
   )) return true;
   const state = policy.targets.get(element);
@@ -682,7 +698,39 @@ export function sourceControlledContentChangedTargets(
       changed.push(target);
     }
   }
+  // A text withheld on its own, or no longer (D212): the element that
+  // holds it is read again, the host for one straight in a root.
+  const before = previous.withheldTexts ?? EMPTY_NODE_SET;
+  const after = next.withheldTexts ?? EMPTY_NODE_SET;
+  const listed = new Set(changed);
+  for (const [texts, others] of [[before, after], [after, before]] as const) {
+    for (const text of texts) {
+      if (others.has(text)) continue;
+      const holder = sourceTextHolder(text);
+      if (holder && !listed.has(holder)) {
+        listed.add(holder);
+        changed.push(holder);
+      }
+    }
+  }
   return Object.freeze(changed);
+}
+
+const EMPTY_NODE_SET: ReadonlySet<Node> = new Set();
+
+/** The element whose list holds `text`: its parent, or its root's host. */
+function sourceTextHolder(text: Node): Element | undefined {
+  try {
+    const parent = sourceNodeLink(text, 'parentNode');
+    if (!parent) return undefined;
+    if (sourceNodeType(parent) === 1) return parent as Element;
+    if (sourceNodeType(parent) === 11 && 'host' in parent) {
+      return (parent as ShadowRoot).host;
+    }
+  } catch {
+    // Detached or unreadable: nothing to read again.
+  }
+  return undefined;
 }
 
 /** A root-wide fallback or incomplete-scan transition needs a checkpoint. */
@@ -724,7 +772,7 @@ export function sourceControlledContentMutationsMayChange(
         if (
           policy.idElements.has(element) ||
           policy.unindexableIdTargets.has(element) ||
-          policy.withheldIdRoots.has(element.getRootNode()) ||
+          policy.withheldIdRoots.has(sourceCall(element, 'getRootNode')) ||
           (id !== undefined && id !== null &&
             id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH) ||
           (id !== undefined && id !== null && policy.referencedIds.has(id))
@@ -764,8 +812,7 @@ export function sourceControlledContentMutationsMayChange(
         policy.controllers.has(mutationElement) ||
         policy.targets.has(mutationElement) ||
         (sourceControlledContentLayoutMayChange(mutationElement, policy) &&
-          mutationElement !== mutationElement.ownerDocument.documentElement &&
-          mutationElement !== mutationElement.ownerDocument.body)
+          !isSourceDocumentRootOrBody(mutationElement))
       )) ||
       controlledMutationNodesMayChange(record.addedNodes, policy) ||
       controlledMutationNodesMayChange(record.removedNodes, policy)
@@ -820,6 +867,7 @@ function finishSourceControlledContentPolicy(
   withheldIdRoots: ReadonlySet<Node>,
   overflow: boolean,
   incomplete: boolean,
+  withheldTexts: ReadonlySet<Node> = new Set(),
 ): SourceControlledContentPolicy {
   const contextElements = new Set<Element>();
   for (const participant of [...controllers, ...targets.keys()]) {
@@ -836,6 +884,7 @@ function finishSourceControlledContentPolicy(
     idElements,
     unindexableIdTargets,
     withheldIdRoots,
+    withheldTexts,
     overflow,
     incomplete,
   });
@@ -866,7 +915,7 @@ function controlledMutationNodesMayChange(
     if (
       id !== undefined && id !== null &&
       (id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
-        policy.withheldIdRoots.has(element.getRootNode()) ||
+        policy.withheldIdRoots.has(sourceCall(element, 'getRootNode')) ||
         policy.referencedIds.has(id))
     ) return true;
     if (sourceLocalName(element).toLowerCase() === 'style' &&
@@ -889,7 +938,7 @@ function markResolvedSourceControlledTargets(
     if (raw === undefined || raw === null ||
       raw.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH) continue;
     for (const id of raw.trim().split(/\s+/u).filter(Boolean)) {
-      const sameRoot = idsByRoot.get(controller.getRootNode())?.get(id) ?? [];
+      const sameRoot = idsByRoot.get(sourceCall(controller, 'getRootNode'))?.get(id) ?? [];
       const matches = sameRoot.length > 0
         ? sameRoot
         : idsAcrossRoots.get(id) ?? [];
@@ -908,7 +957,7 @@ function controllerOverflowRoots(
     if (
       index >= MAX_SOURCE_CONTROLLED_RELATIONSHIPS || raw === undefined ||
       raw === null || raw.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH
-    ) roots.add(controller.getRootNode());
+    ) roots.add(sourceCall(controller, 'getRootNode'));
     index += 1;
   }
   return roots;
@@ -986,10 +1035,10 @@ function readSourceControlledTabSelection(
     normalizedSourceRole(trigger) !== 'tab' ||
     normalizedSourceRole(panel) !== 'tabpanel' ||
     trigger === panel ||
-    trigger.ownerDocument !== panel.ownerDocument ||
-    trigger.getRootNode() !== panel.getRootNode() ||
-    trigger.contains(panel) ||
-    panel.contains(trigger) ||
+    sourceOwnerDocument(trigger) !== sourceOwnerDocument(panel) ||
+    sourceCall(trigger, 'getRootNode') !== sourceCall(panel, 'getRootNode') ||
+    sourceCall(trigger, 'contains', panel) ||
+    sourceCall(panel, 'contains', trigger) ||
     !sourceElementPathIsPainted(trigger, sourceWindow, paintCache)
   ) return undefined;
   const selected = normalizedSourceBooleanAttribute(trigger, 'aria-selected');
@@ -1282,8 +1331,7 @@ function childClipOf(
   }
   // The path walk never treats the root or body as a clipping ancestor.
   if (
-    element === element.ownerDocument.documentElement ||
-    element === element.ownerDocument.body
+    isSourceDocumentRootOrBody(element)
   ) return ancestorClip;
   const clipped = inputs.overflow;
   if (!clipped) return EMPTY_CLIP;
@@ -1339,6 +1387,7 @@ function rectsSurviveClip(
 function sourceControlledLookThrough(
   targets: Map<Element, SourceControlledTargetState>,
   sourceWindow: Window | null | undefined,
+  withheldTexts: Set<Node>,
 ): (panel: Element, paintCache: SourcePaintScanCache) => void {
   // One budget and one set of answers for a policy's targets, whatever
   // slices it is built in (D163); the paint cache is the slice's.
@@ -1371,6 +1420,9 @@ function sourceControlledLookThrough(
     // Nothing it holds is painted: it stays the boundary it was. Text of its
     // own that the page paints counts (D173).
     if (!holding.paintedText && !readable.includes(true)) return false;
+    // Text of its own the page does not paint is withheld alone (D212): it
+    // used to keep the whole target withheld, what it shows too.
+    for (const text of holding.unpaintedTexts) withheldTexts.add(text);
     held.forEach((child, index) => {
       if (!readable[index]) targets.set(child, 'withheld');
       else if ((targets.get(child) ?? 'withheld') === 'withheld') {
@@ -1405,12 +1457,18 @@ function readSourceElementsHeldWithoutBox(
   element: Element,
   sourceWindow: Window | null | undefined,
   paintCache: SourcePaintScanCache,
-): { readonly elements: readonly Element[]; readonly paintedText: boolean } | undefined {
+): {
+  readonly elements: readonly Element[];
+  readonly paintedText: boolean;
+  /** Its own text the page does not paint, withheld alone (D212). */
+  readonly unpaintedTexts: readonly Text[];
+} | undefined {
   if (!sourceElementPathShowsWithoutBox(element, sourceWindow, paintCache)) {
     return undefined;
   }
   try {
     const held: Element[] = [];
+    const unpaintedTexts: Text[] = [];
     let paintedText = false;
     const pending: (Element | ShadowRoot)[] = [element];
     const root = safelyReadSourceShadowRoot(element);
@@ -1429,7 +1487,11 @@ function readSourceElementsHeldWithoutBox(
               sourceWindow,
               paintCache,
             )
-          ) return undefined;
+          ) {
+            unpaintedTexts.push(node as Text);
+            if (unpaintedTexts.length > MAX_SOURCE_PAINT_RECTS) return undefined;
+            continue;
+          }
           paintedText = true;
           continue;
         }
@@ -1440,7 +1502,7 @@ function readSourceElementsHeldWithoutBox(
         if (held.length + pending.length > MAX_SOURCE_PAINT_RECTS) return undefined;
       }
     }
-    return { elements: held, paintedText };
+    return { elements: held, paintedText, unpaintedTexts };
   } catch {
     return undefined;
   }
@@ -1482,7 +1544,7 @@ function readSourceTextPaintRects(
   text: Text,
 ): readonly SourcePaintBounds[] | undefined {
   try {
-    const range = text.ownerDocument.createRange();
+    const range = sourceCall(sourceOwnerDocument(text) as Document, 'createRange');
     range.selectNodeContents(text);
     const rects = range.getClientRects();
     if (rects.length > MAX_SOURCE_PAINT_RECTS) return undefined;
@@ -1602,8 +1664,7 @@ function sourcePaintSurvivesClipping(
   if (!intersections || intersections.length === 0) return false;
   for (const ancestor of path.slice(1)) {
     if (
-      ancestor === ancestor.ownerDocument.documentElement ||
-      ancestor === ancestor.ownerDocument.body
+      isSourceDocumentRootOrBody(ancestor)
     ) continue;
     const ancestorInputs = sourcePaintInputs(ancestor, sourceWindow, paintCache);
     const clipped = ancestorInputs.overflow;
@@ -1696,8 +1757,8 @@ function sourcePaintInputs(
     if (typeof getComputedStyle !== 'function') {
       throw new Error('Computed style is unavailable.');
     }
-    const hiddenAttribute = element.hasAttribute('hidden');
-    const rawAriaHidden = element.getAttribute('aria-hidden');
+    const hiddenAttribute = sourceCall(element, 'hasAttribute', 'hidden');
+    const rawAriaHidden = sourceCall(element, 'getAttribute', 'aria-hidden');
     const ariaHidden = rawAriaHidden === null || rawAriaHidden.trim() === ''
       ? false
       : normalizedSourceBoolean(rawAriaHidden);
@@ -1840,7 +1901,7 @@ function readSourceElementPaintRects(
 ): readonly SourcePaintBounds[] | undefined {
   try {
     if (typeof element.getClientRects !== 'function') return undefined;
-    const rects = element.getClientRects();
+    const rects = sourceCall(element, 'getClientRects');
     if (rects.length > MAX_SOURCE_PAINT_RECTS) return undefined;
     const painted: SourcePaintBounds[] = [];
     for (let index = 0; index < rects.length; index += 1) {
@@ -1916,7 +1977,7 @@ function safelyReadSourceAttribute(
   name: string,
 ): string | null | undefined {
   try {
-    return element.getAttribute(name);
+    return sourceCall(element, 'getAttribute', name);
   } catch {
     return undefined;
   }
@@ -2012,16 +2073,16 @@ export function readSourceFlatTreeParentElement(node: Node): Element | undefined
     if (
       sourceNodeType(assignedSlot) !== 1 ||
       sourceLocalName(assignedSlot).toLowerCase() !== 'slot' ||
-      assignedSlot.ownerDocument !== node.ownerDocument
+      sourceOwnerDocument(assignedSlot) !== sourceOwnerDocument(node)
     ) throw new Error('Invalid assigned-slot ancestry.');
     return assignedSlot;
   }
   const parent = sourceNodeLink(node, 'parentElement');
   if (parent) return parent;
-  const root = node.getRootNode();
+  const root = sourceCall(node, 'getRootNode');
   if (sourceNodeType(root) !== 11 || !('host' in root)) return undefined;
   const host = (root as ShadowRoot).host;
-  if (sourceNodeType(host) !== 1 || host.ownerDocument !== node.ownerDocument) {
+  if (sourceNodeType(host) !== 1 || sourceOwnerDocument(host) !== sourceOwnerDocument(node)) {
     throw new Error('Invalid shadow-host ancestry.');
   }
   return host;
@@ -2146,7 +2207,7 @@ export function readSourceSelectLabel(
   if (!isSourceSelectLabelElementPublic(element)) return undefined;
   if (isSourceSelectEntryVisuallyHidden(element)) return undefined;
   try {
-    const rawAttributeLabel = element.getAttribute('label');
+    const rawAttributeLabel = sourceCall(element, 'getAttribute', 'label');
     const hasAuthoritativeAttributeLabel = rawAttributeLabel !== null &&
       rawAttributeLabel !== '';
     let label = hasAuthoritativeAttributeLabel
@@ -2205,7 +2266,7 @@ export function readSourceClosedSelectChosenLabel(
   option: Element,
 ): { readonly text: string } | undefined {
   if (sourceLocalName(option).toLowerCase() !== 'option') return undefined;
-  const select = option.closest('select');
+  const select = sourceCall(option, 'closest', 'select');
   if (!select) return undefined;
   const outer = closedBoxChosenOption;
   closedBoxChosenOption = Object.freeze({ option, select });
@@ -2264,7 +2325,7 @@ export function beginSourceSelectLabelWalk(): SourceSelectLabelWalk {
 }
 
 export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
-  const view = element.ownerDocument?.defaultView;
+  const view = sourceDocumentView(sourceOwnerDocument(element));
   const chosen = closedBoxChosenOption;
   const remembered = chosen ? undefined : selectLabelWalk?.hidden;
   const known = remembered?.get(element);
@@ -2277,8 +2338,8 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   // option, still counts.
   const chosenAt = chosen
     ? path.findIndex((current) =>
-      current !== chosen.select && chosen.select.contains(current) &&
-      current.contains(chosen.option))
+      current !== chosen.select && sourceCall(chosen.select, 'contains', current) &&
+      sourceCall(current, 'contains', chosen.option))
     : -1;
   const chosenSelectAt = chosen && chosenAt >= 0
     ? path.indexOf(chosen.select, chosenAt)
@@ -2337,7 +2398,7 @@ const MAX_SOURCE_SELECT_ENTRY_DEPTH = 32;
  * blank row). An option outside a dropdown is read as before.
  */
 export function isSourceSelectEntryLeftOutOfList(entry: Element): boolean {
-  const view = entry.ownerDocument?.defaultView;
+  const view = sourceDocumentView(sourceOwnerDocument(entry));
   const between: Element[] = [];
   let current: Element | null = entry;
   for (
@@ -2364,7 +2425,7 @@ export function isSourceSelectEntryLeftOutOfList(entry: Element): boolean {
  * out until the page itself showed the menu).
  */
 export function readSourceSelectRevealer(select: Element): Element | undefined {
-  const view = select.ownerDocument?.defaultView;
+  const view = sourceDocumentView(sourceOwnerDocument(select));
   const path = readSourceFlatTreeElementPath(select);
   if (!path) return undefined;
   let revealer: Element | undefined;
@@ -2394,7 +2455,7 @@ function sourceSelectEntryStaysHidden(
   current: Element,
   view: (Window & typeof globalThis) | null | undefined,
 ): boolean {
-  if (current.hasAttribute('hidden')) return true;
+  if (sourceCall(current, 'hasAttribute', 'hidden')) return true;
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
     const style = view.getComputedStyle(current);
@@ -2408,7 +2469,7 @@ function sourceSelectEntryStaysHidden(
     if (opacity !== '' && Number(opacity) === 0) return true;
     // Under `display: none` it has no box at all: none to judge.
     return typeof current.getClientRects === 'function' &&
-      current.getClientRects().length > 0 &&
+      sourceCall(current, 'getClientRects').length > 0 &&
       sourceSelectHasNoRenderedDocumentBox(current, view, style);
   } catch {
     // As for `sourceSelectEntryIsItselfHidden`: no proof of invisibility.
@@ -2420,7 +2481,7 @@ function sourceSelectEntryIsItselfHidden(
   current: Element,
   view: (Window & typeof globalThis) | null | undefined,
 ): boolean {
-  if (current.hasAttribute('hidden')) return true;
+  if (sourceCall(current, 'hasAttribute', 'hidden')) return true;
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
     const style = view.getComputedStyle(current);
@@ -2474,10 +2535,10 @@ function sourceSelectHasNoRenderedDocumentBox(
   try {
     if (
       typeof select.getClientRects === 'function' &&
-      select.getClientRects().length === 0
+      sourceCall(select, 'getClientRects').length === 0
     ) return true;
     if (typeof select.getBoundingClientRect !== 'function') return false;
-    const rect = select.getBoundingClientRect();
+    const rect = sourceCall(select, 'getBoundingClientRect');
     if (
       ![rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height]
         .every(Number.isFinite)
@@ -2631,7 +2692,7 @@ export function readSourceSelectEntries(
     if (tagName === 'option' || tagName === 'optgroup') continue;
     if (
       isSourceSelectWrapper(child) &&
-      child.querySelector('option,optgroup') !== null
+      sourceCall(child, 'querySelector', 'option,optgroup') !== null
     ) {
       wrapped = true;
       break;
@@ -2974,9 +3035,9 @@ function readSourceUnmemoizedPath(
 export function hasSourceCredentialSecretAncestor(
   node: Node,
   classifier: StickySourceSecretClassifier = sourceDocumentSecretClassifier(
-    node.ownerDocument ?? node,
+    sourceOwnerDocument(node) ?? node,
   ),
-  sourceWindow: Window | null | undefined = node.ownerDocument?.defaultView,
+  sourceWindow: Window | null | undefined = sourceDocumentView(sourceOwnerDocument(node)),
   ownMemo?: SourceSecretAncestorMemo,
 ): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;
@@ -3181,10 +3242,10 @@ function isSourceHttpNavigationAnchor(element: Element): boolean {
     ) return false;
     if (
       SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES.some((attribute) =>
-        element.hasAttribute(attribute)
+        sourceCall(element, 'hasAttribute', attribute)
       )
     ) return false;
-    const rawHref = element.getAttribute('href')?.trim();
+    const rawHref = sourceCall(element, 'getAttribute', 'href')?.trim();
     if (
       !rawHref ||
       rawHref.length > MAX_SOURCE_NAVIGATION_URL_LENGTH ||
@@ -3259,11 +3320,32 @@ export function hasSourceActivationElementAncestor(element: Element): boolean {
  * form's field, whose parent is the form, and never ended. Only an HTML form
  * answers so, and its local name is lower case.
  */
+/**
+ * A node's document, and a document's window, root and body, past a form's
+ * fields and a document's named elements (D212): `<img name="body">` is
+ * `document.body`, and a form's field named `ownerDocument` its document.
+ */
+function sourceOwnerDocument(node: Node): Document | null {
+  return sourceProperty(node, 'ownerDocument');
+}
+
+function sourceDocumentView(
+  document: Document | null | undefined,
+): Document['defaultView'] | undefined {
+  return document ? sourceProperty(document, 'defaultView') : undefined;
+}
+
+function isSourceDocumentRootOrBody(element: Element): boolean {
+  const document = sourceOwnerDocument(element);
+  return !!document && (
+    element === sourceProperty(document, 'documentElement') ||
+    element === sourceProperty(document, 'body')
+  );
+}
+
+/** A node's link, past a form's fields or a document's named elements (D212). */
 function sourceNodeLink<T extends Node, K extends keyof T>(node: T, name: K): T[K] {
-  return sourceNodeType(node) === 1 &&
-    sourceLocalName(node as unknown as Element) === 'form'
-    ? readSourceOwnAccessor(node, String(name)) as T[K]
-    : node[name];
+  return sourceProperty(node, name);
 }
 
 export function readSourceStructuralAttributes(
@@ -3277,7 +3359,7 @@ export function readSourceStructuralAttributes(
       'role',
       'contenteditable',
     ] as const) {
-      const value = element.getAttribute(name);
+      const value = sourceCall(element, 'getAttribute', name);
       if (value !== null) result[name] = value;
     }
     return result;
@@ -3289,7 +3371,7 @@ export function readSourceStructuralAttributes(
 
 function safelyHasSourceAttribute(element: Element, name: string): boolean {
   try {
-    return element.hasAttribute(name);
+    return sourceCall(element, 'hasAttribute', name);
   } catch {
     return false;
   }

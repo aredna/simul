@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 import { sanitizeSourceDocument } from '../lib/replica/html-mirror-sanitizer';
 import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
 import { hasSourceAriaControlledRegionAncestor } from '../lib/ocr/image-source-session';
+import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 import {
   createSourceControlledContentPolicy,
   sourceControlledContentChangedTargets,
@@ -56,8 +57,10 @@ function installPaintedSourceFixture(document: Document, window: Window): void {
   Object.defineProperty(window, 'getComputedStyle', {
     configurable: true,
     value: ((element: Element) => {
-      const hidden = element.hasAttribute('hidden') ||
-        element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
+      // Past a form's fields, as Chrome's own code reads (D212).
+      const attribute = (name: string) => Element.prototype.getAttribute.call(element, name);
+      const hidden = attribute('hidden') !== null ||
+        attribute('aria-hidden')?.trim().toLowerCase() === 'true';
       return {
         display: hidden ? 'none' : 'block',
         visibility: 'visible',
@@ -89,6 +92,74 @@ describe('painted controlled regions', () => {
   beforeEach(() => {
     const { window } = parseHTML('<html><body></body></html>');
     Object.assign(globalThis, { Node: window.Node, Element: window.Element, Text: window.Text });
+  });
+
+  it('reads past a form\'s field names and a document\'s named elements (D212)', () => {
+    const page = `<!doctype html><html><body>
+      <button id="open" aria-expanded="true" aria-controls="panel">Open</button>
+      <form id="panel" aria-controls="inner"><input id="field" name="x"><p>Form words</p></form>
+      <section id="inner">Inner words</section>
+      <img id="named" alt="">
+    </body></html>`;
+    const read = (shadow?: (document: Document) => () => void): string => {
+      const { document, window } = load(page);
+      const undo = shadow?.(document) ?? (() => {});
+      try {
+        const policy = createSourceControlledContentPolicy(document, window);
+        return JSON.stringify({
+          targets: [...policy.targets].map(([element, state]) => [element.id, state]),
+          incomplete: policy.incomplete,
+          overflow: policy.overflow,
+        });
+      } catch (error) {
+        return String(error);
+      } finally {
+        undo();
+      }
+    };
+    const expected = read();
+    expect(expected).toContain('"panel","controlled-region"');
+    // A form answers for its fields' names before its own properties.
+    const formNames = [
+      'getAttribute', 'hasAttribute', 'contains', 'getRootNode', 'closest',
+      'querySelector', 'ownerDocument', 'parentElement', 'parentNode',
+      'firstElementChild', 'nextElementSibling', 'children', 'localName', 'nodeType',
+    ];
+    // linkedom has no named access, and keeps some properties on the node
+    // itself: those move to a prototype, as Chrome has them, and linkedom's
+    // own code still gets the property (as `nameOnDocument` does).
+    const onForm = (name: string) => (document: Document) => {
+      const form = document.getElementById('panel')!;
+      const field = document.getElementById('field');
+      const original = Object.getPrototypeOf(form) as object;
+      const own = Object.getOwnPropertyDescriptor(form, name);
+      const prototype = Object.create(original, own
+        ? {
+            [name]: own.get || own.set
+              ? { ...own, configurable: true }
+              : { configurable: true, get: () => own.value },
+          }
+        : {}) as object;
+      Object.setPrototypeOf(form, prototype);
+      const real = (): unknown => Reflect.get(prototype, name, form);
+      Object.defineProperty(form, name, {
+        configurable: true,
+        get() {
+          const caller = new Error().stack?.split('\n')[2] ?? '';
+          return caller.includes('/node_modules/') ? real() : field;
+        },
+      });
+      return () => {
+        delete (form as unknown as Record<string, unknown>)[name];
+        Object.setPrototypeOf(form, original);
+        if (own) Object.defineProperty(form, name, own);
+      };
+    };
+    expect(formNames.filter((name) => read(onForm(name)) !== expected)).toEqual([]);
+    const names = DOCUMENT_NAMES.filter((name) => name !== 'adoptedStyleSheets');
+    expect(names.filter((name) => read((document) =>
+      nameOnDocument(document, name, document.getElementById('named')!)) !== expected))
+      .toEqual([]);
   });
 
   it('keeps a carousel wrapper controlled only by stateless buttons readable', () => {
@@ -454,21 +525,31 @@ describe('painted controlled regions', () => {
 
     it('does not vouch for text of its own whose boxes cannot be read', () => {
       // Text straight in the target has no box of an element to be judged
-      // by; here no `Range` gives its own boxes either (D173).
+      // by; here no `Range` gives its own boxes either (D173). Since D212
+      // that text alone is withheld and the painted element beside it read.
       const loose = shaped(
         `${button('1')}<div id="t1" class="contents">LOOSE1<span id="seen1">SEEN1</span></div>`,
       );
-      expect(loose.state('t1')).toBe('withheld');
+      expect(loose.state('t1')).toBe('controlled-region');
       expect(loose.sent()).not.toContain('LOOSE1');
-      expect(loose.sent()).not.toContain('SEEN1');
+      expect(loose.sent()).toContain('SEEN1');
       const inRoot = shaped(`${button('2')}<span id="t2" class="contents"></span>`, {
         t2: 'LOOSE2<span id="seen2">SEEN2</span>',
       });
-      expect(inRoot.state('t2')).toBe('withheld');
+      expect(inRoot.state('t2')).toBe('controlled-region');
+      expect([...inRoot.policy().withheldTexts ?? []].map((text) => text.nodeValue))
+        .toEqual(['LOOSE2']);
       const fallback = shaped(`${button('3')}<span id="t3" class="contents"></span>`, {
         t3: '<slot>LOOSE3</slot><span id="seen3">SEEN3</span>',
       });
-      expect(fallback.state('t3')).toBe('withheld');
+      expect(fallback.state('t3')).toBe('controlled-region');
+      expect([...fallback.policy().withheldTexts ?? []].map((text) => text.nodeValue))
+        .toEqual(['LOOSE3']);
+      // Nothing else it holds is painted: withheld whole, as before.
+      const alone = shaped(`${button('5')}<div id="t5" class="contents">LOOSE5</div>`);
+      expect(alone.state('t5')).toBe('withheld');
+      expect(alone.policy().withheldTexts?.size ?? 0).toBe(0);
+      expect(alone.sent()).not.toContain('LOOSE5');
       // White space between its elements is no text.
       const spaced = shaped(
         `${button('4')}<div id="t4" class="contents">\n  <span id="seen4">SEEN4</span>\n</div>`,
@@ -483,12 +564,15 @@ describe('painted controlled regions', () => {
        * of the page for `AWAY`, below a 40px clip for `BELOW`, else in view.
        */
       const textBoxes = (document: Document) => {
-        const original = Object.getOwnPropertyDescriptor(document, 'createRange');
+        // On a prototype, where Chrome has it: the policy calls a
+        // document's methods through its prototypes (D212).
+        const original = Object.getPrototypeOf(document) as object;
+        const prototype = Object.create(original) as object;
+        Object.setPrototypeOf(document, prototype);
         onTestFinished(() => {
-          delete (document as unknown as Record<string, unknown>).createRange;
-          if (original) Object.defineProperty(document, 'createRange', original);
+          Object.setPrototypeOf(document, original);
         });
-        Object.defineProperty(document, 'createRange', {
+        Object.defineProperty(prototype, 'createRange', {
           configurable: true,
           value: () => {
             let node: Node | undefined;
@@ -532,14 +616,28 @@ describe('painted controlled regions', () => {
         for (const id of closedIds(n)) expect(targets.get(page.find(id)), id).toBe('withheld');
         for (const text of closedText(n)) expect(sent, text).not.toContain(text);
       }
-      // Off the page, of no box, or clipped away: the whole target stays
-      // withheld, the painted element beside the text too.
-      for (const n of ['4', '5', '6']) {
-        expect(targets.get(page.find(`t${n}`)), n).toBe('withheld');
+      // Off the page, of no box, or clipped away: the text alone is
+      // withheld, and the painted element beside it read (D212); with
+      // nothing beside it painted the whole target stays withheld.
+      for (const n of ['4', '5']) {
+        expect(targets.get(page.find(`t${n}`)), n).toBe('controlled-region');
       }
-      for (const text of ['AWAY4', 'SEEN4', 'NOBOX5', 'SEEN5', 'BELOW6']) {
+      expect(targets.get(page.find('t6'))).toBe('withheld');
+      for (const text of ['AWAY4', 'NOBOX5', 'BELOW6']) {
         expect(sent, text).not.toContain(text);
       }
+      for (const text of ['SEEN4', 'SEEN5']) expect(sent, text).toContain(text);
+      expect([...page.policy().withheldTexts ?? []].map((text) => text.nodeValue).sort())
+        .toEqual(['AWAY4', 'NOBOX5']);
+      // A text withheld alone, or no longer: its holder is read again.
+      const before = page.policy();
+      const after = { ...before, withheldTexts: new Set<Node>() };
+      const holders = sourceControlledContentChangedTargets(before, after)
+        .map((element) => element.id).sort();
+      expect(holders).toEqual(['t4', 't5']);
+      expect(sourceControlledContentChangedTargets(after, before).map((element) => element.id).sort())
+        .toEqual(['t4', 't5']);
+      expect(sourceControlledContentChangedTargets(before, page.policy())).toEqual([]);
     });
 
     it('judges what its root holds, and what is slotted where it is drawn', () => {
