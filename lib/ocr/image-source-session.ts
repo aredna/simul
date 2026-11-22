@@ -1196,19 +1196,12 @@ export class ImageSourceSession {
     if (!imageAccessibilityTextIsVisible(node, this.environment.window)) {
       return { status: 'blocked' };
     }
-    let rect: DOMRect;
-    try {
-      rect = node.getBoundingClientRect();
-    } catch {
-      return { status: 'blocked' };
-    }
-    if (hasProtectedSiblingOverlap(
-      node,
-      rect,
-      this.environment.document,
-      this.environment.window,
-      (candidate) => this.#hasStickySecretAncestor(candidate),
-    )) return { status: 'blocked' };
+    // What is painted over the image is not asked about (D232): the label
+    // is the image's own `alt` or `aria-label`, which the mirror sends as
+    // the author's words whatever lies over it (D76), and nothing of the
+    // element over it is read. Asking cost a box of every element of the
+    // page at each read: 21 ms a read on a page of 22,000 elements, which
+    // the panel asks again for each image a change admits.
     const direct = readDirectImageAccessibilityText(node);
     if (!direct) return { status: 'none' };
     const nearestElementLanguage = nearestValidElementLanguage(node);
@@ -1582,7 +1575,7 @@ export function hasSafeCaptureGeometry(
 /**
  * An image contained by a control is governed by controlImages. A different
  * element painted over that image is never part of the image; it blocks pixel
- * capture and accessibility-label reads only when it is credential-secret
+ * capture (not a label read, D232) only when it is credential-secret
  * (password, one-time-code, payment-card and other secret autocompletes,
  * hidden/file inputs, CSS-masked text, or a sticky secret classification).
  * A public text control, button or link painted over the image exposes

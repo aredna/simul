@@ -1150,7 +1150,7 @@ describe('image source capture safety', () => {
     session.dispose();
   });
 
-  it('blocks accessibility evidence painted under an unrelated sibling control', () => {
+  it('reads an image\'s label though a secret field lies over it, which the mirror sends anyway (D232)', () => {
     const { document } = parseHTML(
       '<html><body><img id="image" alt="Public label">' +
       '<input id="overlap" autocomplete="one-time-code"></body></html>',
@@ -1211,7 +1211,8 @@ describe('image source capture safety', () => {
     expect(port.messages.at(-1)).toMatchObject({
       kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'overlapped-alt',
-      status: 'blocked',
+      status: 'ready',
+      evidence: { text: 'Public label', source: 'alt' },
     });
     session.dispose();
   });
