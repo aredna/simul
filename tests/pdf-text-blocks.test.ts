@@ -627,14 +627,50 @@ describe('pdfOcrBlocks', () => {
       ], 302),
       ocrLine('1702, dont un seul toucha les', 100, 334, 640),
     ], 2, 612, typed);
+    // The line below, which the cut line runs on into, is the flow's last
+    // part since D189.
     expect(blocks.map((block) => block.flow)).toEqual([
-      undefined, { id: 1, part: 0 }, { id: 1, part: 1 }, undefined,
+      undefined, { id: 1, part: 0 }, { id: 1, part: 1 }, { id: 1, part: 2 },
     ]);
     // A line cut down to one piece is a block like any other.
     const footer = pdfOcrBlocks([ocrWords([
       ['Rapport', 100, 96], ['annuel', 206, 84], ['Page', 450, 40], ['1', 498, 8],
     ], 1474)], 2, 612, [{ left: 223, top: 736, width: 50, height: 11 }]);
     expect(footer.map((block) => [block.text, block.flow])).toEqual([['Rapport annuel', undefined]]);
+  });
+
+  it('runs a cut line on into the one block below it, where the reading order is plain (D189)', () => {
+    const typed = [{ left: 212, top: 150, width: 100, height: 11 }];
+    const cut = (last = 'et') => ocrWords([
+      ['Les', 100, 44], ['registres', 152, 120], ['mentionnent', 280, 130],
+      ['COPIE', 426, 80], ['CONFORME', 514, 110],
+      ['1640', 660, 60], [last, 728, 24],
+    ], 302);
+    const flows = (below: PdfOcrLine[], last?: string) =>
+      pdfOcrBlocks([cut(last), ...below], 2, 612, typed).map((block) => [block.text, block.flow?.part]);
+    // The paragraph's next two lines are one block, the flow's last part.
+    expect(flows([
+      ocrLine('1702, dont un seul toucha les entrepôts', 100, 334, 640),
+      ocrLine('du quai.', 100, 366, 120),
+    ])).toEqual([
+      ['Les registres mentionnent', 0],
+      ['1640 et', 1],
+      ['1702, dont un seul toucha les entrepôts du quai.', 2],
+    ]);
+    // A line that ends a sentence runs on into nothing.
+    expect(flows([ocrLine('Le conseil vota de nouveaux règlements.', 100, 334, 640)], 'et.')
+      .map(([, part]) => part)).toEqual([0, 1, undefined]);
+    // Two columns below: which comes next is not plain.
+    expect(flows([
+      ocrLine('1702, dont un', 100, 334, 260),
+      ocrLine('seul toucha les', 560, 334, 190),
+    ]).map(([, part]) => part)).toEqual([0, 1, undefined, undefined]);
+    // A block wider than the line: the line ended early, a paragraph's end.
+    expect(flows([ocrLine('Un autre paragraphe commence ici et va bien plus loin', 100, 334, 1000)])
+      .map(([, part]) => part)).toEqual([0, 1, undefined]);
+    // A block starting far below is another paragraph.
+    expect(flows([ocrLine('1702, dont un seul toucha les', 100, 400, 640)])
+      .map(([, part]) => part)).toEqual([0, 1, undefined]);
   });
 
   it('splits a translation across a line\'s pieces by their room, at word boundaries (D184)', () => {

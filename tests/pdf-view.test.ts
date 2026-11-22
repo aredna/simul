@@ -491,6 +491,37 @@ describe('PdfView text', () => {
     expect(measured.get('Endless')).toBe(2);
   });
 
+  it('sets the pieces of one cut line at one font size, the smallest needed (D189)', async () => {
+    const needed = new Map<string, number>([['Short', 20], ['Long', 80]]);
+    const measureBlock: PdfBlockMeasure = (block, text) => {
+      const scale = Number(/\* ([\d.]+)px/u.exec(block.style.fontSize)?.[1] ?? 10) / 10;
+      const height = (needed.get(text.textContent ?? '') ?? 0) * scale * scale;
+      return { needed: { width: 100, height }, available: { width: 100, height: 20 } };
+    };
+    const harness = setup({ pages: 1, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    const piece = (id: number, left: number, part: number): PdfSurfaceBlock => {
+      const rect = { left, top: 72, width: 150, height: 12 };
+      return { ...textBlock(id, 'Morceau'), lines: [rect], box: rect, flow: { id: 1, part } };
+    };
+    // Two pieces of a line, and the block below it the line runs on into.
+    harness.view.setPageText(0, [
+      piece(1, 72, 0),
+      piece(2, 300, 1),
+      { ...textBlock(3, 'Suite', { top: 90 }), flow: { id: 1, part: 2 } },
+    ]);
+    await harness.finishNext();
+    harness.view.showTranslation(1, 'Short', 'en');
+    harness.view.showTranslation(2, 'Long', 'en');
+    harness.view.showTranslation(3, 'Short', 'en');
+    harness.runFrames();
+    const sizes = [...harness.element.querySelectorAll<HTMLElement>('.pdf-block')].map(fontPixels);
+    expect(sizes[1]).toBe(5);
+    // The short piece takes the long one's size; the block below keeps its own.
+    expect(sizes[0]).toBe(5);
+    expect(sizes[2]).toBe(10);
+  });
+
   it('measures every drawn page before resizing any', async () => {
     const log: Array<[string, number]> = [];
     const measureBlock: PdfBlockMeasure = (block, text) => {

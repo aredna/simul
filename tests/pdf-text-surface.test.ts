@@ -468,6 +468,63 @@ describe('PdfTextSurface scanned pages', () => {
     expect(surface.project(projection(surface, second!.id, '1640 et'))).toBe(false);
   });
 
+  it('splits by the glyphs\' widths, and gives the block a line runs on into the rest (D189)', () => {
+    const { surface, shown, pages, sink } = mounted();
+    const piece = (text: string, left: number, width: number, part: number, lines = 1): PdfTextBlock => {
+      const top = part === 2 ? 166 : 150;
+      const rects = Array.from({ length: lines }, (_, line) => ({ left, top: top + 14 * line, width, height: 12 }));
+      return { ...block(text), lines: rects, box: { left, top, width, height: 14 * lines - 2 }, flow: { id: 1, part } };
+    };
+    surface.setScannedPage(1, [
+      piece('Les registres', 50, 100, 0),
+      piece('entre 1640 et', 330, 100, 1),
+    ], 'fra');
+    // A W is five times as wide as an i, a space between.
+    const widths: Record<string, number> = { W: 10, i: 2, ' ': 3 };
+    const measureText = vi.fn((_id: number, text: string) =>
+      [...text].reduce((sum, each) => sum + (widths[each] ?? 5), 0));
+    Object.assign(sink, { measureText });
+    const [first, second] = pages.get(1)!;
+    surface.beginProjection({ translationEpoch: 4, pairKey: 'fr>en' });
+    expect(surface.project(projection(surface, first!.id, 'Les registres entre 1640 et', {
+      translated: 'WWWW WWWW ii ii ii ii',
+    }))).toBe(true);
+    // By characters it would be "WWWW WWWW" and "ii ii ii ii".
+    expect(shown).toEqual([[first!.id, 'WWWW', 'en'], [second!.id, 'WWWW ii ii ii ii', 'en']]);
+    expect(measureText).toHaveBeenCalledWith(first!.id, 'WWWW');
+    // Not measurable: by characters.
+    shown.length = 0;
+    measureText.mockReturnValue(undefined as unknown as number);
+    surface.project(projection(surface, first!.id, 'Les registres entre 1640 et', {
+      translated: 'WWWW WWWW ii ii ii ii',
+    }));
+    expect(shown).toEqual([[first!.id, 'WWWW WWWW', 'en'], [second!.id, 'ii ii ii ii', 'en']]);
+
+    // The two lines below, which the cut line runs on into: one text, the
+    // block taking the share of its two lines' width.
+    const next = setup();
+    next.surface.mount(DOCUMENT, 1);
+    next.surface.addPage({ index: 0, blocks: [], scanned: true });
+    next.surface.markTextComplete();
+    next.surface.setScannedPage(0, [
+      piece('Les registres', 50, 100, 0),
+      piece('1640 et', 330, 100, 1),
+      piece('1702, dont un seul toucha les entrepôts du quai.', 50, 100, 2, 2),
+    ], 'fra');
+    expect(next.surface.snapshot()!.records.map((record) => record.source))
+      .toEqual(['Les registres 1640 et 1702, dont un seul toucha les entrepôts du quai.']);
+    const [a, b, c] = next.pages.get(0)!;
+    next.surface.beginProjection({ translationEpoch: 4, pairKey: 'fr>en' });
+    next.surface.project(projection(next.surface, a!.id, next.surface.snapshot()!.records[0]!.source, {
+      translated: 'one two three four five six seven eight',
+    }));
+    expect(next.shown).toEqual([
+      [a!.id, 'one two', 'en'],
+      [b!.id, 'three four', 'en'],
+      [c!.id, 'five six seven eight', 'en'],
+    ]);
+  });
+
   it('reads pages again in another OCR model group, and not in the same one', () => {
     const { surface, pages } = mounted();
     surface.setScannedPage(1, [block('Lu en anglais')], 'eng');

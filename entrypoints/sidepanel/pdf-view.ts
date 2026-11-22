@@ -165,6 +165,8 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   #holdRedraw = false;
   /** Fitting retries run since a block could last not be measured. */
   #fitRetries = 0;
+  /** Measures text for splitting a translation across pieces; `null` when it cannot. */
+  #textMeasure: CanvasRenderingContext2D | null | undefined;
   #resizeObserver: ResizeObserverLike | undefined;
   /** The page each text block is on. */
   readonly #blockPages = new Map<number, number>();
@@ -371,6 +373,35 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     if (!page.canvas) return;
     if (page.layer.coloursSampled || page.layer.colourReadFailed) this.#schedule();
     else this.#decorate(index!);
+  }
+
+  /**
+   * How wide `text` is in a block's font (family, weight, slant, size), in
+   * the block's points, measured on a canvas (D189). `undefined` where
+   * there is no such block or no canvas to measure on.
+   */
+  measureText(blockId: number, text: string): number | undefined {
+    const index = this.#blockPages.get(blockId);
+    const page = index === undefined ? undefined : this.#pages[index];
+    const block = page?.blocks?.find((each) => each.id === blockId);
+    if (!page || !block || !(block.fontSize > 0)) return undefined;
+    if (this.#textMeasure === undefined) {
+      try {
+        this.#textMeasure = this.#element.ownerDocument.createElement('canvas').getContext('2d') ?? null;
+      } catch {
+        this.#textMeasure = null;
+      }
+    }
+    const context = this.#textMeasure;
+    if (!context) return undefined;
+    const face = page.fontFaces?.[block.fontId];
+    context.font = `${face?.italic ? 'italic ' : ''}${face?.bold ? '700 ' : ''}${block.fontSize}px ${block.fontFamily}`;
+    try {
+      const width = context.measureText(text).width;
+      return Number.isFinite(width) && width >= 0 ? width : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   hideTranslations(): void {

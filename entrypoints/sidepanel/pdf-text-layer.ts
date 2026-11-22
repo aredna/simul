@@ -264,6 +264,7 @@ export class PdfPageTextLayer {
       setFontSize(entry);
     }
     this.#fitting = next;
+    this.#evenLines();
     return next.length > 0;
   }
 
@@ -277,6 +278,35 @@ export class PdfPageTextLayer {
       setFontSize(entry);
     }
     this.#fitting = [];
+    this.#evenLines();
+  }
+
+  /**
+   * Gives the translated pieces of one line cut around typed text one font
+   * size, the smallest any of them fitted at, once all are fitted (D189):
+   * a smaller size fits wherever a larger one does.
+   */
+  #evenLines(): void {
+    const lines = new Map<string, LayerBlock[]>();
+    for (const entry of this.#blocks.values()) {
+      const { flow, lines: rects, fontSize } = entry.block;
+      if (!flow || !entry.translated || rects.length !== 1 || !(fontSize > 0)) continue;
+      // Pieces of one line share its top; a block the line runs on into is lower.
+      const key = `${flow.id}:${Math.round(rects[0]!.top / (fontSize / 2))}`;
+      const line = lines.get(key) ?? [];
+      line.push(entry);
+      lines.set(key, line);
+    }
+    for (const line of lines.values()) {
+      if (line.length < 2 || line.some((entry) => !entry.fitted)) continue;
+      const size = Math.min(...line.map((entry) => entry.block.fontSize * entry.fit));
+      for (const entry of line) {
+        const fit = size / entry.block.fontSize;
+        if (fit >= entry.fit) continue;
+        entry.fit = fit;
+        setFontSize(entry);
+      }
+    }
   }
 
   /** The scale to try next, or `undefined` when the search is done. */

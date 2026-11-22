@@ -952,6 +952,41 @@ describe('PdfViewerTracker doubts (D133)', () => {
     }
   });
 
+  it('looks for no scrollbar across where Chrome 158 fits to width beside a pixel less (D184)', () => {
+    // A default zoom of 120% or more opens a wide PDF fitted to width:
+    // 965 px of PDF in a view of 979 where the tab measures 15 (Chrome 158
+    // for Testing). No scrollbar lies across, and the bottom is the one
+    // reported.
+    for (const scrollbar of [15, 15.2]) {
+      const start = () => {
+        const viewer = new FakeViewer(pages(300), (979 - 14) / 826, 757, 979);
+        viewer.scrollbar = scrollbar;
+        viewer.scrollbarWhole = 14;
+        viewer.scrollbarShort = 1;
+        expect(viewer.scrollbarAcross).toBe(false);
+        const tracker = new PdfViewerTracker(pages(300));
+        tracker.setScrollbarWidth(scrollbar);
+        send(tracker, viewer, 1_000);
+        tracker.place(tracker.doubt!, 0);
+        return { viewer, tracker };
+      };
+      const end = start();
+      // End where Chrome does not animate scrolling: one report.
+      end.viewer.scrollTo(end.viewer.maxScroll);
+      send(end.tracker, end.viewer, 1_000);
+      expect(end.tracker.settle()?.index, `${scrollbar}`).toBe(end.viewer.topPage());
+      expect(end.viewer.topPage()).toBeGreaterThanOrEqual(298);
+      end.tracker.place(end.tracker.doubt!, end.viewer.mostVisible());
+      // And animated.
+      expect(runTo(end.tracker, end.viewer, 0)).toEqual({ index: 0, fraction: 0 });
+      expect(runTo(end.tracker, end.viewer, end.viewer.maxScroll)?.index).toBe(end.viewer.topPage());
+      // A share of the view less a scrollbar across is no step here.
+      const { viewer, tracker } = start();
+      viewer.scrollTo(Math.round(PDF_VIEWER_PAGE_KEY_SHARE * (viewer.viewportHeight - 14)));
+      expect(send(tracker, viewer, 400).kind).toBe('hold');
+    }
+  });
+
   it('looks for both bottoms where Chrome\'s whole number for the scrollbar is unsure (D134)', () => {
     // A width measured as 15.45 px may be 15 or 16 to Chrome. In fit to
     // width by either number no scrollbar lies across; half a pixel wider

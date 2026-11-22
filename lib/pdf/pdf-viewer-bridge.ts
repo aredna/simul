@@ -3,6 +3,7 @@ import {
   PDF_VIEWER_ORIGIN,
   isPdfViewerPortName,
   pdfViewerPageZoom,
+  pdfViewerShowsToolbar,
   readPdfViewerScale,
   readPdfViewerScrollbar,
   readPdfViewerViewport,
@@ -60,6 +61,8 @@ export interface PdfViewerBridgeEnvironment {
   readonly devicePixelRatio?: () => number;
   /** The tab's height in its CSS pixels, which tells a default zoom (D184). */
   readonly innerHeight?: () => number;
+  /** The fragment of the PDF's address, which may hide the viewer's toolbar (D189). */
+  readonly locationHash?: () => string;
   readonly setInterval?: (callback: () => void, ms: number) => unknown;
   readonly clearInterval?: (handle: unknown) => void;
 }
@@ -99,6 +102,8 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
     (() => (globalThis as { devicePixelRatio?: number }).devicePixelRatio ?? 1);
   const innerHeight = environment.innerHeight ??
     (() => (globalThis as { innerHeight?: number }).innerHeight ?? Number.NaN);
+  const locationHash = environment.locationHash ??
+    (() => (globalThis as { location?: { hash?: string } }).location?.hash ?? '');
   const startTimer = environment.setInterval ??
     ((callback: () => void, ms: number) => setInterval(callback, ms));
   const stopTimer = environment.clearInterval ??
@@ -227,7 +232,11 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
       // In the viewer's own pixels: a default zoom scales the tab's (D184).
       let zoom = 1;
       try {
-        zoom = pdfViewerPageZoom(viewport.viewportHeight, innerHeight());
+        zoom = pdfViewerPageZoom(
+          viewport.viewportHeight,
+          innerHeight(),
+          pdfViewerShowsToolbar(locationHash()),
+        );
       } catch {
         zoom = 1;
       }

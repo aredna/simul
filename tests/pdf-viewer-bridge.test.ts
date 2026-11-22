@@ -11,6 +11,7 @@ import {
   PDF_VIEWER_ORIGIN,
   createPdfViewerPortName,
   pdfViewerPageZoom,
+  pdfViewerShowsToolbar,
 } from '../lib/pdf/pdf-viewer-protocol';
 
 type Listener = Parameters<NonNullable<PdfViewerBridgeEnvironment['window']>['addEventListener']>[1];
@@ -29,6 +30,7 @@ function setup(options: {
   measureScrollbar?: () => number | undefined;
   devicePixelRatio?: () => number;
   innerHeight?: () => number;
+  locationHash?: () => string;
 } = {}) {
   const viewerWindow = { postMessage: vi.fn() };
   let frame = { contentWindow: viewerWindow };
@@ -52,6 +54,7 @@ function setup(options: {
     measureScrollbar: options.measureScrollbar ?? (() => undefined),
     devicePixelRatio: options.devicePixelRatio ?? (() => Number.NaN),
     ...(options.innerHeight ? { innerHeight: options.innerHeight } : {}),
+    ...(options.locationHash ? { locationHash: options.locationHash } : {}),
     setInterval: (callback) => {
       const handle = { callback, cleared: false };
       intervals.push(handle);
@@ -285,6 +288,32 @@ describe('installPdfViewerBridge', () => {
     const port = hidden.open();
     hidden.deliver({ ...REPORT, viewportHeight: 813 });
     expect(port.sent[0]).toMatchObject({ scrollbar: 15, scale: 1 });
+  });
+
+  it('takes the zoom from the whole viewport where the PDF\'s address hides the toolbar (D189)', () => {
+    // Chrome for Testing 158 at a default zoom of 83%, `#toolbar=0`: the
+    // viewport is the viewer's whole 813 px in a tab 979 px tall.
+    for (const hash of ['#toolbar=0', '#zoom=150&toolbar=0', '#page=3&TOOLBAR=0&zoom=50']) {
+      const { open, deliver } = setup({
+        measureScrollbar: () => 18.07,
+        devicePixelRatio: () => 0.83,
+        innerHeight: () => 979,
+        locationHash: () => hash,
+      });
+      const port = open();
+      deliver({ ...REPORT, viewportHeight: 813 });
+      const sent = port.sent[0] as { scrollbar: number; scale: number };
+      expect(Math.abs(sent.scrollbar - 15), hash).toBeLessThan(0.1);
+      expect(sent.scale, hash).toBeCloseTo(1, 2);
+    }
+    expect(pdfViewerShowsToolbar(undefined)).toBe(true);
+    expect(pdfViewerShowsToolbar('')).toBe(true);
+    expect(pdfViewerShowsToolbar('#toolbar=1')).toBe(true);
+    expect(pdfViewerShowsToolbar('#toolbar=0')).toBe(false);
+    expect(pdfViewerShowsToolbar('#notoolbar=0')).toBe(true);
+    // Shown, the same tab and viewport would be 89%.
+    expect(pdfViewerPageZoom(813, 979)).toBeCloseTo(0.888, 3);
+    expect(pdfViewerPageZoom(813, 979, false)).toBeCloseTo(0.8304, 4);
   });
 
   it('sends the screen\'s scale, and the report without it when it is not known (D134)', () => {

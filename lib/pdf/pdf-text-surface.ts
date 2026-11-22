@@ -23,6 +23,11 @@ export interface PdfTextSink {
   setPageText(pageIndex: number, blocks: readonly PdfSurfaceBlock[]): void;
   showTranslation(blockId: number, text: string, language: string | undefined): void;
   hideTranslations(): void;
+  /**
+   * How wide `text` is in the block's font, in the block's points
+   * (D189); `undefined` where it cannot be measured.
+   */
+  measureText?(blockId: number, text: string): number | undefined;
 }
 
 export interface PdfPageText {
@@ -373,10 +378,18 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     const language = targetLanguage(projection.pairKey);
     const pieces = this.#flows.get(projection.nodeId);
     if (pieces) {
-      // Across the pieces, in reading order, by the room each has (D184).
+      // Across the pieces, in reading order, by the room each has (D184):
+      // a line's width, and a block below it that the line runs on into
+      // as many widths as it has lines. Measured in the first piece's font
+      // where the view can, else by characters (D189).
+      const first = pieces[0]!;
+      const measured = this.#sink.measureText?.(first.id, projection.translated);
       const parts = splitAcrossPieces(
         projection.translated,
-        pieces.map((piece) => piece.box.width),
+        pieces.map((piece) => piece.box.width * Math.max(1, piece.lines.length)),
+        measured !== undefined && measured > 0
+          ? (text) => this.#sink.measureText?.(first.id, text) ?? 0
+          : undefined,
       );
       pieces.forEach((piece, index) => {
         const part = parts[index] ?? '';

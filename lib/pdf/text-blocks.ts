@@ -41,7 +41,9 @@ export interface PdfTextBlock {
    * A piece of an OCR line cut around typed text (D121), with the other
    * pieces of its line (D184): `id` is shared by them, `part` counts from 0
    * in reading order. They are translated as one text, laid out across the
-   * pieces. Absent on a line that was not cut, or kept one piece only.
+   * pieces. Absent on a line that was not cut, or kept one piece only. The
+   * block below a cut line that runs on into it is the flow's last part
+   * (D189).
    */
   readonly flow?: { readonly id: number; readonly part: number };
 }
@@ -60,6 +62,11 @@ const MAX_LINE_PITCH = 1.6;
 // An OCR line box is as tall as its tallest and lowest glyphs: "a new era"
 // is about a third shorter than "Typography" in the same font.
 const OCR_SIZE_TOLERANCE = 0.4;
+// A cut line runs on into the block below it when that block starts within
+// this share of the line's height below it, and starts and ends within this
+// share of it of where the line does (D189).
+const FLOW_ON_GAP = 0.8;
+const FLOW_ON_EDGE = 2;
 // OCR text has no pdf.js font; the empty id reads as a regular face.
 const OCR_FONT_ID = '';
 // An OCR line box this many times taller than wide is a vertical line.
@@ -238,12 +245,52 @@ export function pdfOcrBlocks(
   }
   // The tallest line comes nearest the font size: shorter lines lack
   // ascenders or descenders. The line pitch in points stays as measured.
-  return blocksFromLines(converted, {}, pageWidth, OCR_SIZE_TOLERANCE).map((block) => {
+  const blocks = blocksFromLines(converted, {}, pageWidth, OCR_SIZE_TOLERANCE).map((block) => {
     const size = Math.max(...block.lines.map((line) => line.height));
     return size > block.fontSize
       ? { ...block, fontSize: size, lineHeight: (block.lineHeight * block.fontSize) / size }
       : block;
   });
+  return flowOn(blocks, flows);
+}
+
+/**
+ * Makes the block below a line cut around typed text the last part of the
+ * line's flow, where the line runs on into it (D189): the line does not
+ * end a sentence and reaches the right of that block, which starts at once
+ * below it where the line starts. Only one block may fit: two (columns, a
+ * caption beside) leave the reading order open, and the line stays alone.
+ */
+function flowOn(blocks: PdfTextBlock[], flows: number): PdfTextBlock[] {
+  for (let id = 1; id <= flows; id += 1) {
+    const pieces = blocks.filter((block) => block.flow?.id === id);
+    if (pieces.length < 2) continue;
+    const last = pieces.reduce((a, b) => (b.flow!.part > a.flow!.part ? b : a));
+    if (SENTENCE_END.test(last.text.trim())) continue;
+    const top = Math.min(...pieces.map((piece) => piece.box.top));
+    const bottom = Math.max(...pieces.map((piece) => piece.box.top + piece.box.height));
+    const left = Math.min(...pieces.map((piece) => piece.box.left));
+    const right = Math.max(...pieces.map((piece) => piece.box.left + piece.box.width));
+    const height = bottom - top;
+    const below = blocks.filter((block) => {
+      if (block.flow) return false;
+      const gap = block.box.top - bottom;
+      return gap >= -FLOW_ON_GAP * height / 2 &&
+        gap <= FLOW_ON_GAP * height &&
+        block.box.left < right &&
+        block.box.left + block.box.width > left;
+    });
+    if (below.length !== 1) continue;
+    const next = below[0]!;
+    const nextRight = next.box.left + next.box.width;
+    if (
+      Math.abs(next.box.left - left) > FLOW_ON_EDGE * height ||
+      nextRight > right + FLOW_ON_EDGE * height
+    ) continue;
+    const index = blocks.indexOf(next);
+    blocks[index] = { ...next, flow: { id, part: last.flow!.part + 1 } };
+  }
+  return blocks;
 }
 
 function ocrLine(text: string, left: number, top: number, right: number, bottom: number): Line {

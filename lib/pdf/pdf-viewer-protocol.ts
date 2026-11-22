@@ -116,22 +116,37 @@ const MAX_PAGE_ZOOM = 5;
  * The default zoom of Chrome's settings on the tab's own document, which
  * Chrome does not apply to the viewer's frame (D184): the viewer's CSS px
  * per the tab's. The viewer fills the tab, its toolbar 56 px above the
- * viewport it reports, so the ratio of the two heights tells it; a viewport
- * as tall as the tab is a hidden toolbar (`#toolbar=0`) at 100%. 1 when it
- * cannot be told. The tab's `devicePixelRatio` and the scrollbar it measures
- * carry that zoom (a scrollbar of 18 px at 83%, where the viewer leaves 14).
- * A hidden toolbar under another default zoom reads 56 px of the tab high:
- * 83% reads as 89%, and the scrollbar a pixel too wide.
+ * viewport it reports, so the ratio of the two heights tells it. A toolbar
+ * the PDF's address hides (`toolbar`, below) leaves the viewport the whole
+ * height (D189: 813 px of a tab 979 px tall at 83%, which read as 89% with
+ * the toolbar counted). Else a viewport as tall as the tab is a toolbar
+ * hidden some other way at 100%. 1 when it cannot be told. The tab's
+ * `devicePixelRatio` and the scrollbar it measures carry that zoom (a
+ * scrollbar of 18 px at 83%, where the viewer leaves 14).
  */
-export function pdfViewerPageZoom(viewportHeight: number, tabHeight: number | undefined): number {
+export function pdfViewerPageZoom(
+  viewportHeight: number,
+  tabHeight: number | undefined,
+  toolbar = true,
+): number {
   if (
     !(typeof tabHeight === 'number' && tabHeight > 0 && Number.isFinite(tabHeight)) ||
     !(viewportHeight > 0)
   ) return 1;
   if (Math.abs(viewportHeight / tabHeight - 1) < NO_ZOOM) return 1;
-  const zoom = (viewportHeight + VIEWER_TOOLBAR_HEIGHT) / tabHeight;
+  const zoom = (viewportHeight + (toolbar ? VIEWER_TOOLBAR_HEIGHT : 0)) / tabHeight;
   if (Math.abs(zoom - 1) < NO_ZOOM) return 1;
   return zoom >= MIN_PAGE_ZOOM && zoom <= MAX_PAGE_ZOOM ? zoom : 1;
+}
+
+/**
+ * Whether Chrome's viewer shows its toolbar for a PDF at an address with
+ * this fragment: `toolbar=0` among its open parameters hides it (D189).
+ */
+export function pdfViewerShowsToolbar(hash: string | undefined): boolean {
+  if (!hash) return true;
+  const parameters = hash.replace(/^#/u, '').split('&');
+  return !parameters.some((parameter) => parameter.trim().toLowerCase() === 'toolbar=0');
 }
 
 /** A scrollbar's width in CSS pixels, or `undefined` when it is not one. */
