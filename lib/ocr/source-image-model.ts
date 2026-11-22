@@ -273,6 +273,31 @@ export class SourceImageModel {
   }
 
   /**
+   * Whether a rectangle for a screenshot may be given for this descriptor
+   * although the image has been observed again since (D182): the same
+   * picture under the same admission, so that only where the image is may
+   * differ. The rectangle is then the image's live one, which the panel
+   * compares before, after and once more after its screenshot; anything
+   * that moves the image or lays something protected over it in between
+   * fails that comparison or the live safety check. Before D182 the
+   * observation number alone refused the second rectangle, so on a page
+   * that changes something every frame no screenshot was ever kept.
+   */
+  isCaptureCurrent(descriptor: SourceImageDescriptor): boolean {
+    const parsed = readSourceImageDescriptor(descriptor);
+    if (!parsed) return false;
+    const current = this.#records.get(parsed.nodeId);
+    return Boolean(
+      current &&
+      parsed.admissionRevision !== undefined &&
+      parsed.pictureRevision !== undefined &&
+      current.pictureRevision === parsed.pictureRevision &&
+      current.admissionRevision === parsed.admissionRevision &&
+      this.isContentCurrent(parsed),
+    );
+  }
+
+  /**
    * Whether a read that does not look at the screen (the image's label, its
    * file) may still be answered for this descriptor: the same document,
    * content and CSS picture, at the same size. A new observation, capture or

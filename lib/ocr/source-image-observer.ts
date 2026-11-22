@@ -18,6 +18,10 @@ import {
   type AnimationFrameScheduler,
 } from '../browser-scheduling';
 import type { ImageVisibilityTier } from './contracts';
+import {
+  sourceVisibilityMutationMaySkip,
+  type SourceStyleNames,
+} from '../replica/source-style-names';
 import type { ImageSourceReadySummary } from './image-source-protocol';
 import type { SourceImageUpsert } from './source-image-model';
 import {
@@ -72,6 +76,13 @@ export interface SourceImageObserverEnvironment {
   ) => boolean | undefined;
   /** Whether a completed transition can change document-wide admission. */
   readonly layoutSettleRequiresRefreshAll?: (target: Element) => boolean;
+  /**
+   * The names the page's style rules mention, when every sheet has been
+   * read (the mirror's census; D182). A change of a `class` token or a
+   * `data-*` attribute that no rule names restyles nothing, and the
+   * observer then reads nothing for it. Without it every change is read.
+   */
+  readonly styleNames?: () => SourceStyleNames | undefined;
   readonly scheduleFrame?: AnimationFrameScheduler;
   readonly cancelFrame?: AnimationFrameCanceller;
   readonly setTimer?: (callback: () => void, milliseconds: number) => unknown;
@@ -114,6 +125,13 @@ const MAX_CAPTURE_BAND_SPAN = 16;
  */
 const MAX_CAPTURE_BAND_RECHECK = 4_096;
 const MAX_CAPTURE_OVERLAP_COMPARISONS = 50_000;
+/**
+ * Boxes kept of elements that may paint over an image without being a
+ * control (D182), and how many elements under a changed ancestor are looked
+ * at for them.
+ */
+const MAX_COVER_LEDGER = 512;
+const MAX_COVER_SCAN_ELEMENTS = 512;
 const MAX_LAYOUT_SETTLE_TARGETS = 256;
 const UNREADABLE_SHADOW_ROOT = Symbol('unreadable-shadow-root');
 type ShadowRootRead = ShadowRoot | null |
@@ -183,6 +201,9 @@ const IMAGE_CAPTURE_ROUTING_ATTRIBUTES = new Set([
 ]);
 const SOURCE_IMAGE_MUTATION_OPTIONS: MutationObserverInit = Object.freeze({
   attributes: true,
+  // The class tokens a change took away, which the skip of changes no
+  // style rule names compares (D182).
+  attributeOldValue: true,
   characterData: true,
   childList: true,
   subtree: true,
@@ -370,6 +391,8 @@ export class SourceImageObserver {
   readonly #layoutSettleTargets = new Set<Element>();
   readonly #layoutSettleSafetyTargets = new Set<Element>();
   readonly #captureSafetyBounds = new Map<Element, CaptureSafetyBounds>();
+  /** The last box seen of each element that may cover an image (D182). */
+  readonly #coverBounds = new Map<Element, CaptureSafetyBounds>();
   #captureSafetyBoundsReliable = true;
   #captureBandIndex: CaptureBandIndex | undefined;
   /** An index could not be made; none is tried again until a change. */
@@ -931,6 +954,7 @@ export class SourceImageObserver {
     this.#layoutSettleSafetyRefreshAll = false;
     this.#captureSafetyBounds.clear();
     this.#captureSafetyBoundsReliable = true;
+    this.#coverBounds.clear();
     this.#fillingCapacity = false;
   }
 
@@ -1387,8 +1411,17 @@ export class SourceImageObserver {
     }
   }
 
-  #onMutations(records: readonly MutationRecord[]): void {
+  #onMutations(delivered: readonly MutationRecord[]): void {
     if (!this.#started) return;
+    // A class token or `data-*` attribute of an element that is no image,
+    // which no style rule names: nothing it could restyle, and nothing this
+    // observer reads (D182). A page that marks a counter or a timer in such
+    // an attribute every frame walked the document at every frame.
+    const styleNames = this.#environment.styleNames;
+    const records = styleNames
+      ? delivered.filter((record) => !imageObserverMaySkip(record, styleNames))
+      : delivered;
+    if (records.length === 0) return;
     this.#invalidateCaptureBands();
     if (records.length > MAX_SOURCE_IMAGE_MUTATION_RECORDS) {
       // A hostile delivery cannot induce unbounded record×subtree work. One
@@ -1643,21 +1676,31 @@ export class SourceImageObserver {
         this.#environment.document,
       );
       if (currentSafetyTargets) {
-        const currentBounds = this.#readCaptureSafetyControlBounds(
+        // Each control's box is compared with the last snapshot, as on a
+        // scroll: an image is renewed where a control came over it, left it
+        // or crossed it, not wherever one lies over it at every change of
+        // the page (D182). On a page a script changes every frame, an image
+        // with a link over it was otherwise never read. A control restyled
+        // in place over an image is left to the rectangles: a read made
+        // while it lay over the image is marked as covered and looked at
+        // again once it has gone (D172), and the page checks for protected
+        // controls at every rectangle.
+        // Admission can narrow in the same batch: a newly private image is
+        // withdrawn before its box is read.
+        const comparable = new Set<HTMLImageElement>();
+        for (const image of observedAtMutationStart) {
+          if (!this.#states.has(image)) continue;
+          if (this.#isPrivate(image)) this.#refresh(image);
+          else comparable.add(image);
+        }
+        const assessment = this.#captureSafetyRelationChanges(
+          comparable,
           currentSafetyTargets,
         );
-        const allControls = currentBounds
-          ? new Set<Element>([
-              ...this.#captureSafetyBounds.keys(),
-              ...currentBounds.keys(),
-            ])
-          : undefined;
-        const candidates = allControls && currentBounds
-          ? this.#imagesOverlappedBy(allControls, currentBounds)
-          : undefined;
-        if (currentBounds) stylesheetSafetySnapshot = currentBounds;
-        if (candidates) stylesheetSafetyCandidates = candidates;
-        else {
+        if (assessment) {
+          stylesheetSafetySnapshot = assessment.controlBounds;
+          stylesheetSafetyCandidates = new Set(assessment.changedImages);
+        } else {
           safetyScopeAmbiguous = true;
         }
       } else {
@@ -1917,6 +1960,7 @@ export class SourceImageObserver {
     if (!this.#captureSafetyBoundsReliable) return undefined;
     const controls = new Set<Element>();
     const movingImages = new Set<HTMLImageElement>();
+    const coverImages = new Set<HTMLImageElement>();
     for (const target of targets) {
       let targetHasBoundedDependency = false;
       for (const known of this.#captureSafetyBounds.keys()) {
@@ -1938,18 +1982,31 @@ export class SourceImageObserver {
         controls.add(control);
         targetHasBoundedDependency = true;
       }
+      let targetHoldsImage = false;
       for (const image of this.#states.keys()) {
         const path = readSourceFlatTreeElementPath(image);
         if (path?.includes(target)) {
           movingImages.add(image);
           targetHasBoundedDependency = true;
+          targetHoldsImage = true;
         }
       }
-      if (!targetHasBoundedDependency) {
-        // A positioned non-control overlay is not retained in the private
-        // control ledger. Its pre-transition bounds are unavailable, so the
-        // only safe old+new union is the bounded global fallback.
+      if (targetHoldsImage && !this.#coversWithin(target, coverImages)) {
         return undefined;
+      }
+      if (!targetHasBoundedDependency) {
+        // A positioned element that is not a control is not in the control
+        // ledger. Once its box has been seen, the old and new boxes are
+        // compared (D182); the first time, the old box of one positioned
+        // absolute, fixed or sticky is not known, and only the bounded
+        // global fallback is safe. One moved in flow (relative, by a
+        // transform) is taken where it is now.
+        const moved = this.#coverMoveCandidates(
+          target,
+          coverImages,
+          !elementCoversInFlow(target),
+        );
+        if (!moved) return undefined;
       }
     }
     const overlapped = this.#imagesOverlappedBy(controls);
@@ -1960,7 +2017,92 @@ export class SourceImageObserver {
     );
     if (!movingOverlaps) return undefined;
     for (const image of movingOverlaps) overlapped.add(image);
+    for (const image of coverImages) overlapped.add(image);
     return overlapped;
+  }
+
+  /**
+   * Compares an element that may cover an image with its last box seen,
+   * and adds the images under either box (D182). With no box seen before,
+   * `needsOldBox` says the old place matters (false: none can be given) or
+   * that the images under the box now are enough.
+   */
+  #coverMoveCandidates(
+    cover: Element,
+    into: Set<HTMLImageElement>,
+    needsOldBox: boolean,
+  ): boolean {
+    const current = cover.isConnected
+      ? readCaptureSafetyBounds(cover)
+      : undefined;
+    const previous = this.#coverBounds.get(cover);
+    this.#coverBounds.delete(cover);
+    if (current) {
+      this.#coverBounds.set(cover, current);
+      if (this.#coverBounds.size > MAX_COVER_LEDGER) {
+        const oldest = this.#coverBounds.keys().next().value;
+        if (oldest) this.#coverBounds.delete(oldest);
+      }
+    }
+    if (!previous && !current) return !needsOldBox;
+    if (!previous && needsOldBox) return false;
+    const box = previous && current
+      ? sameCaptureSafetyBounds(previous, current)
+        ? current
+        : captureSafetyBoundsHull(previous, current)
+      : (current ?? previous)!;
+    let comparisons = 0;
+    for (const [image, state] of this.#states) {
+      if (++comparisons > MAX_CAPTURE_OVERLAP_COMPARISONS) return false;
+      const path = readSourceFlatTreeElementPath(image);
+      const bounds = readCaptureSafetyBounds(image);
+      if (!path || !bounds) return false;
+      if (path.includes(cover)) continue;
+      if (
+        rectanglesOverlap(bounds, box) ||
+        rectanglesOverlap(state.safetyBounds, box)
+      ) into.add(image);
+    }
+    return true;
+  }
+
+  /**
+   * A class or style on an element that holds images can move another
+   * element inside it over them or off them (a menu shown by a class on
+   * `body`): those images are not themselves moved, so the elements under
+   * the ancestor that may cover them are compared with their last boxes
+   * (D182). Bounded: past MAX_COVER_SCAN_ELEMENTS nothing more is looked at.
+   */
+  #coversWithin(target: Element, into: Set<HTMLImageElement>): boolean {
+    const view = target.ownerDocument?.defaultView;
+    const getComputedStyle = view?.getComputedStyle;
+    if (!view || typeof getComputedStyle !== 'function') return true;
+    const pending: Element[] = [...target.children];
+    let inspected = 0;
+    while (pending.length > 0 && inspected < MAX_COVER_SCAN_ELEMENTS) {
+      const element = pending.pop()!;
+      inspected += 1;
+      if (isImageElement(element)) continue;
+      let style: CSSStyleDeclaration | undefined;
+      try {
+        style = getComputedStyle.call(view, element) ?? undefined;
+      } catch {
+        style = undefined;
+      }
+      const position = style?.position?.trim().toLowerCase() ?? '';
+      const transform = style?.transform?.trim().toLowerCase() ?? '';
+      const covers = position === 'absolute' || position === 'fixed' ||
+        position === 'sticky' || position === 'relative' ||
+        (transform !== '' && transform !== 'none');
+      const holdsImage = covers &&
+        boundedDescendantMatch(element, 'img', MAX_COVER_SCAN_ELEMENTS) !== false;
+      if (covers && !holdsImage) {
+        if (!this.#coverMoveCandidates(element, into, false)) return false;
+        continue;
+      }
+      for (const child of element.children) pending.push(child);
+    }
+    return true;
   }
 
   #imagesOverlappedBy(
@@ -2125,6 +2267,9 @@ export class SourceImageObserver {
     ]);
     if (controls.size > MAX_CAPTURE_SAFETY_TARGETS) return undefined;
     const changedImages = new Set<HTMLImageElement>();
+    // No control before or now: no relation can have changed, and no image
+    // box needs reading.
+    if (controls.size === 0) return Object.freeze({ changedImages, controlBounds });
     let comparisons = 0;
     for (const image of images) {
       const state = this.#states.get(image);
@@ -2884,6 +3029,38 @@ function collectCaptureControlTargets(
   return Object.freeze(targets);
 }
 
+/**
+ * Whether an element is moved in flow (relative, or by a transform) rather
+ * than placed out of it: where it was before its change is about where it
+ * is now, so the images under it now are the ones it may have left.
+ */
+function imageObserverMaySkip(
+  record: MutationRecord,
+  names: () => SourceStyleNames | undefined,
+): boolean {
+  if (record.type !== 'attributes' || !isElement(record.target)) return false;
+  const name = record.attributeName?.toLowerCase();
+  if (!name || (name !== 'class' && !name.startsWith('data-'))) return false;
+  // An image's own attributes, and what holds its label or its admission
+  // (aria-*, id, title), are read by this observer whatever the rules say.
+  if (isImageElement(record.target)) return false;
+  return sourceVisibilityMutationMaySkip(record, names);
+}
+
+function elementCoversInFlow(element: Element): boolean {
+  try {
+    const style = element.ownerDocument.defaultView?.getComputedStyle?.(element);
+    const position = style?.position?.trim().toLowerCase();
+    const transform = style?.transform?.trim().toLowerCase() ?? '';
+    return position === 'relative' || (
+      position !== 'absolute' && position !== 'fixed' &&
+      position !== 'sticky' && transform !== '' && transform !== 'none'
+    );
+  } catch {
+    return false;
+  }
+}
+
 function elementSettleMayChangeCaptureOverlap(element: Element): boolean {
   try {
     // A transition owned by an image, or by a bounded image-only presentation
@@ -2911,8 +3088,12 @@ function elementSettleMayChangeCaptureOverlap(element: Element): boolean {
     const view = element.ownerDocument.defaultView;
     const style = view?.getComputedStyle?.(element);
     const position = style?.position?.trim().toLowerCase();
+    const transform = style?.transform?.trim().toLowerCase() ?? '';
+    // An element moved by its own `left`, `top` or `transform` in flow
+    // paints over what it reaches as well (D182).
     return position === 'absolute' || position === 'fixed' ||
-      position === 'sticky';
+      position === 'sticky' || position === 'relative' ||
+      (transform !== '' && transform !== 'none');
   } catch {
     return true;
   }

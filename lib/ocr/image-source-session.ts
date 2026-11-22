@@ -117,6 +117,11 @@ export interface ImageSourceSessionEnvironment {
    * CORS taints the canvas). Tests inject a stand-in.
    */
   readonly encodeImageRegion?: ImageRegionEncoder;
+  /**
+   * The names the page's style rules mention (the mirror's census), for the
+   * observer to leave out changes no rule names (D182).
+   */
+  readonly styleNames?: SourceImageObserverEnvironment['styleNames'];
   readonly onDispose?: () => void;
 }
 
@@ -396,13 +401,22 @@ export class ImageSourceSession {
       message.kind === 'simul:image-source-v2:accessibility-text' ||
       message.kind === 'simul:image-source-v2:pixels';
     const known = this.#model.get(message.descriptor.nodeId);
-    const descriptor = screenless ? message.descriptor : known;
+    // A rectangle is given for the image as it is now while only where it
+    // is has changed since it was asked about (D182): it names the
+    // observation asked about, and the panel compares the rectangles around
+    // its screenshot, so a move fails there.
+    const descriptor = screenless || (
+      known && !this.#model.isCurrent(message.descriptor)
+    )
+      ? message.descriptor
+      : known;
     if (
       !known ||
       !descriptor ||
       !(screenless
         ? this.#model.isContentCurrent(message.descriptor)
-        : this.#model.isCurrent(message.descriptor))
+        : this.#model.isCurrent(message.descriptor) ||
+          this.#model.isCaptureCurrent(message.descriptor))
     ) {
       this.#post(
         message.kind === 'simul:image-source-v2:accessibility-text' ||
@@ -493,7 +507,10 @@ export class ImageSourceSession {
   };
 
   #answerMeasure(requestId: string, descriptor: SourceImageDescriptor): void {
-    if (!this.#model?.isCurrent(descriptor)) {
+    if (
+      !this.#model?.isCurrent(descriptor) &&
+      !this.#model?.isCaptureCurrent(descriptor)
+    ) {
       this.#post({
         kind: 'simul:image-source-v2:metrics',
         requestId,
@@ -808,6 +825,9 @@ export class ImageSourceSession {
           this.#refreshControlledContentPolicyForMutations(records),
         layoutSettleRequiresRefreshAll: (target) =>
           this.#controlledContentLayoutMayChange(target),
+        ...(this.environment.styleNames
+          ? { styleNames: this.environment.styleNames }
+          : {}),
         isPrivateImage: (image: HTMLImageElement) =>
           this.#hasStickySecretAncestor(image) ||
           (!this.#controlImages &&

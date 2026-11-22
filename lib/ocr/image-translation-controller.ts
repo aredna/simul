@@ -62,6 +62,7 @@ import {
   MAX_ACTIVE_IMAGE_SCANS,
   type ImageScanJob,
   type ImageScanUpdateResult,
+  carriesThrough,
 } from './image-scan-scheduler';
 import { decideSmallImageEligibility } from './small-image-policy';
 import {
@@ -193,6 +194,7 @@ export type ImageTranslationDiagnosticStage =
   | 'no-text-found'
   | 'no-text-same-pixels'
   | 'no-text-file-only'
+  | 'image-result-confirmed'
   | 'translation-started'
   | 'translation-failed'
   | 'translation-empty'
@@ -564,6 +566,11 @@ interface RetainedFinalImageAnalysis {
   readonly weight: number;
   /** Not yet confirmed: shown when the image moves, never taken for a read. */
   readonly unconfirmed?: true;
+  /**
+   * The admission it was read under (D182): when what lies over the image
+   * has changed since, a capture confirms it before it answers again.
+   */
+  readonly admissionRevision?: number;
 }
 
 /** A whole-image OCR result kept by the image itself (D86). */
@@ -579,6 +586,30 @@ interface ImageIdentityAnalysis {
   readonly returnLooks?: number;
   /** Not yet confirmed: shown when the image moves, never taken for a read. */
   readonly unconfirmed?: true;
+  /**
+   * The document it was read in, and the digest of the pixels read: in
+   * another document of the same address it answers only once a capture of
+   * the same digest confirms it (D182, owner ruling D175).
+   */
+  readonly document?: ReplicaSourceDocumentIdentity;
+  readonly pixelHash?: string;
+  /** Whether those pixels were read from the image's file, not the screen. */
+  readonly fromFile?: true;
+}
+
+/**
+ * A kept result a capture is to confirm before it stands (D182): the same
+ * digest keeps it with no OCR and no visible change; another reads the
+ * image, without busy state when its words show already (`silent`).
+ */
+interface CaptureConfirmation {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly contentRevision: number;
+  readonly pixelHash: string;
+  /** A digest of a file is compared only with another read of the file. */
+  readonly fromFile: boolean;
+  readonly projection: ImageOverlayProjection | undefined;
+  readonly silent: boolean;
 }
 
 interface OriginFinalImageAnalysis {
@@ -728,6 +759,15 @@ export class ImageTranslationController {
     readonly contentRevision: number;
     readonly pixelHash: string;
   }>();
+  /**
+   * The job taking a screenshot now. A new capture of its image (the image
+   * moved) stops it, though a carried job goes on through other
+   * observations (D182): the rectangles around the screenshot would not
+   * match, and a job that waited for that kept retrying behind the scroll.
+   */
+  #capturingJob: ImageScanJob | undefined;
+  /** Kept results a capture is to confirm, by image (D182). */
+  readonly #captureConfirmations = new Map<number, CaptureConfirmation>();
   /** The job that reads such an image again, which shows no busy state. */
   #silentJob: ImageScanJob | undefined;
   /** When each image's CSS picture last changed, or was first seen. */
@@ -1276,6 +1316,7 @@ export class ImageTranslationController {
     this.#emptyRetries.clear();
     this.#coveredReads.clear();
     this.#fileOnlyEmpty.clear();
+    this.#captureConfirmations.clear();
     this.#semanticEvidenceIndex.clear();
     this.#judgeVerdicts.clear();
     this.#resetAutoLanguageProbe();
@@ -1434,6 +1475,7 @@ export class ImageTranslationController {
     this.#emptyRetries.clear();
     this.#coveredReads.clear();
     this.#fileOnlyEmpty.clear();
+    this.#captureConfirmations.clear();
     this.#semanticEvidenceIndex.clear();
     this.#judgeVerdicts.clear();
     this.#projector.clear();
@@ -1474,6 +1516,16 @@ export class ImageTranslationController {
     // The scheduler applies it as an ordinary change when the reader asked
     // for this image to be read again; then its job runs.
     const answered = kept?.answers === true && scheduling.status === 'coalesced';
+    const capturing = this.#capturingJob;
+    if (
+      change.kind === 'upsert' &&
+      capturing?.descriptor.nodeId === change.descriptor.nodeId &&
+      descriptorCaptureRevision(change.descriptor) !==
+        descriptorCaptureRevision(capturing.descriptor)
+    ) {
+      this.#capturingJob = undefined;
+      this.#activeAbortController?.abort();
+    }
     if (change.kind === 'upsert') {
       this.environment.onDiagnostic?.('image-discovered');
       const schedulingStage = scheduling.status === 'queued'
@@ -1697,6 +1749,7 @@ export class ImageTranslationController {
       this.#pageFiles.delete(change.nodeId);
       this.#coveredReads.delete(change.nodeId);
       this.#fileOnlyEmpty.delete(change.nodeId);
+      this.#captureConfirmations.delete(change.nodeId);
       this.#cssPictureChangedAt.delete(change.nodeId);
       this.#earlyCssPictureReads.delete(change.nodeId);
       this.#returnLooks.delete(change.nodeId);
@@ -1967,6 +2020,60 @@ export class ImageTranslationController {
     let eagerSemanticCandidate: PendingSemanticImageEvidence | undefined;
     let eagerSemanticProjectionAttempted = false;
     let eagerSemanticProjected = false;
+    // The look owed to a newer observation that a job was carried through
+    // (D182) is usually answered by what that job found, before anything is
+    // read: the label would read as it did, the picture is the same.
+    if (job.relook && this.#answerFromKept(job, scheduler)) return;
+    // Words read from the whole picture under another admission than now
+    // are confirmed by a capture first (D182). When the label would read as
+    // it did ("no label" stays while the content does), the capture comes
+    // before the label: the same pixels end the job there, with no read of
+    // the label and no OCR. Other pixels go on through the plan with this
+    // capture, quietly, since the words show already.
+    this.#prepareAdmissionConfirmation(job.descriptor);
+    const confirmation = this.#captureConfirmations.get(job.descriptor.nodeId);
+    const keptKey = this.#retainedFinalAnalyses.get(job.descriptor.nodeId)
+      ?.finalConfigurationKey;
+    if (
+      confirmation?.silent &&
+      keptKey !== undefined &&
+      ocrEligibility.eligible &&
+      this.#labelReadUnchanged(
+        job.descriptor,
+        steps,
+        !keptKey.startsWith(`${this.#finalAnalysisSettingsKey(steps)}\u0001\u0001`),
+      )
+    ) {
+      if (this.#movedSinceAsked(job, scheduler)) return;
+      this.environment.onDiagnostic?.('capture-started');
+      this.#reportJobProgress(jobOrdinal, 'capture-started', job.descriptor);
+      const acquisition = await this.#acquireWatched(
+        job,
+        pixelCoordinator,
+        signal,
+      );
+      if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+        throw new DOMException('Image job became stale.', 'AbortError');
+      }
+      if (acquisition.status === 'ready') {
+        this.#captureRetries.delete(job.descriptor.nodeId);
+        pixels = acquisition.pixels;
+        this.#noteCssPictureCapture(job.descriptor, pixels);
+        if (this.#commitCaptureConfirmation(
+          job,
+          pixels,
+          scheduler,
+          jobOrdinal,
+          replayLease,
+          pairEpoch,
+          pairKey,
+          keptKey,
+        )) return;
+      } else {
+        captureDeferral = acquisition;
+        this.environment.onDiagnostic?.('capture-deferred');
+      }
+    }
     if (eagerSemanticRead) {
       try {
         eagerSemanticCandidate = retainedSemantic?.semanticAttempted
@@ -2027,27 +2134,10 @@ export class ImageTranslationController {
       // The label read again reads as it did for the image's kept result
       // (on a page whose controls cannot all be placed, every scroll step
       // reads it again): that result is the answer, with no capture (D170).
-      if (this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
-        const kept = this.#keptWholeImageResult(job.descriptor);
-        if (kept?.answers && !kept.confirmingLook) {
-          if (!kept.projection) {
-            this.#clearProjection(job.descriptor);
-            scheduler.settle(job);
-            this.environment.onDiagnostic?.('image-result-kept');
-            return;
-          }
-          if (this.#showKeptProjection(kept.projection)) {
-            this.#rememberFinalAnalysis(
-              job.descriptor,
-              kept.projection,
-              kept.finalConfigurationKey,
-            );
-            scheduler.settle(job);
-            this.environment.onDiagnostic?.('image-result-kept');
-            return;
-          }
-        }
-      }
+      if (
+        this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey) &&
+        this.#answerFromKept(job, scheduler)
+      ) return;
     }
 
     if (await this.#keptWhileCovered(
@@ -2274,9 +2364,14 @@ export class ImageTranslationController {
         .some(({ kind }) => kind === 'accessibility-text');
       if (!ocrEligibility.eligible || captureDeferral) continue;
       if (!pixels) {
+        if (this.#movedSinceAsked(job, scheduler)) return;
         this.environment.onDiagnostic?.('capture-started');
         this.#reportJobProgress(jobOrdinal, 'capture-started', job.descriptor);
-        const acquisition = await pixelCoordinator.acquire(job.descriptor, signal);
+        const acquisition = await this.#acquireWatched(
+          job,
+          pixelCoordinator,
+          signal,
+        );
         if (acquisition.status !== 'ready') {
           captureDeferral = acquisition;
           this.environment.onDiagnostic?.('capture-deferred');
@@ -2303,6 +2398,17 @@ export class ImageTranslationController {
           throw new DOMException('Image job became stale.', 'AbortError');
         }
       }
+      // A capture asked to confirm a kept result (D182).
+      if (this.#commitCaptureConfirmation(
+        job,
+        pixels,
+        scheduler,
+        jobOrdinal,
+        replayLease,
+        pairEpoch,
+        pairKey,
+        finalConfigurationKey,
+      )) return;
       // The same pixels this picture showed when it was read and found
       // without text, under the same settings: OCR would find nothing again.
       // This capture is the look that confirms "no text" (D87), and it is
@@ -2966,11 +3072,12 @@ export class ImageTranslationController {
           document: job.descriptor.document,
           nodeId: job.descriptor.nodeId,
           contentRevision: job.descriptor.contentRevision,
-          observationRevision: job.descriptor.observationRevision,
+          observationRevision: this.#jobObservation(job),
           replayLease,
           pairEpoch,
           pairKey,
           pixelHash: pixels.pixelHash,
+          ...(pixels.pixelSource !== undefined ? { fromFile: true as const } : {}),
           bitmapWidth: pixels.bitmapWidth,
           bitmapHeight: pixels.bitmapHeight,
           cropOffsetXCss: pixels.cropOffsetXCss,
@@ -3693,7 +3800,7 @@ export class ImageTranslationController {
       document: job.descriptor.document,
       nodeId: job.descriptor.nodeId,
       contentRevision: job.descriptor.contentRevision,
-      observationRevision: job.descriptor.observationRevision,
+      observationRevision: this.#jobObservation(job),
       replayLease,
       pairEpoch,
       pairKey,
@@ -4451,6 +4558,9 @@ export class ImageTranslationController {
       ...(descriptor.pictureRevision === undefined
         ? {}
         : { pictureRevision: descriptor.pictureRevision }),
+      ...(descriptor.admissionRevision === undefined
+        ? {}
+        : { admissionRevision: descriptor.admissionRevision }),
       finalConfigurationKey,
       projection: Object.freeze({ ...projection }),
       expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
@@ -4524,8 +4634,14 @@ export class ImageTranslationController {
       }
       return false;
     }
-    // Not yet confirmed: the image is read, not answered from this.
-    if (retained.unconfirmed) return false;
+    // Not yet confirmed: the image is read, not answered from this. Read
+    // under another admission: the job's capture confirms it (D182).
+    if (
+      retained.unconfirmed ||
+      !admissionHolds(retained, retained.projection, job.descriptor)
+    ) {
+      return false;
+    }
     signal.throwIfAborted();
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Final image analysis became stale.', 'AbortError');
@@ -4536,7 +4652,7 @@ export class ImageTranslationController {
       document: job.descriptor.document,
       nodeId: job.descriptor.nodeId,
       contentRevision: job.descriptor.contentRevision,
-      observationRevision: job.descriptor.observationRevision,
+      observationRevision: this.#jobObservation(job),
       replayLease,
       pairEpoch,
       pairKey,
@@ -4650,9 +4766,11 @@ export class ImageTranslationController {
     let projection: ImageOverlayProjection | undefined;
     let answers: boolean;
     if (last && current?.projection) {
-      // The words read from the pixels, kept by the image's identity.
+      // The words read from the pixels, kept by the image's identity. What
+      // lies over the image changed since: a capture confirms them (D182).
       projection = current.projection;
-      answers = !current.unconfirmed && !last.unconfirmed && answerable();
+      answers = !current.unconfirmed && !last.unconfirmed &&
+        admissionHolds(last, last.projection, descriptor) && answerable();
     } else if (
       last?.projection.evidenceKind === 'semantic' &&
       last.projection.regions.length > 0
@@ -4670,7 +4788,9 @@ export class ImageTranslationController {
       !last &&
       current &&
       !current.projection &&
-      (current.returnLooks ?? 0) === 0
+      (current.returnLooks ?? 0) === 0 &&
+      current.document !== undefined &&
+      sameSourceDocument(current.document, descriptor.document)
     ) {
       // A confirmed "no text". A picture CSS gives keeps its look on return
       // (CSS_PICTURE_EMPTY_RETURN_LOOKS) until it has had it: its number
@@ -4693,6 +4813,7 @@ export class ImageTranslationController {
       projection = last.projection;
       answers = isWholeImageCrop(last.projection) &&
         !last.unconfirmed &&
+        admissionHolds(last, last.projection, descriptor) &&
         answerable();
     } else {
       // A whole picture read without text, by this image, under the same
@@ -4730,6 +4851,166 @@ export class ImageTranslationController {
       finalConfigurationKey,
       answers,
     });
+  }
+
+  /**
+   * A job carried through a new capture of its image (a crop, a place, what
+   * the page renewed around it) takes no screenshot: the image is moving,
+   * and the rectangles around a screenshot would not match. The newest
+   * observation is looked at instead (D182). Through observations that keep
+   * the capture (a visibility tier) the job goes on to its screenshot.
+   */
+  #movedSinceAsked(job: ImageScanJob, scheduler: ImageScanScheduler): boolean {
+    const current = this.#descriptors.get(job.descriptor.nodeId);
+    if (
+      !current ||
+      current.observationRevision === job.descriptor.observationRevision ||
+      descriptorCaptureRevision(current) === descriptorCaptureRevision(job.descriptor)
+    ) return false;
+    scheduler.defer(job);
+    return true;
+  }
+
+  async #acquireWatched(
+    job: ImageScanJob,
+    pixelCoordinator: PixelAcquisitionCoordinator,
+    signal: AbortSignal,
+  ): Promise<PixelAcquisitionResult> {
+    this.#capturingJob = job;
+    try {
+      return await pixelCoordinator.acquire(job.descriptor, signal);
+    } finally {
+      if (this.#capturingJob === job) this.#capturingJob = undefined;
+    }
+  }
+
+  /** Ends a job with the image's kept result when that answers it. */
+  #answerFromKept(job: ImageScanJob, scheduler: ImageScanScheduler): boolean {
+    const kept = this.#keptWholeImageResult(job.descriptor);
+    if (!kept?.answers || kept.confirmingLook) return false;
+    if (!kept.projection) {
+      this.#clearProjection(job.descriptor);
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('image-result-kept');
+      return true;
+    }
+    if (!this.#showKeptProjection(kept.projection)) return false;
+    this.#rememberFinalAnalysis(
+      job.descriptor,
+      kept.projection,
+      kept.finalConfigurationKey,
+    );
+    scheduler.settle(job);
+    this.environment.onDiagnostic?.('image-result-kept');
+    return true;
+  }
+
+  /**
+   * The whole image's words kept by the image itself, read under another
+   * admission than now (something that lies over the image changed since):
+   * the job's capture confirms them (D182). They stay shown meanwhile.
+   */
+  #prepareAdmissionConfirmation(descriptor: SourceImageDescriptor): void {
+    if (this.#captureConfirmations.has(descriptor.nodeId)) return;
+    const last = this.#retainedFinalAnalyses.get(descriptor.nodeId);
+    if (
+      !last ||
+      last.unconfirmed ||
+      last.projection.evidenceKind !== 'ocr' ||
+      last.projection.regions.length === 0 ||
+      !isWholeImageCrop(last.projection) ||
+      last.pictureRevision === undefined ||
+      last.pictureRevision !== descriptor.pictureRevision ||
+      last.contentRevision !== descriptor.contentRevision ||
+      !sameSourceDocument(last.document, descriptor.document) ||
+      sameAdmission(last, descriptor) ||
+      // Words read from the image's file: nothing over the image was in it.
+      readFromFile(last.projection)
+    ) return;
+    this.#captureConfirmations.set(descriptor.nodeId, Object.freeze({
+      document: descriptor.document,
+      contentRevision: descriptor.contentRevision,
+      pixelHash: last.projection.pixelHash,
+      fromFile: false,
+      projection: last.projection,
+      silent: true,
+    }));
+  }
+
+  /**
+   * A capture made to confirm a kept result (D182). The same digest of the
+   * whole image keeps it: it is shown under the image's present revisions,
+   * with no OCR. A part of the image says nothing yet and is read as any
+   * capture; other pixels are read, quietly when the words show already.
+   */
+  #commitCaptureConfirmation(
+    job: ImageScanJob,
+    pixels: AcquiredImagePixels,
+    scheduler: ImageScanScheduler,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    finalConfigurationKey: string,
+  ): boolean {
+    const nodeId = job.descriptor.nodeId;
+    const confirmation = this.#captureConfirmations.get(nodeId);
+    if (!confirmation) return false;
+    if (
+      !sameSourceDocument(confirmation.document, job.descriptor.document) ||
+      confirmation.contentRevision !== job.descriptor.contentRevision
+    ) {
+      this.#captureConfirmations.delete(nodeId);
+      return false;
+    }
+    if (!isWholeImageCrop(pixels)) return false;
+    this.#captureConfirmations.delete(nodeId);
+    // A screenshot and a file never give the same digest: such a pair says
+    // nothing, and the image is read as any other.
+    if (readFromFile(pixels) !== confirmation.fromFile) return false;
+    if (pixels.pixelHash !== confirmation.pixelHash) {
+      // What was kept no longer fits the picture: neither this image's own
+      // result nor the one kept by its identity answers the read that
+      // follows.
+      if (confirmation.silent) this.#silentJob = job;
+      this.#deleteRetainedFinalAnalysis(nodeId);
+      for (const key of this.#imageIdentityKeys(
+        this.environment.resolveAnchor(job.descriptor.document, nodeId),
+        job.descriptor,
+        job.descriptor.renderedWidth,
+        job.descriptor.renderedHeight,
+        finalConfigurationKey,
+      )) {
+        const kept = this.#imageIdentityAnalyses.get(key);
+        if (!kept) continue;
+        this.#imageIdentityAnalyses.delete(key);
+        this.#imageIdentityAnalysisWeight -= kept.weight;
+      }
+      return false;
+    }
+    if (!confirmation.projection) {
+      this.#clearProjection(job.descriptor);
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('image-result-confirmed');
+      this.environment.onDiagnostic?.('no-text-found');
+      return true;
+    }
+    const projection: ImageOverlayProjection = Object.freeze({
+      ...confirmation.projection,
+      jobOrdinal,
+      document: job.descriptor.document,
+      nodeId,
+      contentRevision: job.descriptor.contentRevision,
+      observationRevision: this.#jobObservation(job),
+      replayLease,
+      pairEpoch,
+      pairKey,
+    });
+    if (!this.#showKeptProjection(projection)) return false;
+    this.#rememberFinalAnalysis(job.descriptor, projection, finalConfigurationKey);
+    scheduler.settle(job);
+    this.environment.onDiagnostic?.('image-result-confirmed');
+    return true;
   }
 
   /**
@@ -5110,7 +5391,15 @@ export class ImageTranslationController {
       }
       return;
     }
-    this.#rememberImageIdentityOutcome(key, projection, 0, unconfirmed);
+    this.#rememberImageIdentityOutcome(
+      key,
+      projection,
+      0,
+      unconfirmed,
+      descriptor.document,
+      projection.pixelHash,
+      readFromFile(projection),
+    );
   }
 
   /**
@@ -5138,6 +5427,10 @@ export class ImageTranslationController {
       pixels.descriptor.cssPicture === undefined
         ? 0
         : CSS_PICTURE_EMPTY_RETURN_LOOKS,
+      false,
+      pixels.descriptor.document,
+      pixels.pixelHash,
+      readFromFile(pixels),
     );
   }
 
@@ -5146,6 +5439,9 @@ export class ImageTranslationController {
     projection: ImageOverlayProjection | undefined,
     returnLooks = 0,
     unconfirmed = false,
+    document?: ReplicaSourceDocumentIdentity,
+    pixelHash?: string,
+    fromFile = false,
   ): void {
     if (!key) return;
     const weight = finalAnalysisWeight(key, projection?.regions ?? []);
@@ -5161,6 +5457,9 @@ export class ImageTranslationController {
       weight,
       ...(!projection && returnLooks > 0 ? { returnLooks } : {}),
       ...(projection && unconfirmed ? { unconfirmed: true as const } : {}),
+      ...(document ? { document } : {}),
+      ...(pixelHash ? { pixelHash } : {}),
+      ...(fromFile ? { fromFile: true as const } : {}),
     }));
     this.#imageIdentityAnalysisWeight += weight;
     while (
@@ -5194,7 +5493,10 @@ export class ImageTranslationController {
       job.descriptor.renderedHeight,
       finalConfigurationKey,
     ));
-    if (!found) return false;
+    // A capture is to confirm what is kept for this image first (D182).
+    if (!found || this.#captureConfirmations.has(job.descriptor.nodeId)) {
+      return false;
+    }
     const { key, analysis: retained } = found;
     this.#imageIdentityAnalyses.delete(key);
     if (retained.expiresAt <= this.#now()) {
@@ -5208,6 +5510,25 @@ export class ImageTranslationController {
     }
     // Not yet confirmed: the image is read, not answered from this.
     if (retained.unconfirmed) return false;
+    // Read in another document of the same address: the address may show
+    // another picture now. One capture of the same pixels confirms it, with
+    // no OCR and no visible change (D182, owner ruling D175).
+    if (
+      !retained.document ||
+      !sameSourceDocument(retained.document, job.descriptor.document)
+    ) {
+      if (retained.pixelHash && (retained.returnLooks ?? 0) === 0) {
+        this.#captureConfirmations.set(job.descriptor.nodeId, Object.freeze({
+          document: job.descriptor.document,
+          contentRevision: job.descriptor.contentRevision,
+          pixelHash: retained.pixelHash,
+          fromFile: retained.fromFile === true,
+          projection: retained.projection,
+          silent: false,
+        }));
+      }
+      return false;
+    }
     if (!retained.projection && (retained.returnLooks ?? 0) > 0) {
       // "No text" was kept for a picture that CSS gives, and the picture may
       // have arrived since. The image is read once more: the look is counted
@@ -5229,7 +5550,7 @@ export class ImageTranslationController {
       document: job.descriptor.document,
       nodeId: job.descriptor.nodeId,
       contentRevision: job.descriptor.contentRevision,
-      observationRevision: job.descriptor.observationRevision,
+      observationRevision: this.#jobObservation(job),
       replayLease,
       pairEpoch,
       pairKey,
@@ -5279,7 +5600,7 @@ export class ImageTranslationController {
       document: job.descriptor.document,
       nodeId: job.descriptor.nodeId,
       contentRevision: job.descriptor.contentRevision,
-      observationRevision: job.descriptor.observationRevision,
+      observationRevision: this.#jobObservation(job),
       replayLease,
       pairEpoch,
       pairKey,
@@ -5676,7 +5997,7 @@ export class ImageTranslationController {
       document: job.descriptor.document,
       nodeId: job.descriptor.nodeId,
       contentRevision: job.descriptor.contentRevision,
-      observationRevision: job.descriptor.observationRevision,
+      observationRevision: this.#jobObservation(job),
       replayLease,
       pairEpoch,
       pairKey,
@@ -6618,9 +6939,25 @@ export class ImageTranslationController {
       current &&
       sameSourceDocument(current.document, job.descriptor.document) &&
       current.contentRevision === job.descriptor.contentRevision &&
-      current.observationRevision === job.descriptor.observationRevision &&
+      (
+        current.observationRevision === job.descriptor.observationRevision ||
+        // A newer observation of the same picture does not stop the job
+        // (D182); what it finds is shown under that observation.
+        carriesThrough(job.descriptor, current)
+      ) &&
       this.#request?.isCurrent(),
     );
+  }
+
+  /**
+   * The observation a job's result is shown under: the image's newest one
+   * when the job was carried through it (D182), else the job's own.
+   */
+  #jobObservation(job: ImageScanJob): number {
+    const current = this.#descriptors.get(job.descriptor.nodeId);
+    return current && carriesThrough(job.descriptor, current)
+      ? current.observationRevision
+      : job.descriptor.observationRevision;
   }
 
   #isProjectionCurrent(projection: ImageOverlayProjection): boolean {
@@ -6737,6 +7074,7 @@ export class ImageTranslationController {
     this.#emptyRetries.clear();
     this.#coveredReads.clear();
     this.#fileOnlyEmpty.clear();
+    this.#captureConfirmations.clear();
     if (!preserveSemanticEvidence) this.#semanticEvidenceIndex.clear();
     this.#projector.beginPair(
       this.#pairEpoch,
@@ -7438,6 +7776,41 @@ function imageHasBackgroundPicture(image: HTMLImageElement | undefined): boolean
   } catch {
     return false;
   }
+}
+
+/** Whether pixels, or the words read from them, came from the image's file. */
+function readFromFile(read: object): boolean {
+  const facts = read as {
+    readonly pixelSource?: unknown;
+    readonly fromFile?: unknown;
+  };
+  return facts.pixelSource !== undefined || facts.fromFile === true;
+}
+
+/**
+ * Whether what lies over the image leaves a kept result standing: words
+ * read from the image's file saw nothing that lay over it; words read from
+ * the screen stand under the admission they were read under (D182).
+ */
+function admissionHolds(
+  kept: { readonly admissionRevision?: number },
+  projection: ImageOverlayProjection,
+  descriptor: SourceImageDescriptor,
+): boolean {
+  return readFromFile(projection) || sameAdmission(kept, descriptor);
+}
+
+/**
+ * Whether a kept result was read under the image's present admission. One
+ * kept before admissions were recorded, or for an image without them, is.
+ */
+function sameAdmission(
+  kept: { readonly admissionRevision?: number },
+  descriptor: SourceImageDescriptor,
+): boolean {
+  return kept.admissionRevision === undefined ||
+    descriptor.admissionRevision === undefined ||
+    kept.admissionRevision === descriptor.admissionRevision;
 }
 
 const IMAGE_PICTURE_SCHEMA_VERSION = 'image-picture-v1';

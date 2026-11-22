@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import {
   IMAGE_OVERLAY_ELEMENT,
@@ -643,6 +643,79 @@ describe('ImageOverlayProjector', () => {
       expect(images.get(nodeId)!.nextSibling).toBe(overlayFor(document, nodeId));
     }
     projector.dispose();
+  });
+
+  it('draws the overlay of an image inside a link, figure, picture or list item in the nearest ancestor\'s own root, unless an element between makes a stacking context (D182)', () => {
+    const { document, window } = parseHTML(
+      '<html><body>' +
+      '<div id="a-host"><a href="/x"><img id="linked"></a></div>' +
+      '<section id="f-host"><figure><picture><img id="pictured"></picture></figure></section>' +
+      '<div id="l-host"><ul><li><img id="listed"></li></ul></div>' +
+      '<div id="z-host"><a id="raised" href="/y"><img id="stacked"></a></div>' +
+      '<div id="o-host"><figure id="faded"><img id="faded-image"></figure></div>' +
+      '</body></html>',
+    );
+    // linkedom windows share their properties: undone after the test.
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        getPropertyValue: (name: string) => {
+          if (element.id === 'raised') {
+            if (name === 'position') return 'relative';
+            if (name === 'z-index') return '2';
+          }
+          if (element.id === 'faded' && name === 'opacity') return '0.5';
+          if (name === 'position') return 'static';
+          if (name === 'z-index') return 'auto';
+          if (name === 'opacity') return '1';
+          return '';
+        },
+      }),
+    });
+    onTestFinished(() => {
+      delete (window as unknown as { getComputedStyle?: unknown }).getComputedStyle;
+    });
+    const ids = ['linked', 'pictured', 'listed', 'stacked', 'faded-image'];
+    const images = new Map<number, HTMLImageElement>();
+    ids.forEach((id, index) => {
+      const image = document.querySelector(`#${id}`) as unknown as HTMLImageElement;
+      image.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 100, height: 60,
+        right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+      });
+      images.set(index + 1, image);
+    });
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    for (const nodeId of images.keys()) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId })))
+        .toBe(true);
+    }
+    const overlays = findImageOverlays(document as unknown as Document);
+    expect(overlays).toHaveLength(5);
+    // Out of sight of page selectors: no overlay in the light tree beside
+    // the first three images.
+    for (const nodeId of [1, 2, 3]) {
+      expect(images.get(nodeId)!.nextSibling).toBeNull();
+      expect(document.querySelectorAll('simul-image-overlay')).toHaveLength(2);
+    }
+    // A raised link, and a faded figure, make stacking contexts of their own:
+    // the overlay stays right after the image.
+    expect(images.get(4)!.nextSibling).toBe(overlayFor(document, 4));
+    expect(images.get(5)!.nextSibling).toBe(overlayFor(document, 5));
+    projector.dispose();
+    expect(findImageOverlays(document as unknown as Document)).toHaveLength(0);
   });
 
   it('leaves the overlays of two images of one slot where they are, one after the other', () => {

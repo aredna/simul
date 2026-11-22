@@ -98,6 +98,11 @@ export interface ImageOverlayProjection {
   readonly pairEpoch: number;
   readonly pairKey: string;
   readonly pixelHash: string;
+  /**
+   * The words were read from the image's file, not the screen: `pixelHash`
+   * is then a digest of the file's pixels (D182).
+   */
+  readonly fromFile?: true;
   readonly bitmapWidth: number;
   readonly bitmapHeight: number;
   readonly cropOffsetXCss: number;
@@ -906,8 +911,12 @@ const overlayShadowRoots = new WeakMap<Element, ShadowRoot>();
  * after all of the parent's children rather than right after the image, so a
  * later positioned sibling (a badge over the image) no longer covers it. The
  * mirror sees no shadow root (it is closed) and patches the parent's children
- * as before. Any other parent (a link, a picture, a figure, a list item, a
- * parent with its own shadow root) keeps the overlay right after the image.
+ * as before. Inside a link, a picture, a figure, a list item or another
+ * parent that cannot host one, the overlay lives in the root of the nearest
+ * ancestor that can, unless an element between makes a stacking context of
+ * its own: the page's stacking around the image would then differ from the
+ * overlay's, and the overlay stays right after the image (D182, owner
+ * ruling D175). A parent with its own shadow root keeps it there too.
  * Where the parent's own root gives the image to a slot by script, a sibling
  * of the image is given to no slot and would not be drawn: there the overlay
  * goes right after that slot, inside the root. Either way the overlay
@@ -918,7 +927,7 @@ const overlayShadowRoots = new WeakMap<Element, ShadowRoot>();
 function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
   const parent = image.parentElement;
   const shadow = parent && image.parentNode === parent
-    ? overlayShadowRootFor(parent)
+    ? overlayShadowRootFor(parent) ?? ancestorOverlayShadowRoot(parent)
     : undefined;
   if (shadow) {
     if (root.parentNode === shadow) return true;
@@ -960,6 +969,91 @@ function giveSlotName(root: HTMLElement, name: string | null): void {
   if (root.getAttribute('slot') === name) return;
   if (name === null) root.removeAttribute('slot');
   else root.setAttribute('slot', name);
+}
+
+/**
+ * The owned root of the nearest ancestor above a parent that cannot host
+ * one, when no element from that parent up to the ancestor makes a stacking
+ * context, has a shadow root of its own, or cannot be read (D182).
+ */
+function ancestorOverlayShadowRoot(parent: Element): ShadowRoot | undefined {
+  if (
+    parent.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    OVERLAY_SHADOW_HOSTS.has(parent.localName)
+  ) return undefined;
+  const view = parent.ownerDocument?.defaultView;
+  const getComputedStyle = view?.getComputedStyle;
+  if (!view || typeof getComputedStyle !== 'function') return undefined;
+  let current: Element | null = parent;
+  for (let depth = 0; current && depth < MAX_CLIP_ANCESTOR_DEPTH; depth += 1) {
+    if (current.namespaceURI !== 'http://www.w3.org/1999/xhtml') return undefined;
+    if (current.localName === 'body' || current.localName === 'html') {
+      return undefined;
+    }
+    if (OVERLAY_SHADOW_HOSTS.has(current.localName)) {
+      return overlayShadowRootFor(current);
+    }
+    // A slot, or a root of the page's own, between: the overlay would be
+    // drawn elsewhere or not at all.
+    if (current.shadowRoot || current.localName === 'slot') return undefined;
+    let style: CSSStyleDeclaration | undefined;
+    try {
+      style = getComputedStyle.call(view, current) ?? undefined;
+    } catch {
+      style = undefined;
+    }
+    if (!style || makesStackingContext(style)) return undefined;
+    // Within one tree only: the parent of a root's top element is the root.
+    current = current.parentNode === current.parentElement
+      ? current.parentElement
+      : null;
+  }
+  return undefined;
+}
+
+/**
+ * Whether an element's computed style makes it a stacking context (or one
+ * that clips or composes what it holds), by the CSS rules Chrome follows.
+ * A value this does not know counts as one.
+ */
+function makesStackingContext(style: CSSStyleDeclaration): boolean {
+  const read = (name: string): string => {
+    try {
+      return (style.getPropertyValue?.(name) ?? '').trim().toLowerCase();
+    } catch {
+      return 'unknown';
+    }
+  };
+  const none = (name: string) => {
+    const value = read(name);
+    return value === '' || value === 'none';
+  };
+  const position = read('position');
+  const zIndex = read('z-index');
+  const opacity = read('opacity');
+  if (position === 'fixed' || position === 'sticky') return true;
+  if (position !== '' && position !== 'static' && zIndex !== '' && zIndex !== 'auto') {
+    return true;
+  }
+  if (opacity !== '' && Number(opacity) !== 1) return true;
+  for (const name of [
+    'transform', 'translate', 'rotate', 'scale', 'filter', 'backdrop-filter',
+    'perspective', 'clip-path', 'mask-image', 'mask', '-webkit-mask-image',
+  ]) {
+    if (!none(name)) return true;
+  }
+  const blend = read('mix-blend-mode');
+  if (blend !== '' && blend !== 'normal') return true;
+  if (read('isolation') === 'isolate') return true;
+  const willChange = read('will-change');
+  if (/\b(transform|translate|rotate|scale|opacity|filter|perspective|clip-path|mask|z-index|position|isolation|mix-blend-mode|backdrop-filter)\b/u
+    .test(willChange)) return true;
+  if (/\b(layout|paint|strict|content)\b/u.test(read('contain'))) return true;
+  const container = read('container-type');
+  if (container !== '' && container !== 'normal') return true;
+  // A flex or grid item with a z-index: its parent's display says.
+  if (zIndex !== '' && zIndex !== 'auto') return true;
+  return false;
 }
 
 function overlayShadowRootFor(parent: Element): ShadowRoot | undefined {

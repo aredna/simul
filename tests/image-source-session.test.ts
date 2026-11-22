@@ -1284,6 +1284,79 @@ describe('image source capture safety', () => {
     session.dispose();
   });
 
+  it('gives a rectangle for an earlier observation of the same picture under the same admission, by where the image is now (D182)', () => {
+    const { document } = parseHTML('<html><body><img id="image"></body></html>');
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    let top = 0;
+    Object.defineProperty(image, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => rect(0, top, 200, 100),
+    });
+    installHitTest(document as unknown as Document, image);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'carried-measure-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'carried-measure-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const sourceWindow = {
+      innerWidth: 800,
+      innerHeight: 600,
+      scrollX: 0,
+      scrollY: 0,
+      devicePixelRatio: 1,
+      getComputedStyle: () => baseStyle,
+    } as unknown as Window;
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: sourceWindow,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({ kind: 'simul:image-source-v2:start', document: identity });
+    const first = lastUpsertDescriptorForNode(port.messages, 7)!;
+    expect(first.admissionRevision).toBeDefined();
+
+    // The view now cuts off the image's top (as a scroll or a script
+    // moves it): a new observation and capture, the same picture and
+    // admission.
+    top = -40;
+    port.emitMessage({
+      kind: 'simul:image-source-v2:measure',
+      requestId: 'carried',
+      descriptor: first,
+    });
+    const moved = lastUpsertDescriptorForNode(port.messages, 7)!;
+    expect(moved.observationRevision).toBeGreaterThan(first.observationRevision);
+    expect(moved.admissionRevision).toBe(first.admissionRevision);
+    expect(moved.pictureRevision).toBe(first.pictureRevision);
+    // The rectangle is where the image is now, and names the observation
+    // asked about, which the panel's checks compare around its screenshot.
+    expect(port.messages.at(-1)).toMatchObject({
+      kind: 'simul:image-source-v2:metrics',
+      requestId: 'carried',
+      status: 'ready',
+      metrics: {
+        observationRevision: first.observationRevision,
+        top: -40,
+      },
+    });
+    session.dispose();
+  });
+
   it('does not measure an image for tab pixels while the tab is pinch-zoomed (D119)', () => {
     const { document } = parseHTML(
       '<html><body><img id="image"></body></html>',

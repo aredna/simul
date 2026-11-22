@@ -8,6 +8,7 @@ import {
   type SourceImageObservationEvent,
 } from '../lib/ocr/source-image-observer';
 import { SourceImageModel } from '../lib/ocr/source-image-model';
+import type { SourceStyleNames } from '../lib/replica/source-style-names';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 import {
   installSourceShadowRootReader,
@@ -1914,6 +1915,163 @@ describe('SourceImageObserver', () => {
         captureChanged: true,
       },
     }]);
+    stop();
+  });
+
+  it('leaves an image with a link over it alone when the page changes elsewhere, and renews it once the link moves (D182)', () => {
+    // A script changing a counter every frame renewed every image a link
+    // lay over at each change, so such an image was never read.
+    const fixture = createFixture(
+      '<a id="play" href="/play">Play</a><p id="ticker">1</p>',
+    );
+    const link = fixture.document.querySelector('#play')!;
+    const ticker = fixture.document.querySelector('#ticker')!;
+    const linkBounds = { left: 60, top: 30, width: 60, height: 30 };
+    setElementBounds(link, linkBounds);
+    setElementBounds(ticker, { left: 0, top: 600, width: 100, height: 20 });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    // The ledger knows the link once a change has been read.
+    fixture.mutation.trigger([attributeRecord(link, 'title')]);
+    events.length = 0;
+
+    for (const text of ['2', '3', '4']) {
+      ticker.firstChild!.textContent = text;
+      fixture.mutation.trigger([{
+        type: 'characterData',
+        target: ticker.firstChild,
+      } as unknown as MutationRecord]);
+    }
+    expect(events.filter((event) => eventNodeId(event) === 7)).toEqual([]);
+
+    // The link moves off the image: its relation changed.
+    linkBounds.left = 400;
+    ticker.firstChild!.textContent = '5';
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: ticker.firstChild,
+    } as unknown as MutationRecord]);
+    expect(events.filter((event) => eventNodeId(event) === 7)).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it.each(['relative', 'ancestor'] as const)(
+    'renews an image a picture covered and then left, moved by its own style or by a class of an ancestor (D182, case %s)',
+    (shape) => {
+      // Words first read while the picture lay over the image stayed over it
+      // after the picture had gone: neither move was seen as a cover.
+      const fixture = createFixture(
+        '<div id="wrap"><img id="held" src="held.png">' +
+          '<div id="cover"><span>H</span></div></div>',
+      );
+      const view = fixture.document.defaultView!;
+      const wrap = fixture.document.querySelector('#wrap')!;
+      const held = fixture.document.querySelector<HTMLImageElement>('#held')!;
+      const cover = fixture.document.querySelector('#cover')!;
+      setImageMetrics(held, { left: 400, top: 0, width: 200, height: 100 });
+      fixture.nodeIds.set(held, 21);
+      const coverBounds = { left: 800, top: 0, width: 200, height: 100 };
+      setElementBounds(cover, coverBounds);
+      const ordinary = {
+        display: 'block', visibility: 'visible', contentVisibility: 'visible',
+        opacity: '1', clipPath: 'none', maskImage: 'none', perspective: 'none',
+        rotate: 'none', scale: 'none', transform: 'none', filter: 'none',
+        mixBlendMode: 'normal', content: 'normal',
+        getPropertyValue: () => '',
+      };
+      // linkedom windows share their properties: undone after the test.
+      Object.defineProperty(view, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => ({
+          ...ordinary,
+          position: element === cover
+            ? shape === 'relative' ? 'relative' : 'absolute'
+            : 'static',
+        }),
+      });
+      onTestFinished(() => {
+        delete (view as unknown as Record<string, unknown>).getComputedStyle;
+      });
+      const events: SourceImageObservationEvent[] = [];
+      const stop = fixture.observer.subscribe((event) => events.push(event));
+      fixture.mutation.trigger([attributeRecord(wrap, 'title')]);
+      events.length = 0;
+      const renewed = () => events
+        .filter((event) => event.kind === 'upsert' && event.input.captureChanged)
+        .map(eventNodeId);
+      const move = (left: number) => {
+        coverBounds.left = left;
+        if (shape === 'relative') {
+          cover.setAttribute('style', `left: ${left}px`);
+          fixture.mutation.trigger([attributeRecord(cover, 'style')]);
+        } else {
+          wrap.className = left === 400 ? 'open' : '';
+          fixture.mutation.trigger([attributeRecord(wrap, 'class')]);
+        }
+      };
+      move(400);
+      expect(renewed()).toContain(21);
+      expect(renewed()).not.toContain(7);
+      events.length = 0;
+      move(800);
+      expect(renewed()).toContain(21);
+      expect(renewed()).not.toContain(7);
+      stop();
+    },
+  );
+
+  it('reads nothing for a class token or data attribute no style rule names (D182)', () => {
+    const names: SourceStyleNames = {
+      classes: new Set(['open']),
+      ids: new Set(),
+      attributes: new Set(),
+      attributeReads: new Set(),
+      pseudoClasses: new Set(),
+      pseudoElements: new Set(),
+      hidingClasses: new Set(),
+    };
+    const fixture = createFixture('<div id="clock" class="tick-1"></div>', {
+      styleNames: () => names,
+    });
+    const clock = fixture.document.querySelector('#clock')!;
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+    let imageReads = 0;
+    const read = fixture.image.getBoundingClientRect.bind(fixture.image);
+    Object.defineProperty(fixture.image, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        imageReads += 1;
+        return read();
+      },
+    });
+    // A page marking a timer every frame: nothing names these.
+    const classRecord = (oldValue: string) => ({
+      ...attributeRecord(clock, 'class'),
+      oldValue,
+    }) as MutationRecord;
+    for (let tick = 2; tick < 5; tick += 1) {
+      clock.className = `tick-${tick}`;
+      clock.setAttribute('data-tick', String(tick));
+      fixture.mutation.trigger([
+        classRecord(`tick-${tick - 1}`),
+        attributeRecord(clock, 'data-tick'),
+      ]);
+    }
+    expect(imageReads).toBe(0);
+    // A class a rule names, added or taken away, is read as before.
+    clock.className = 'tick-5 open';
+    fixture.mutation.trigger([classRecord('tick-4')]);
+    expect(imageReads).toBeGreaterThan(0);
+    imageReads = 0;
+    clock.className = 'tick-5';
+    fixture.mutation.trigger([classRecord('tick-5 open')]);
+    expect(imageReads).toBeGreaterThan(0);
+    expect(events.length).toBe(0);
     stop();
   });
 
@@ -4066,6 +4224,7 @@ function createFixture(
       records: readonly MutationRecord[],
     ) => boolean | undefined;
     readonly layoutSettleRequiresRefreshAll?: (target: Element) => boolean;
+    readonly styleNames?: () => SourceStyleNames | undefined;
   } = {},
 ) {
   const { document } = parseHTML(
@@ -4119,6 +4278,7 @@ function createFixture(
     ...(options.layoutSettleRequiresRefreshAll
       ? { layoutSettleRequiresRefreshAll: options.layoutSettleRequiresRefreshAll }
       : {}),
+    ...(options.styleNames ? { styleNames: options.styleNames } : {}),
     ...(options.useDefaultFrames
       ? {}
       : {

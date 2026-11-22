@@ -357,6 +357,80 @@ describe('ImageScanScheduler', () => {
     expect(scheduler.takeNext()?.descriptor.nodeId).toBe(2);
   });
 
+  it('carries a job through new observations of the same picture under the same admission, then looks once more (D182)', () => {
+    // On a page that changes something every frame each image is observed
+    // again at every frame: a job cancelled at each one never finished.
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+    });
+    const revisions = {
+      captureRevision: 1,
+      pictureRevision: 1,
+      admissionRevision: 1,
+    };
+    scheduler.apply(upsert(descriptor(1, 'visible', revisions)));
+    const active = scheduler.takeNext()!;
+    // A new place (a crop, a visibility tier): the job goes on.
+    for (const observationRevision of [2, 3]) {
+      scheduler.apply(upsert(descriptor(1, 'near', {
+        ...revisions,
+        captureRevision: observationRevision,
+        observationRevision,
+      })));
+    }
+    expect(scheduler.active).toBe(1);
+    expect(scheduler.drainCancellations()).toEqual([]);
+    expect(scheduler.takeNext()).toBeUndefined();
+    // It ends: the newest observation is looked at once more.
+    expect(scheduler.settle(active)).toBe(true);
+    const again = scheduler.takeNext()!;
+    expect(again.descriptor.observationRevision).toBe(3);
+    expect(scheduler.settle(again)).toBe(true);
+    expect(scheduler.takeNext()).toBeUndefined();
+
+    // A deferral of a carried job hands over to the newest observation.
+    scheduler.apply(upsert(descriptor(1, 'visible', {
+      ...revisions,
+      captureRevision: 4,
+      observationRevision: 4,
+      contentRevision: 2,
+    })));
+    const deferred = scheduler.takeNext()!;
+    scheduler.apply(upsert(descriptor(1, 'visible', {
+      ...revisions,
+      captureRevision: 5,
+      observationRevision: 5,
+      contentRevision: 2,
+    })));
+    expect(scheduler.defer(deferred)).toBe(false);
+    const handedOver = scheduler.takeNext()!;
+    expect(handedOver.descriptor.observationRevision).toBe(5);
+    expect(scheduler.settle(handedOver)).toBe(true);
+
+    // What lies over the image changed (a new admission), or its picture
+    // did: the job is cancelled as before.
+    scheduler.apply(upsert(descriptor(2, 'visible', revisions)));
+    scheduler.takeNext();
+    scheduler.apply(upsert(descriptor(2, 'visible', {
+      ...revisions,
+      admissionRevision: 2,
+      observationRevision: 2,
+    })));
+    expect(scheduler.drainCancellations()).toMatchObject([
+      { reason: 'superseded', job: { descriptor: { nodeId: 2 } } },
+    ]);
+    scheduler.takeNext();
+    scheduler.apply(upsert(descriptor(2, 'visible', {
+      ...revisions,
+      admissionRevision: 2,
+      pictureRevision: 2,
+      observationRevision: 3,
+    })));
+    expect(scheduler.drainCancellations()).toMatchObject([
+      { reason: 'superseded', job: { descriptor: { nodeId: 2 } } },
+    ]);
+  });
+
   it('treats observation revisions as currentness boundaries', () => {
     const scheduler = new ImageScanScheduler(documentIdentity, {
       policy: 'eager-all',

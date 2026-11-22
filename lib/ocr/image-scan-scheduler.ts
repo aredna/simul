@@ -41,6 +41,8 @@ export interface ImageScanJob {
   readonly descriptor: SourceImageDescriptor;
   readonly priority: ImageScanPriority;
   readonly manualOverride: boolean;
+  /** The look owed to an observation a job was carried through (D182). */
+  readonly relook?: true;
 }
 
 export interface ImageScanCancellation {
@@ -66,6 +68,12 @@ interface SchedulerRecord {
   completedContentRevision?: number;
   completedCaptureRevision?: number;
   completedObservationRevision?: number;
+  /**
+   * The observation a job carried through newer ones finished (D182): the
+   * image's kept result may answer the later observations of the same
+   * picture under the same admission, as for a completed one.
+   */
+  carriedCompletion?: SourceImageDescriptor;
   deferredObservationRevision?: number;
   deferralReason?: ImageScanDeferralReason;
   enqueueOrder?: number;
@@ -99,6 +107,8 @@ export class ImageScanScheduler {
   >();
   readonly #overflows = new Set<number>();
   readonly #cancellations: ImageScanCancellation[] = [];
+  /** Images whose next job is the look owed after a carried job (D182). */
+  readonly #relooks = new Set<number>();
   #policy: ImageScanPolicy;
   #skipSmallImages: boolean;
   #gates: ImageScanGates = CLOSED_GATES;
@@ -206,8 +216,9 @@ export class ImageScanScheduler {
       this.#manualOverrides.get(parsed.descriptor.nodeId) ===
         parsed.descriptor.contentRevision ||
       // Work still owed for the image (a peer's label changed, a look was
-      // asked for) is not swallowed by the answer (D168).
-      !recordHasCurrentCompletion(previous)
+      // asked for) is not swallowed by the answer (D168). The look owed
+      // after a carried job is what the answer gives (D182).
+      !recordCompleteOrCarried(previous)
     ) return this.apply(change);
     const result = this.#upsert(parsed.descriptor, true);
     this.#reconsiderOverflowed();
@@ -228,6 +239,7 @@ export class ImageScanScheduler {
       return false;
     }
     this.#manualOverrides.set(nodeId, contentRevision);
+    record.carriedCompletion = undefined;
     record.completedContentRevision = undefined;
     record.completedCaptureRevision = undefined;
     record.completedObservationRevision = undefined;
@@ -251,6 +263,7 @@ export class ImageScanScheduler {
       this.#active.delete(parsed.nodeId);
       this.#recordCancellation(active, 'superseded');
     }
+    record.carriedCompletion = undefined;
     record.completedContentRevision = undefined;
     record.completedCaptureRevision = undefined;
     record.completedObservationRevision = undefined;
@@ -266,10 +279,12 @@ export class ImageScanScheduler {
     const next = this.#bestPending();
     if (!next) return undefined;
     this.#pending.delete(next.descriptor.nodeId);
+    const relook = this.#relooks.delete(next.descriptor.nodeId);
     const job: ImageScanJob = Object.freeze({
       descriptor: next.descriptor,
       priority: next.priority,
       manualOverride: next.manualOverride,
+      ...(relook ? { relook: true as const } : {}),
     });
     this.#active.set(job.descriptor.nodeId, next);
     this.#dispatchOrder += 1;
@@ -282,6 +297,21 @@ export class ImageScanScheduler {
     const record = this.#records.get(job.descriptor.nodeId);
     if (!active || !sameJob(active, job)) return false;
     this.#active.delete(job.descriptor.nodeId);
+    if (record && carriesThrough(job.descriptor, record.descriptor)) {
+      // Carried through a newer observation (D182): the job's own is
+      // complete, and the newest is queued for one more look, which a kept
+      // result usually answers with no capture.
+      record.completedContentRevision = job.descriptor.contentRevision;
+      record.completedCaptureRevision = descriptorCaptureRevision(
+        job.descriptor,
+      );
+      record.completedObservationRevision = job.descriptor.observationRevision;
+      record.carriedCompletion = job.descriptor;
+      this.#relooks.add(job.descriptor.nodeId);
+      this.#reconcileNode(job.descriptor.nodeId);
+      this.#reconsiderOverflowed();
+      return true;
+    }
     if (!record || !sameDescriptor(record.descriptor, job.descriptor)) {
       this.#reconsiderOverflowed();
       return false;
@@ -330,6 +360,13 @@ export class ImageScanScheduler {
     if (!owned || !sameJob(owned, job)) return false;
     if (active) this.#active.delete(job.descriptor.nodeId);
     if (pending) this.#pending.delete(job.descriptor.nodeId);
+    if (active && record && carriesThrough(job.descriptor, record.descriptor)) {
+      // The deferral was for an observation that is past: the newest one
+      // is looked at instead (D182).
+      this.#reconcileNode(job.descriptor.nodeId);
+      this.#reconsiderOverflowed();
+      return false;
+    }
     if (!record || !sameDescriptor(record.descriptor, job.descriptor)) {
       this.#reconsiderOverflowed();
       return false;
@@ -402,6 +439,7 @@ export class ImageScanScheduler {
     this.#manualOverrides.clear();
     this.#decisions.clear();
     this.#overflows.clear();
+    this.#relooks.clear();
     this.#enqueueOrder = 0;
     this.#dispatchOrder = 0;
   }
@@ -437,7 +475,7 @@ export class ImageScanScheduler {
         descriptorCaptureRevision(before);
       const carryCompletedObservation = !contentChanged && (
         answered ||
-        (!captureChanged && recordHasCurrentCompletion(previous))
+        (!captureChanged && recordCompleteOrCarried(previous))
       );
       if (contentChanged) {
         this.#cancelNode(descriptor.nodeId, 'superseded');
@@ -459,7 +497,9 @@ export class ImageScanScheduler {
               completedCaptureRevision: descriptorCaptureRevision(descriptor),
               completedObservationRevision: descriptor.observationRevision,
             }
-          : {}),
+          : !contentChanged && previous.carriedCompletion
+            ? { carriedCompletion: previous.carriedCompletion }
+            : {}),
       });
     } else {
       this.#records.set(descriptor.nodeId, { descriptor });
@@ -499,6 +539,11 @@ export class ImageScanScheduler {
     const active = this.#active.get(nodeId);
     if (active) {
       if (sameDescriptor(active.descriptor, record.descriptor)) return;
+      // A new observation of the same picture, under the same admission,
+      // does not cancel the job: on a page that changes something every
+      // frame it would never finish. It goes on, and once it ends the newest
+      // observation is looked at again (D182).
+      if (carriesThrough(active.descriptor, record.descriptor)) return;
       this.#active.delete(nodeId);
       this.#recordCancellation(active, 'superseded');
     }
@@ -835,6 +880,21 @@ function recordHasCurrentCompletion(record: SchedulerRecord): boolean {
       record.descriptor.observationRevision;
 }
 
+/**
+ * Complete, or finished by a job carried through newer observations of the
+ * same content and capture (D182): only a visibility tier changed since, so
+ * nothing is owed that the image's kept result does not give.
+ */
+function recordCompleteOrCarried(record: SchedulerRecord): boolean {
+  const carried = record.carriedCompletion;
+  return recordHasCurrentCompletion(record) || (
+    carried !== undefined &&
+    carried.contentRevision === record.descriptor.contentRevision &&
+    descriptorCaptureRevision(carried) ===
+      descriptorCaptureRevision(record.descriptor)
+  );
+}
+
 function sameContent(
   left: SourceImageDescriptor,
   right: SourceImageDescriptor,
@@ -843,6 +903,37 @@ function sameContent(
     sameSourceDocument(left.document, right.document) &&
     left.nodeId === right.nodeId &&
     left.contentRevision === right.contentRevision
+  );
+}
+
+/**
+ * Whether a job asked for one observation of an image may go on through a
+ * newer one (D182): the same picture (content, picture revision, size and
+ * CSS picture) under the same admission, still in the document. Only where
+ * the image is may differ: its crop, its place, its visibility tier. The page
+ * checks where the image is at each rectangle a screenshot needs, so a
+ * capture is still taken only where the image stood still and nothing
+ * protected lay over it. Descriptors without admission revisions (protocol
+ * v1) are never carried.
+ */
+export function carriesThrough(
+  asked: SourceImageDescriptor,
+  newest: SourceImageDescriptor,
+): boolean {
+  return (
+    asked.admissionRevision !== undefined &&
+    asked.pictureRevision !== undefined &&
+    sameContent(asked, newest) &&
+    asked.observationRevision < newest.observationRevision &&
+    newest.connected &&
+    asked.sourceKind === newest.sourceKind &&
+    asked.pictureRevision === newest.pictureRevision &&
+    asked.admissionRevision === newest.admissionRevision &&
+    asked.renderedWidth === newest.renderedWidth &&
+    asked.renderedHeight === newest.renderedHeight &&
+    asked.intrinsicWidth === newest.intrinsicWidth &&
+    asked.intrinsicHeight === newest.intrinsicHeight &&
+    asked.cssPicture === newest.cssPicture
   );
 }
 
