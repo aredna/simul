@@ -467,9 +467,13 @@ export function installHtmlMirrorSourceBridge(
   // the page paints, share one fifth of the tab's time, for the document
   // (D164).
   const passShare = createPassShareLedger({ now });
+  // The mirror of the document that runs now: its census of the names the
+  // page's style rules mention tells the image reader which changes restyle
+  // nothing (D182, D201).
+  let liveMirror: HtmlMirrorSourceSession | undefined;
   runtime.onConnect.addListener((port) => {
     if (readHtmlMirrorPortSessionId(port.name)) {
-      new HtmlMirrorSourceSession({
+      liveMirror = new HtmlMirrorSourceSession({
         port,
         document: sourceDocument,
         window: sourceWindow,
@@ -508,6 +512,12 @@ export function installHtmlMirrorSourceBridge(
           new SourceImageObserver(observerEnvironment),
         secretClassifier: documentSecretClassifier,
         secretScan,
+        styleNames: () => liveMirror?.mentionedStyleNames(),
+        // What a change asks of the whole document is read in slices, in
+        // the share of the tab's time of the live passes (D164, D201).
+        passShare,
+        now,
+        yieldToMain: environment.yieldToMain ?? yieldToMain,
       });
       return;
     }
@@ -3390,6 +3400,15 @@ export class HtmlMirrorSourceSession {
   }
 
   /**
+   * What the page's style sheets mention, for the image reader (D201):
+   * nothing once this mirror has stopped, since its census is then no longer
+   * told of changed sheets.
+   */
+  mentionedStyleNames(): SourceStyleNames | undefined {
+    return this.#disposed ? undefined : this.#mentionedStyleNames();
+  }
+
+  /**
    * What the page's style sheets mention (D164), or undefined when every
    * name counts: some owner of sheets is not read whole yet, a sheet is
    * not as it was read, or the mirror does not know every root.
@@ -5970,6 +5989,10 @@ export class HtmlMirrorSourceSession {
     // Also when a sheet is only gone: its rules no longer apply.
     this.#styleDerivedPending = true;
     this.#onLayoutChange();
+    // The poll counts this as no change of the page, so the field reader
+    // hears of it here: a rule put into a held sheet may show or hide a
+    // field, as one the poll reports does (D185, D203).
+    noteSemanticSourceStyleSheetChange(this.environment.document);
     return true;
   }
 

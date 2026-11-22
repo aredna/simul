@@ -584,14 +584,15 @@ describe('painted controlled regions', () => {
         `${button('1')}<div id="t1" class="contents">${'<div class="contents">'.repeat(levels)}` +
         `<span id="seen1">DEEP1</span>${closed('1')}${'</div>'.repeat(levels)}</div>`,
       );
-      const two = nest(2);
-      expect(two.state('t1')).toBe('controlled-region');
-      expect(two.state('seen1')).toBe('controlled-region');
-      for (const id of closedIds('1')) expect(two.state(id), id).toBe('withheld');
-      expect(two.sent()).toContain('DEEP1');
-      const three = nest(3);
-      expect(three.state('t1')).toBe('withheld');
-      expect(three.sent()).not.toContain('DEEP1');
+      // Eight levels since D203 (two before).
+      const eight = nest(8);
+      expect(eight.state('t1')).toBe('controlled-region');
+      expect(eight.state('seen1')).toBe('controlled-region');
+      for (const id of closedIds('1')) expect(eight.state(id), id).toBe('withheld');
+      expect(eight.sent()).toContain('DEEP1');
+      const nine = nest(9);
+      expect(nine.state('t1')).toBe('withheld');
+      expect(nine.sent()).not.toContain('DEEP1');
       // A wrapper of no height is looked through like one of no box at all,
       // and one that clips is not.
       const hanging = shaped(

@@ -8,6 +8,10 @@ import {
   type SourceImageObservationEvent,
 } from '../lib/ocr/source-image-observer';
 import { SourceImageModel } from '../lib/ocr/source-image-model';
+import {
+  createPassShareLedger,
+  type PassShareLedger,
+} from '../lib/browser-scheduling';
 import type { SourceStyleNames } from '../lib/replica/source-style-names';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 import {
@@ -2054,6 +2058,78 @@ describe('SourceImageObserver', () => {
       kind: 'upsert',
       input: { nodeId: 7, cssPicture: expect.any(Number) },
     }]);
+    stop();
+  });
+
+  it('reads what a change asks of the whole document in a pass of slices after it, in the share of the tab\'s time (D201)', async () => {
+    // A page of many elements: the walks for controls and images took one
+    // task at every change, 35 to 90 ms at 20,000 elements.
+    let filler = '';
+    for (let index = 0; index < 600; index += 1) filler += `<span>${index}</span>`;
+    let clock = 1_000;
+    const ledger = createPassShareLedger({ now: () => clock });
+    let turns = 0;
+    const fixture = createFixture(`<p id="ticker">1</p>${filler}`, {
+      passShare: ledger,
+      // Each look at the clock is two milliseconds of work.
+      now: () => (clock += 2),
+      yieldToMain: async () => {
+        turns += 1;
+      },
+    });
+    const ticker = fixture.document.querySelector('#ticker')!;
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    // The image's label changes with a text elsewhere; only the text's
+    // record comes. The image is read again by the pass, not in this task.
+    fixture.image.setAttribute('alt', 'A new label');
+    ticker.firstChild!.textContent = '2';
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: ticker.firstChild,
+    } as unknown as MutationRecord]);
+    expect(events).toEqual([]);
+    expect(fixture.observer.passPending).toBe(true);
+    let passed = false;
+    void fixture.observer.whenPassed().then(() => {
+      passed = true;
+    });
+
+    for (let turn = 0; turn < 10 && fixture.timers.size > 0; turn += 1) {
+      fixture.timers.run();
+      // Until the pass has ended and let the ledger go.
+      for (
+        let tick = 0;
+        tick < 400 && ledger.waitMs({}, true) !== 0;
+        tick += 1
+      ) {
+        await Promise.resolve();
+      }
+    }
+    expect(fixture.observer.passPending).toBe(false);
+    await Promise.resolve();
+    expect(passed).toBe(true);
+    expect(turns).toBeGreaterThan(1);
+    expect(events.filter((event) => eventNodeId(event) === 7)).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true },
+    }]);
+    // Its work is counted in the share: the next pass waits.
+    expect(ledger.waitMs({})).toBeGreaterThan(0);
+
+    // Until a screenshot asks for it: the measure gives up after a second
+    // and a half, and the share alone can be longer.
+    ticker.firstChild!.textContent = '3';
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: ticker.firstChild,
+    } as unknown as MutationRecord]);
+    const asked = fixture.timers.delays.length;
+    expect(fixture.timers.delays.slice(asked - 3)).not.toContain(0);
+    void fixture.observer.whenPassed();
+    expect(fixture.timers.delays.slice(asked)).toContain(0);
     stop();
   });
 
@@ -4259,6 +4335,9 @@ function createFixture(
     ) => boolean | undefined;
     readonly layoutSettleRequiresRefreshAll?: (target: Element) => boolean;
     readonly styleNames?: () => SourceStyleNames | undefined;
+    readonly passShare?: PassShareLedger;
+    readonly now?: () => number;
+    readonly yieldToMain?: () => Promise<void>;
   } = {},
 ) {
   const { document } = parseHTML(
@@ -4313,12 +4392,16 @@ function createFixture(
       ? { layoutSettleRequiresRefreshAll: options.layoutSettleRequiresRefreshAll }
       : {}),
     ...(options.styleNames ? { styleNames: options.styleNames } : {}),
+    ...(options.passShare ? { passShare: options.passShare } : {}),
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.yieldToMain ? { yieldToMain: options.yieldToMain } : {}),
     ...(options.useDefaultFrames
       ? {}
       : {
           scheduleFrame: (callback: () => void) => frames.schedule(callback),
           cancelFrame: (frame: number) => frames.cancel(frame),
-          setTimer: (callback: () => void) => timers.schedule(callback),
+          setTimer: (callback: () => void, milliseconds?: number) =>
+            timers.schedule(callback, milliseconds),
           clearTimer: (handle: unknown) => timers.cancel(handle as number),
         }),
     ...(options.maxImages === undefined
@@ -4482,8 +4565,11 @@ class FakeFrameScheduler {
 class FakeTimerScheduler {
   readonly #callbacks = new Map<number, () => void>();
   #sequence = 0;
+  /** The delay each timer was asked with, in order. */
+  readonly delays: Array<number | undefined> = [];
 
-  schedule(callback: () => void): number {
+  schedule(callback: () => void, milliseconds?: number): number {
+    this.delays.push(milliseconds);
     const handle = ++this.#sequence;
     this.#callbacks.set(handle, callback);
     return handle;

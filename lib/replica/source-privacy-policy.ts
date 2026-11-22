@@ -1,4 +1,5 @@
 import {
+  readSourceOwnAccessor,
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
@@ -39,8 +40,13 @@ const MAX_SOURCE_CONTROLLED_ID_BYTES = 4 * 1_024 * 1_024;
 const MAX_SOURCE_ARIA_CONTROLS_LENGTH = 1 * 1_024 * 1_024;
 const MAX_SOURCE_CONTROLLED_MUTATION_NODES = 2_048;
 const MAX_SOURCE_PAINT_RECTS = 256;
-/** How far below a target without a box held elements without one are looked through. */
-const MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH = 2;
+/**
+ * How far below a target without a box held elements without one are looked
+ * through. Two until D203; a component library nests a few `display:
+ * contents` hosts and slots, and the elements judged stay under the budget
+ * below, so a deeper nest costs no more than a wider one.
+ */
+const MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH = 8;
 const MAX_SOURCE_CONTROLLED_LOOKED_THROUGH_ELEMENTS = 2_048;
 const DEFAULT_MAX_SOURCE_CONTROLLED_NODES = 50_000;
 const MAX_SOURCE_NAVIGATION_URL_LENGTH = 16 * 1024;
@@ -1568,7 +1574,7 @@ function sourceElementBoxIsPainted(
   if (!overflow || overflow.x || overflow.y) return false;
   let children: readonly Element[];
   try {
-    children = [...element.children];
+    children = [...sourceNodeLink(element, 'children')];
   } catch {
     return false;
   }
@@ -2010,7 +2016,7 @@ export function readSourceFlatTreeParentElement(node: Node): Element | undefined
     ) throw new Error('Invalid assigned-slot ancestry.');
     return assignedSlot;
   }
-  const parent = node.parentElement;
+  const parent = sourceNodeLink(node, 'parentElement');
   if (parent) return parent;
   const root = node.getRootNode();
   if (sourceNodeType(root) !== 11 || !('host' in root)) return undefined;
@@ -2120,7 +2126,11 @@ export function isSourceNativeSelectImplicitRole(
 /** Standalone/datalist options stay private; only select descendants are public. */
 export function isSourceOptionInsideNativeSelect(element: Element): boolean {
   if (sourceLocalName(element).toLowerCase() !== 'option') return false;
-  for (let current = element.parentElement; current; current = current.parentElement) {
+  for (
+    let current = sourceNodeLink(element, 'parentElement');
+    current;
+    current = sourceNodeLink(current, 'parentElement')
+  ) {
     const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'select') return true;
     if (tagName === 'datalist') return false;
@@ -2339,7 +2349,7 @@ export function isSourceSelectEntryLeftOutOfList(entry: Element): boolean {
       return between.some((element) => sourceSelectEntryStaysHidden(element, view));
     }
     between.push(current);
-    current = current.parentElement;
+    current = sourceNodeLink(current, 'parentElement');
   }
   return isSourceSelectEntryVisuallyHidden(entry);
 }
@@ -2505,11 +2515,11 @@ function sourceSelectOptionPathIsPublic(
     isSourceActivationRoleValue(optionAttributes.role) ||
     isSourceSelectEntryVisuallyHidden(option)
   ) return false;
-  let current = option.parentElement;
+  let current = sourceNodeLink(option, 'parentElement');
   while (current && sourceLocalName(current).toLowerCase() !== 'select') {
     if (sourceLocalName(current).toLowerCase() !== 'optgroup') {
       if (!isSourceSelectWrapper(current)) return false;
-      current = current.parentElement;
+      current = sourceNodeLink(current, 'parentElement');
       continue;
     }
     const attributes = readSourceStructuralAttributes(current);
@@ -2522,7 +2532,7 @@ function sourceSelectOptionPathIsPublic(
       ) ||
       isSourceActivationRoleValue(attributes.role)
     ) return false;
-    current = current.parentElement;
+    current = sourceNodeLink(current, 'parentElement');
   }
   return current !== null &&
     (!expectedSelect || current === expectedSelect) &&
@@ -2585,7 +2595,7 @@ export function isSourceSelectWrapper(element: Element): boolean {
 export function readSourceSelectEntryOwner(entry: Element): Element | undefined {
   const group = sourceLocalName(entry).toLowerCase() === 'optgroup';
   let outer: Element | undefined;
-  let current = entry.parentElement;
+  let current = sourceNodeLink(entry, 'parentElement');
   for (let depth = 0; current && depth <= MAX_SOURCE_SELECT_WRAPPER_DEPTH; depth += 1) {
     const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'select') return outer ?? current;
@@ -2595,7 +2605,7 @@ export function readSourceSelectEntryOwner(entry: Element): Element | undefined 
     } else if (!isSourceSelectWrapper(current)) {
       return undefined;
     }
-    current = current.parentElement;
+    current = sourceNodeLink(current, 'parentElement');
   }
   return undefined;
 }
@@ -2612,7 +2622,11 @@ export function readSourceSelectEntries(
   const ownerTag = sourceLocalName(owner).toLowerCase();
   if (ownerTag !== 'select' && ownerTag !== 'optgroup') return undefined;
   let wrapped = false;
-  for (let child = owner.firstElementChild; child; child = child.nextElementSibling) {
+  for (
+    let child = sourceNodeLink(owner, 'firstElementChild');
+    child;
+    child = sourceNodeLink(child, 'nextElementSibling')
+  ) {
     const tagName = sourceLocalName(child).toLowerCase();
     if (tagName === 'option' || tagName === 'optgroup') continue;
     if (
@@ -2627,7 +2641,11 @@ export function readSourceSelectEntries(
   const entries: Element[] = [];
   const pending: Array<{ readonly element: Element; readonly depth: number }> = [];
   const push = (parent: Element, depth: number): void => {
-    for (let child = parent.lastElementChild; child; child = child.previousElementSibling) {
+    for (
+      let child = sourceNodeLink(parent, 'lastElementChild');
+      child;
+      child = sourceNodeLink(child, 'previousElementSibling')
+    ) {
       pending.push({ element: child, depth });
     }
   };
@@ -2656,7 +2674,11 @@ export function readSourceSelectEntries(
 
 function directOptgroupLegend(element: Element): Element | undefined {
   let inspected = 0;
-  for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+  for (
+    let child = sourceNodeLink(element, 'firstElementChild');
+    child;
+    child = sourceNodeLink(child, 'nextElementSibling')
+  ) {
     inspected += 1;
     if (inspected > MAX_SOURCE_SELECT_LABEL_DESCENDANTS) return undefined;
     if (sourceLocalName(child).toLowerCase() === 'legend') return child;
@@ -2681,7 +2703,11 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
       isSourceActivationRoleValue(rootAttributes.role)
     ) return false;
     const pending: Element[] = [];
-    for (let child = element.lastElementChild; child; child = child.previousElementSibling) {
+    for (
+      let child = sourceNodeLink(element, 'lastElementChild');
+      child;
+      child = sourceNodeLink(child, 'previousElementSibling')
+    ) {
       if (pending.length >= MAX_SOURCE_SELECT_LABEL_DESCENDANTS) return false;
       pending.push(child);
     }
@@ -2709,9 +2735,9 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
         isSourceActivationRoleValue(descendantAttributes.role)
       ) return false;
       for (
-        let child = descendant.lastElementChild;
+        let child = sourceNodeLink(descendant, 'lastElementChild');
         child;
-        child = child.previousElementSibling
+        child = sourceNodeLink(child, 'previousElementSibling')
       ) {
         if (inspected + pending.length >= MAX_SOURCE_SELECT_LABEL_DESCENDANTS) {
           return false;
@@ -2728,7 +2754,7 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
 function readBoundedSourceSelectText(element: Element): string | undefined {
   let output = '';
   let inspected = 0;
-  let current: Node | null = element.firstChild;
+  let current: Node | null = sourceNodeLink(element, 'firstChild');
   while (current) {
     inspected += 1;
     if (inspected > MAX_SOURCE_SELECT_LABEL_NODES) break;
@@ -2736,11 +2762,11 @@ function readBoundedSourceSelectText(element: Element): string | undefined {
       sourceNodeType(current) === Node.ELEMENT_NODE &&
       isSourceSelectEntryVisuallyHidden(current as Element)
     ) {
-      while (current && current !== element && !current.nextSibling) {
-        current = current.parentNode;
+      while (current && current !== element && !sourceNodeLink(current, 'nextSibling')) {
+        current = sourceNodeLink(current, 'parentNode');
       }
       if (!current || current === element) break;
-      current = current.nextSibling;
+      current = sourceNodeLink(current, 'nextSibling');
       continue;
     }
     if (sourceNodeType(current) === Node.TEXT_NODE) {
@@ -2760,15 +2786,16 @@ function readBoundedSourceSelectText(element: Element): string | undefined {
         break;
       }
     }
-    if (current.firstChild) {
-      current = current.firstChild;
+    const first = sourceNodeLink(current, 'firstChild');
+    if (first) {
+      current = first;
       continue;
     }
-    while (current && current !== element && !current.nextSibling) {
-      current = current.parentNode;
+    while (current && current !== element && !sourceNodeLink(current, 'nextSibling')) {
+      current = sourceNodeLink(current, 'parentNode');
     }
     if (!current || current === element) break;
-    current = current.nextSibling;
+    current = sourceNodeLink(current, 'nextSibling');
   }
   return output.slice(0, MAX_SOURCE_SELECT_LABEL_TEXT).trim();
 }
@@ -3063,8 +3090,8 @@ export function hasSourcePrivateOrActivationElementAncestor(
         isSourceOptionInsideNativeSelect(current),
       ) ||
       isSourcePrivateTagName(sourceLocalName(current)) ||
-      isSourceActivationTagName(current.tagName) ||
-      isSourceActivationRoleValue(current.getAttribute('role'))
+      isSourceActivationTagName(sourceLocalName(current)) ||
+      isSourceActivationRoleValue(readSourceStructuralAttributes(current).role)
     ) return true;
   }
   return false;
@@ -3126,7 +3153,7 @@ export function hasSourceImageCaptureBlockingAncestor(
       isSourcePrivateTagName(sourceLocalName(current)) ||
       (
         !options.allowActivationControls &&
-        isSourceActivationTagName(current.tagName)
+        isSourceActivationTagName(sourceLocalName(current))
       ) ||
       (
         !options.allowActivationControls &&
@@ -3180,7 +3207,11 @@ function isSourceHttpNavigationAnchor(element: Element): boolean {
 }
 
 function isSourceElementInsideNativeSelect(element: Element): boolean {
-  for (let current = element.parentElement; current; current = current.parentElement) {
+  for (
+    let current = sourceNodeLink(element, 'parentElement');
+    current;
+    current = sourceNodeLink(current, 'parentElement')
+  ) {
     const tagName = sourceLocalName(current).toLowerCase();
     if (tagName === 'select') {
       return isEligibleSourceSelect(
@@ -3208,8 +3239,8 @@ export function hasSourceActivationElementAncestor(element: Element): boolean {
   if (!path) return true;
   for (const current of path) {
     if (
-      isSourceActivationTagName(current.tagName) ||
-      isSourceActivationRoleValue(current.getAttribute('role'))
+      isSourceActivationTagName(sourceLocalName(current)) ||
+      isSourceActivationRoleValue(readSourceStructuralAttributes(current).role)
     ) return true;
   }
   return false;
@@ -3221,6 +3252,20 @@ export function hasSourceActivationElementAncestor(element: Element): boolean {
  * authors can place raw form values in attributes and classification has to
  * happen before any content-bearing field is touched.
  */
+/**
+ * A link between nodes (a parent, a child, a sibling) past a form's field
+ * names (D201). A form answers `form.<field name>` before its own
+ * properties: through a field named `parentElement` a walk up went into the
+ * form's field, whose parent is the form, and never ended. Only an HTML form
+ * answers so, and its local name is lower case.
+ */
+function sourceNodeLink<T extends Node, K extends keyof T>(node: T, name: K): T[K] {
+  return sourceNodeType(node) === 1 &&
+    sourceLocalName(node as unknown as Element) === 'form'
+    ? readSourceOwnAccessor(node, String(name)) as T[K]
+    : node[name];
+}
+
 export function readSourceStructuralAttributes(
   element: Element,
 ): Record<string, string> {

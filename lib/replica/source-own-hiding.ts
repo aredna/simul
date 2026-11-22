@@ -1,5 +1,9 @@
 import { readSourceFlatTreeElementPath } from './source-privacy-policy';
 import { readSourceAssignedSlot } from './source-shadow-root';
+import {
+  readCrossOriginSheetFromPageCache,
+  type SourceCrossOriginSheetReader,
+} from './source-style-names';
 
 /**
  * What the computed style cannot say about an element under something
@@ -25,6 +29,112 @@ const MAX_SOURCE_HIDING_RULES_KEPT = 512;
 const MAX_SOURCE_SHOWING_RULES_KEPT = 1_024;
 /** How many slots up the flat tree the roots' `::slotted` rules are asked. */
 const MAX_SOURCE_SLOT_CHAIN = 16;
+/** Sheets of another origin of one document whose text is asked for (D203). */
+const MAX_SOURCE_SHEET_COPIES = 32;
+/** The longest such sheet whose rules are read (D203), as D180's names. */
+const MAX_SOURCE_SHEET_COPY_CHARACTERS = 2 * 1024 * 1024;
+
+/**
+ * Sheets of another origin, read from the page's copy (D203): the page may
+ * not read their rules, so every dropdown asked in their tree was withheld,
+ * though the page shows it (four of eight on the D173 harness page with one
+ * such sheet). The text is asked for once a sheet, as D180 asks for its
+ * names (`readCrossOriginSheetFromPageCache`: only a sheet the page itself
+ * loaded, from the page's copy, no credentials, where its server allows
+ * CORS), and parsed into a sheet of the page's own that is never applied.
+ * Until the text has come, and for a sheet whose server does not allow it,
+ * the dropdown stays withheld, as before. A copy that imports another sheet
+ * is not used: a constructed sheet drops its `@import` rules.
+ */
+const sourceSheetCopies = new WeakMap<
+  Document,
+  Map<string, { readonly cssRules: CSSRuleList } | 'pending' | 'refused'>
+>();
+let sourceSheetCopyReader:
+  | ((view: Window) => SourceCrossOriginSheetReader | undefined)
+  | undefined;
+
+/** Test hook: how the page's copy of a sheet is read (D203). */
+export function setSourceOwnHidingSheetReader(
+  reader: ((view: Window) => SourceCrossOriginSheetReader | undefined) | undefined,
+): void {
+  sourceSheetCopyReader = reader;
+}
+
+/**
+ * The rules of a sheet the page cannot read, from its copy once that has
+ * come; the first ask starts the read. Undefined until then, and for one
+ * that cannot be read.
+ */
+function sourceSheetCopyRules(
+  sheet: CSSStyleSheet,
+  root: Node,
+): CSSRuleList | undefined {
+  let href: string | null | undefined;
+  let document: Document | null | undefined;
+  try {
+    href = sheet.href;
+    document = (root as Partial<Document>).nodeType === 9
+      ? root as Document
+      : root.ownerDocument;
+  } catch {
+    return undefined;
+  }
+  const view = document?.defaultView;
+  if (!href || !document || !view) return undefined;
+  let copies = sourceSheetCopies.get(document);
+  if (!copies) {
+    copies = new Map();
+    sourceSheetCopies.set(document, copies);
+  }
+  const known = copies.get(href);
+  if (known !== undefined) {
+    return typeof known === 'object' ? known.cssRules : undefined;
+  }
+  if (copies.size >= MAX_SOURCE_SHEET_COPIES) return undefined;
+  let read: SourceCrossOriginSheetReader | undefined;
+  try {
+    read = (sourceSheetCopyReader ?? readCrossOriginSheetFromPageCache)(view);
+  } catch {
+    read = undefined;
+  }
+  if (!read) {
+    copies.set(href, 'refused');
+    return undefined;
+  }
+  const settled = copies;
+  settled.set(href, 'pending');
+  const refuse = (): void => {
+    settled.set(href, 'refused');
+  };
+  try {
+    void read(href).then((text) => {
+      if (
+        typeof text !== 'string' || text.length > MAX_SOURCE_SHEET_COPY_CHARACTERS ||
+        /@import\b/iu.test(text)
+      ) {
+        refuse();
+        return;
+      }
+      try {
+        const Sheet = (view as Window & { CSSStyleSheet?: typeof CSSStyleSheet })
+          .CSSStyleSheet;
+        if (typeof Sheet !== 'function') {
+          refuse();
+          return;
+        }
+        const copy = new Sheet();
+        copy.replaceSync(text);
+        settled.set(href, { cssRules: copy.cssRules });
+      } catch {
+        refuse();
+      }
+    }, refuse);
+  } catch {
+    refuse();
+  }
+  return undefined;
+}
 
 /** The properties by which an element hides itself, as the cascade sets them. */
 type HidingProperty = 'visibility' | 'transform' | 'scale';
@@ -360,12 +470,18 @@ function readSourceHidingRuleSet(
     // A tree whose sheets cannot be listed may hold one that hides it.
     complete = false;
   }
+  // A sheet of another origin cannot be read: its rules are known only
+  // from the page's copy (D203), and not at all without one.
+  const copies = new Map<CSSStyleSheet, CSSRuleList>();
   const sizes = sheets.map((sheet) => {
     try {
       return sheet.cssRules.length;
     } catch {
-      // A sheet of another origin cannot be read: its rules are not known.
-      return -1;
+      const copy = sourceSheetCopyRules(sheet, root);
+      if (!copy) return -1;
+      copies.set(sheet, copy);
+      // Apart from any count the page's own sheet could have.
+      return -2 - copy.length;
     }
   });
   const sheetMedia = sheets.map((sheet) => sheet.media?.mediaText ?? '');
@@ -384,12 +500,15 @@ function readSourceHidingRuleSet(
       hiding: 0,
       showing: 0,
       showingComplete: true,
+      complete: true,
+      root,
     };
     const supports = readSupports(root);
     sheets.forEach((sheet, index) => {
-      if (sizes[index]! < 0) return;
+      if (sizes[index] === -1) return;
       const media = sheetMedia[index]!;
-      collectHidingRules(sheet, found, budget, {
+      const copy = copies.get(sheet);
+      collectHidingRules(copy ? { cssRules: copy } : sheet, found, budget, {
         media: media ? [media] : [],
         parent: undefined,
         selectorSources: [],
@@ -399,7 +518,7 @@ function readSourceHidingRuleSet(
       });
     });
     rules = found;
-    complete = complete && !sizes.includes(-1) && budget.left > 0 &&
+    complete = complete && !sizes.includes(-1) && budget.complete && budget.left > 0 &&
       budget.hiding < MAX_SOURCE_HIDING_RULES_KEPT;
     showingComplete = budget.showingComplete;
     keptHidingRules.set(root, {
@@ -475,6 +594,17 @@ function sameTexts(
     live.every((text, index) => text === read[index]);
 }
 
+interface HidingRuleBudget {
+  left: number;
+  hiding: number;
+  showing: number;
+  showingComplete: boolean;
+  /** False when a sheet imported into one of the tree's could not be read. */
+  complete: boolean;
+  /** The tree whose rules these are, for the page's copies of its sheets. */
+  readonly root: Node;
+}
+
 /**
  * `context.parent`: the selector of the style rule these rules are nested
  * in. A nested rule's own selector says `&` for it, or is meant under it.
@@ -482,14 +612,21 @@ function sameTexts(
 function collectHidingRules(
   holder: { readonly cssRules: CSSRuleList },
   found: SourceHidingRule[],
-  budget: { left: number; hiding: number; showing: number; showingComplete: boolean },
+  budget: HidingRuleBudget,
   context: HidingRuleContext,
 ): void {
   let rules: CSSRuleList;
   try {
     rules = holder.cssRules;
   } catch {
-    return;
+    // A sheet of another origin imported into one of the page's (D203): its
+    // copy, or a read that may have missed the rule that hides.
+    const copy = sourceSheetCopyRules(holder as CSSStyleSheet, budget.root);
+    if (!copy) {
+      budget.complete = false;
+      return;
+    }
+    rules = copy;
   }
   for (let index = 0; index < rules.length; index += 1) {
     if (budget.left <= 0 || budget.hiding >= MAX_SOURCE_HIDING_RULES_KEPT) return;

@@ -128,6 +128,14 @@ export interface ImageSourceSessionEnvironment {
    * observer to leave out changes no rule names (D182).
    */
   readonly styleNames?: SourceImageObserverEnvironment['styleNames'];
+  /**
+   * The share of the tab's time the live whole-page passes keep to (D164):
+   * what a change asks of the whole document is read in a pass of slices
+   * after it, and a screenshot's rectangle waits for that pass (D201).
+   */
+  readonly passShare?: SourceImageObserverEnvironment['passShare'];
+  readonly now?: SourceImageObserverEnvironment['now'];
+  readonly yieldToMain?: SourceImageObserverEnvironment['yieldToMain'];
   readonly onDispose?: () => void;
 }
 
@@ -512,7 +520,31 @@ export class ImageSourceSession {
     this.#answerMeasure(message.requestId, descriptor);
   };
 
-  #answerMeasure(requestId: string, descriptor: SourceImageDescriptor): void {
+  #answerMeasure(
+    requestId: string,
+    descriptor: SourceImageDescriptor,
+    waited = false,
+  ): void {
+    const observer = this.#observer;
+    if (!waited && observer?.passPending) {
+      // What a change of the page did to the controls is not read yet: no
+      // rectangle for a screenshot before it is known (D201). Once it is,
+      // the rectangle is read as below, with its live checks; a change after
+      // the request is no other than one during the screenshot, and on a
+      // page that changes at every frame a second wait would never end.
+      void observer.whenPassed().then(() => {
+        if (this.#observer === observer) {
+          this.#answerMeasure(requestId, descriptor, true);
+        } else {
+          this.#post({
+            kind: 'simul:image-source-v2:metrics',
+            requestId,
+            status: 'stale',
+          });
+        }
+      });
+      return;
+    }
     if (
       !this.#model?.isCurrent(descriptor) &&
       !this.#model?.isCaptureCurrent(descriptor)
@@ -833,6 +865,13 @@ export class ImageSourceSession {
           this.#controlledContentLayoutMayChange(target),
         ...(this.environment.styleNames
           ? { styleNames: this.environment.styleNames }
+          : {}),
+        ...(this.environment.passShare
+          ? { passShare: this.environment.passShare }
+          : {}),
+        ...(this.environment.now ? { now: this.environment.now } : {}),
+        ...(this.environment.yieldToMain
+          ? { yieldToMain: this.environment.yieldToMain }
           : {}),
         isPrivateImage: (image: HTMLImageElement) =>
           this.#hasStickySecretAncestor(image) ||

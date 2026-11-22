@@ -2,6 +2,7 @@ import { parseHTML } from 'linkedom';
 import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import {
+  setSourceOwnHidingSheetReader,
   sourceElementHidesItselfByVisibility,
   sourceElementScalesItselfToNothing,
 } from '../lib/replica/source-own-hiding';
@@ -191,6 +192,70 @@ describe('what the page itself wrote for a dropdown under something hidden', () 
     // the panel opening over them withholds them rather than read them.
     expect(hides('far')).toBe(true);
     expect(hides('near')).toBe(true);
+  });
+
+  it('reads a sheet of another origin from the page\'s copy once it has come (D203)', async () => {
+    const unreadable = (href: string) => ({
+      href,
+      get cssRules(): readonly FakeRule[] {
+        throw new Error('SecurityError');
+      },
+    });
+    const asked: string[] = [];
+    const texts: Record<string, string | undefined> = {
+      'https://cdn.example/menu.css': '.far{visibility:hidden}',
+      'https://cdn.example/imports.css': '@import url(other.css); .near{visibility:visible}',
+    };
+    setSourceOwnHidingSheetReader(() => async (href) => {
+      asked.push(href);
+      return texts[href];
+    });
+    onTestFinished(() => setSourceOwnHidingSheetReader(undefined));
+    const { document, hides } = page(
+      '<select id="far" class="far"></select><select id="near" class="near"></select>',
+      [unreadable('https://cdn.example/menu.css')],
+    );
+    // A constructed sheet of the page's own, never applied: the copy's rules.
+    const window = document.defaultView as unknown as Record<string, unknown>;
+    const had = Object.getOwnPropertyDescriptor(window, 'CSSStyleSheet');
+    onTestFinished(() => {
+      delete window.CSSStyleSheet;
+      if (had) Object.defineProperty(window, 'CSSStyleSheet', had);
+    });
+    Object.defineProperty(window, 'CSSStyleSheet', {
+      configurable: true,
+      value: class {
+        cssRules: FakeRule[] = [];
+        replaceSync(text: string): void {
+          this.cssRules = [...text.matchAll(/([^{}]+)\{([^}]*)\}/gu)]
+            .map(([, selector, body]) => rule(selector!.trim(), body!));
+        }
+      },
+    });
+    // Until the copy has come, either may be hidden by it.
+    expect(hides('far', true)).toBe(true);
+    expect(hides('near', true)).toBe(true);
+    await nextRun();
+    expect(hides('far', true)).toBe(true);
+    expect(hides('near', true)).toBe(false);
+    expect(asked).toEqual(['https://cdn.example/menu.css']);
+    // One that imports another is not used; one whose server refused stays
+    // unknown.
+    Object.defineProperty(document, 'styleSheets', {
+      configurable: true,
+      value: [unreadable('https://cdn.example/imports.css')],
+    });
+    expect(hides('near', true)).toBe(true);
+    await nextRun();
+    expect(hides('near', true)).toBe(true);
+    Object.defineProperty(document, 'styleSheets', {
+      configurable: true,
+      value: [{ cssRules: [{ styleSheet: unreadable('https://cdn.example/refused.css') }] }],
+    });
+    expect(hides('near', true)).toBe(true);
+    await nextRun();
+    // An imported sheet that cannot be read may hold the rule too.
+    expect(hides('near', true)).toBe(true);
   });
 
   it('withholds a dropdown whose tree was too big to read (A6)', () => {

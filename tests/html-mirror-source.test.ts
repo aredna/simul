@@ -2,6 +2,20 @@ import { parseHTML } from 'linkedom';
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
+
+// The documents told that their sheets' rules changed (D203).
+const semanticSheetNotes = vi.hoisted(() => [] as unknown[]);
+vi.mock('../lib/replica/semantic-source-session', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../lib/replica/semantic-source-session')>();
+  return {
+    ...actual,
+    noteSemanticSourceStyleSheetChange: (document: Document) => {
+      semanticSheetNotes.push(document);
+      actual.noteSemanticSourceStyleSheetChange(document);
+    },
+  };
+});
 import {
   MAX_HTML_MIRROR_SCROLL_PANES,
   HTML_MIRROR_PANE_BOXES_VERSION,
@@ -7981,6 +7995,24 @@ describe('style sheets that change (D143)', () => {
     expect(gaps(fixture)).toBe(0);
     expect(fixture.patches()).toHaveLength(2);
     expect(fixture.checkpoints()).toHaveLength(1);
+  });
+
+  it('tells the field reader of a rule put into a held style element\'s sheet (D203)', () => {
+    // `insertRule` changes no element: the poll reads the element again, and
+    // the rule may show or hide a field, which the field reader asks of the
+    // tab only when told (D185).
+    const { fixture, sheets: [sheet] } = styleFixture(
+      '<style id="dynamic">.page{display:grid}</style>' +
+      '<main class="page"><input class="secret"></main>',
+    );
+    poll(fixture);
+    semanticSheetNotes.length = 0;
+    (sheet!.cssRules as unknown as { cssText: string }[]).push({
+      cssText: '.secret{display:none}',
+    });
+    poll(fixture);
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(semanticSheetNotes).toContain(fixture.document);
   });
 
   it('sends the text nodes of a style element as before when the mirror holds it by them', () => {

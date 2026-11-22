@@ -23,6 +23,7 @@ import {
   readSourceShadowRoot,
 } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
+import { createPassShareLedger } from '../lib/browser-scheduling';
 
 const baseStyle = {
   display: 'block',
@@ -84,6 +85,117 @@ describe('image source capture safety', () => {
     expect(JSON.stringify(port.messages.at(-1))).not.toMatch(
       /(?:src|url|pixels|text|hash|nodeId)/iu,
     );
+    session.dispose();
+  });
+
+  it('gives no rectangle for a screenshot before the pass that reads a change of the page has read the controls (D201)', async () => {
+    // What a change asks of the whole document is read in slices after it,
+    // in the share of the tab's time of the live passes: until that pass has
+    // read the controls, what the change did to them is not known.
+    const { document, window } = parseHTML(
+      '<html><body><p id="ticker">1</p><img id="image"></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    const ticker = document.querySelector('#ticker')!;
+    setImageFacts(image);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'image-pass-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'image-pass-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    let clock = 1_000;
+    const order: string[] = [];
+    const shared = createPassShareLedger({ now: () => clock });
+    const ledger: typeof shared = {
+      get notBefore() {
+        return shared.notBefore;
+      },
+      waitMs: (owner, ignoreShare) => shared.waitMs(owner, ignoreShare),
+      begin: (owner) => {
+        order.push('pass begins');
+        shared.begin(owner);
+      },
+      touch: (owner) => shared.touch(owner),
+      note: (busyMs, owner) => {
+        order.push('pass ends');
+        shared.note(busyMs, owner);
+      },
+      release: (owner) => shared.release(owner),
+    };
+    const timers: Array<() => void> = [];
+    let mutate: ((records: readonly MutationRecord[]) => void) | undefined;
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: window as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      passShare: ledger,
+      // Each look at the clock is a millisecond of work.
+      now: () => (clock += 1),
+      yieldToMain: async () => undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        setTimer: (callback) => {
+          timers.push(callback);
+          return timers.length;
+        },
+        clearTimer: () => undefined,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: (callback) => {
+          mutate = callback;
+          return { observe: () => undefined, disconnect: () => undefined };
+        },
+      }),
+    });
+    port.emitMessage({ kind: 'simul:image-source-v2:start', document: identity });
+    const descriptor = lastUpsertDescriptorForNode(port.messages, 7)!;
+    expect(descriptor).toBeDefined();
+
+    ticker.firstChild!.textContent = '2';
+    mutate?.([{
+      type: 'characterData',
+      target: ticker.firstChild,
+    } as unknown as MutationRecord]);
+    const before = port.messages.length;
+    const post = port.postMessage.bind(port);
+    port.postMessage = (message: unknown) => {
+      if ((message as { requestId?: string }).requestId === 'after-change') {
+        order.push('rectangle');
+      }
+      post(message);
+    };
+    port.emitMessage({
+      kind: 'simul:image-source-v2:measure',
+      requestId: 'after-change',
+      descriptor,
+    });
+    // A paint and more go by: no answer while the pass has not run.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(port.messages.slice(before)).toEqual([]);
+
+    // The pass runs when the ledger lets it: then the rectangle is given.
+    for (let turn = 0; turn < 20 && timers.length > 0; turn += 1) {
+      clock += 10;
+      timers.shift()!();
+      for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+    }
+    // (The fixture's image has no painted box: the answer is that it is
+    // hidden. What counts is when it comes.)
+    await vi.waitFor(() => expect(port.messages.slice(before)).toMatchObject([{
+      kind: 'simul:image-source-v2:metrics',
+      requestId: 'after-change',
+    }]));
+    expect(order[0]).toBe('pass begins');
+    expect(order).toContain('rectangle');
+    expect(ledger.notBefore).toBeGreaterThan(Number.NEGATIVE_INFINITY);
     session.dispose();
   });
 

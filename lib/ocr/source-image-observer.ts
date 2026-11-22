@@ -12,10 +12,14 @@ import {
   readSourceShadowRoot,
 } from '../replica/source-shadow-root';
 import {
+  createSliceClock,
+  LIVE_SLICE_BUDGET_MS,
   receiverSafeAnimationFrameCanceller,
   receiverSafeAnimationFrameScheduler,
+  yieldToMain,
   type AnimationFrameCanceller,
   type AnimationFrameScheduler,
+  type PassShareLedger,
 } from '../browser-scheduling';
 import type { ImageVisibilityTier } from './contracts';
 import {
@@ -92,6 +96,19 @@ export interface SourceImageObserverEnvironment {
    * observer then reads nothing for it. Without it every change is read.
    */
   readonly styleNames?: () => SourceStyleNames | undefined;
+  /**
+   * The share of the tab's time the live whole-page passes keep to (D164),
+   * with the semantic scan and the comparison of what the page paints. With
+   * it, what a change asks of the whole document (the images' facts read
+   * again, the document walked for images and for controls) is one pass, in
+   * slices, after the change (D201); screenshots wait for it. Without it
+   * that work is done in the change's own task, as before.
+   */
+  readonly passShare?: PassShareLedger;
+  /** The clock of the pass's slices; `performance.now` by default. */
+  readonly now?: () => number;
+  /** The turn between the pass's slices; `yieldToMain` by default. */
+  readonly yieldToMain?: () => Promise<void>;
   readonly scheduleFrame?: AnimationFrameScheduler;
   readonly cancelFrame?: AnimationFrameCanceller;
   readonly setTimer?: (callback: () => void, milliseconds: number) => unknown;
@@ -361,6 +378,8 @@ export class SourceImageObserver {
   readonly #cancelFrame: AnimationFrameCanceller;
   readonly #setTimer: (callback: () => void, milliseconds: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
+  readonly #now: () => number;
+  readonly #yieldToMain: () => Promise<void>;
   readonly #listeners = new Set<(event: SourceImageObservationEvent) => void>();
   readonly #states = new Map<HTMLImageElement, ObservedImageState>();
   readonly #capacityCandidates = new Set<HTMLImageElement>();
@@ -415,6 +434,17 @@ export class SourceImageObserver {
   #started = false;
   #lifecycleGeneration = 0;
   #fillingCapacity = false;
+  /** The whole-document work changes asked for, not begun yet (D201). */
+  #passWork: ImageObserverPassWork | undefined;
+  #passRunning = false;
+  /** Inside a pass: its refreshes are not a change of the next one's. */
+  #inPass = false;
+  #passTimer: unknown;
+  /** Bumped at every change that asks for a pass. */
+  #passGeneration = 0;
+  /** The last change whose effect on the controls a pass has read. */
+  #passDone = 0;
+  #passWaiters: Array<{ readonly generation: number; readonly resolve: () => void }> = [];
 
   constructor(environment: SourceImageObserverEnvironment) {
     const documentIdentity = readSourceDocumentIdentity(
@@ -453,6 +483,8 @@ export class SourceImageObserver {
             typeof view?.cancelAnimationFrame === 'function'
           ) view.cancelAnimationFrame(handle);
         };
+    this.#now = environment.now ?? (() => performance.now());
+    this.#yieldToMain = environment.yieldToMain ?? yieldToMain;
     this.#setTimer = environment.setTimer ?? ((callback, milliseconds) =>
       view?.setTimeout(callback, milliseconds) ?? setTimeout(callback, milliseconds));
     this.#clearTimer = environment.clearTimer ?? ((handle) => {
@@ -510,6 +542,34 @@ export class SourceImageObserver {
       this.#listeners.delete(listener);
       if (this.#listeners.size === 0) this.#stop();
     };
+  }
+
+  /**
+   * What a change of the page did to the controls has not been read yet
+   * (D201): the pass that reads it has not done its safety part. A
+   * screenshot waits for it, so that it is never taken before what the
+   * change did to the controls and the images under them is known.
+   */
+  get passPending(): boolean {
+    return this.#started && this.#passDone < this.#passGeneration;
+  }
+
+  /**
+   * Settles once what every change delivered so far did to the controls has
+   * been read, or at stop. A pass waiting for its share starts now: the
+   * measure that asks gives up after a second and a half, and on a page that
+   * changes at every frame the share alone can be longer (D201).
+   */
+  whenPassed(): Promise<void> {
+    if (!this.passPending) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#passWaiters.push({ generation: this.#passGeneration, resolve });
+      if (this.#passTimer !== undefined && !this.#passRunning) {
+        this.#clearTimer(this.#passTimer);
+        this.#passTimer = undefined;
+        this.#schedulePass();
+      }
+    });
   }
 
   refreshAll(): void {
@@ -864,6 +924,14 @@ export class SourceImageObserver {
     if (!this.#started) return;
     this.#started = false;
     this.#lifecycleGeneration += 1;
+    // A pass that runs stops at its next slice; what waits for it goes on.
+    this.#passWork = undefined;
+    if (this.#passTimer !== undefined) {
+      this.#clearTimer(this.#passTimer);
+      this.#passTimer = undefined;
+    }
+    this.#passDone = this.#passGeneration;
+    this.#resolvePassWaiters();
     if (this.#viewportListener) {
       this.#environment.document.defaultView?.removeEventListener(
         'resize',
@@ -1302,6 +1370,13 @@ export class SourceImageObserver {
     state.layoutToken = processingTokens.layoutToken;
     state.cssPicture = cssPictureNumber(image, processingTokens.cssPicture);
     state.viewportToken = facts.viewportToken;
+    // The box the coming pass compares with what lies over the image is the
+    // one from before the changes it reads (D201).
+    const work = this.#passWork;
+    if (
+      work && !this.#inPass && !forceCaptureChange &&
+      !work.safetyBase.has(image)
+    ) work.safetyBase.set(image, state.safetyBounds);
     state.safetyBounds = facts.safetyBounds;
     this.#emitUpsert(
       state,
@@ -1427,6 +1502,10 @@ export class SourceImageObserver {
     // which no style rule names: nothing it could restyle, and nothing this
     // observer reads (D182). A page that marks a counter or a timer in such
     // an attribute every frame walked the document at every frame.
+    // A rule just written that names the class is not missed: the census
+    // compares the page's sheets with those it read at every call and gives
+    // no names when one differs, and a change of a sheet's owner is never
+    // skipped (D201).
     const styleNames = this.#environment.styleNames;
     const records = styleNames
       ? delivered.filter((record) => !imageObserverMaySkip(record, styleNames))
@@ -1681,7 +1760,12 @@ export class SourceImageObserver {
       this.#performGlobalRefresh(true, true, true);
       return;
     }
-    if (refreshStylesheetSafety) {
+    // With the pass share, what asks for the whole document is one pass
+    // after the change (D201): the walk for controls and their comparison
+    // with the last snapshot, the images' facts read again, and the walk for
+    // new images. What the change names itself is read now.
+    const deferred = this.#environment.passShare !== undefined;
+    if (refreshStylesheetSafety && !deferred) {
       const currentSafetyTargets = collectCurrentCaptureControlTargets(
         this.#environment.document,
       );
@@ -1738,7 +1822,14 @@ export class SourceImageObserver {
     for (const image of [...safetyCandidates]) {
       if (!observedAtMutationStart.has(image)) safetyCandidates.delete(image);
     }
+    // The pass is open before anything is refreshed here, so that it knows
+    // each image's box from before this change.
+    const passWork = deferred && (refreshAllRouting || refreshStylesheetSafety)
+      ? this.#openPassWork(observedAtMutationStart)
+      : undefined;
     const refreshedImages = new Set<HTMLImageElement>();
+    // Renewed now for what lies over them: the pass does not renew them again.
+    const renewedImages = new Set<HTMLImageElement>();
     for (const image of routingCandidates) {
       // A global refresh already discovers newly eligible images with a fresh
       // revision. Existing work advances only when its private routing token
@@ -1754,6 +1845,7 @@ export class SourceImageObserver {
         forceCaptureChange,
       );
       refreshedImages.add(image);
+      if (captureSafetyChanged) renewedImages.add(image);
     }
     for (const image of safetyCandidates) {
       // The emitted event contains only a boolean currentness boundary. The
@@ -1761,6 +1853,32 @@ export class SourceImageObserver {
       // reading accessibility text or pixels.
       this.#refresh(image, false, true, true);
       refreshedImages.add(image);
+      renewedImages.add(image);
+    }
+    if (deferred) {
+      if (refreshStylesheetSafety) {
+        // The controls this change named are where they are now in the
+        // snapshot, so the pass does not find them changed a second time;
+        // a snapshot that cannot be kept so is made again by the pass.
+        this.#refreshCaptureSafetyBoundsInPlace(new Set([
+          ...safetyTargets,
+          ...currentOnlySafetyTargets,
+        ]));
+      } else {
+        this.#refreshCaptureSafetyBounds(new Set([
+          ...safetyTargets,
+          ...currentOnlySafetyTargets,
+        ]));
+      }
+      if (passWork) {
+        this.#queuePass(
+          passWork,
+          refreshAllRouting,
+          refreshStylesheetSafety,
+          renewedImages,
+        );
+      }
+      return;
     }
     if (refreshAllRouting) {
       // Run targeted forced-content work first so a single mutation cannot
@@ -1788,6 +1906,199 @@ export class SourceImageObserver {
         ...currentOnlySafetyTargets,
       ]));
     }
+  }
+
+  /**
+   * The pass the changes of this task join (D201): opened before they
+   * refresh anything, so that it knows each image's box from before them.
+   * Images observed when a change of it was delivered are those it compares.
+   */
+  #openPassWork(observed: ReadonlySet<HTMLImageElement>): ImageObserverPassWork {
+    let work = this.#passWork;
+    if (!work) {
+      work = {
+        routing: false,
+        safety: false,
+        observed: new Set(),
+        safetyBase: new Map(),
+        renewed: new Set(),
+        generation: 0,
+      };
+      this.#passWork = work;
+    }
+    for (const image of observed) work.observed.add(image);
+    return work;
+  }
+
+  #queuePass(
+    work: ImageObserverPassWork,
+    routing: boolean,
+    safety: boolean,
+    renewed: ReadonlySet<HTMLImageElement>,
+  ): void {
+    work.routing ||= routing;
+    work.safety ||= safety;
+    for (const image of renewed) work.renewed.add(image);
+    this.#passGeneration += 1;
+    work.generation = this.#passGeneration;
+    this.#schedulePass();
+  }
+
+  /** Asks the ledger when the pass may begin, and waits that long. */
+  #schedulePass(): void {
+    const ledger = this.#environment.passShare;
+    if (
+      !ledger || !this.#started || this.#passRunning ||
+      this.#passTimer !== undefined || !this.#passWork
+    ) return;
+    this.#passTimer = this.#setTimer(() => {
+      this.#passTimer = undefined;
+      this.#startPass();
+    }, ledger.waitMs(this, this.#passWaiters.length > 0));
+  }
+
+  #startPass(): void {
+    const ledger = this.#environment.passShare;
+    const work = this.#passWork;
+    if (!ledger || !work || !this.#started || this.#passRunning) return;
+    if (ledger.waitMs(this, this.#passWaiters.length > 0) > 0) {
+      this.#schedulePass();
+      return;
+    }
+    this.#passWork = undefined;
+    this.#passRunning = true;
+    void this.#runPass(work, ledger);
+  }
+
+  /**
+   * One pass, in slices with a turn for the page between them (D164). The
+   * page may change meanwhile: what it changes then is the next pass's, and
+   * what it took away is read as gone.
+   */
+  async #runPass(
+    work: ImageObserverPassWork,
+    ledger: PassShareLedger,
+  ): Promise<void> {
+    const lifecycle = this.#lifecycleGeneration;
+    const now = this.#now;
+    const clock = createSliceClock({
+      budgetMs: LIVE_SLICE_BUDGET_MS,
+      now,
+      yield: this.#yieldToMain,
+    });
+    const steps = this.#passSteps(work, () => clock.expired());
+    let busy = 0;
+    let failed = false;
+    ledger.begin(this);
+    try {
+      for (;;) {
+        const sliceStart = now();
+        let done: boolean | undefined;
+        this.#inPass = true;
+        try {
+          done = steps.next().done;
+        } finally {
+          this.#inPass = false;
+          busy += Math.max(0, now() - sliceStart);
+        }
+        if (done) break;
+        await clock.next();
+        if (!this.#started || lifecycle !== this.#lifecycleGeneration) return;
+        ledger.touch(this);
+      }
+    } catch {
+      // What lies over the images is not known now: the next comparison
+      // takes every image as changed, and no screenshot waiting for this
+      // pass is measured before a pass after it has ended.
+      this.#captureSafetyBoundsReliable = false;
+      failed = true;
+    } finally {
+      this.#passRunning = false;
+      ledger.note(busy, this);
+    }
+    if (!this.#started || lifecycle !== this.#lifecycleGeneration) return;
+    if (!failed) this.#markSafetyRead(work.generation);
+    this.#schedulePass();
+  }
+
+  /**
+   * In the order the change's own task kept: the controls first (a newly
+   * private image withdrawn, the images a control came over, left or
+   * crossed renewed, the snapshot kept), then every image's facts read
+   * again and the document walked for new images.
+   */
+  *#passSteps(
+    work: ImageObserverPassWork,
+    expired: () => boolean,
+  ): Generator<void, void> {
+    if (work.safety) {
+      const found = yield* walkCurrentCaptureControlTargets(
+        this.#environment.document,
+        MAX_CAPTURE_SAFETY_TARGETS,
+        expired,
+      );
+      // A control the page took out while the walk went on is gone.
+      const controls = found?.filter((control) => control.isConnected);
+      const comparable = new Set<HTMLImageElement>();
+      for (const image of work.observed) {
+        if (!this.#states.has(image)) continue;
+        if (this.#isPrivate(image)) this.#refresh(image);
+        else comparable.add(image);
+        if (expired()) yield;
+      }
+      const assessment = controls
+        ? this.#captureSafetyRelationChanges(
+            comparable,
+            controls,
+            work.safetyBase,
+          )
+        : undefined;
+      for (const image of assessment?.changedImages ?? work.observed) {
+        if (work.renewed.has(image) || !this.#states.has(image)) continue;
+        this.#refresh(image, false, true, true);
+        if (expired()) yield;
+      }
+      this.#applyCaptureSafetyAssessment(assessment);
+    }
+    // What the changes did to the controls is known: a screenshot waiting
+    // for it may be measured. The rest (every image read again, the walk
+    // for new images) changes no capture's safety.
+    this.#markSafetyRead(work.generation);
+    if (work.routing) {
+      for (const image of [...this.#states.keys()]) {
+        if (this.#states.has(image)) this.#refresh(image);
+        if (expired()) yield;
+      }
+      const scan = yield* walkBoundedImageGraph(
+        [this.#environment.document],
+        createSourceImageTraversalBudget(this.#maxImages),
+        expired,
+      );
+      this.#registerShadowHostCandidates(scan.hostCandidates);
+      for (const root of scan.shadowRoots) this.#observeSourceRoot(root);
+      const images = filterImagesToObservedRoots(
+        scan,
+        this.#observedMutationRoots,
+      ).images.filter((image) => !this.#states.has(image) && image.isConnected);
+      for (const image of this.#eligibleDiscoveryCandidates(images)) {
+        this.#discover(image, true);
+      }
+    }
+  }
+
+  #markSafetyRead(generation: number): void {
+    this.#passDone = Math.max(this.#passDone, generation);
+    this.#resolvePassWaiters();
+  }
+
+  #resolvePassWaiters(): void {
+    if (this.#passWaiters.length === 0) return;
+    const waiting: Array<{ readonly generation: number; readonly resolve: () => void }> = [];
+    for (const waiter of this.#passWaiters) {
+      if (waiter.generation <= this.#passDone) waiter.resolve();
+      else waiting.push(waiter);
+    }
+    this.#passWaiters = waiting;
   }
 
   #refreshAllFromCurrentAdmission(
@@ -2262,6 +2573,8 @@ export class SourceImageObserver {
   #captureSafetyRelationChanges(
     images: ReadonlySet<HTMLImageElement>,
     currentControls: readonly Element[],
+    /** Image boxes from before the changes a pass reads (D201). */
+    previousImageBounds?: ReadonlyMap<HTMLImageElement, CaptureSafetyBounds>,
   ): CaptureSafetyRelationAssessment | undefined {
     const controlBounds = this.#readCaptureSafetyControlBounds(currentControls);
     if (!controlBounds) return undefined;
@@ -2284,6 +2597,8 @@ export class SourceImageObserver {
     for (const image of images) {
       const state = this.#states.get(image);
       if (!state) continue;
+      const previousImage = previousImageBounds?.get(image) ??
+        state.safetyBounds;
       const currentImageBounds = readCaptureSafetyBounds(image);
       const path = readSourceFlatTreeElementPath(image);
       if (!currentImageBounds || !path) {
@@ -2306,7 +2621,7 @@ export class SourceImageObserver {
         const previousControlBounds = this.#captureSafetyBounds.get(control);
         const currentControlBounds = controlBounds.get(control);
         const previouslyOverlapped = previousControlBounds
-          ? rectanglesOverlap(state.safetyBounds, previousControlBounds)
+          ? rectanglesOverlap(previousImage, previousControlBounds)
           : false;
         const currentlyOverlapped = currentControlBounds
           ? rectanglesOverlap(currentImageBounds, currentControlBounds)
@@ -2319,13 +2634,13 @@ export class SourceImageObserver {
           !previouslyOverlapped && !currentlyOverlapped &&
           previousControlBounds && currentControlBounds &&
           !sameCaptureSafetyRelativeGeometry(
-            state.safetyBounds,
+            previousImage,
             currentImageBounds,
             previousControlBounds,
             currentControlBounds,
           ) &&
           rectanglesOverlap(
-            captureSafetyBoundsHull(state.safetyBounds, currentImageBounds),
+            captureSafetyBoundsHull(previousImage, currentImageBounds),
             captureSafetyBoundsHull(
               previousControlBounds,
               currentControlBounds,
@@ -2670,10 +2985,18 @@ export class SourceImageObserver {
     this.#captureSafetyBoundsReliable = true;
   }
 
-  #refreshCaptureSafetyBounds(targets: ReadonlySet<Element>): void {
+  /** The snapshot for these targets now, made again in full only by the pass (D201). */
+  #refreshCaptureSafetyBoundsInPlace(targets: ReadonlySet<Element>): void {
+    this.#refreshCaptureSafetyBounds(targets, true);
+  }
+
+  #refreshCaptureSafetyBounds(
+    targets: ReadonlySet<Element>,
+    inPlace = false,
+  ): void {
     if (targets.size === 0) return;
     if (!this.#captureSafetyBoundsReliable) {
-      this.#rebuildCaptureSafetyBounds();
+      if (!inPlace) this.#rebuildCaptureSafetyBounds();
       return;
     }
     const affected = new Set<Element>();
@@ -2681,14 +3004,14 @@ export class SourceImageObserver {
       for (const known of this.#captureSafetyBounds.keys()) {
         const containsKnown = sameOrContainsElement(target, known);
         if (containsKnown === undefined) {
-          this.#captureSafetyBoundsReliable = false;
+          if (!inPlace) this.#captureSafetyBoundsReliable = false;
           return;
         }
         if (containsKnown) affected.add(known);
       }
       const current = collectCaptureControlTargets(target);
       if (!current) {
-        this.#captureSafetyBoundsReliable = false;
+        if (!inPlace) this.#captureSafetyBoundsReliable = false;
         return;
       }
       for (const control of current) affected.add(control);
@@ -2697,13 +3020,13 @@ export class SourceImageObserver {
       this.#captureSafetyBounds.size + affected.size >
         MAX_CAPTURE_SAFETY_TARGETS * 2
     ) {
-      this.#rebuildCaptureSafetyBounds();
+      if (!inPlace) this.#rebuildCaptureSafetyBounds();
       return;
     }
     for (const control of affected) {
       const controlMatch = elementMatchesCaptureControl(control);
       if (controlMatch === undefined) {
-        this.#captureSafetyBoundsReliable = false;
+        if (!inPlace) this.#captureSafetyBoundsReliable = false;
         return;
       }
       if (!control.isConnected || !controlMatch) {
@@ -2712,7 +3035,7 @@ export class SourceImageObserver {
       }
       const bounds = readCaptureSafetyBounds(control);
       if (!bounds) {
-        this.#captureSafetyBoundsReliable = false;
+        if (!inPlace) this.#captureSafetyBoundsReliable = false;
         return;
       }
       this.#captureSafetyBounds.set(control, bounds);
@@ -2844,10 +3167,32 @@ function createSourceImageTraversalBudget(
   };
 }
 
+/** Runs a walk to its end in one go. */
+function drainWalk<T>(steps: Generator<void, T>): T {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+const NEVER_EXPIRED = (): boolean => false;
+/** How many nodes a walk goes by between two looks at its slice clock. */
+const WALK_CLOCK_STRIDE = 64;
+
 function collectBoundedImageGraph(
   initialNodes: Iterable<Node>,
   budget: SourceImageTraversalBudget,
 ): BoundedImageGraph {
+  return drainWalk(walkBoundedImageGraph(initialNodes, budget, NEVER_EXPIRED));
+}
+
+/** The walk for images, stopping when `expired` says so to give a turn (D201). */
+function* walkBoundedImageGraph(
+  initialNodes: Iterable<Node>,
+  budget: SourceImageTraversalBudget,
+  expired: () => boolean,
+): Generator<void, BoundedImageGraph> {
+  let steps = 0;
   const images: HTMLImageElement[] = [];
   const shadowRoots: ShadowRoot[] = [];
   const hostCandidates: Element[] = [];
@@ -2864,6 +3209,7 @@ function collectBoundedImageGraph(
       budget.overflow = true;
       break;
     }
+    if (++steps % WALK_CLOCK_STRIDE === 0 && expired()) yield;
     const node = pending.pop();
     if (!node) break;
     budget.nodesRemaining -= 1;
@@ -3038,6 +3384,16 @@ function collectCaptureControlTargets(
     return undefined;
   }
   return Object.freeze(targets);
+}
+
+/** The whole-document work of the changes a pass reads (D201). */
+interface ImageObserverPassWork {
+  routing: boolean;
+  safety: boolean;
+  readonly observed: Set<HTMLImageElement>;
+  readonly safetyBase: Map<HTMLImageElement, CaptureSafetyBounds>;
+  readonly renewed: Set<HTMLImageElement>;
+  generation: number;
 }
 
 /**
@@ -3262,12 +3618,24 @@ function collectCurrentCaptureControlTargets(
   document: Document,
   limit = MAX_CAPTURE_SAFETY_TARGETS,
 ): readonly Element[] | undefined {
+  return drainWalk(walkCurrentCaptureControlTargets(document, limit, NEVER_EXPIRED));
+}
+
+/** The walk for controls, stopping when `expired` says so to give a turn (D201). */
+function* walkCurrentCaptureControlTargets(
+  document: Document,
+  limit: number,
+  expired: () => boolean,
+): Generator<void, readonly Element[] | undefined> {
   const targets: Element[] = [];
   const pending: Node[] = [document];
   let scanned = 0;
   try {
     while (pending.length > 0) {
       if (scanned >= MAX_CAPTURE_SAFETY_SCAN_ELEMENTS) return undefined;
+      if (scanned % WALK_CLOCK_STRIDE === WALK_CLOCK_STRIDE - 1 && expired()) {
+        yield;
+      }
       const node = pending.pop();
       if (!node) break;
       scanned += 1;
