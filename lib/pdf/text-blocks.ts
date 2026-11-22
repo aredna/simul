@@ -37,6 +37,13 @@ export interface PdfTextBlock {
   /** The pdf.js id of the font most of the text uses. */
   readonly fontId: string;
   readonly align: PdfTextAlign;
+  /**
+   * A piece of an OCR line cut around typed text (D121), with the other
+   * pieces of its line (D184): `id` is shared by them, `part` counts from 0
+   * in reading order. They are translated as one text, laid out across the
+   * pieces. Absent on a line that was not cut, or kept one piece only.
+   */
+  readonly flow?: { readonly id: number; readonly part: number };
 }
 
 // A line breaks when the baseline moves more than this share of the font
@@ -120,6 +127,8 @@ interface Line {
   baseline: number;
   /** A piece of an OCR line cut around typed text: a block of its own. */
   alone?: boolean;
+  /** Its line's other pieces share `id` (D184). */
+  flow?: { readonly id: number; readonly part: number };
 }
 
 /**
@@ -180,6 +189,7 @@ export function pdfOcrBlocks(
 ): PdfTextBlock[] {
   if (!(pixelsPerPoint > 0) || !Number.isFinite(pixelsPerPoint)) return [];
   const converted: Line[] = [];
+  let flows = 0;
   for (const line of lines) {
     const text = line.text.replace(/\s+/gu, ' ').trim();
     const { x, y, width, height } = line.boundingBox;
@@ -209,15 +219,18 @@ export function pdfOcrBlocks(
       // size, and the span of its words. It joins no other line: a block is
       // drawn as one box, and the box of a piece with the line above or
       // below it would lie over the typed text the piece was cut around.
-      for (const piece of pieces) {
-        // Beside a line that is mostly typed text, a single character is a
-        // box border or a speck read as a letter, not the scan's own text.
-        if (mostlyTyped && lettersAndDigits(piece.text) < 2) continue;
+      // Beside a line that is mostly typed text, a single character is a
+      // box border or a speck read as a letter, not the scan's own text.
+      const kept = pieces.filter((piece) => !mostlyTyped || lettersAndDigits(piece.text) >= 2);
+      // The pieces of one line are one text to translate (D184).
+      const flow = kept.length > 1 ? (flows += 1) : undefined;
+      kept.forEach((piece, part) => {
         converted.push({
           ...ocrLine(piece.text, piece.left, top, piece.right, bottom),
           alone: true,
+          ...(flow === undefined ? {} : { flow: { id: flow, part } }),
         });
-      }
+      });
       continue;
     }
     if (mostlyTyped) continue;
@@ -623,7 +636,62 @@ function toBlock(
     fontFamily: genericFamily(styles[fontId]?.fontFamily),
     fontId,
     align: align ?? lineAlign(lines[0]!, fontSize, mostlyRtl(lines), page),
+    // A piece joins no other line, so its block is that one line.
+    ...(lines.length === 1 && lines[0]!.flow ? { flow: lines[0]!.flow } : {}),
   };
+}
+
+/**
+ * Splits a translation across the pieces of a line cut around typed text
+ * (D184), in reading order, at word boundaries: each piece takes words
+ * while the text measured so far stays within its share of the pieces'
+ * room (`capacities`, a piece's width on the page). `measure` gives a
+ * text's length in the units the shares are counted in; by default its
+ * characters, which a block's font then fits to its box. Every piece gets
+ * at least one word while words are left, and the last takes the rest.
+ * Text written without spaces is split between characters.
+ */
+export function splitAcrossPieces(
+  text: string,
+  capacities: readonly number[],
+  measure: (text: string) => number = (each) => [...each].length,
+): string[] {
+  const count = capacities.length;
+  if (count === 0) return [];
+  const trimmed = text.replace(/\s+/gu, ' ').trim();
+  const spaced = trimmed.includes(' ');
+  const words = spaced ? trimmed.split(' ') : [...trimmed];
+  const join = (parts: readonly string[]) => parts.join(spaced ? ' ' : '');
+  const room = capacities.map((capacity) => (Number.isFinite(capacity) && capacity > 0 ? capacity : 0));
+  const totalRoom = room.reduce((sum, each) => sum + each, 0);
+  const total = measure(join(words));
+  const parts: string[] = [];
+  let next = 0;
+  let roomBefore = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (index === count - 1) {
+      parts.push(join(words.slice(next)));
+      break;
+    }
+    roomBefore += room[index]!;
+    // Where this piece's share of the room ends, measured in text.
+    const end = totalRoom > 0 ? (total * roomBefore) / totalRoom : (total * (index + 1)) / count;
+    // Leave a word for each piece after this one, where there are enough:
+    // with too few, the pieces take one each in reading order.
+    const last = Math.max(Math.min(next + 1, words.length), words.length - (count - 1 - index));
+    let taken = next;
+    if (taken < last) taken += 1;
+    while (taken < last) {
+      const withNext = measure(join(words.slice(0, taken + 1)));
+      const without = measure(join(words.slice(0, taken)));
+      // Take the next word when the share ends nearer after it than before.
+      if (end - without <= withNext - end) break;
+      taken += 1;
+    }
+    parts.push(join(words.slice(next, taken)));
+    next = taken;
+  }
+  return parts;
 }
 
 /**

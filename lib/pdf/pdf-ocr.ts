@@ -51,11 +51,12 @@ export const PDF_OCR_PAGE_TIMEOUT_MS = 60_000;
  * The weight budget of the PDF's recognition cache, the most the cache
  * takes. A page's result carries its words (D121), which the cache counts
  * as it counts regions: a dense page of 500 words weighs about 26,000,
- * where it weighed 7,500 without them. A PDF one page longer than the
- * cache holds is read again in full on Refresh, because pages are read in
- * order and the oldest is dropped: under the default budget of 1,000,000
- * that was 38 dense pages, and under the default limit of 128 entries 128
- * pages of any kind (D134). This budget holds about 380 dense pages.
+ * where it weighed 7,500 without them. Under the default budget of
+ * 1,000,000 that was 38 dense pages, and under the default limit of 128
+ * entries 128 pages of any kind (D134). This budget holds about 380 dense
+ * pages. A full PDF cache keeps the pages it has and does not keep the next
+ * (D184): pages are read in order, and dropping the oldest for each new one
+ * left a PDF one page longer than the cache read again in full on Refresh.
  */
 export const PDF_RECOGNITION_CACHE_WEIGHT = 10_000_000;
 /** And how many pages it holds at most, however few words they have. */

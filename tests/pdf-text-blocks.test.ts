@@ -11,7 +11,7 @@ import {
   type PdfTextItem,
   type PdfjsEnvironment,
 } from '../lib/pdf/pdfjs-runtime';
-import { joinLines, pdfOcrBlocks, pdfTextBlocks, type PdfOcrLine } from '../lib/pdf/text-blocks';
+import { joinLines, pdfOcrBlocks, pdfTextBlocks, splitAcrossPieces, type PdfOcrLine } from '../lib/pdf/text-blocks';
 
 const vendorDirectory = resolve('vendor/pdfjs');
 const nodeEnvironment: PdfjsEnvironment = {
@@ -614,6 +614,42 @@ describe('pdfOcrBlocks', () => {
       expect(across > 0 && down > 0).toBe(false);
     }
     expect(blocks[2]!.box.left).toBeCloseTo(330);
+  });
+
+  it('marks the pieces of one line as one text to lay out across them (D184)', () => {
+    const typed = [{ left: 212, top: 150, width: 100, height: 11 }];
+    const blocks = pdfOcrBlocks([
+      ocrLine('Après chaque incendie, le conseil vota de', 100, 270, 660),
+      ocrWords([
+        ['Les', 100, 44], ['registres', 152, 120], ['mentionnent', 280, 130],
+        ['COPIE', 426, 80], ['CONFORME', 514, 110],
+        ['1640', 660, 60], ['et', 728, 24],
+      ], 302),
+      ocrLine('1702, dont un seul toucha les', 100, 334, 640),
+    ], 2, 612, typed);
+    expect(blocks.map((block) => block.flow)).toEqual([
+      undefined, { id: 1, part: 0 }, { id: 1, part: 1 }, undefined,
+    ]);
+    // A line cut down to one piece is a block like any other.
+    const footer = pdfOcrBlocks([ocrWords([
+      ['Rapport', 100, 96], ['annuel', 206, 84], ['Page', 450, 40], ['1', 498, 8],
+    ], 1474)], 2, 612, [{ left: 223, top: 736, width: 50, height: 11 }]);
+    expect(footer.map((block) => [block.text, block.flow])).toEqual([['Rapport annuel', undefined]]);
+  });
+
+  it('splits a translation across a line\'s pieces by their room, at word boundaries (D184)', () => {
+    // "Les registres mentionnent" (155 pt) and "1640 et" (46 pt).
+    expect(splitAcrossPieces('The registers mention 1640 and', [155, 46]))
+      .toEqual(['The registers mention', '1640 and']);
+    // Each piece gets a word while there are words.
+    expect(splitAcrossPieces('Registers mention', [10, 300, 10])).toEqual(['Registers', 'mention', '']);
+    expect(splitAcrossPieces('Nothing fits here at all', [1, 1000])).toEqual(['Nothing', 'fits here at all']);
+    // Text written without spaces splits between characters.
+    expect(splitAcrossPieces('記録には一六四〇年と', [100, 100])).toEqual(['記録には一', '六四〇年と']);
+    // Three pieces, a quarter, half and a quarter of the room.
+    expect(splitAcrossPieces('one two three four five six', [50, 100, 50]))
+      .toEqual(['one two', 'three four', 'five six']);
+    expect(splitAcrossPieces('anything', [])).toEqual([]);
   });
 
   it('leaves a line out when typed text covers every word of it (D121)', () => {

@@ -369,6 +369,8 @@ describe('offscreen OCR protocol and lifecycle', () => {
       askWords: boolean,
       pages = 128,
       maxCacheEntries?: number,
+      keepFirstResults = false,
+      now: () => number = Date.now,
     ) => {
       let runs = 0;
       let weight = 0;
@@ -376,8 +378,10 @@ describe('offscreen OCR protocol and lifecycle', () => {
         store: memoryStore(),
         resetEpoch: 0,
         clientId: 'client-ocr',
+        now: () => now(),
         ...(maxCacheWeight === undefined ? {} : { maxCacheWeight }),
         ...(maxCacheEntries === undefined ? {} : { maxCacheEntries }),
+        ...(keepFirstResults ? { keepFirstResults } : {}),
         sendMessage: async (message: unknown) => {
           if ((message as Record<string, unknown>).kind === 'simul:ocr-v1:ensure-host') {
             return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
@@ -437,6 +441,78 @@ describe('offscreen OCR protocol and lifecycle', () => {
     const web = await secondPassRuns(undefined, false);
     expect(web).toMatchObject({ first: 128, again: 0 });
     expect(web.weight).toBeLessThan(7_600);
+  });
+
+  it('keeps a scanned PDF\'s first pages when it is longer than the cache, read again on Refresh (D184)', async () => {
+    const page = (job: OffscreenOcrJob): ImageTextResult => ({
+      providerId: 'tesseract',
+      bitmapWidth: job.bitmapWidth,
+      bitmapHeight: job.bitmapHeight,
+      transcript: 'une ligne',
+      transcriptConfidence: 0.92,
+      geometryConfidence: 0.92,
+      regions: [{
+        text: 'une ligne',
+        confidence: 0.92,
+        boundingBox: { x: 10, y: 2, width: 330, height: 3 },
+        ...(job.words === true ? {
+          words: [
+            { text: 'une', boundingBox: { x: 10, y: 2, width: 28, height: 3 } },
+            { text: 'ligne', boundingBox: { x: 40, y: 2, width: 40, height: 3 } },
+          ],
+        } : {}),
+      }],
+    });
+    // A cache of 8 pages, a scan of 12, read in page order three times.
+    const passes = async (keepFirstResults: boolean, at: () => number = Date.now) => {
+      // The pages OCR read, by node.
+      let read = new Set<number>();
+      const coordinator = new ImageRecognitionCoordinator({
+        store: memoryStore(),
+        resetEpoch: 0,
+        clientId: 'client-ocr',
+        maxCacheEntries: 8,
+        now: () => at(),
+        ...(keepFirstResults ? { keepFirstResults } : {}),
+        sendMessage: async (message: unknown) => {
+          if ((message as Record<string, unknown>).kind === 'simul:ocr-v1:ensure-host') {
+            return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+          }
+          const command = readOffscreenOcrCommand(message);
+          if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+          read.add(command.job.nodeId);
+          return success(command.job, page(command.job));
+        },
+      });
+      const route = {
+        providerOrder: ['tesseract'] as const,
+        sourceLanguage: 'fr',
+        languageGroup: 'fra',
+        modelVersion: 'tessdata-fast-87416418',
+        words: true as const,
+      };
+      const counts: number[] = [];
+      for (let pass = 0; pass < 3; pass += 1) {
+        read = new Set();
+        for (let index = 0; index < 12; index += 1) {
+          await coordinator.recognize({
+            ...pixels,
+            descriptor: { ...descriptor, nodeId: index + 1 },
+            pixelHash: index.toString(16).padStart(64, '0'),
+          }, route);
+        }
+        counts.push(read.size);
+      }
+      return counts;
+    };
+    // Dropping the oldest page for each new one reads all 12 again on
+    // every pass; keeping the first 8 reads only the last 4 again.
+    expect(await passes(false)).toEqual([12, 12, 12]);
+    expect(await passes(true)).toEqual([12, 4, 4]);
+    // Kept pages still expire after the cache's 15 minutes, and make room.
+    let clock = 1_000_000;
+    const tick = () => (clock += 60_000);
+    expect(await passes(true, tick)).toEqual([12, 12, 12]);
   });
 
   it('accepts bounded TextDetector jobs and rejects out-of-bounds hints', () => {

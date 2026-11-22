@@ -98,6 +98,15 @@ export interface ImageRecognitionCoordinatorEnvironment {
   readonly maxCacheWeight?: number;
   readonly maxInFlight?: number;
   readonly maxCacheAgeMs?: number;
+  /**
+   * A full cache keeps the results it has and refuses a new one, where it
+   * otherwise drops the oldest (D184). A scanned PDF is read in page order,
+   * so dropping the oldest page for each new one leaves a PDF longer than
+   * the cache read again in full on Refresh; keeping the first pages reads
+   * only those beyond them again. Records still expire after
+   * `maxCacheAgeMs`.
+   */
+  readonly keepFirstResults?: boolean;
   readonly now?: () => number;
 }
 
@@ -164,6 +173,7 @@ export class ImageRecognitionCoordinator {
   readonly #maxCacheWeight: number;
   readonly #maxInFlight: number;
   readonly #maxCacheAgeMs: number;
+  readonly #keepFirstResults: boolean;
   readonly #now: () => number;
   readonly #cache = new Map<string, StoredImageRecognitionResult>();
   readonly #providerEvidence = new Map<
@@ -214,6 +224,7 @@ export class ImageRecognitionCoordinator {
       environment.maxCacheAgeMs,
       RECOGNITION_CACHE_TTL_MS,
     );
+    this.#keepFirstResults = environment.keepFirstResults === true;
     this.#now = environment.now ?? Date.now;
   }
 
@@ -739,7 +750,12 @@ export class ImageRecognitionCoordinator {
 
   #boundRetainedRecognitionMemory(
     protectedContinuation?: ImageRecognitionContinuation,
+    refusable?: string,
   ): void {
+    // Expired records make room before a new result is refused (D184).
+    if (refusable !== undefined && this.#overRetainedBudget()) {
+      this.#expireRetained();
+    }
     while (
       this.#cache.size +
           this.#continuations.size +
@@ -759,6 +775,15 @@ export class ImageRecognitionCoordinator {
         protectedContinuation,
       );
       if (!oldest) break;
+      if (
+        oldest.kind !== 'provider' &&
+        refusable !== undefined &&
+        this.#cache.has(refusable)
+      ) {
+        // Keep what came first: the new result goes, not the oldest (D184).
+        this.#deleteCachedResult(refusable);
+        continue;
+      }
       if (oldest.kind === 'result') {
         // A protected continuation may still be returned to the caller even
         // when its optional route-result cache entry must be dropped.
@@ -769,6 +794,15 @@ export class ImageRecognitionCoordinator {
         this.#deleteContinuation(oldest.key);
       }
     }
+  }
+
+  #overRetainedBudget(): boolean {
+    return this.#cache.size +
+          this.#continuations.size +
+          this.#providerEvidence.size +
+          this.#emptyConfirmations.size >
+        this.#maxCacheEntries ||
+      this.#cacheWeight + this.#providerEvidenceWeight > this.#maxCacheWeight;
   }
 
   #oldestRetainedRecognitionRecord(
@@ -866,7 +900,10 @@ export class ImageRecognitionCoordinator {
       recency: this.#nextRecency(),
     });
     this.#cacheWeight += weight;
-    this.#boundRetainedRecognitionMemory(result.continuation);
+    this.#boundRetainedRecognitionMemory(
+      result.continuation,
+      this.#keepFirstResults ? cacheKey : undefined,
+    );
   }
 
   #rememberProviderEvidence(
@@ -989,6 +1026,7 @@ export function createBrowserImageRecognitionCoordinator(
   resetEpoch: number,
   maxCacheWeight?: number,
   maxCacheEntries?: number,
+  keepFirstResults?: boolean,
 ): ImageRecognitionCoordinator {
   return new ImageRecognitionCoordinator({
     store,
@@ -996,6 +1034,7 @@ export function createBrowserImageRecognitionCoordinator(
     sendMessage: (message) => browser.runtime.sendMessage(message),
     ...(maxCacheWeight === undefined ? {} : { maxCacheWeight }),
     ...(maxCacheEntries === undefined ? {} : { maxCacheEntries }),
+    ...(keepFirstResults ? { keepFirstResults } : {}),
   });
 }
 

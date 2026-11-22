@@ -10,6 +10,7 @@ import {
   PDF_VIEWER_HELLO_TYPE,
   PDF_VIEWER_ORIGIN,
   createPdfViewerPortName,
+  pdfViewerPageZoom,
 } from '../lib/pdf/pdf-viewer-protocol';
 
 type Listener = Parameters<NonNullable<PdfViewerBridgeEnvironment['window']>['addEventListener']>[1];
@@ -27,6 +28,7 @@ function setup(options: {
   frame?: boolean;
   measureScrollbar?: () => number | undefined;
   devicePixelRatio?: () => number;
+  innerHeight?: () => number;
 } = {}) {
   const viewerWindow = { postMessage: vi.fn() };
   let frame = { contentWindow: viewerWindow };
@@ -49,6 +51,7 @@ function setup(options: {
     now: () => clock,
     measureScrollbar: options.measureScrollbar ?? (() => undefined),
     devicePixelRatio: options.devicePixelRatio ?? (() => Number.NaN),
+    ...(options.innerHeight ? { innerHeight: options.innerHeight } : {}),
     setInterval: (callback) => {
       const handle = { callback, cleared: false };
       intervals.push(handle);
@@ -245,6 +248,43 @@ describe('installPdfViewerBridge', () => {
     deliver(REPORT);
     expect(measureScrollbar).toHaveBeenCalledTimes(2);
     expect(port.sent[3]).toMatchObject({ scrollbar: 15.2, scale: 1.25 });
+  });
+
+  it('sends the scrollbar and the scale in the viewer\'s pixels under a default zoom (D184)', () => {
+    // Chrome for Testing 158 on a screen scaled by 1 (and 1.25 at 150%):
+    // the tab's height, scrollbar and scale at each default zoom, and the
+    // viewer's viewport, 757 px tall under its 56 px toolbar at every one.
+    // The viewer leaves 15 px (19 screen px at 1.25), whatever the zoom.
+    for (const [zoom, tab, measured, ratio, screen, scrollbar] of [
+      [0.5, 1626, 30, 0.5, 1, 15],
+      [0.8333, 979, 18.07, 0.8333, 1, 15],
+      [1, 813, 15, 1, 1, 15],
+      [1.2, 677, 12.5, 1.2, 1, 15],
+      [1.5, 542, 10, 1.5, 1, 15],
+      [1.5, 543, 10.13, 1.875, 1.25, 15.2],
+    ] as const) {
+      const { open, deliver } = setup({
+        measureScrollbar: () => measured,
+        devicePixelRatio: () => ratio,
+        innerHeight: () => tab,
+      });
+      const port = open();
+      deliver({ ...REPORT, viewportHeight: 757 });
+      const sent = port.sent[0] as { scrollbar: number; scale: number };
+      expect(Math.abs(sent.scrollbar - scrollbar), `${zoom}`).toBeLessThan(0.1);
+      expect(sent.scale, `${zoom}`).toBeCloseTo(screen, 2);
+    }
+    // Not told, or nothing Chrome zooms to: none.
+    for (const tab of [undefined, Number.NaN, 0, -5, Number.POSITIVE_INFINITY, 100, 9_000]) {
+      expect(pdfViewerPageZoom(757, tab), `${tab}`).toBe(1);
+    }
+    expect(pdfViewerPageZoom(0, 813)).toBe(1);
+    expect(pdfViewerPageZoom(757, 979)).toBeCloseTo(0.8304, 4);
+    // A hidden toolbar at 100%: the viewport is the tab's height.
+    const hidden = setup({ measureScrollbar: () => 15, devicePixelRatio: () => 1, innerHeight: () => 813 });
+    const port = hidden.open();
+    hidden.deliver({ ...REPORT, viewportHeight: 813 });
+    expect(port.sent[0]).toMatchObject({ scrollbar: 15, scale: 1 });
   });
 
   it('sends the screen\'s scale, and the report without it when it is not known (D134)', () => {

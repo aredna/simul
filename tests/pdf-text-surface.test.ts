@@ -442,6 +442,32 @@ describe('PdfTextSurface scanned pages', () => {
     });
   });
 
+  it('translates the pieces of a line cut around a stamp as one text, split across them (D184)', () => {
+    const { surface, shown, pages } = mounted();
+    const piece = (text: string, left: number, width: number, part: number): PdfTextBlock => {
+      const box = { left, top: 150, width, height: 12 };
+      return { ...block(text), lines: [box], box, flow: { id: 1, part } };
+    };
+    surface.setScannedPage(1, [
+      block('Après chaque incendie'),
+      piece('Les registres mentionnent', 50, 155, 0),
+      piece('1640 et', 330, 46, 1),
+    ], 'fra');
+    const sources = surface.snapshot()!.records.map((record) => record.source);
+    expect(sources).toEqual(['Texte', 'Après chaque incendie', 'Les registres mentionnent 1640 et']);
+    const [, first, second] = pages.get(1)!;
+    surface.beginProjection({ translationEpoch: 4, pairKey: 'fr>en' });
+    expect(surface.project(projection(surface, first!.id, 'Les registres mentionnent 1640 et', {
+      translated: 'The registers mention 1640 and',
+    }))).toBe(true);
+    expect(shown).toEqual([
+      [first!.id, 'The registers mention', 'en'],
+      [second!.id, '1640 and', 'en'],
+    ]);
+    // The second piece has no record of its own.
+    expect(surface.project(projection(surface, second!.id, '1640 et'))).toBe(false);
+  });
+
   it('reads pages again in another OCR model group, and not in the same one', () => {
     const { surface, pages } = mounted();
     surface.setScannedPage(1, [block('Lu en anglais')], 'eng');

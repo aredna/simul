@@ -24,6 +24,10 @@ const WIDE_EXACT = 1e-6;
 // A measured width this near half way between two whole px may be either
 // to Chrome.
 const WHOLE_UNSURE = 0.1;
+// Chrome 158 fits a PDF to width beside a scrollbar a pixel narrower than
+// the one the tab measures, and the PDF is then that many screen px of the
+// view less the tab's scrollbar, to within this (0.0001 recorded, D184).
+const FIT_NARROWER_EXACT = 0.01;
 // While the width is not told, a PDF within this (screen px) of the view
 // less the usual scrollbar may have one across or not.
 const UNTOLD_WIDE_MARGIN = 1;
@@ -1204,8 +1208,18 @@ export class PdfViewerTracker {
     const across = [full - scrollbar, full - scrollbar + 1];
     // Chrome's own whole number for the scrollbar: the nearest, or either
     // when the width measured is about half way between two.
-    if (wider(Math.round(scrollbar + WHOLE_UNSURE)) <= WIDE_EXACT) return [full];
-    if (wider(Math.round(scrollbar - WHOLE_UNSURE)) > WIDE_EXACT) return across;
+    const low = Math.round(scrollbar - WHOLE_UNSURE);
+    const high = Math.round(scrollbar + WHOLE_UNSURE);
+    if (wider(high) <= WIDE_EXACT) return [full];
+    // Chrome 158 fits a PDF to width beside a scrollbar a pixel narrower:
+    // 965 px of PDF in a view of 979 where the tab measures 15, at default
+    // zooms of 120% to 200% (D184). It has none across, and taking both
+    // bottoms there read a wheel step at 150% as a PageUp.
+    if (Math.abs(wider(low - 1)) <= FIT_NARROWER_EXACT) return [full];
+    if (Math.abs(wider(high - 1)) <= FIT_NARROWER_EXACT) return [full];
+    // A PDF up to a pixel wider than the view less the scrollbar has none
+    // on Chrome 158 and one on Chrome 154 (D184).
+    if (wider(low - 1) > WIDE_EXACT) return across;
     return [full, ...across];
   }
 

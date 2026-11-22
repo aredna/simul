@@ -2030,6 +2030,8 @@ async function pdfRecognizer(): Promise<ImageRecognitionCoordinator> {
       state.preferences.resetRevision,
       PDF_RECOGNITION_CACHE_WEIGHT,
       PDF_RECOGNITION_CACHE_ENTRIES,
+      // A scan longer than the cache keeps its first pages (D184).
+      true,
     );
   }
   recognition.advanceResetEpoch(state.preferences.resetRevision);

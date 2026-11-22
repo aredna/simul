@@ -11,7 +11,7 @@ import type {
   ReplicaTranslationSnapshot,
 } from '../translation/replica-translation-coordinator';
 import { canonicalizeLanguageTag } from '../translation-provider';
-import type { PdfTextBlock } from './text-blocks';
+import { joinLines, splitAcrossPieces, type PdfTextBlock } from './text-blocks';
 
 /** A text block with the id its translation record carries. */
 export interface PdfSurfaceBlock extends PdfTextBlock {
@@ -65,6 +65,11 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
   #pageCount = 0;
   #pages: (readonly PdfSurfaceBlock[] | undefined)[] = [];
   readonly #records = new Map<number, ReplicaSourceDomTextRecord>();
+  /**
+   * The pieces of one OCR line cut around typed text, by the id of the
+   * first, whose record holds their text as one (D184).
+   */
+  readonly #flows = new Map<number, readonly PdfSurfaceBlock[]>();
   #nextId = 1;
   #snapshot: ReplicaTranslationSnapshot | undefined;
   #textComplete = false;
@@ -365,11 +370,21 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
       // An empty translation would only cover the text with nothing.
       projection.translated.trim().length === 0
     ) return false;
-    this.#sink.showTranslation(
-      projection.nodeId,
-      projection.translated,
-      targetLanguage(projection.pairKey),
-    );
+    const language = targetLanguage(projection.pairKey);
+    const pieces = this.#flows.get(projection.nodeId);
+    if (pieces) {
+      // Across the pieces, in reading order, by the room each has (D184).
+      const parts = splitAcrossPieces(
+        projection.translated,
+        pieces.map((piece) => piece.box.width),
+      );
+      pieces.forEach((piece, index) => {
+        const part = parts[index] ?? '';
+        if (part.trim().length > 0) this.#sink.showTranslation(piece.id, part, language);
+      });
+      return true;
+    }
+    this.#sink.showTranslation(projection.nodeId, projection.translated, language);
     return true;
   }
 
@@ -405,18 +420,39 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     if (!document) return;
     const keptIds = new Set(kept.map((block) => block.id));
     for (const block of this.#pages[index] ?? []) {
-      if (!keptIds.has(block.id)) this.#records.delete(block.id);
+      if (keptIds.has(block.id)) continue;
+      this.#records.delete(block.id);
+      this.#flows.delete(block.id);
     }
     const placed = blocks.map((block): PdfSurfaceBlock => ({ ...block, id: this.#nextId++ }));
     this.#pages[index] = mergeByHeight(kept, placed);
+    // A line's pieces are one record, on the first of them (D184).
+    const flows = new Map<number, PdfSurfaceBlock[]>();
+    for (const block of placed) {
+      if (!block.flow || block.text.trim().length === 0) continue;
+      const pieces = flows.get(block.flow.id) ?? [];
+      pieces.push(block);
+      flows.set(block.flow.id, pieces);
+    }
+    const sources = new Map<number, string>();
+    const inFlow = new Set<number>();
+    for (const pieces of flows.values()) {
+      if (pieces.length < 2) continue;
+      pieces.sort((a, b) => a.flow!.part - b.flow!.part);
+      const first = pieces[0]!;
+      this.#flows.set(first.id, pieces);
+      sources.set(first.id, pieces.reduce((text, piece) => joinLines(text, piece.text), ''));
+      for (const piece of pieces) inFlow.add(piece.id);
+    }
     for (const block of placed) {
       if (block.text.trim().length === 0) continue;
+      if (inFlow.has(block.id) && !sources.has(block.id)) continue;
       this.#records.set(block.id, {
         document,
         nodeId: block.id,
         nodeType: 3,
         revision: 1,
-        source: block.text,
+        source: sources.get(block.id) ?? block.text,
       });
     }
     this.#snapshot = undefined;
@@ -441,6 +477,7 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     this.#pageCount = 0;
     this.#pages = [];
     this.#records.clear();
+    this.#flows.clear();
     this.#snapshot = undefined;
     this.#textComplete = false;
     this.#readingPage = 0;

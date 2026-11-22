@@ -104,6 +104,36 @@ export function readPdfViewerScale(value: unknown): number | undefined {
     : undefined;
 }
 
+// Chrome's PDF toolbar above the viewer's viewport, in the viewer's CSS px.
+const VIEWER_TOOLBAR_HEIGHT = 56;
+// A ratio this near 1 is no zoom.
+const NO_ZOOM = 0.01;
+// Chrome's zooms run from 25% to 500%.
+const MIN_PAGE_ZOOM = 0.25;
+const MAX_PAGE_ZOOM = 5;
+
+/**
+ * The default zoom of Chrome's settings on the tab's own document, which
+ * Chrome does not apply to the viewer's frame (D184): the viewer's CSS px
+ * per the tab's. The viewer fills the tab, its toolbar 56 px above the
+ * viewport it reports, so the ratio of the two heights tells it; a viewport
+ * as tall as the tab is a hidden toolbar (`#toolbar=0`) at 100%. 1 when it
+ * cannot be told. The tab's `devicePixelRatio` and the scrollbar it measures
+ * carry that zoom (a scrollbar of 18 px at 83%, where the viewer leaves 14).
+ * A hidden toolbar under another default zoom reads 56 px of the tab high:
+ * 83% reads as 89%, and the scrollbar a pixel too wide.
+ */
+export function pdfViewerPageZoom(viewportHeight: number, tabHeight: number | undefined): number {
+  if (
+    !(typeof tabHeight === 'number' && tabHeight > 0 && Number.isFinite(tabHeight)) ||
+    !(viewportHeight > 0)
+  ) return 1;
+  if (Math.abs(viewportHeight / tabHeight - 1) < NO_ZOOM) return 1;
+  const zoom = (viewportHeight + VIEWER_TOOLBAR_HEIGHT) / tabHeight;
+  if (Math.abs(zoom - 1) < NO_ZOOM) return 1;
+  return zoom >= MIN_PAGE_ZOOM && zoom <= MAX_PAGE_ZOOM ? zoom : 1;
+}
+
 /** A scrollbar's width in CSS pixels, or `undefined` when it is not one. */
 export function readPdfViewerScrollbar(value: unknown): number | undefined {
   return typeof value === 'number' && value >= 0 && value <= PDF_VIEWER_MAX_SCROLLBAR

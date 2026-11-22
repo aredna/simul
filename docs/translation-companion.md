@@ -992,19 +992,29 @@ shell and the mirror has nothing to copy (D103).
     The recognition cache counts words as it counts regions, so the PDF's
     cache has a weight budget of its own (`PDF_RECOGNITION_CACHE_WEIGHT`,
     10,000,000, the most the cache takes) and its own limit of entries
-    (`PDF_RECOGNITION_CACHE_ENTRIES`, 1,024): a PDF one page longer than
-    the cache holds is read again in full on Refresh, because pages are
-    read in order and the oldest is dropped. Under the default budget of
+    (`PDF_RECOGNITION_CACHE_ENTRIES`, 1,024). Under the default budget of
     1,000,000 that was 38 dense pages, and under the default limit of 128
     entries 128 pages of any kind (D134: a scan of 140 pages was read
     again in full). The PDF's cache holds about 380 dense pages, and a
-    page stays in it for 15 minutes, like any recognition.
+    page stays in it for 15 minutes, like any recognition. A full PDF
+    cache keeps the pages it has and does not keep the next
+    (`keepFirstResults`, D184): pages are read in order, and dropping the
+    oldest for each new one read a PDF one page longer than the cache
+    again in full on Refresh; now only the pages over the budget are read
+    again. The image cache of web pages still drops the oldest.
     `pdfOcrBlocks` cuts the words that typed line boxes half cover out of a
     line and keeps each run of the remaining words as a piece: the text
     between them as OCR wrote it, the line's own height, the span of its
     words. A piece is a block of its own; it joins neither the line above
     nor the line below, because a block is drawn as one box and that box
-    would lie over the typed text. A line whose words are all covered is
+    would lie over the typed text. The pieces of one line carry a `flow`
+    (an id and their order, D184): the surface makes them one record, the
+    pieces' text joined, so the translator gets the line as one text, and
+    splits the translation across them in reading order
+    (`splitAcrossPieces`): each takes the share of the words its width
+    has of all the pieces', at word boundaries (characters where the text
+    has no spaces). Each piece's font then shrinks to fit as any block's
+    does. A line's flow does not continue onto the line below. A line whose words are all covered is
     left out, and so is a piece with no letter or digit (a dash between
     typed words). Beside a line that is mostly typed text (which D111 left
     out whole), a piece of a single letter or digit is left out too: it is
@@ -1244,10 +1254,21 @@ shell and the mirror has nothing to copy (D103).
         (End at zooms of 125% to 300%), so with a scrollbar across both
         that bottom and the one a pixel lower are looked for (D177).
       - Under a default zoom other than 100% (Chrome's settings) the tab
-        measures its scrollbar in its own zoomed pixels (18 px at 83%,
-        12.5 at 120%) while the viewer, which that zoom does not scale,
-        leaves 14; at 83% End on a PDF wider than the view is missed
-        (D177, an open item).
+        measures its scrollbar and its `devicePixelRatio` in its own zoomed
+        pixels (18 px at 83%, 12.5 at 120%), while the viewer, which that
+        zoom does not scale, leaves 14. The viewer fills the tab, 757 px
+        under its 56 px toolbar at every zoom, so the bridge takes the zoom
+        as the viewer's height (viewport and toolbar) over the tab's
+        `innerHeight`, and sends the scrollbar times it and the scale over
+        it (`pdfViewerPageZoom`, D184). A viewport as tall as the tab is a
+        hidden toolbar at 100%; under another zoom a hidden toolbar reads
+        a little high.
+      - Chrome 158 also fits a PDF to width beside a scrollbar a pixel
+        narrower than the tab's (965 px of PDF in a view of 979 beside 15),
+        which a default zoom of 120% or more opens a wide PDF in. A PDF
+        that is exactly that wide has no scrollbar across. One up to a
+        pixel wider otherwise has none on Chrome 158 and one on Chrome 154,
+        so both bottoms are looked for (D184).
       - Every bottom looked for, and every pixel allowed around it, is a
         place in each page where a movement that stops there reads as End.
         Far zoomed out, where each turn of the wheel is a held movement,
@@ -1346,8 +1367,13 @@ shell and the mirror has nothing to copy (D103).
       within half a page, so a longer step, or a frame of an animated
       movement that went whole pages, could be any length; the frames of
       Home, End, a fling or a drag come less than 25 ms apart or differ in
-      length. A lone report at a page key's step from the place before that
-      also fits the top or the bottom of the PDF is a doubt (D177): Home or
+      length. A scrollbar drag at an even speed, each frame whole pages
+      long, sent its frames 33 ms apart in Chrome for Testing 158 at every
+      CPU slowdown tried (none, 4 and 8 times), and none passed for steps
+      (D184): the scrollbar's whole pixels make its frames 2 to 3 px
+      unequal, and the first frame after the grab is of another length.
+      A lone report at a page key's step from the place before that also
+      fits the top or the bottom of the PDF is a doubt (D177): Home or
       End with no animation send one report, which can land there. That is
       on purpose: scrolling within a page leaves a number typed into the
       page box and not entered where it is, and a look would read it; a
@@ -1604,6 +1630,14 @@ guess, silently. Capture the toolbar after jumps at device scales 1 and 2,
 right to left, and in forced colours light and dark, and read every strip as
 the panel does: each must name the page jumped to (72 of 72 on Chrome for
 Testing 158).
+
+On each new Chrome version, before a release, check the language facts the
+mirror leans on (D183): the accessibility tree reads a translated element's
+plain `lang` while drawing follows the page's language kept in `xml:lang`
+(D124), and the root's computed `-webkit-locale` follows the document's
+content language (D137). If Chrome read the other one for its tree,
+translations would be announced in the page's language again, silently. All
+five readings must be right (5 of 5 on Chrome for Testing 158).
 
 Run `npm run artifact:check` and confirm the ready-to-load artifact remains
 under the 42 MiB unpacked limit, contains the pinned Tesseract catalog, the

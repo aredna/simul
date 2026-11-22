@@ -2,6 +2,7 @@ import {
   PDF_VIEWER_HELLO_TYPE,
   PDF_VIEWER_ORIGIN,
   isPdfViewerPortName,
+  pdfViewerPageZoom,
   readPdfViewerScale,
   readPdfViewerScrollbar,
   readPdfViewerViewport,
@@ -57,6 +58,8 @@ export interface PdfViewerBridgeEnvironment {
   readonly measureScrollbar?: () => number | undefined;
   /** The screen's pixels per CSS pixel: a scrollbar's width changes with it. */
   readonly devicePixelRatio?: () => number;
+  /** The tab's height in its CSS pixels, which tells a default zoom (D184). */
+  readonly innerHeight?: () => number;
   readonly setInterval?: (callback: () => void, ms: number) => unknown;
   readonly clearInterval?: (handle: unknown) => void;
 }
@@ -94,6 +97,8 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
   const measureScrollbar = environment.measureScrollbar ?? measureDocumentScrollbar;
   const devicePixelRatio = environment.devicePixelRatio ??
     (() => (globalThis as { devicePixelRatio?: number }).devicePixelRatio ?? 1);
+  const innerHeight = environment.innerHeight ??
+    (() => (globalThis as { innerHeight?: number }).innerHeight ?? Number.NaN);
   const startTimer = environment.setInterval ??
     ((callback: () => void, ms: number) => setInterval(callback, ms));
   const stopTimer = environment.clearInterval ??
@@ -218,7 +223,20 @@ export function installPdfViewerBridge(environment: PdfViewerBridgeEnvironment =
       if (!viewport) return;
       answeredWindow = event.source;
       lastHeardAt = now();
-      const { width, scale } = screen();
+      const measured = screen();
+      // In the viewer's own pixels: a default zoom scales the tab's (D184).
+      let zoom = 1;
+      try {
+        zoom = pdfViewerPageZoom(viewport.viewportHeight, innerHeight());
+      } catch {
+        zoom = 1;
+      }
+      const width = measured.width === undefined
+        ? undefined
+        : readPdfViewerScrollbar(measured.width * zoom);
+      const scale = measured.scale === undefined
+        ? undefined
+        : readPdfViewerScale(measured.scale / zoom);
       try {
         port.postMessage({
           kind: 'viewport',
