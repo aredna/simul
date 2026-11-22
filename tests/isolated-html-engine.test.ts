@@ -274,6 +274,51 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(blockerCss).toContain('mask-image:none!important');
   });
 
+  it('writes the name of what the reader left out on the place it holds (D208)', async () => {
+    const standard = makeCheckpoint('page', 0);
+    const placeholder = (id: number, leftOutTagName?: string): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html',
+      tagName: sourceSecretPlaceholderTagName(id),
+      attributes: [], children: [], opaquePlaceholder: true,
+      ...(leftOutTagName ? { leftOutTagName } : {}),
+    } as HtmlMirrorNode);
+    const checkpoint = createHtmlMirrorCheckpoint(standard.identity, {
+      ...standard.payload,
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+          { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+          { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+            placeholder(5, 'script'),
+            { kind: 'element', id: 6, namespace: 'html', tagName: 'p', attributes: [['id', 'after']], children: [] },
+            placeholder(7),
+          ] },
+        ],
+      },
+    })!;
+    expect(checkpoint).toBeDefined();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(new FakeHtmlStream(checkpoint), host);
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const body = host.iframe!.contentDocument!.body;
+    const [script, , secret] = [...body.children];
+    expect(script!.getAttribute('data-simul-left-out')).toBe('script');
+    expect(script!.getAttribute('aria-hidden')).toBe('true');
+    // A place held for a secret says nothing of what it was.
+    expect(secret!.hasAttribute('data-simul-left-out')).toBe(false);
+    // Only a name of the list is taken.
+    expect(createHtmlMirrorCheckpoint(standard.identity, {
+      ...standard.payload,
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+          { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+          { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+            placeholder(5, 'input'),
+          ] },
+        ],
+      },
+    })).toBeUndefined();
+  });
+
   it('stages a doctype-free shell for a bounded quirks-mode checkpoint', async () => {
     const standard = makeCheckpoint('standards page', 0);
     const checkpoint = createHtmlMirrorCheckpoint(standard.identity, {

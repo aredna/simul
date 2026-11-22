@@ -355,6 +355,21 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       expect(read('.field:has(select){x:1}')).toBe(`.field:has(${STAND_IN}){x:1}`);
       expect(read('div>select~p{x:1}')).toBe(`div>${STAND_IN}~p{x:1}`);
     });
+    it('names the places held for what the reader leaves out (D208)', () => {
+      expect(read('script + p{x:1}'))
+        .toBe(':is(script,:where([data-simul-left-out="script"])) + p{x:1}');
+      expect(read('a{}iframe~p{x:1}'))
+        .toBe('a{}:is(iframe,:where([data-simul-left-out="iframe"]))~p{x:1}');
+      expect(read(':not(template){x:1}'))
+        .toBe(':not(:is(template,:where([data-simul-left-out="template"]))){x:1}');
+      expect(read('.a:has(> NOSCRIPT){x:1}'))
+        .toBe('.a:has(> :is(NOSCRIPT,:where([data-simul-left-out="noscript"]))){x:1}');
+    });
+    it('writes the bounds of an `@scope` too (D208)', () => {
+      expect(read('@scope (.card:last-child) to (select){p{x:1}}')).toBe(
+        `@scope (.card:nth-last-child(1 of ${NOT_LABEL})) to (${STAND_IN}){p{x:1}}`,
+      );
+    });
     it('writes nothing that is no selector', () => {
       for (const css of [
         '.select,#select,[name=select],select-box,x|select{x:1}',
@@ -362,13 +377,17 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
         '@keyframes select{from{x:1}}',
         '.a{animation-name:select}',
         '@supports selector(:last-child){p{x:1}}',
+        '@supports selector(script + p){p{x:1}}',
+        '.script,[type=script],x-script,svg|script{x:1}',
+        '.a{animation:script 1s}',
         '@page :first{margin:0}',
       ]) expect(read(css), css).toBe(css);
     });
     it('reads what it wrote the same when the panel reads it again', () => {
       for (const css of [
         'a > :last-child{x:1}', 'li:only-child{x:1}', 'select + .hint{x:1}',
-        ':is(select){x:1}', 'li:nth-last-child(2n+1){x:1}',
+        ':is(select){x:1}', 'li:nth-last-child(2n+1){x:1}', 'script+p{x:1}',
+        '@scope (select) to (li:last-child){p{x:1}}',
       ]) {
         const once = read(css)!;
         expect(read(once), css).toBe(once);
@@ -657,9 +676,24 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
     expect(elements[0]).toMatchObject({ opaquePlaceholder: true, attributes: [], children: [] });
     expect(elements[0]!.tagName).toMatch(/^simul-/u);
     expect(elements[2]).toMatchObject({ opaquePlaceholder: true });
+    // Each carries the name of what it holds the place of (D208).
+    expect(elements[0]!.leftOutTagName).toBe('script');
+    expect(elements[2]!.leftOutTagName).toBe('template');
     const framed = graphElementBySourceId(graph, 'framed')!;
     expect(framed.children.filter((child) =>
-      child.kind === 'element' && child.opaquePlaceholder)).toHaveLength(5);
+      child.kind === 'element' && child.opaquePlaceholder)
+      .map((child) => (child as HtmlMirrorElementNode).leftOutTagName))
+      .toEqual(['iframe', 'object', 'embed', 'audio', 'noscript']);
+    // Only on a placeholder, and only a name of the list.
+    const held = elements[0]!;
+    for (const forged of [
+      { ...held, leftOutTagName: 'input' },
+      { ...held, leftOutTagName: 7 },
+      { kind: 'element', id: 99_990, namespace: 'html', tagName: 'p', attributes: [], children: [], leftOutTagName: 'script' },
+    ]) {
+      expect(readHtmlMirrorNode(forged, new Set(), 0, undefined, false,
+        false, false, false, false, 'passive'), JSON.stringify(forged)).toBeUndefined();
+    }
     expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
       false, false, false, false, 'passive')).toBeDefined();
   });

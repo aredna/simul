@@ -35,7 +35,9 @@ import {
   PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE,
   PAGE_XML_LANGUAGE_ATTRIBUTE,
   createHtmlMirrorShellLedger,
+  HTML_MIRROR_LEFT_OUT_ATTRIBUTE,
   hasPrivateHtmlMirrorAttribute,
+  isHtmlMirrorLeftOutTagName,
   isAutonomousCustomElementName,
   readHtmlMirrorDocumentContent,
   isTransportableStyleSheetText,
@@ -2309,9 +2311,17 @@ function buildNode(
       !isSourceSecretPlaceholderTagName(input.tagName, input.id) ||
       input.attributes.length !== 0 ||
       input.children.length !== 0 ||
-      input.shadowRoot
+      input.shadowRoot ||
+      (input.leftOutTagName !== undefined &&
+        !isHtmlMirrorLeftOutTagName(input.leftOutTagName))
     ) throw new Error('Non-canonical secret placeholder rejected.');
     protectIsolatedOpaquePlaceholder(node);
+    // The place held for an element the reader leaves out carries its name,
+    // for the page's type selectors (`script + p`), as the sheets are
+    // written to read it (D208).
+    if (input.leftOutTagName !== undefined) {
+      sourceCall(node, 'setAttribute', HTML_MIRROR_LEFT_OUT_ATTRIBUTE, input.leftOutTagName);
+    }
     nodes.set(input.id, node);
     return node;
   }

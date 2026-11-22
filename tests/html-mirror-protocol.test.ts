@@ -2922,7 +2922,9 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
 
     expect(graph?.root.tagName).toBe('html');
-    expect(JSON.stringify(graph)).not.toContain('script');
+    // Only the place a script held, by name (D208), and no script.
+    expect(JSON.stringify(graph).replaceAll('"leftOutTagName":"script"', ''))
+      .not.toContain('script');
     expect(JSON.stringify(graph)).not.toContain('onclick');
     expect(JSON.stringify(graph)).not.toContain('secret');
     expect(JSON.stringify(graph)).toContain('public button');

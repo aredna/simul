@@ -4,6 +4,7 @@ import {
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
+  sourceProperty,
 } from './source-node-accessors';
 import {
   MAX_SOURCE_SELECTED_OPTION_INDEXES,
@@ -99,6 +100,14 @@ export class HtmlMirrorCapacityError extends Error {
 
 export type HtmlMirrorNamespace = 'html' | 'svg' | 'mathml';
 
+/** The elements the mirror holds a place for where the reader leaves them out. */
+export const HTML_MIRROR_LEFT_OUT_TAG_NAMES = Object.freeze([
+  'audio', 'embed', 'iframe', 'noscript', 'object', 'script', 'template',
+] as const);
+export type HtmlMirrorLeftOutTagName = typeof HTML_MIRROR_LEFT_OUT_TAG_NAMES[number];
+/** The attribute the mirror writes a left-out element's name in (D208). */
+export const HTML_MIRROR_LEFT_OUT_ATTRIBUTE = 'data-simul-left-out';
+
 export interface HtmlMirrorElementNode {
   readonly kind: 'element';
   readonly id: number;
@@ -121,6 +130,13 @@ export interface HtmlMirrorElementNode {
   readonly shadowRoot?: HtmlMirrorShadowRoot;
   /** Canonical extension-owned shell replacing one hard-secret source root. */
   readonly opaquePlaceholder?: true;
+  /**
+   * On an opaque placeholder for an element the reader leaves out (D181):
+   * the element's own name, which the mirror writes on it as
+   * `data-simul-left-out` for the page's type selectors (D208). Never on a
+   * placeholder for a secret.
+   */
+  readonly leftOutTagName?: HtmlMirrorLeftOutTagName;
   /**
    * The element's children (and its root's, which then says so too) come
    * in a part of the same checkpoint (D163): a read in slices stopped here.
@@ -1894,7 +1910,7 @@ export function readHtmlMirrorNode(
       'selectPickerOpen', 'selectPresentationStyle', 'controlText',
       'canvasBackgroundColor', 'resolvedStyleSheetText',
       'customElementDefined', 'assignedNodeIds', 'shadowRoot',
-      'opaquePlaceholder', 'childrenFollow', 'placeholder',
+      'opaquePlaceholder', 'leftOutTagName', 'childrenFollow', 'placeholder',
     ]) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
@@ -1905,7 +1921,10 @@ export function readHtmlMirrorNode(
     !Array.isArray(input.children)
   ) return undefined;
   const opaquePlaceholder = input.opaquePlaceholder === true;
+  const leftOutTagName = input.leftOutTagName;
   if (
+    (leftOutTagName !== undefined &&
+      (!opaquePlaceholder || !isHtmlMirrorLeftOutTagName(leftOutTagName))) ||
     (input.opaquePlaceholder !== undefined && !opaquePlaceholder) ||
     (opaquePlaceholder
       ? (
@@ -2281,6 +2300,7 @@ export function readHtmlMirrorNode(
       : {}),
     ...(shadowRoot ? { shadowRoot } : {}),
     ...(opaquePlaceholder ? { opaquePlaceholder: true as const } : {}),
+    ...(isHtmlMirrorLeftOutTagName(leftOutTagName) ? { leftOutTagName } : {}),
     ...(childrenFollow ? { childrenFollow: true as const } : {}),
     ...(placeholder ? { placeholder } : {}),
   });
@@ -2604,9 +2624,9 @@ function serializeNode(
         : 'executionRiskBlockCount',
     );
     if (
-      LEFT_OUT_PLACEHOLDER_TAGS.has(tagName) &&
+      isHtmlMirrorLeftOutTagName(tagName) &&
       liveElement.namespaceURI === 'http://www.w3.org/1999/xhtml'
-    ) return serializeLeftOutPlaceholder(id, context);
+    ) return serializeLeftOutPlaceholder(id, context, tagName);
     return undefined;
   }
   const namespace = readNamespace(liveElement.namespaceURI);
@@ -3279,18 +3299,30 @@ function readSourceReadUnit(
   let read = 0;
   // Where a run may stop: after one child at least, once the slice is out.
   const stops = (): boolean => read > 0 && cut.expired?.() === true;
-  /** The list from the run's own place in it; undefined when that is lost. */
+  /**
+   * The list from the run's own place in it; undefined when that is lost.
+   * A list of the holder's own children is walked on from the cursor, a
+   * child of the holder still, by its next siblings (D209): copied and
+   * searched at every run, a list of 131,000 children cost 20 ms a slice
+   * on Chrome 154. A dropdown's entries are a list of their own.
+   */
   const listFrom = (
+    holder: Node,
     list: Iterable<Node>,
     cursor: Node | undefined,
-  ): readonly Node[] | undefined => {
-    const nodes = Array.from(list);
-    if (!cursor) return nodes;
-    const at = nodes.indexOf(cursor);
-    return at < 0 ? undefined : nodes.slice(at);
+  ): Iterable<Node> | undefined => {
+    if (Array.isArray(list)) {
+      if (!cursor) return list;
+      const at = list.indexOf(cursor);
+      return at < 0 ? undefined : list.slice(at);
+    }
+    if (!cursor) return sourceChildrenFrom(sourceProperty(holder, 'firstChild'));
+    return sourceProperty(cursor, 'parentNode') === holder
+      ? sourceChildrenFrom(cursor)
+      : undefined;
   };
   if (unit.phase === 'light') {
-    const nodes = listFrom(sourceStructuralChildNodes(element), unit.cursor);
+    const nodes = listFrom(element, sourceStructuralChildNodes(element), unit.cursor);
     if (!nodes) return 'restart';
     const children: HtmlMirrorNode[] = [];
     for (const liveChild of nodes) {
@@ -3348,7 +3380,11 @@ function readSourceReadUnit(
   }
   const shadow = unit.shadow!;
   const shadowId = unit.shadowId!;
-  const nodes = listFrom(shadow.childNodes, unit.phase === 'shadow' ? unit.cursor : undefined);
+  const nodes = listFrom(
+    shadow,
+    shadow.childNodes,
+    unit.phase === 'shadow' ? unit.cursor : undefined,
+  );
   if (!nodes) return 'restart';
   const shadowChildren: HtmlMirrorNode[] = [];
   for (const childNode of nodes) {
@@ -3374,6 +3410,11 @@ function readSourceReadUnit(
     children: Object.freeze(shadowChildren),
   }));
   return { fills, elements };
+}
+
+/** A node and the siblings after it, each read as the list is then (D209). */
+function* sourceChildrenFrom(first: Node | null): Generator<Node, void, undefined> {
+  for (let node = first; node; node = sourceProperty(node, 'nextSibling')) yield node;
 }
 
 /**
@@ -5369,9 +5410,19 @@ function rewriteAlertRoleSelectors(css: string): string {
 /** The mark of the label Simul adds to an image-replaced link or list item. */
 const PAINTED_LABEL_OVERLAY_SELECTOR =
   ':where(:not([data-simul-painted-semantic-label-overlay]))';
-/** The mark of the element the mirror stands in a dropdown's place with. */
-const SELECT_STAND_IN_SELECTOR =
-  ':is(select,:where([data-simul-owned-select-host]))';
+/**
+ * What else each type selector names in the mirror: the element that stands
+ * in a dropdown's place, and the places held for what the reader leaves out.
+ */
+const TYPE_STAND_IN_SELECTORS: ReadonlyMap<string, string> = new Map([
+  ['select', ':where([data-simul-owned-select-host])'],
+  ...HTML_MIRROR_LEFT_OUT_TAG_NAMES.map((name) => [
+    name,
+    `:where([${HTML_MIRROR_LEFT_OUT_ATTRIBUTE}="${name}"])`,
+  ] as const),
+]);
+const NAMES_STAND_IN_SELECTOR =
+  /last-child|only-child|select|script|template|iframe|noscript|object|embed|audio/iu;
 /** Functions whose arguments are selectors. */
 const CSS_SELECTOR_FUNCTIONS = new Set([
   'has', 'host', 'host-context', 'is', 'matches', 'not', 'slotted', 'where',
@@ -5384,19 +5435,24 @@ const CSS_SELECTOR_FUNCTIONS = new Set([
  *
  * - the label Simul appends to an image-replaced link or list item (D178)
  *   is no child to `:last-child`, `:only-child` or `:nth-last-child()`
- *   (`:last-child` is written `:nth-last-child(1 of :where(:not([…])))`);
+ *   (`:last-child` is written `:nth-last-child(1 of :where(:not([…])))`),
+ *   and it is a `bdi`, so the `-of-type` counts of the page's own types are
+ *   as in the tab (D208);
  * - the type selector `select` also names the element that stands in for a
- *   dropdown (D62), so `select + .hint` and `.field:has(select)` match.
+ *   dropdown (D62), so `select + .hint` and `.field:has(select)` match;
+ * - `script`, `iframe` and the other elements the reader leaves out also
+ *   name the place the mirror holds for each (D181), which carries the
+ *   name in `data-simul-left-out` (D208), so `script + p` matches.
  *
- * Only selectors are written so: a style rule's prelude and the selector
- * arguments in it, never an at-rule's prelude, a declaration or an
- * attribute selector. Written once: the text it writes reads the same when
- * the panel reads it again. Left as they were: `:last-of-type` and the like
- * (the label is a `span`), and type selectors on what the reader holds a
- * place for (`script + p`): that place is an element with no attribute.
+ * Only selectors are written so: a style rule's prelude, an `@scope`'s
+ * bounds and the selector arguments in them, never another at-rule's
+ * prelude (`@supports selector()` asks whether a selector is understood,
+ * which the written one is as well), a declaration or an attribute
+ * selector. Written once: the text it writes reads the same when the panel
+ * reads it again.
  */
 function rewriteStandInSelectors(css: string): string {
-  if (!/last-child|only-child|select/iu.test(css)) return css;
+  if (!NAMES_STAND_IN_SELECTOR.test(css)) return css;
   const { tokens } = tokenizeCssForBadStrings(css);
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const text = (index: number): string => {
@@ -5415,11 +5471,13 @@ function rewriteStandInSelectors(css: string): string {
     }
     return index;
   };
-  const rewritePrelude = (from: number, to: number): void => {
-    // For each open block: whether selectors stand in it.
+  const rewritePrelude = (from: number, to: number, scope = false): void => {
+    // For each open block: whether selectors stand in it. In an `@scope`
+    // prelude they stand in its bare parentheses only.
     const selectorBlocks: boolean[] = [];
-    const inSelector = () =>
-      selectorBlocks.length === 0 || selectorBlocks[selectorBlocks.length - 1]!;
+    const inSelector = () => selectorBlocks.length === 0
+      ? !scope
+      : selectorBlocks[selectorBlocks.length - 1]!;
     for (let index = from; index < to; index += 1) {
       const token = tokens[index]!;
       if (token.kind === 'open') {
@@ -5428,8 +5486,9 @@ function rewriteStandInSelectors(css: string): string {
           ? text(index - 1).toLowerCase()
           : '';
         const colon = tokens[index - 2]?.kind === 'colon';
-        const selectors = token.closer === ')' && colon &&
-          CSS_SELECTOR_FUNCTIONS.has(named) && inSelector();
+        const selectors = (token.closer === ')' && colon &&
+          CSS_SELECTOR_FUNCTIONS.has(named) && inSelector()) ||
+          (scope && selectorBlocks.length === 0 && token.closer === ')' && !named);
         if (
           token.closer === ')' && colon && named === 'nth-last-child' && inSelector()
         ) {
@@ -5474,17 +5533,22 @@ function rewriteStandInSelectors(css: string): string {
           end: token.end,
           text: `:where(:first-child):nth-last-child(1 of ${PAINTED_LABEL_OVERLAY_SELECTOR})`,
         });
-      } else if (name === 'select' && !followedByCall) {
+      } else if (TYPE_STAND_IN_SELECTORS.has(name) && !followedByCall) {
+        const standIn = TYPE_STAND_IN_SELECTORS.get(name)!;
         const previous = before ? text(index - 1) : '';
-        const typePosition = !before || before.kind === 'space' ||
+        const typePosition = index === from || !before || before.kind === 'space' ||
           before.kind === 'comma' || (before.kind === 'open' && before.closer === ')') ||
           previous === '>' || previous === '+' || previous === '~';
         const next = text(index + 1);
         // Written already: the first argument of the `:is(` this writes.
         const written = before?.kind === 'open' && text(index - 2).toLowerCase() === 'is' &&
-          css.startsWith(SELECT_STAND_IN_SELECTOR.slice(10), token.end);
+          css.startsWith(`,${standIn})`, token.end);
         if (typePosition && next !== '|' && !written) {
-          edits.push({ start: token.start, end: token.end, text: SELECT_STAND_IN_SELECTOR });
+          edits.push({
+            start: token.start,
+            end: token.end,
+            text: `:is(${css.slice(token.start, token.end)},${standIn})`,
+          });
         }
       }
     }
@@ -5530,6 +5594,7 @@ function rewriteStandInSelectors(css: string): string {
       const close = blockEnd(preludeEnd);
       const atName = atRule ? text(start).slice(1).toLowerCase() : '';
       if (!atRule) rewritePrelude(start, preludeEnd);
+      else if (atName === 'scope') rewritePrelude(start + 1, preludeEnd, true);
       // Keyframe selectors and declarations are not selectors.
       if (atName !== 'keyframes' && atName !== '-webkit-keyframes' &&
         !(atRule && !CSS_RULE_LIST_AT_RULES.has(atName))) {
@@ -8068,19 +8133,20 @@ function isUnsafeSourceElement(
  * whole, a script or an iframe made `:first-child`, `:empty`, `:nth-child`
  * and sibling rules count otherwise than in the tab.
  */
-const LEFT_OUT_PLACEHOLDER_TAGS = new Set([
-  'audio',
-  'embed',
-  'iframe',
-  'noscript',
-  'object',
-  'script',
-  'template',
-]);
+const LEFT_OUT_PLACEHOLDER_TAGS: ReadonlySet<string> = new Set<HtmlMirrorLeftOutTagName>(
+  HTML_MIRROR_LEFT_OUT_TAG_NAMES,
+);
+
+export function isHtmlMirrorLeftOutTagName(
+  value: unknown,
+): value is HtmlMirrorLeftOutTagName {
+  return typeof value === 'string' && LEFT_OUT_PLACEHOLDER_TAGS.has(value);
+}
 
 function serializeLeftOutPlaceholder(
   id: number,
   context: SerializeContext,
+  leftOutTagName: HtmlMirrorLeftOutTagName,
 ): HtmlMirrorElementNode {
   const tagName = sourceSecretPlaceholderTagName(id);
   admitNode(context.budget, id, tagName.length * 2 + 64, context.representability);
@@ -8092,6 +8158,7 @@ function serializeLeftOutPlaceholder(
     attributes: Object.freeze([]),
     children: Object.freeze([]),
     opaquePlaceholder: true as const,
+    leftOutTagName,
   });
 }
 

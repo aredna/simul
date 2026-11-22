@@ -690,7 +690,8 @@ describe('media queries about scripts, read as the tab reads them', () => {
     )!;
     const serialized = JSON.stringify(graph);
     expect(serialized).toContain('with scripts');
-    expect(serialized).not.toContain('noscript');
+    // Only the place each held, by name (D208).
+    expect(serialized.replaceAll('"leftOutTagName":"noscript"', '')).not.toContain('noscript');
     expect(serialized).not.toContain('without scripts');
     expect(serialized).not.toContain('.js{display:none}');
   });

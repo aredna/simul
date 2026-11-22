@@ -192,7 +192,10 @@ export function presentPaintedSemanticLabel(
   const style = sourceProperty(element, 'style');
   const originalPointerEvents = inlineStyleSnapshot(style, 'pointer-events');
   const originalPosition = inlineStyleSnapshot(style, 'position');
-  const overlay = sourceProperty(element, 'ownerDocument').createElement('span');
+  // A `bdi`, which isolates its text as `dir="auto"` does: a type the page's
+  // links and list items seldom hold, so the page's `:last-of-type` and
+  // `:nth-last-of-type()` count its own spans as in the tab (D208).
+  const overlay = sourceProperty(element, 'ownerDocument').createElement('bdi');
 
   sourceCall(element, 'setAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE, 'v1');
   style.setProperty('pointer-events', 'none', 'important');

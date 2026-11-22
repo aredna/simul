@@ -876,6 +876,43 @@ describe('a long list read over several fills (D163)', () => {
     return sliced;
   }
 
+  it('goes on from its child without going through the list again (D209)', async () => {
+    const target = widePage();
+    const wide = target.byId('wide');
+    const own = Object.getOwnPropertyDescriptor(wide, 'childNodes');
+    onTestFinished(() => {
+      if (own) Object.defineProperty(wide, 'childNodes', own);
+      else Reflect.deleteProperty(wide, 'childNodes');
+    });
+    // Every child any read goes through in the container's list.
+    let walked = 0;
+    const list = wide.childNodes;
+    const counted = new Proxy(list, {
+      get(held, key) {
+        if (key === Symbol.iterator) {
+          return function* () {
+            for (const node of held) {
+              walked += 1;
+              yield node;
+            }
+          };
+        }
+        if (typeof key === 'string' && /^\d+$/u.test(key)) walked += 1;
+        const value = Reflect.get(held, key, held);
+        return typeof value === 'function' ? value.bind(held) : value;
+      },
+    });
+    Object.defineProperty(wide, 'childNodes', { configurable: true, get: () => counted });
+    const registry = new WeakNodeIdRegistry();
+    const sliced = await readInSlices(target, registry, 1);
+    expect(sliced.outcome).toBe('done');
+    expect(JSON.stringify(sliced.fills)).toContain(`Row ${ROWS - 1}`);
+    const wideId = registry.getId(wide);
+    // Read in many runs, each from where the last stopped.
+    expect(sliced.fills.filter((fill) => fill.nodeId === wideId).length).toBeGreaterThan(10);
+    expect(walked).toBeLessThan(3 * ROWS);
+  });
+
   it('starts again when the child it goes on from left the list', async () => {
     expect((await changeAtFirstFill((_, __, next) => next.remove())).outcome)
       .toBe('restart');

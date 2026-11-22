@@ -321,6 +321,8 @@ describe('painted semantic labels', () => {
     );
     expect(link.element.lastElementChild?.getAttribute(PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE))
       .toBe('v1');
+    // A `bdi`: the page's `:last-of-type` counts its own spans (D208).
+    expect(link.element.lastElementChild?.localName).toBe('bdi');
     expect(readPaintedSemanticLabelOverlayText(link.element)).toBe('Mainichi');
   });
 
