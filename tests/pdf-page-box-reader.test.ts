@@ -10,6 +10,7 @@ import {
   PDF_CAPTURE_UNWANTED,
   PDF_LOCATE_STOP,
   PDF_LOCATE_TYPING,
+  PDF_PAGE_BOX_SECOND_LOOK_MS,
   PdfPageBoxReader,
   captureChromePdfTab,
   type PdfLocateDiagnostic,
@@ -96,16 +97,22 @@ async function tesseract(picture: PdfPageBoxPicture): Promise<string | undefined
   return text === '' ? undefined : text;
 }
 
+type TestCapture = PdfTabCapture | typeof PDF_CAPTURE_REFUSED | undefined;
+
 /**
  * A reader over a capture, taken as `captureChromePdfTab` takes it: not at
- * all when the tab's size is not wanted.
+ * all when the tab's size is not wanted. Given several, each capture takes
+ * the next, and the last stays. Its waits end at once and are noted.
  */
-function readerFor(capture: PdfTabCapture | typeof PDF_CAPTURE_REFUSED | undefined) {
+function readerFor(captures: TestCapture | readonly TestCapture[]) {
   const diagnostics: PdfLocateDiagnostic[] = [];
   const taken = vi.fn();
+  const waits: number[] = [];
   const clock = { now: 0 };
+  const list = Array.isArray(captures) ? captures : [captures as TestCapture];
   const reader = new PdfPageBoxReader({
     capture: async (_tabId, _signal, wanted) => {
+      const capture = list[Math.min(taken.mock.calls.length, list.length - 1)];
       if (capture && capture !== PDF_CAPTURE_REFUSED && !wanted(capture.tabWidth, capture.tabHeight)) {
         return PDF_CAPTURE_UNWANTED;
       }
@@ -115,9 +122,12 @@ function readerFor(capture: PdfTabCapture | typeof PDF_CAPTURE_REFUSED | undefin
     createCanvas: (width, height) => createCanvas(width, height) as never,
     encode: (canvas) => pngOf(canvas as unknown as Canvas),
     now: () => clock.now,
+    wait: async (ms) => {
+      waits.push(ms);
+    },
     onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
   });
-  return { reader, diagnostics, taken, clock };
+  return { reader, diagnostics, taken, waits, clock };
 }
 
 function requestFor(
@@ -141,13 +151,18 @@ describe('PdfPageBoxReader on pictures of Chrome\'s toolbar, read by the bundled
     'reads the page box of %s',
     async (_file, strip) => {
       const capture = await captureOf(strip);
-      const { reader, diagnostics } = readerFor(capture);
+      const { reader, diagnostics, taken } = readerFor(capture);
 
       // What the box shows: the viewer's page, but for a number typed and
-      // not entered, which the viewer has not gone to yet.
+      // not entered, which the viewer has not gone to yet: the same picture
+      // twice is all a test can give (D220).
       expect(await reader.locate(requestFor(strip))).toBe(Number(strip.box) - 1);
       expect(diagnostics).toEqual([{ stage: 'locate', outcome: 'read', milliseconds: 0 }]);
-      expect(capture.image.close).toHaveBeenCalledTimes(1);
+      // Another page than the guessed first one is captured twice, each
+      // capture let go.
+      const captures = Number(strip.box) === 1 ? 1 : 2;
+      expect(taken).toHaveBeenCalledTimes(captures);
+      expect(capture.image.close).toHaveBeenCalledTimes(captures);
     },
     60_000,
   );
@@ -375,6 +390,7 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
       createCanvas: (width, height) => createCanvas(width, height) as never,
       encode: (canvas) => pngOf(canvas as unknown as Canvas),
       now: () => 0,
+      wait: async () => undefined,
     });
     const request = requestFor({ pageCount: 300 });
     for (let look = 1; look <= 4; look += 1) await reader.locate(request);
@@ -390,7 +406,8 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
     showing = wide;
     expect(await reader.locate(request)).toBe(54);
     // A page box found starts the count again: two looks without one, a
-    // look with one, and two more without are all taken.
+    // look with one (two captures: another page than the guess, D220), and
+    // two more without are all taken.
     const before = taken.mock.calls.length;
     showing = narrow;
     await reader.locate(request);
@@ -400,7 +417,7 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
     showing = narrow;
     await reader.locate(request);
     await reader.locate(request);
-    expect(taken.mock.calls.length - before).toBe(5);
+    expect(taken.mock.calls.length - before).toBe(6);
   });
 
   it('goes on looking at a page box whose number is only busy: a caret after typed digits', async () => {
@@ -452,12 +469,110 @@ describe('PdfPageBoxReader keeps the guess unless everything fits (D133)', () =>
       capture: async () => captureOf(strip),
       createCanvas: (width, height) => createCanvas(width, height) as never,
     encode: (canvas) => pngOf(canvas as unknown as Canvas),
+      wait: async () => undefined,
       onDiagnostic: () => {
         throw new Error('The log is full.');
       },
     });
 
     expect(await reader.locate(requestFor(strip, { read: says('55 / 300') }))).toBe(54);
+  });
+});
+
+describe('PdfPageBoxReader captures a page that would move the panel twice (D220)', () => {
+  // Two digits typed into the box, not entered: with the caret blinked off
+  // the box shows a plain 25 (pixel for pixel an unfocused box, D197); with
+  // it on, a number Chrome does not take for one.
+  const typed = fixture('state-1x-typed-no-caret.png');
+  const caret = fixture('state-1x-typed-caret.png');
+  const says = (text: string) => vi.fn(async (): Promise<string | undefined> => text);
+
+  it('keeps the guess when the second capture, about 0.6 s on, shows the caret back', async () => {
+    const { reader, diagnostics, taken, waits, clock } = readerFor([
+      await captureOf(typed),
+      await captureOf(caret),
+    ]);
+    const read = vi.fn(async (picture: PdfPageBoxPicture) => {
+      // Reading takes a while: the wait is what is left of the 0.6 s.
+      clock.now += 50;
+      return tesseract(picture);
+    });
+
+    expect(await reader.locate(requestFor(typed, { read }))).toBe(PDF_LOCATE_TYPING);
+    expect(taken).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([PDF_PAGE_BOX_SECOND_LOOK_MS - 50 * read.mock.calls.length]);
+    expect(diagnostics).toMatchObject([{ outcome: 'kept', why: 'typed' }]);
+  });
+
+  it('keeps the guess when the second capture shows another number', async () => {
+    const other = fixture('chrome138-1x-37-of-300.png');
+    const { reader, diagnostics, taken } = readerFor([await captureOf(typed), await captureOf(other)]);
+
+    expect(await reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBe(PDF_LOCATE_TYPING);
+    expect(taken).toHaveBeenCalledTimes(2);
+    expect(diagnostics).toMatchObject([{ outcome: 'kept', why: 'typed' }]);
+  });
+
+  it('takes the page when the second capture shows the same box', async () => {
+    const { reader, diagnostics, taken, waits } = readerFor(await captureOf(typed));
+    const read = says('25 / 300');
+
+    expect(await reader.locate(requestFor(typed, { read }))).toBe(24);
+    expect(taken).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([PDF_PAGE_BOX_SECOND_LOOK_MS]);
+    // The second capture is compared, not read.
+    expect(read).toHaveBeenCalledTimes(PDF_PAGE_BOX_INK_HEIGHTS.length);
+    expect(diagnostics).toMatchObject([{ outcome: 'read' }]);
+  });
+
+  it('captures once when the page read is the guessed one: taking it moves nothing', async () => {
+    const { reader, diagnostics, taken, waits } = readerFor(await captureOf(typed));
+    const doubt = { ...doubtOf(300), page: 24 };
+
+    expect(await reader.locate(requestFor(typed, { doubt, read: says('25 / 300') }))).toBe(24);
+    expect(taken).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+    expect(diagnostics).toMatchObject([{ outcome: 'read' }]);
+  });
+
+  it('keeps the guess when the second capture shows no page box, or fails', async () => {
+    const narrow = await captureOf({ file: 'no-page-box-narrow-tab.png', scale: 1 });
+    const gone = readerFor([await captureOf(typed), narrow]);
+    expect(await gone.reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBeUndefined();
+    expect(gone.diagnostics).toMatchObject([{ outcome: 'kept', why: 'again' }]);
+
+    const failed = readerFor([await captureOf(typed), undefined]);
+    expect(await failed.reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBeUndefined();
+    expect(failed.diagnostics).toMatchObject([{ outcome: 'kept', why: 'again' }]);
+
+    const refused = readerFor([await captureOf(typed), PDF_CAPTURE_REFUSED]);
+    expect(await refused.reader.locate(requestFor(typed, { read: says('25 / 300') }))).toBe(PDF_LOCATE_STOP);
+  });
+
+  it('takes nothing, and captures no more, once stopped while it waits', async () => {
+    const stop = new AbortController();
+    const taken = vi.fn();
+    const capture = await captureOf(typed);
+    const reader = new PdfPageBoxReader({
+      capture: async () => {
+        taken();
+        return capture;
+      },
+      createCanvas: (width, height) => createCanvas(width, height) as never,
+      encode: (canvas) => pngOf(canvas as unknown as Canvas),
+    });
+    vi.useFakeTimers();
+    try {
+      const looking = reader.locate(requestFor(typed, { read: says('25 / 300'), signal: stop.signal }));
+      await vi.advanceTimersByTimeAsync(PDF_PAGE_BOX_SECOND_LOOK_MS / 2);
+      expect(taken).toHaveBeenCalledTimes(1);
+      stop.abort();
+      expect(await looking).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(PDF_PAGE_BOX_SECOND_LOOK_MS);
+      expect(taken).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

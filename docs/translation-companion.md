@@ -1549,7 +1549,15 @@ shell and the mirror has nothing to copy (D103).
       number selected or with a caret ends the looks into that doubt
       (D177). With the caret blinked off the focused box is the unfocused
       one pixel for pixel, the digits apart (D197), so one picture cannot
-      tell a typed number from an entered one. A jump made while the viewer still scrolls whose second
+      tell a typed number from an entered one. A page read that would move
+      the panel (another than the guessed one) is therefore captured once
+      more, 0.6 s after the first capture, when a caret blinked off is
+      back; a caret or another number in the box then ends the looks into
+      that doubt as above, and only the same box lets the page be taken
+      (D220). Chrome's caret is on and off 0.5 s each, so a look whose
+      first capture falls in the last tenth of a second of a blink-off
+      meets the next blink-off and still takes a typed number: one such
+      look in five. A jump made while the viewer still scrolls whose second
       report comes more than 12 ms after its first raises no doubt (Chrome
       138 with the companion window sent it up to 18.8 ms late on a busy
       machine), nor does a jump on a PDF so long that the snap moves its

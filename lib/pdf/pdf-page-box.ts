@@ -17,7 +17,8 @@ import type { RgbaPixels } from './colour-sample';
  * colours Chrome draws no box, and the number is found by the "/" after it
  * (D177, measured with Chrome's `--force-high-contrast`, light and dark).
  * What the box shows is what is read: a number typed and not yet entered,
- * once its caret has blinked off, is a plain number here.
+ * once its caret has blinked off, is a plain number here; the reader tells
+ * it by a second capture (D220).
  */
 
 /** Chrome's PDF toolbar is this tall, in CSS pixels (Chrome 138 to 158, D177). */
@@ -481,6 +482,48 @@ export function pdfPageFromBoxText(
   if (number.length !== layout.digits || number.startsWith('0')) return undefined;
   const page = Number(number);
   return page >= 1 && page <= pageCount ? page : undefined;
+}
+
+// Two captures of an unchanged toolbar give the same pixels; this much a
+// channel may differ all the same (D220).
+const SAME_BOX_TOLERANCE = 24;
+
+/**
+ * Whether two strips show the same page box with the same number in it:
+ * the box and its ink where they were, and every pixel of them alike. A
+ * number typed on, or a caret back, is another picture (D220).
+ */
+export function samePdfPageBox(
+  first: RgbaPixels,
+  firstLayout: PdfPageBoxLayout,
+  second: RgbaPixels,
+  secondLayout: PdfPageBoxLayout,
+): boolean {
+  const sameRect = (a: PdfToolbarRect, b: PdfToolbarRect) =>
+    a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
+  if (
+    first.width !== second.width ||
+    first.height !== second.height ||
+    firstLayout.digits !== secondLayout.digits ||
+    !sameRect(firstLayout.box, secondLayout.box) ||
+    !sameRect(firstLayout.number, secondLayout.number)
+  ) return false;
+  const { box, number } = firstLayout;
+  const left = Math.max(0, Math.min(box.left, number.left));
+  const right = Math.min(first.width, Math.max(box.right, number.right));
+  const top = Math.max(0, Math.min(box.top, number.top));
+  const bottom = Math.min(first.height, Math.max(box.bottom, number.bottom));
+  for (let y = top; y < bottom; y += 1) {
+    for (let x = left; x < right; x += 1) {
+      const at = (y * first.width + x) * 4;
+      for (let channel = 0; channel < 3; channel += 1) {
+        if (Math.abs(first.data[at + channel]! - second.data[at + channel]!) > SAME_BOX_TOLERANCE) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 type Rgb = readonly [number, number, number];

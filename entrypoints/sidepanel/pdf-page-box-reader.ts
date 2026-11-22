@@ -9,6 +9,7 @@ import {
   composePdfPageBoxLine,
   findPdfPageBox,
   pdfPageFromBoxText,
+  samePdfPageBox,
   type PdfPageBoxLine,
   type PdfPageBoxMissing,
 } from '../../lib/pdf/pdf-page-box';
@@ -71,10 +72,11 @@ export const PDF_CAPTURE_UNWANTED = 'unwanted';
 export const PDF_LOCATE_STOP = 'stop';
 
 /**
- * The page box's number is selected or has a caret: the reader is at the
- * box, and what it shows may be a number typed and not yet entered, which
- * a later look could take once the caret has blinked off. This doubt is
- * not looked into again (D177).
+ * The page box's number is selected or has a caret, or a second capture
+ * showed a caret or another number (D220): the reader is at the box, and
+ * what it shows may be a number typed and not yet entered, which a later
+ * look could take once the caret has blinked off. This doubt is not looked
+ * into again (D177).
  */
 export const PDF_LOCATE_TYPING = 'typing';
 
@@ -106,6 +108,8 @@ export interface PdfLocateDiagnostic {
    * `text`: the text is not a page number and this PDF's page count.
    * `differ`: the picture read at another size names another page.
    * `page`: the page read does not fit where the viewer reports the page.
+   * `typed`: a second capture shows a caret or another number in the box
+   * (D220). `again`: the second capture failed or shows no page box.
    */
   readonly why?:
     | 'size'
@@ -114,7 +118,9 @@ export interface PdfLocateDiagnostic {
     | 'unread'
     | 'text'
     | 'differ'
-    | 'page';
+    | 'page'
+    | 'typed'
+    | 'again';
   readonly milliseconds: number;
 }
 
@@ -141,6 +147,8 @@ export interface PdfPageBoxReaderDependencies {
    */
   readonly encode?: (canvas: ReaderCanvas) => Blob | Promise<Blob>;
   readonly now?: () => number;
+  /** Waits `ms`, or less once `signal` is aborted; `setTimeout` by default. */
+  readonly wait?: (ms: number, signal: AbortSignal) => Promise<void>;
   readonly onDiagnostic?: (diagnostic: PdfLocateDiagnostic) => void;
 }
 
@@ -164,6 +172,34 @@ const TOOLBAR_SLACK = 1;
 // again for a while, as long as the tab keeps its size.
 const MAX_UNREADABLE_LOOKS = 3;
 const UNREADABLE_PAUSE_MS = 60_000;
+
+/**
+ * A page read that would move the panel is captured again this long after
+ * the first capture (D220): a caret blinked off then is back, unless the
+ * second capture falls in its next blink-off. Chrome's caret is on and off
+ * 0.5 s each (Chrome for Testing 158): one such look in five; a caret of
+ * 0.6 s, never. Chrome allows two captures a second.
+ */
+export const PDF_PAGE_BOX_SECOND_LOOK_MS = 600;
+
+/** Waits `ms`; ends early once `signal` is aborted. */
+function waitFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', done);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
 
 /**
  * Finds which page Chrome's PDF viewer shows by reading the page box of its
@@ -222,64 +258,36 @@ export class PdfPageBoxReader {
     // PDF's page, which could show anything. Such a tab is not captured.
     const underToolbar = (tabHeight: number) =>
       Math.abs(tabHeight - doubt.viewport.viewportHeight - PDF_TOOLBAR_HEIGHT) <= TOOLBAR_SLACK;
-    let capture: Awaited<ReturnType<PdfPageBoxReaderDependencies['capture']>>;
     // Why the tab was not worth capturing, when it was not.
     let unwanted: PdfLocateDiagnostic['why'] = 'toolbar';
-    try {
-      capture = await this.#dependencies.capture(
-        request.tabId,
-        signal,
-        (tabWidth, tabHeight) => {
-          if (!underToolbar(tabHeight)) return false;
-          const unreadable = this.#unreadable;
-          if (
-            unreadable &&
-            unreadable.looks >= MAX_UNREADABLE_LOOKS &&
-            started - unreadable.at < UNREADABLE_PAUSE_MS &&
-            unreadable.tabId === request.tabId &&
-            unreadable.tabWidth === tabWidth &&
-            unreadable.tabHeight === tabHeight &&
-            unreadable.pageCount === pageCount
-          ) {
-            // The same toolbar as the last looks: it would show the same.
-            unwanted = unreadable.missing;
-            return false;
-          }
-          return true;
-        },
-      );
-    } catch {
-      capture = undefined;
-    }
-    if (capture === PDF_CAPTURE_REFUSED) {
+    const first = await this.#look(request, underToolbar, (tabWidth, tabHeight) => {
+      if (!underToolbar(tabHeight)) return false;
+      const unreadable = this.#unreadable;
+      if (
+        unreadable &&
+        unreadable.looks >= MAX_UNREADABLE_LOOKS &&
+        started - unreadable.at < UNREADABLE_PAUSE_MS &&
+        unreadable.tabId === request.tabId &&
+        unreadable.tabWidth === tabWidth &&
+        unreadable.tabHeight === tabHeight &&
+        unreadable.pageCount === pageCount
+      ) {
+        // The same toolbar as the last looks: it would show the same.
+        unwanted = unreadable.missing;
+        return false;
+      }
+      return true;
+    });
+    const firstAt = now();
+    if (first.kind === 'refused') {
       finish('refused');
       return PDF_LOCATE_STOP;
     }
-    if (capture === PDF_CAPTURE_UNWANTED) return finish('kept', unwanted);
-    if (!capture) return signal.aborted ? undefined : finish('no-capture');
-    let strip: RgbaPixels | undefined;
-    let scale = 0;
-    try {
-      if (signal.aborted) return undefined;
-      const { image, tabWidth, tabHeight } = capture;
-      scale = image.width / tabWidth;
-      if (
-        !(scale > 0.1 && scale < 16) ||
-        Math.abs(image.height / tabHeight / scale - 1) > 0.02
-      ) return finish('kept', 'size');
-      if (!underToolbar(tabHeight)) return finish('kept', 'toolbar');
-      strip = this.#strip(image, Math.round(PDF_TOOLBAR_HEIGHT * scale));
-    } catch {
-      strip = undefined;
-    } finally {
-      // The rest of the capture is never looked at.
-      try {
-        capture.image.close?.();
-      } catch {
-        // Already released.
-      }
-    }
-    if (!strip) return finish('kept', 'size');
+    if (first.kind === 'unwanted') return finish('kept', unwanted);
+    if (first.kind === 'aborted') return undefined;
+    if (first.kind === 'none') return finish('no-capture');
+    if (first.kind === 'kept') return finish('kept', first.why);
+    const { strip, scale } = first;
     const search = findPdfPageBox(strip, scale, pageCount);
     if (!search.found) {
       // A number that is not plain (selected, a caret): the reader is at
@@ -289,7 +297,7 @@ export class PdfPageBoxReader {
         return PDF_LOCATE_TYPING;
       }
       // A toolbar without a page box stays without one.
-      const { tabWidth, tabHeight } = capture;
+      const { tabWidth, tabHeight } = first;
       const before = this.#unreadable;
       const again = before !== undefined &&
         before.tabId === request.tabId &&
@@ -345,8 +353,95 @@ export class PdfPageBoxReader {
     if (page === undefined) return finish('kept', why);
     // Only a page that is where the viewer reports the page.
     if (!doubt.pages.includes(page - 1)) return finish('kept', 'page');
+    if (page - 1 !== doubt.page) {
+      // The box focused, its caret blinked off, shows a number typed and
+      // not entered as a plain one, and its pixels cannot tell focus (D197).
+      // A number that would move the panel is captured once more about
+      // 0.6 s on, when a caret would be back; a caret or another number
+      // then is typing, and the guess stays (D220). A number that names the
+      // guessed page moves nothing and is not captured again.
+      try {
+        await (this.#dependencies.wait ?? waitFor)(
+          Math.max(0, PDF_PAGE_BOX_SECOND_LOOK_MS - (now() - firstAt)),
+          signal,
+        );
+      } catch {
+        // The look goes on at once.
+      }
+      if (signal.aborted) return undefined;
+      const second = await this.#look(request, underToolbar, (_tabWidth, tabHeight) =>
+        underToolbar(tabHeight));
+      if (second.kind === 'refused') {
+        finish('refused');
+        return PDF_LOCATE_STOP;
+      }
+      if (second.kind === 'aborted') return undefined;
+      if (second.kind !== 'strip') return finish('kept', 'again');
+      const again = findPdfPageBox(second.strip, second.scale, pageCount);
+      if (
+        again.found
+          ? !samePdfPageBox(strip, search.layout, second.strip, again.layout)
+          : again.missing === 'number'
+      ) {
+        finish('kept', 'typed');
+        return PDF_LOCATE_TYPING;
+      }
+      if (!again.found) return finish('kept', 'again');
+    }
     finish('read');
     return page - 1;
+  }
+
+  /**
+   * One capture of the tab, if `wanted` says so of its size, and the top
+   * of it as tall as the toolbar; the rest of the capture is let go at once
+   * and never looked at.
+   */
+  async #look(
+    request: PdfPageBoxRequest,
+    underToolbar: (tabHeight: number) => boolean,
+    wanted: (tabWidth: number, tabHeight: number) => boolean,
+  ): Promise<
+    | { readonly kind: 'strip'; readonly strip: RgbaPixels; readonly scale: number; readonly tabWidth: number; readonly tabHeight: number }
+    | { readonly kind: 'refused' }
+    | { readonly kind: 'unwanted' }
+    | { readonly kind: 'aborted' }
+    | { readonly kind: 'none' }
+    | { readonly kind: 'kept'; readonly why: 'size' | 'toolbar' }
+  > {
+    const { signal } = request;
+    let capture: Awaited<ReturnType<PdfPageBoxReaderDependencies['capture']>>;
+    try {
+      capture = await this.#dependencies.capture(request.tabId, signal, wanted);
+    } catch {
+      capture = undefined;
+    }
+    if (capture === PDF_CAPTURE_REFUSED) return { kind: 'refused' };
+    if (capture === PDF_CAPTURE_UNWANTED) return { kind: 'unwanted' };
+    if (!capture) return { kind: signal.aborted ? 'aborted' : 'none' };
+    const { tabWidth, tabHeight } = capture;
+    try {
+      if (signal.aborted) return { kind: 'aborted' };
+      const { image } = capture;
+      const scale = image.width / tabWidth;
+      if (
+        !(scale > 0.1 && scale < 16) ||
+        Math.abs(image.height / tabHeight / scale - 1) > 0.02
+      ) return { kind: 'kept', why: 'size' };
+      if (!underToolbar(tabHeight)) return { kind: 'kept', why: 'toolbar' };
+      const strip = this.#strip(image, Math.round(PDF_TOOLBAR_HEIGHT * scale));
+      return strip
+        ? { kind: 'strip', strip, scale, tabWidth, tabHeight }
+        : { kind: 'kept', why: 'size' };
+    } catch {
+      return { kind: 'kept', why: 'size' };
+    } finally {
+      try {
+        capture.image.close?.();
+      } catch {
+        // Already released.
+      }
+    }
   }
 
   /** The top `height` device pixels of the capture. */
