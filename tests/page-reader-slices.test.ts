@@ -586,6 +586,41 @@ describe('the page read in slices (D163)', () => {
     }
   });
 
+  it('says "too large" for a walk cut short only where the page passes the cap (D210)', () => {
+    const markup = '<html><body><main>' +
+      Array.from({ length: 700 }, (_, index) => `<p>row ${index}</p>`).join('') +
+      '</main></body></html>';
+    const target = page(markup.replace('<main>', '<main><x-open id="open"></x-open><x-closed id="closed"></x-closed>'));
+    // A walk that stopped early (as one that caught a throw reports itself).
+    const cut = createSourceControlledContentPolicy(target.document, target.window, 50);
+    expect(cut.incomplete).toBe(true);
+    const readWith = () => {
+      const read = beginSourceDocumentRead(target.document, target.window, new WeakNodeIdRegistry(), {
+        controlledContent: cut,
+      });
+      return { outcome: read.step({ expired: () => false }).outcome, read };
+    };
+    // Within the limits: a read that failed, not one over them.
+    const within = readWith();
+    expect(within.outcome).toBe('failed');
+    expect(within.read.representability.capacityOmissionCount).toBe(0);
+    const whole = createHtmlMirrorRepresentabilityCollector();
+    expect(sanitizeSourceDocument(
+      target.document, target.window, new WeakNodeIdRegistry(), whole,
+      'conservative', cut,
+    )).toBeUndefined();
+    expect(whole.capacityOmissionCount).toBe(0);
+    // Past them: over the limits, as before.
+    applyHtmlMirrorLimitSettings({ itemMegabytes: 10, pageMegabytes: 60, maxElements: 1_000 });
+    try {
+      const over = readWith();
+      expect(over.outcome).toBe('overflow');
+      expect(over.read.representability.capacityOmissionCount).toBeGreaterThan(0);
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
+  });
+
   it('reads a small page in one step when the slice does not run out', () => {
     const target = page();
     const registry = new WeakNodeIdRegistry();

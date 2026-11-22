@@ -2395,6 +2395,9 @@ function assignIsolatedManualSlots(
           now.length === held.length &&
           now.every((node, index) => node === held[index])
         ) continue;
+        // `assign` takes its nodes only as arguments, so a slot given more
+        // than the engine's limit on arguments (about 125,000) throws and is
+        // left as it is (D210).
         (slot as HTMLSlotElement).assign(...held);
       } catch {
         // Left as it is.

@@ -1104,7 +1104,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       return says;
     };
     const create = document.createElement.bind(document);
-    document.createElement = ((name: string) => {
+    onDocumentPrototype(document as unknown as Document, 'createElement', ((name: string) => {
       const created = create(name);
       if (name === 'span') {
         (created as unknown as { matches: (selector: string) => boolean })
@@ -1114,7 +1114,7 @@ describe('isolated HTML sanitizer and protocol', () => {
           };
       }
       return created;
-    }) as typeof document.createElement;
+    }) as typeof document.createElement);
     return {
       document: document as unknown as Document,
       window: window as unknown as Window,
@@ -1573,7 +1573,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     const encode = vi.fn((type: string) => type === 'image/webp' ? webp : png);
     let tainted = false;
     const createElement = document.createElement.bind(document);
-    vi.spyOn(document, 'createElement').mockImplementation(((name: string) => {
+    onDocumentPrototype(document as unknown as Document, 'createElement', ((name: string) => {
       if (name !== 'canvas') return createElement(name);
       return {
         width: 0,
@@ -1875,7 +1875,9 @@ describe('isolated HTML sanitizer and protocol', () => {
       'conservative',
       policy,
     )).toBeUndefined();
-    expect(checkpointDiagnostics.capacityOmissionCount).toBe(1);
+    // Refused, but not as a page over the mirror's limits: it is within
+    // them, the walk alone was cut short (D210).
+    expect(checkpointDiagnostics.capacityOmissionCount).toBe(0);
   });
 
   it('withholds a selected panel wholly outside a clipped ancestor', () => {
@@ -5372,9 +5374,8 @@ describe('isolated HTML sanitizer and protocol', () => {
         this.cssRules = value === text ? lossy : [];
       }
     }
-    Object.defineProperty(document, 'defaultView', {
-      configurable: true,
-      value: { CSSStyleSheet: ParsedSheet },
+    onDocumentPrototype(document as unknown as Document, 'defaultView', {
+      CSSStyleSheet: ParsedSheet,
     });
     const read = (rules: readonly { readonly cssText: string }[]) => {
       Object.defineProperty(style, 'sheet', {
@@ -5904,6 +5905,19 @@ function graphElementsByTag(
     }
   }
   return matches;
+}
+
+/**
+ * Puts `value` where Chrome keeps a document's own properties, on its
+ * prototype, for this document alone: the reader reads a document's
+ * properties past its own (D207), where a page's named images stand.
+ */
+function onDocumentPrototype(document: Document, name: string, value: unknown): void {
+  Object.setPrototypeOf(document, Object.create(Object.getPrototypeOf(document) as object, {
+    [name]: typeof value === 'function'
+      ? { configurable: true, writable: true, value }
+      : { configurable: true, get: () => value },
+  }));
 }
 
 function graphTextNodes(

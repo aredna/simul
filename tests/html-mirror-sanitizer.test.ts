@@ -30,6 +30,7 @@ import {
 import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
 import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
 import { closedRootReader } from './support/closed-shadow-roots';
+import { DOCUMENT_NAMES, nameOnDocument } from './support/named-document';
 
 /** The open items of D181 on the page side of the mirror channel. */
 describe('the mirror channel\'s reading of the page (D181)', () => {
@@ -281,6 +282,35 @@ describe('the mirror channel\'s reading of the page (D181)', () => {
       menu as unknown as Node, registry, 'https://example.test/', undefined,
       'passive', undefined, base,
     ))).toEqual(['Unpainted words', 'Painted item']);
+  });
+
+  it('reads a page whose images take the names of its document\'s properties as one without (D207)', () => {
+    const PAGE = '<!doctype html><html lang="en"><head><style>p{color:red}</style></head><body>' +
+      '<p id="words">Plain words</p><img id="named" alt="" src="https://example.test/a.png">' +
+      '<div contenteditable="true">Edited</div></body></html>';
+    const readWith = (name?: string): string => {
+      const { document, window } = parseHTML(PAGE);
+      const undo = name
+        ? nameOnDocument(document as unknown as Document, name, document.getElementById('named')!)
+        : () => {};
+      try {
+        return JSON.stringify(sanitizeSourceDocument(
+          document as unknown as Document,
+          window as unknown as Window,
+          new WeakNodeIdRegistry(),
+        ) ?? null);
+      } catch (error) {
+        return String(error);
+      } finally {
+        undo();
+      }
+    };
+    const expected = readWith();
+    expect(expected).toContain('Plain words');
+    // linkedom's document has no `adoptedStyleSheets` of its own to read past.
+    const names = [...DOCUMENT_NAMES, 'baseURI', 'compatMode', 'doctype']
+      .filter((name) => name !== 'adoptedStyleSheets');
+    expect(names.filter((name) => readWith(name) !== expected)).toEqual([]);
   });
 
   describe('a sheet read past a string that a line break cuts (D202)', () => {

@@ -1,6 +1,8 @@
 import {
+  readSourceOwnAccessor,
   sourceAnswersFieldNames,
   sourceAttributeList,
+  sourceCall,
   sourceChildNodeList,
   sourceLocalName,
   sourceNodeType,
@@ -90,6 +92,61 @@ export const MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS = 4_096;
 export const MAX_HTML_MIRROR_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_ADOPTED_STYLE_SHEETS_PER_OWNER = 256;
 const MAX_BROKEN_CONTROL_ICON_EDGE = 64;
+
+/**
+ * Whether the page holds more nodes than the mirror's cap, counted as the
+ * walk of relationships counts them (every node from the root, with each
+ * shadow root's), up to one past the cap (D210). A walk that reports itself
+ * incomplete on a page within the cap stopped for another reason (a throw
+ * it caught: D162's page of 131,000 children, refused as "too large"), and
+ * that is said as a read that failed, not as one past the limits. Unreadable
+ * counts as within it: no "too large" that cannot be shown.
+ */
+export function sourceDocumentPassesNodeCap(
+  sourceDocument: Document | null | undefined,
+): boolean {
+  const root = sourceDocumentProperty(sourceDocument, 'documentElement');
+  if (!root) return false;
+  try {
+    const pending: Node[] = [root];
+    let counted = 0;
+    while (pending.length > 0) {
+      const node = pending.pop()!;
+      counted += 1;
+      if (counted > MAX_HTML_MIRROR_NODES) return true;
+      const type = sourceNodeType(node);
+      if (type !== 1 && type !== 11) continue;
+      for (const child of sourceChildNodeList(node)) pending.push(child);
+      if (type === 1) {
+        const shadow = readSourceShadowRoot(node as Element);
+        if (shadow) pending.push(shadow);
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A document's base URL past its named elements (D207): a string of its
+ * own is its base URL; anything else (an `<img name="baseURI">`) is read
+ * again by the prototypes' accessor.
+ */
+function sourceDocumentBaseUrl(sourceDocument: Document): string {
+  const own = sourceDocument.baseURI as unknown;
+  return typeof own === 'string'
+    ? own
+    : readSourceOwnAccessor(sourceDocument, 'baseURI') as string;
+}
+
+/** A property of a document past its named elements (D207), or undefined without one. */
+function sourceDocumentProperty<K extends keyof Document>(
+  document: Document | null | undefined,
+  name: K,
+): Document[K] | undefined {
+  return document ? sourceProperty(document, name) : undefined;
+}
 
 export class HtmlMirrorCapacityError extends Error {
   constructor(readonly diagnosticRecorded = false) {
@@ -923,7 +980,7 @@ export function readSourceDocumentLanguage(root: Element): string | undefined {
     if (
       root.hasAttribute('lang') || root.hasAttributeNS(XML_NAMESPACE_URI, 'lang')
     ) return undefined;
-    const locale = root.ownerDocument?.defaultView?.getComputedStyle(root)
+    const locale = sourceDocumentProperty(root.ownerDocument, 'defaultView')?.getComputedStyle(root)
       .getPropertyValue('-webkit-locale') ?? '';
     const language = quotedCssText(locale);
     if (language === undefined) return undefined;
@@ -959,7 +1016,7 @@ function languageCanMatch(
   language: string,
   selector: string,
 ): boolean {
-  const probe = root.ownerDocument.createElement('span');
+  const probe = sourceCall(root.ownerDocument, 'createElement', 'span');
   probe.setAttribute('lang', language);
   return probe.matches(selector);
 }
@@ -1148,8 +1205,8 @@ const MEDIA_ACTIVE_ATTRIBUTES = new Set([
  */
 export function sourceDocumentMode(sourceDocument: Document): HtmlMirrorDocumentMode {
   try {
-    if (sourceDocument.compatMode === 'BackCompat') return 'quirks';
-    const doctype = sourceDocument.doctype;
+    if (sourceProperty(sourceDocument, 'compatMode') === 'BackCompat') return 'quirks';
+    const doctype = sourceProperty(sourceDocument, 'doctype');
     if (!doctype) return 'standards';
     const publicId = doctype.publicId.toLowerCase();
     const hasSystemId = doctype.systemId !== '';
@@ -1204,7 +1261,7 @@ export function sanitizeSourceAdoptedStyleSheets(
 ): readonly string[] | undefined {
   let sheets: ArrayLike<CSSStyleSheet>;
   try {
-    sheets = owner.adoptedStyleSheets;
+    sheets = sourceProperty(owner, 'adoptedStyleSheets');
   } catch {
     incrementRepresentability(representability, 'unreadableStyleCount');
     return Object.freeze([]);
@@ -1605,7 +1662,7 @@ export function sanitizeSourceElementHints(
   // The document's own `<html>`: one inside the page is an element like any
   // other, and paints no canvas.
   const canvasBackgroundColor = tagName === 'html' &&
-      source === source.ownerDocument?.documentElement
+      source === sourceDocumentProperty(source.ownerDocument, 'documentElement')
     ? readSourceCanvasBackgroundColor(source)
     : undefined;
   const resolvedStyleSheetText = fidelityPolicy === 'passive'
@@ -1684,7 +1741,7 @@ export function sanitizeSourceDocument(
   precomputedControlledContent?: SourceControlledContentPolicy,
   slotReadings?: SourceSlotReadings,
 ): HtmlMirrorDocumentGraph | undefined {
-  const documentElement = sourceDocument.documentElement;
+  const documentElement = sourceProperty(sourceDocument, 'documentElement');
   if (!documentElement) return undefined;
   const budget = createHtmlMirrorReadBudget();
   const styleWork = createHtmlMirrorStyleWorkBudget();
@@ -1695,12 +1752,14 @@ export function sanitizeSourceDocument(
       MAX_HTML_MIRROR_NODES,
     );
   if (controlledContent.incomplete) {
-    incrementRepresentability(representability, 'capacityOmissionCount');
+    if (sourceDocumentPassesNodeCap(sourceDocument)) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
+    }
     return undefined;
   }
   const root = serializeNode(documentElement, {
     registry,
-    baseUrl: sourceDocument.baseURI,
+    baseUrl: sourceDocumentBaseUrl(sourceDocument),
     budget,
     styleWork,
     privateRegion: false,
@@ -1722,7 +1781,7 @@ export function sanitizeSourceDocument(
   if (!root || root.kind !== 'element' || root.tagName !== 'html') return undefined;
   const adoptedStyleSheets = captureAdoptedStyleSheets(
     sourceDocument,
-    sourceDocument.baseURI,
+    sourceDocumentBaseUrl(sourceDocument),
     budget,
     styleWork,
     representability,
@@ -1737,11 +1796,11 @@ export function sanitizeSourceDocument(
     viewportHeight: boundedDimension(sourceWindow.innerHeight),
     documentWidth: boundedDimension(Math.max(
       documentElement.scrollWidth,
-      sourceDocument.body?.scrollWidth ?? 0,
+      sourceProperty(sourceDocument, 'body')?.scrollWidth ?? 0,
     )),
     documentHeight: boundedDimension(Math.max(
       documentElement.scrollHeight,
-      sourceDocument.body?.scrollHeight ?? 0,
+      sourceProperty(sourceDocument, 'body')?.scrollHeight ?? 0,
     )),
   });
 }
@@ -3546,7 +3605,7 @@ export function beginSourceDocumentRead(
   };
   const step = (clock: { expired(): boolean }): SourceDocumentReadStep => {
     if (finished) return Object.freeze({ outcome: 'failed' as const });
-    const documentElement = sourceDocument.documentElement;
+    const documentElement = sourceProperty(sourceDocument, 'documentElement');
     if (!documentElement) return end('failed');
     if (!shared) {
       const controlledContent = controlledOverride ??
@@ -3557,12 +3616,13 @@ export function beginSourceDocumentRead(
           MAX_HTML_MIRROR_NODES,
         );
       if (controlledContent.incomplete) {
+        if (!sourceDocumentPassesNodeCap(sourceDocument)) return end('failed');
         incrementRepresentability(representability, 'capacityOmissionCount');
         return end('overflow');
       }
       shared = {
         registry,
-        baseUrl: sourceDocument.baseURI,
+        baseUrl: sourceDocumentBaseUrl(sourceDocument),
         budget,
         styleWork: createHtmlMirrorStyleWorkBudget(),
         representability,
@@ -3783,11 +3843,11 @@ function readSourceDocumentReadValues(
     viewportHeight: boundedDimension(sourceWindow.innerHeight),
     documentWidth: boundedDimension(Math.max(
       documentElement.scrollWidth,
-      sourceDocument.body?.scrollWidth ?? 0,
+      sourceProperty(sourceDocument, 'body')?.scrollWidth ?? 0,
     )),
     documentHeight: boundedDimension(Math.max(
       documentElement.scrollHeight,
-      sourceDocument.body?.scrollHeight ?? 0,
+      sourceProperty(sourceDocument, 'body')?.scrollHeight ?? 0,
     )),
   });
 }
@@ -3891,7 +3951,7 @@ export function sanitizeSourcePreview(
 ): HtmlMirrorDocumentGraph | undefined {
   const representability = options.representability ??
     createHtmlMirrorRepresentabilityCollector();
-  const documentElement = sourceDocument.documentElement;
+  const documentElement = sourceProperty(sourceDocument, 'documentElement');
   if (!documentElement) return undefined;
   const maxReadNodes = Math.max(
     1,
@@ -4076,7 +4136,7 @@ export function sanitizeSourcePreview(
     heldPass.list(sourceDocument);
     const root = serializeNode(documentElement, {
       registry,
-      baseUrl: sourceDocument.baseURI,
+      baseUrl: sourceDocumentBaseUrl(sourceDocument),
       budget,
       styleWork,
       privateRegion: false,
@@ -4101,7 +4161,7 @@ export function sanitizeSourcePreview(
     }
     const adoptedStyleSheets = captureAdoptedStyleSheets(
       sourceDocument,
-      sourceDocument.baseURI,
+      sourceDocumentBaseUrl(sourceDocument),
       budget,
       styleWork,
       representability,
@@ -4639,7 +4699,7 @@ function sanitizeAttributes(
     if (result.some(([sent]) => sent === name)) continue;
     result.push(Object.freeze([name, value] as const));
   }
-  if (tagName === 'html' && element === element.ownerDocument?.documentElement) {
+  if (tagName === 'html' && element === sourceDocumentProperty(element.ownerDocument, 'documentElement')) {
     const language = readSourceDocumentLanguage(element);
     if (language !== undefined) {
       result.push(
@@ -5111,7 +5171,7 @@ function readStyleElementSourceText(
 ): string | undefined {
   if (sourceLocalName(element).toLowerCase() !== 'style') return undefined;
   const text = element.textContent ?? '';
-  const Sheet = element.ownerDocument?.defaultView?.CSSStyleSheet;
+  const Sheet = sourceDocumentProperty(element.ownerDocument, 'defaultView')?.CSSStyleSheet;
   if (!text || text.length > MAX_HTML_MIRROR_STRING || typeof Sheet !== 'function') {
     return undefined;
   }
@@ -6251,7 +6311,7 @@ export function readSourceSelectPresentationStyle(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   outOfSight = false,
 ): string | undefined {
-  const view = element.ownerDocument?.defaultView;
+  const view = sourceDocumentProperty(element.ownerDocument, 'defaultView');
   if (
     sourceLocalName(element).toLowerCase() !== 'select' ||
     !view ||
@@ -7676,7 +7736,7 @@ function pageOnlyImagePixels(
       : MAX_PAGE_ONLY_CORS_IMAGE_PIXELS)
   ) {
     try {
-      const canvas = element.ownerDocument.createElement('canvas');
+      const canvas = sourceCall(element.ownerDocument, 'createElement', 'canvas') as HTMLCanvasElement;
       canvas.width = width;
       canvas.height = height;
       const context = canvas.getContext('2d');
@@ -7774,7 +7834,7 @@ function isCanonicalClippedSourceElement(element: Element): boolean {
   if (!/(?:screen-reader|sr-only|visually-hidden|a11y|clip(?:-path)?\s*:)/iu.test(
     candidate,
   )) return false;
-  const view = element.ownerDocument?.defaultView;
+  const view = sourceDocumentProperty(element.ownerDocument, 'defaultView');
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
     const style = view.getComputedStyle(element);
@@ -7837,7 +7897,7 @@ export function isSourceSelectHiddenByItself(element: Element): boolean {
  * nothing: for both, what the page itself wrote for it is asked.
  */
 function isComputedHiddenSourceSelect(element: Element, opened = false): boolean {
-  const view = element.ownerDocument?.defaultView;
+  const view = sourceDocumentProperty(element.ownerDocument, 'defaultView');
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
     const style = view.getComputedStyle(element);
@@ -7895,9 +7955,9 @@ function cssPixelValue(value: string): number | undefined {
 }
 
 function readSourceCanvasBackgroundColor(source: Element): string | undefined {
-  const view = source.ownerDocument?.defaultView;
+  const view = sourceDocumentProperty(source.ownerDocument, 'defaultView');
   if (!view || typeof view.getComputedStyle !== 'function') return undefined;
-  for (const candidate of [source, source.ownerDocument?.body]) {
+  for (const candidate of [source, sourceDocumentProperty(source.ownerDocument, 'body')]) {
     if (!candidate) continue;
     try {
       const color = readHtmlMirrorCanvasBackgroundColor(
@@ -8196,8 +8256,8 @@ export function sourceElementIsEditorWithoutAttribute(element: Element): boolean
   if (SOURCE_EDITORS_WITHOUT_ATTRIBUTE.has(element)) return true;
   try {
     const document = element.ownerDocument;
-    return element === document?.documentElement &&
-      document.designMode?.toLowerCase() === 'on';
+    return element === sourceDocumentProperty(document, 'documentElement') &&
+      sourceDocumentProperty(document, 'designMode')?.toLowerCase() === 'on';
   } catch {
     return false;
   }
@@ -8248,7 +8308,7 @@ export function noteSourceEditingTarget(target: Element): Element | undefined {
  */
 function sourceElementIsEditable(element: Element): boolean {
   if ((element as Partial<HTMLElement>).isContentEditable === true) return true;
-  const view = element.ownerDocument.defaultView;
+  const view = sourceProperty(element.ownerDocument, 'defaultView');
   const style = view?.getComputedStyle?.call(view, element);
   const value = typeof style?.getPropertyValue === 'function'
     ? style.getPropertyValue('-webkit-user-modify')
@@ -8309,7 +8369,7 @@ export function readSourceHiddenRegionState(
     const declaredHidden =
       element.hasAttribute('hidden') ||
       element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
-    const view = element.ownerDocument.defaultView;
+    const view = sourceProperty(element.ownerDocument, 'defaultView');
     const getComputedStyle = view?.getComputedStyle;
     if (typeof getComputedStyle !== 'function') {
       return declaredHidden ? SOURCE_REGION_WITHHELD : SOURCE_REGION_VISIBLE;
@@ -8411,7 +8471,7 @@ function isClosedSourceDetails(element: Element): boolean {
 }
 
 function sourceContentVisibilityIsHidden(element: Element): boolean {
-  const view = element.ownerDocument.defaultView;
+  const view = sourceProperty(element.ownerDocument, 'defaultView');
   const style = view?.getComputedStyle?.call(view, element);
   const value = typeof style?.getPropertyValue === 'function'
     ? style.getPropertyValue('content-visibility')
