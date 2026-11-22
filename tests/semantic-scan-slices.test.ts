@@ -380,29 +380,38 @@ describe('semantic scan in slices (D164)', () => {
   });
 
   it('leaves out at the seal what the scan read before it turned secret', async () => {
-    const page = loadPage();
-    const late = page.byId<HTMLInputElement>('late');
-    late.value = 'swordfish-78';
-    let harness: Harness | undefined = undefined;
-    let at = Number.POSITIVE_INFINITY;
-    harness = createHarness(page, {
-      budgetMs: 2,
-      between: (turn) => {
-        if (turn !== at) return;
-        late.setAttribute('type', 'password');
-        harness!.deliver([attributeRecord(late, 'type', null)]);
-      },
-    });
-    // Count the turns of the first scan, then turn the field into a password
-    // at the last turn of the second, long after its value was read.
-    harness.start();
-    await settle();
-    const firstTurns = harness.turns();
-    harness.ack();
-    late.value = 'swordfish-79';
-    at = firstTurns * 2;
-    harness.session.refresh();
-    await settle();
+    // Turns the field into a password at turn `atSecond` of the second scan.
+    const scenario = async (atSecond: number) => {
+      const page = loadPage();
+      const late = page.byId<HTMLInputElement>('late');
+      late.value = 'swordfish-78';
+      let harness: Harness | undefined = undefined;
+      let at = Number.POSITIVE_INFINITY;
+      harness = createHarness(page, {
+        budgetMs: 2,
+        between: (turn) => {
+          if (turn !== at) return;
+          late.setAttribute('type', 'password');
+          harness!.deliver([attributeRecord(late, 'type', null)]);
+        },
+      });
+      harness.start();
+      await settle();
+      const firstTurns = harness.turns();
+      harness.ack();
+      late.value = 'swordfish-79';
+      at = firstTurns + atSecond;
+      harness.session.refresh();
+      await settle();
+      return { harness, late, firstTurns };
+    };
+    // The second scan builds its policy on the first's index (D225) and has
+    // fewer turns: counted once, then the field turns into a password at its
+    // last turn, long after its value was read.
+    const rehearsal = await scenario(Number.POSITIVE_INFINITY);
+    const secondTurns = rehearsal.harness.turns() - rehearsal.firstTurns;
+    rehearsal.harness.session.dispose();
+    const { harness, late } = await scenario(secondTurns);
     expect(harness.port.messages).toHaveLength(2);
     expect(JSON.stringify(harness.port.messages[1])).not.toContain('swordfish-79');
     expect(harness.port.messages[1]!.records.some((record) =>
@@ -415,38 +424,48 @@ describe('semantic scan in slices (D164)', () => {
   });
 
   it('reads the page again for a root attached above a changed node during the scan (D125)', async () => {
-    const page = loadPage();
-    const reader = closedRootReader();
-    installSourceShadowRootReader(page.document, reader.read);
-    const host = page.byId('host');
-    const late = page.byId<HTMLInputElement>('late');
-    // Chrome reads null from `assignedSlot` for a node slotted into a closed root.
-    Object.defineProperty(late, 'assignedSlot', { configurable: true, value: null });
-    late.value = 'before root';
-    let attachAt = Number.POSITIVE_INFINITY;
-    const harness = createHarness(page, {
-      budgetMs: 2,
-      between: (turn) => {
-        if (turn !== attachAt) return;
-        // Nothing fires for a root attached to an element already read.
-        reader.attach(host, '<div class="mask"><slot></slot></div>');
-      },
-    });
-    harness.start();
-    await settle();
-    const firstTurns = harness.turns();
-    expect(harness.port.messages[0]!.records.map((record) => record.text))
-      .toContain('before root');
-    harness.ack();
+    // Attaches the root at turn `atSecond` of the second scan.
+    const scenario = async (atSecond: number) => {
+      const page = loadPage();
+      const reader = closedRootReader();
+      installSourceShadowRootReader(page.document, reader.read);
+      const host = page.byId('host');
+      const late = page.byId<HTMLInputElement>('late');
+      // Chrome reads null from `assignedSlot` for a node slotted into a closed root.
+      Object.defineProperty(late, 'assignedSlot', { configurable: true, value: null });
+      late.value = 'before root';
+      let attachAt = Number.POSITIVE_INFINITY;
+      const harness = createHarness(page, {
+        budgetMs: 2,
+        between: (turn) => {
+          if (turn !== attachAt) return;
+          // Nothing fires for a root attached to an element already read.
+          reader.attach(host, '<div class="mask"><slot></slot></div>');
+        },
+      });
+      harness.start();
+      await settle();
+      const firstTurns = harness.turns();
+      expect(harness.port.messages[0]!.records.map((record) => record.text))
+        .toContain('before root');
+      harness.ack();
 
-    late.value = 'typed-secret-52';
-    attachAt = firstTurns + firstTurns - 1;
-    harness.session.refresh();
-    await settle();
+      late.value = 'typed-secret-52';
+      attachAt = firstTurns + atSecond;
+      harness.session.refresh();
+      await settle();
+      return { harness, reader, host, firstTurns };
+    };
+    // The second scan builds its policy on the first's index (D225) and has
+    // fewer turns: counted once, then the root comes at its last turn but one.
+    const rehearsal = await scenario(Number.POSITIVE_INFINITY);
+    const secondTurns = rehearsal.harness.turns() - rehearsal.firstTurns;
+    rehearsal.harness.session.dispose();
+    const { harness, reader, host, firstTurns } = await scenario(secondTurns - 1);
     expect(reader.calls).toContain(host);
     expect(JSON.stringify(harness.port.messages)).not.toContain('typed-secret-52');
     // The page was read again: more turns than one scan takes.
-    expect(harness.turns() - firstTurns).toBeGreaterThan(firstTurns);
+    expect(harness.turns() - firstTurns).toBeGreaterThan(secondTurns);
     harness.session.dispose();
   });
 
@@ -693,39 +712,48 @@ describe('semantic scan in slices (D164)', () => {
   });
 
   it('seals a scan that had turns even when no record came (a field masked by a rewritten rule)', async () => {
-    const page = loadPage();
-    const late = page.byId<HTMLInputElement>('late');
-    late.value = 'swordfish-80';
-    let masked = false;
-    const base = pageStyle();
-    // A rule of a sheet rewritten through the CSSOM: no record tells of it.
-    const style = ((element: Element) => {
-      const read = base(element);
-      if (element !== late || !masked) return read;
-      return {
-        ...read,
-        getPropertyValue: (name: string) =>
-          name === '-webkit-text-security' ? 'disc' : read.getPropertyValue(name),
-      } as unknown as CSSStyleDeclaration;
-    }) as Window['getComputedStyle'];
-    let at = Number.POSITIVE_INFINITY;
-    const harness = createHarness(page, {
-      budgetMs: 2,
-      getComputedStyle: style,
-      between: (turn) => {
-        if (turn === at) masked = true;
-      },
-    });
-    harness.start();
-    await settle();
-    const firstTurns = harness.turns();
-    expect(JSON.stringify(harness.port.messages[0])).toContain('swordfish-80');
-    harness.ack();
-    late.value = 'swordfish-81';
-    // At the last turn of the second scan, long after the value was read.
-    at = firstTurns * 2;
-    harness.session.refresh();
-    await settle();
+    // Masks the field at turn `atSecond` of the second scan.
+    const scenario = async (atSecond: number) => {
+      const page = loadPage();
+      const late = page.byId<HTMLInputElement>('late');
+      late.value = 'swordfish-80';
+      let masked = false;
+      const base = pageStyle();
+      // A rule of a sheet rewritten through the CSSOM: no record tells of it.
+      const style = ((element: Element) => {
+        const read = base(element);
+        if (element !== late || !masked) return read;
+        return {
+          ...read,
+          getPropertyValue: (name: string) =>
+            name === '-webkit-text-security' ? 'disc' : read.getPropertyValue(name),
+        } as unknown as CSSStyleDeclaration;
+      }) as Window['getComputedStyle'];
+      let at = Number.POSITIVE_INFINITY;
+      const harness = createHarness(page, {
+        budgetMs: 2,
+        getComputedStyle: style,
+        between: (turn) => {
+          if (turn === at) masked = true;
+        },
+      });
+      harness.start();
+      await settle();
+      const firstTurns = harness.turns();
+      expect(JSON.stringify(harness.port.messages[0])).toContain('swordfish-80');
+      harness.ack();
+      late.value = 'swordfish-81';
+      at = firstTurns + atSecond;
+      harness.session.refresh();
+      await settle();
+      return { harness, at, firstTurns };
+    };
+    // At the last turn of the second scan, long after the value was read;
+    // it builds its policy on the first's index (D225) and has fewer turns.
+    const rehearsal = await scenario(Number.POSITIVE_INFINITY);
+    const secondTurns = rehearsal.harness.turns() - rehearsal.firstTurns;
+    rehearsal.harness.session.dispose();
+    const { harness, at } = await scenario(secondTurns);
     expect(harness.turns()).toBeGreaterThanOrEqual(at);
     expect(harness.port.messages).toHaveLength(2);
     expect(JSON.stringify(harness.port.messages[1])).not.toContain('swordfish-81');

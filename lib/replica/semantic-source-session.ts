@@ -76,11 +76,14 @@ import {
   readSourceFlatTreeElementPath,
   readSourceFlatTreeParentElement,
   readSourceSelectLabel,
+  sourceControlledContentIndexChange,
+  sourceControlledContentIndexedShadowRoots,
   sourceControlledContentMutationsMayChange,
   sourceElementPathHoldsPaint,
   sourceElementPathIsPainted,
   sourceElementPathShowsWithoutBox,
   type SourceControlledContentPolicy,
+  type SourceControlledContentReuse,
   type SourceSecretAncestorMemo,
   type SourceSelectLabelWalk,
 } from './source-privacy-policy';
@@ -581,6 +584,24 @@ export class SemanticSourceSession {
   #observedSemanticRoots = new WeakSet<Document | ShadowRoot>();
   readonly #semanticEventRoots = new Set<Document | ShadowRoot>();
   readonly #stopListeningForShadowRoots: () => void;
+  /**
+   * The last policy of controlled content a scan built, to build the next
+   * on while no change since moved its walk's index (D225, on D221): the
+   * walk of the whole document was most of a policy, and every scan made
+   * one. `#policyIndexMoves` counts the changes that may have moved an
+   * index (a record that writes an id or `aria-controls`, a root met or
+   * watched anew, records the observer dropped), `#policyIndexAdded` the
+   * nodes the records put in; each policy is marked with both as they
+   * were when its walk began.
+   */
+  #lastPolicy: SourceControlledContentPolicy | undefined;
+  #policyIndexMoves = 0;
+  #policyIndexAdded = 0;
+  #policyBuilding = false;
+  readonly #policyIndexMarks = new WeakMap<
+    SourceControlledContentPolicy,
+    { readonly moves: number; readonly added: number }
+  >();
   #sequence = 0;
   /** What the start asked for: a panel of version 2 gets whole states (D179). */
   #protocolVersion: SemanticSourceProtocolVersion = SEMANTIC_SOURCE_PROTOCOL_VERSION;
@@ -658,6 +679,8 @@ export class SemanticSourceSession {
     this.#stopListeningForShadowRoots = listenForSourceShadowRoots(
       environment.document,
       (_root, late) => {
+        // A root met is one the policy's walk may not have indexed (D225).
+        this.#policyIndexMoves += 1;
         // A root attached to a host that was read before fires nothing. When
         // another reader of the page finds it (the base channel's rotation,
         // a person's input), what was sent as public under that host may now
@@ -1045,19 +1068,7 @@ export class SemanticSourceSession {
     try {
       const createObserver = this.environment.createMutationObserver ??
         ((callback: MutationCallback) => new MutationObserver(callback));
-      this.#observer = createObserver((records) => {
-        rememberSourceMutationSecrets(
-          records,
-          this.environment.window,
-          this.#classifier,
-        );
-        // A scan that runs goes on; what changed meanwhile decides whether
-        // its policy is still good, and the batch is sealed (D164).
-        this.#noteScanRecords(records);
-        this.#noteChangeRecords(records);
-        if (!records.some(sourceMutationMayChangeCurrentValue)) return;
-        this.#requestScan();
-      });
+      this.#observer = createObserver((records) => this.#onRecords(records));
       this.#observeSemanticRoot(this.environment.document);
       safelyRead(() => this.environment.window.addEventListener?.(
         'resize',
@@ -1069,6 +1080,22 @@ export class SemanticSourceSession {
     } catch {
       this.dispose(true);
     }
+  }
+
+  /** What the observer delivers, or the scan takes from it (D225). */
+  #onRecords(records: readonly MutationRecord[]): void {
+    rememberSourceMutationSecrets(
+      records,
+      this.environment.window,
+      this.#classifier,
+    );
+    // A scan that runs goes on; what changed meanwhile decides whether
+    // its policy is still good, and the batch is sealed (D164).
+    this.#noteScanRecords(records);
+    this.#noteChangeRecords(records);
+    this.#notePolicyIndexChange(records);
+    if (!records.some(sourceMutationMayChangeCurrentValue)) return;
+    this.#requestScan();
   }
 
   #notePopoverToggle(event: Event): void {
@@ -1109,6 +1136,8 @@ export class SemanticSourceSession {
     if (!this.#observer || this.#observedSemanticRoots.has(root)) return;
     this.#observer.observe(root, SEMANTIC_ROOT_MUTATION_OPTIONS);
     this.#observedSemanticRoots.add(root);
+    // Records from it came to no policy's walk before (D225).
+    this.#policyIndexMoves += 1;
     this.#semanticEventRoots.add(root);
     for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
       sourceCall(root, 'addEventListener', type, this.#onDomChange, true);
@@ -1166,6 +1195,8 @@ export class SemanticSourceSession {
     // The observer has no way to stop watching one root: it lets go of all
     // of them and takes the ones still in the page again.
     if (!this.#observer) return;
+    // What the observer held is dropped with it (D225).
+    this.#policyIndexMoves += 1;
     this.#observer.disconnect();
     this.#observedSemanticRoots = new WeakSet();
     for (const root of kept) {
@@ -1203,6 +1234,7 @@ export class SemanticSourceSession {
       { freshRoots: true },
     );
     this.#noteChangeRecords(records);
+    this.#notePolicyIndexChange(records);
     // Taken records never reach the observer's callback, nor its refresh.
     // Before a scan begins the scan reads what they changed; once it runs,
     // part of the page was read before them, so another scan follows (D164):
@@ -1707,6 +1739,33 @@ export class SemanticSourceSession {
       sourceControlledContentMutationsMayChange(records, policy);
   }
 
+  /** Counts what `records` may do to the index of a policy (D225). */
+  #notePolicyIndexChange(records: readonly MutationRecord[]): void {
+    // Nothing to count for: the last policy was moved already, and none is
+    // being built that a record now could move.
+    const policy = this.#lastPolicy;
+    const mark = policy && this.#policyIndexMarks.get(policy);
+    if ((!mark || mark.moves !== this.#policyIndexMoves) && !this.#policyBuilding) {
+      return;
+    }
+    const change = safelyRead(() => sourceControlledContentIndexChange(records));
+    if (!change || change.moved) this.#policyIndexMoves += 1;
+    else this.#policyIndexAdded += change.added;
+  }
+
+  /** The last policy, to build the next on, if nothing moved its index. */
+  #policyReuse(): SourceControlledContentReuse | undefined {
+    const policy = this.#lastPolicy;
+    const mark = policy && this.#policyIndexMarks.get(policy);
+    if (!policy || !mark || mark.moves !== this.#policyIndexMoves) return undefined;
+    // Records from a root not watched never come: what the index holds of
+    // it may be stale.
+    for (const root of sourceControlledContentIndexedShadowRoots(policy)) {
+      if (!this.#observedSemanticRoots.has(root)) return undefined;
+    }
+    return { policy, addedSince: this.#policyIndexAdded - mark.added };
+  }
+
   /** Reads the page anew; after two restarts, in one task (D164). */
   #restartScan(run: SemanticScanRun): void {
     run.restarts += 1;
@@ -2194,20 +2253,40 @@ export class SemanticSourceSession {
     // if that may change it (D164).
     let controlledContent: SourceControlledContentPolicy | undefined;
     if (scope.controlSemantics || scope.editableContent || scope.formValues) {
-      const builder = beginSourceControlledContentPolicy(
-        this.environment.document,
-        this.environment.window,
-        MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
-      );
       // What changes from here on is kept until the last step that asks it.
       attempt.watchingPolicy = true;
       run.records = [];
       run.recordsOverflow = false;
-      let policy = builder.step(expired);
-      while (!policy) {
-        yield 'turn';
+      // On the index of the last policy when no change since moved it
+      // (D225, on D221); its mark is that policy's, as the index dates from
+      // its walk. What the observer still holds is counted first, and goes
+      // where its callback would have put it.
+      const pending = safelyRead(() => this.#observer?.takeRecords?.() ?? []) ?? [];
+      if (pending.length > 0) this.#onRecords(pending);
+      const reuse = this.#policyReuse();
+      const mark = (reuse && this.#policyIndexMarks.get(reuse.policy)) ?? {
+        moves: this.#policyIndexMoves,
+        added: this.#policyIndexAdded,
+      };
+      const builder = beginSourceControlledContentPolicy(
+        this.environment.document,
+        this.environment.window,
+        MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
+        reuse,
+      );
+      this.#policyBuilding = true;
+      let policy: SourceControlledContentPolicy | undefined;
+      try {
         policy = builder.step(expired);
+        while (!policy) {
+          yield 'turn';
+          policy = builder.step(expired);
+        }
+      } finally {
+        this.#policyBuilding = false;
       }
+      if (!this.#policyIndexMarks.has(policy)) this.#policyIndexMarks.set(policy, mark);
+      this.#lastPolicy = policy;
       controlledContent = policy;
       attempt.policy = policy;
       attempt.policyCheckedTo = 0;
