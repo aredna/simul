@@ -41,6 +41,13 @@ const TWO_PAGE_WIDTH_TOLERANCE = 0.3;
 // How close (screen px) a reported width must be to a page's height at the
 // viewer's zoom to be that page turned a quarter.
 const TURNED_WIDTH_TOLERANCE = 0.3;
+// Chrome turns the view a quarter in one burst: a report of the new width
+// where the view was, then, within this (ms), the top of the page it was
+// on and its snapped report: 1 to 33 ms in Chrome for Testing 158 (D197),
+// the later as more of the PDF was drawn.
+const TURN_SNAP_MS = 50;
+// And a page top is within this (screen px) of its inset.
+const TURN_PAGE_TOP = 1;
 // Chrome's viewer passes its zoom on to the tab only when it changed by more
 // than 0.01 (its MIN_ZOOM_DELTA), so in a fit mode the tab's zoom, which the
 // panel has, can be that far from the viewer's (a little more for rounding).
@@ -337,6 +344,46 @@ export class PdfViewerTracker {
   #viewerZoom: number | undefined;
   /** Whether the viewer shows its pages turned a quarter. */
   #turned = false;
+  /**
+   * The view was turned by a burst only a turn sends, or as the page box
+   * said (D197), where a width can be a page upright and another turned (a
+   * Letter PDF with a landscape page): it stays turned until such a burst,
+   * a lone report of another width at a page top or the page box turns it
+   * back, not by its width alone.
+   */
+  #turnedByBurst = false;
+  /**
+   * The view was turned or turned back by a burst, or by a lone report at a
+   * page top of another width while turned so (D197): where every width is
+   * a page upright and another turned, a burst can be missed (a turn from a
+   * page top sends one report there, as a jump does), so the page box
+   * decides. The page it names fits the report upright, or turned only.
+   */
+  #orientationLook = false;
+  /**
+   * A lone report of a new width that may start a turn's burst, with the
+   * reports of its place that came at once after it (D197).
+   */
+  #turnPending: { readonly reports: { readonly viewport: PdfViewerViewport; readonly elapsed: number }[] } | undefined;
+  /**
+   * The width of a turn's burst that came before the zoom it changed (a fit
+   * mode): the turn is taken when Chrome tells of that zoom (D197).
+   */
+  #burstWidth: number | undefined;
+  /** The first report of what may be such a burst, read as before meanwhile. */
+  #burstFirst: { readonly viewport: PdfViewerViewport; readonly before: Fix | undefined } | undefined;
+  /**
+   * Where the panel goes back to when the page box says the view is turned
+   * after all: the place before the burst or the report of another width
+   * that was read upright (D197).
+   */
+  #lookFrom: Fix | undefined;
+  /**
+   * The page top of such a burst read upright, and whether the reading was
+   * a guess before it: a frame that moves on after it makes the burst a
+   * scroll after all, which the page box need not settle (D197).
+   */
+  #signTop: { readonly viewport: PdfViewerViewport; readonly unsure: boolean } | undefined;
   /** The latest report, read or not. */
   #lastReport: PdfViewerViewport | undefined;
   /** Whether the place could be whole pages off, and how many guesses there were. */
@@ -444,6 +491,22 @@ export class PdfViewerTracker {
       : undefined;
     const report = this.#lastReport;
     if (!report || this.#viewerZoom === before) return;
+    // A turn's burst came before this zoom (D197): taken where the width
+    // cannot tell, now that it is told.
+    const zoomNow = this.#viewerZoom;
+    if (
+      this.#burstWidth !== undefined &&
+      zoomNow !== undefined &&
+      Math.abs(report.pageWidth - this.#burstWidth) < 0.01 &&
+      (!this.#turned || this.#turnedByBurst) &&
+      this.#upright(report, zoomNow) &&
+      this.#fitsLength(report, this.#heights, zoomNow)
+    ) {
+      this.#turnNow();
+      if (this.#turned) this.#orientationLook = true;
+      return;
+    }
+    this.#burstWidth = undefined;
     // An upright report that fitted the zoom it came at belongs to that
     // zoom, and the report of the new zoom is on its way. Read at the new
     // zoom it could pass for a turn: a slide 960 by 720 is as wide at 75%
@@ -488,7 +551,8 @@ export class PdfViewerTracker {
    * The reading the tracker is unsure of, while the viewer is still;
    * `undefined` when the place is known, or when the viewer has sent a
    * report since that is not read yet (a movement or a key step held) or
-   * never will be (a view that is not followed).
+   * never will be (a view that is not followed). A view turned by a burst
+   * is doubted too, for the page box to tell which way it stands (D197).
    *
    * `pages` are the pages as wide as the report says at the viewer's zoom,
    * which is the tab's give or take its lag (`MIN_ZOOM_DELTA`): no tighter,
@@ -496,14 +560,27 @@ export class PdfViewerTracker {
    * for the only one that fits after a small resize in a fit mode. None
    * fits while Chrome has not told of a zoom yet: then there is no doubt to
    * look into until it has (`zoomUnfitted` says so). Without the tab's zoom
-   * they are the pages as wide as the page guessed.
+   * they are the pages as wide as the page guessed. With them come the
+   * pages as tall as the report is wide and no page fits upright: the page
+   * box naming one says the view is turned (D197).
    */
   get doubt(): PdfViewerDoubt | undefined {
     const fix = this.#fix;
+    const last = this.#lastReport;
+    const zoomHeld = this.#viewerZoom;
+    if (this.#turned && this.#orientationLook && last && zoomHeld !== undefined && this.#turnPending === undefined) {
+      // Which way the view stands, which the page box tells (D197).
+      const pages = this.#pages.flatMap((size, page) =>
+        this.#fitsUpright(last, size.width, zoomHeld) || this.#fitsTurned(last, size.height, zoomHeld) ? [page] : []);
+      return pages.length > 0
+        ? { viewport: last, page: fix?.page ?? 0, pages, episode: this.#episode }
+        : undefined;
+    }
     if (
       !this.#unsure ||
       !fix ||
       fix.viewport !== this.#lastReport ||
+      this.#turnPending !== undefined ||
       this.#turned ||
       this.#twoPageZoom !== undefined
     ) return undefined;
@@ -517,12 +594,28 @@ export class PdfViewerTracker {
             MIN_ZOOM_DELTA * width + TURNED_WIDTH_TOLERANCE;
         });
     if (fitting.length === 0) return undefined;
+    // And the pages it fits turned, where a page's height is another's
+    // width: the page box naming one says the view is turned (D197).
+    const turnedPages = zoom === undefined
+      ? []
+      : this.#pages.flatMap((size, page) =>
+          this.#fitsTurned(fix.viewport, size.height, zoom) && !this.#fitsUpright(fix.viewport, size.width, zoom)
+            ? [page]
+            : []);
     return {
       viewport: fix.viewport,
       page: fix.page,
-      pages: fitting.map((candidate) => candidate.page),
+      pages: [...fitting.map((candidate) => candidate.page), ...turnedPages],
       episode: this.#episode,
     };
+  }
+
+  #fitsUpright(viewport: PdfViewerViewport, width: number, zoom: number): boolean {
+    return Math.abs(viewport.pageWidth - width * zoom) <= MIN_ZOOM_DELTA * width + TURNED_WIDTH_TOLERANCE;
+  }
+
+  #fitsTurned(viewport: PdfViewerViewport, height: number, zoom: number): boolean {
+    return Math.abs(viewport.pageWidth - height * zoom) <= TURNED_WIDTH_TOLERANCE;
   }
 
   /**
@@ -543,7 +636,8 @@ export class PdfViewerTracker {
   /**
    * Whether the panel knows the viewer's zoom. Without it a view turned a
    * quarter cannot be told from an upright one (D123), so a doubted report
-   * must not be looked into: a turned view is never captured.
+   * must not be looked into: a turned view is captured only to tell which
+   * way it stands (D197).
    */
   get zoomKnown(): boolean {
     return this.#viewerZoom !== undefined;
@@ -557,9 +651,47 @@ export class PdfViewerTracker {
    * placed), or when the page does not fit the report.
    */
   place(doubt: PdfViewerDoubt, page: number): PdfReadingPosition | undefined {
+    const size = this.#pages[page];
+    const zoom = this.#viewerZoom;
+    if (this.#lastReport !== doubt.viewport || !size || zoom === undefined && this.#turned) return undefined;
+    if (this.#turned) {
+      // Which way the view stands (D197): upright if the page fits the
+      // report upright, and read from there; turned if only turned.
+      if (!this.#orientationLook || !doubt.pages.includes(page)) return undefined;
+      this.#orientationLook = false;
+      if (!this.#fitsUpright(doubt.viewport, size.width, zoom!) || this.#fitsTurned(doubt.viewport, size.height, zoom!)) {
+        return undefined;
+      }
+      this.#turned = false;
+      this.#turnedByBurst = false;
+      this.#guess();
+      this.#returned = true;
+      const before = this.#position;
+      this.#take(doubt.viewport, Number.POSITIVE_INFINITY);
+      this.settle();
+      const upright = this.doubt;
+      const placed = upright?.pages.includes(page) ? this.place(upright, page) : undefined;
+      return placed ?? (this.#position !== before ? this.#position : undefined);
+    }
     const fix = this.#fix;
-    if (!fix || fix.viewport !== doubt.viewport || this.#lastReport !== doubt.viewport) {
-      return undefined;
+    if (!fix || fix.viewport !== doubt.viewport) return undefined;
+    if (
+      zoom !== undefined &&
+      doubt.pages.includes(page) &&
+      this.#fitsTurned(doubt.viewport, size.height, zoom) &&
+      !this.#fitsUpright(doubt.viewport, size.width, zoom)
+    ) {
+      // The page box names a page the report fits only turned: a turn the
+      // tracker missed, from a page top (D197), or a wrong turn back. The
+      // place read since was none; the panel goes back to the place before.
+      this.#unsure = false;
+      const from = this.#lookFrom;
+      this.#turnNow();
+      if (!from) return undefined;
+      this.#setFix(from);
+      this.#jumpFrom = undefined;
+      this.#position = this.#readingPosition(from.y);
+      return this.#position;
     }
     const candidate = doubt.pages.includes(page)
       ? this.#candidates(fix.viewport).find((entry) => entry.page === page)
@@ -590,6 +722,196 @@ export class PdfViewerTracker {
       ? Number.POSITIVE_INFINITY
       : time - this.#lastTime;
     this.#lastTime = time;
+    if (
+      this.#burstWidth !== undefined &&
+      Math.abs(viewport.pageWidth - this.#burstWidth) >= 0.01
+    ) this.#burstWidth = undefined;
+    // A quarter turn's burst (D197): the report of the new width where the
+    // view was, maybe that place again, then within `TURN_SNAP_MS` the top
+    // of the page it was on. The first is held until that top comes, and
+    // read as before if it does not.
+    const pending = this.#turnPending;
+    this.#turnPending = undefined;
+    if (pending) {
+      // The held burst is this rule's own.
+      this.#burstFirst = undefined;
+      const first = pending.reports[0]!.viewport;
+      const burst = elapsed >= 0 && elapsed <= TURN_SNAP_MS &&
+        Math.abs(viewport.pageWidth - first.pageWidth) < 0.01;
+      if (burst && this.#atTurnPageTop(viewport)) return this.#turnByBurst(viewport, pending.reports[0]!.elapsed);
+      if (
+        burst &&
+        Math.max(Math.abs(viewport.pageY - first.pageY), Math.abs(viewport.pageX - first.pageX)) < this.#samePlace()
+      ) {
+        this.#turnPending = { reports: [...pending.reports, { viewport, elapsed }] };
+        return { kind: 'hold', wait: PDF_VIEWER_SETTLE_MS };
+      }
+      return this.#takeAll([...pending.reports, { viewport, elapsed }]);
+    }
+    const zoomHeld = this.#viewerZoom;
+    const previous = this.#lastReport;
+    const widthChanged = previous !== undefined &&
+      Math.abs(viewport.pageWidth - previous.pageWidth) > TURNED_WIDTH_TOLERANCE;
+    if (widthChanged) this.#lookFrom = this.#fix;
+    // Turned by a burst, a lone report of another width is a turn back (or
+    // on, from a page top, which sends one report there), or a page of the
+    // other shape: read upright, a guess the page box settles (D197).
+    if (
+      this.#turned && this.#turnedByBurst && zoomHeld !== undefined && widthChanged &&
+      elapsed > PDF_VIEWER_STREAM_GAP_MS &&
+      this.#upright(viewport, zoomHeld)
+    ) {
+      this.#turnNow();
+      return this.#take(viewport, elapsed);
+    }
+    // A lone report off a page top, maybe that place again, then within the
+    // burst a page top elsewhere: what a turn sends, whatever the widths
+    // (the page most in view may change with the turn), and little else
+    // (D197). Where the page box can tell, it looks.
+    const sign = this.#signTop;
+    this.#signTop = undefined;
+    if (
+      sign && elapsed >= 0 && elapsed <= TURN_SNAP_MS &&
+      Math.max(Math.abs(viewport.pageY - sign.viewport.pageY), Math.abs(viewport.pageX - sign.viewport.pageX)) >=
+        this.#samePlace()
+    ) {
+      this.#unsure = sign.unsure;
+      this.#lookFrom = undefined;
+    } else if (sign && elapsed >= 0 && elapsed <= TURN_SNAP_MS) {
+      this.#signTop = sign;
+    }
+    const first = this.#burstFirst;
+    this.#burstFirst = undefined;
+    if (first && zoomHeld !== undefined && elapsed >= 0 && elapsed <= TURN_SNAP_MS) {
+      const moved = Math.max(
+        Math.abs(viewport.pageY - first.viewport.pageY),
+        Math.abs(viewport.pageX - first.viewport.pageX),
+      );
+      const sameWidth = Math.abs(viewport.pageWidth - first.viewport.pageWidth) <= TURNED_WIDTH_TOLERANCE;
+      if (this.#atTurnPageTop(viewport) && (moved >= this.#samePlace() || !sameWidth)) {
+        const turnTrack = this.#turnSign(viewport, elapsed, first.before, zoomHeld);
+        if (turnTrack) return turnTrack;
+      } else if (sameWidth && moved < this.#samePlace()) {
+        this.#burstFirst = first;
+      }
+    } else if (
+      zoomHeld !== undefined &&
+      elapsed > PDF_VIEWER_STREAM_GAP_MS &&
+      !this.#atTurnPageTop(viewport)
+    ) {
+      this.#burstFirst = { viewport, before: this.#fix };
+    }
+    if (this.#startsTurn(viewport, elapsed)) {
+      this.#turnPending = { reports: [{ viewport, elapsed }] };
+      return { kind: 'hold', wait: PDF_VIEWER_SETTLE_MS };
+    }
+    return this.#take(viewport, elapsed);
+  }
+
+  /**
+   * A page top came as a turn sends it (D197). Turned by a burst, the view
+   * is read upright; upright, the top is read; either way where the top
+   * is a page upright and another turned, a guess the page box settles,
+   * from the place before the burst. A width that fits no page at the zoom
+   * held waits for the zoom Chrome tells of (`setViewerZoom`).
+   */
+  #turnSign(
+    top: PdfViewerViewport,
+    elapsed: number,
+    before: Fix | undefined,
+    zoom: number,
+  ): PdfViewerTrack | undefined {
+    const upright = this.#upright(top, zoom);
+    if (!upright && !this.#fitsLength(top, this.#heights, zoom)) {
+      this.#burstWidth = top.pageWidth;
+      this.#lookFrom = before;
+      return undefined;
+    }
+    if (!upright || !this.#fitsLength(top, this.#heights, zoom)) return undefined;
+    if (this.#turned) {
+      if (!this.#turnedByBurst) return undefined;
+      this.#turnNow();
+      this.#lookFrom = before;
+      return this.#take(top, elapsed);
+    }
+    const track = this.#take(top, elapsed);
+    if (this.#turned) return track;
+    this.#signTop = { viewport: top, unsure: this.#unsure };
+    this.#guess();
+    this.#lookFrom = before;
+    return track;
+  }
+
+  /** Reads reports in turn; a move any of them made is the result. */
+  #takeAll(reports: readonly { readonly viewport: PdfViewerViewport; readonly elapsed: number }[]): PdfViewerTrack {
+    const before = this.#position;
+    let track: PdfViewerTrack = { kind: 'same' };
+    for (const report of reports) track = this.#take(report.viewport, report.elapsed);
+    if (track.kind === 'same' && this.#position !== before && this.#position) {
+      return { kind: 'move', position: this.#position };
+    }
+    return track;
+  }
+
+  /**
+   * Whether a report may be the first of a quarter turn's burst (D197): lone,
+   * of another width than the report before, not at a page top, and the
+   * view upright (turned by a burst, any such report is read upright). At the
+   * viewer's zoom its width is one a page has both upright and turned,
+   * which the width alone cannot tell (D123 tells the rest): it is held.
+   */
+  #startsTurn(viewport: PdfViewerViewport, elapsed: number): boolean {
+    const zoom = this.#viewerZoom;
+    const before = this.#lastReport;
+    if (
+      zoom === undefined ||
+      !before ||
+      elapsed <= PDF_VIEWER_STREAM_GAP_MS ||
+      Math.abs(viewport.pageWidth - before.pageWidth) <= TURNED_WIDTH_TOLERANCE ||
+      this.#atTurnPageTop(viewport)
+    ) return false;
+    if (this.#turned) return false;
+    return this.#upright(viewport, zoom) && this.#fitsLength(viewport, this.#heights, zoom);
+  }
+
+  #atTurnPageTop(viewport: PdfViewerViewport): boolean {
+    const zoom = this.#viewerZoom;
+    return zoom !== undefined && Math.abs(viewport.pageY - INSET_TOP * zoom) <= TURN_PAGE_TOP;
+  }
+
+  /**
+   * A turn's burst came where the width cannot tell (D197): the view is
+   * turned a quarter, or back.
+   */
+  #turnByBurst(top: PdfViewerViewport, elapsed: number): PdfViewerTrack {
+    this.#turnNow();
+    if (this.#turned) this.#orientationLook = true;
+    this.#lastReport = top;
+    if (this.#turned) return { kind: 'same' };
+    // Upright again: the page top is read as the first report of the view,
+    // a guess, as after D123's turn back.
+    return this.#take(top, elapsed);
+  }
+
+  #turnNow(): void {
+    this.#hold = undefined;
+    this.#keyStep = undefined;
+    this.#keyUndo = undefined;
+    this.#burstWidth = undefined;
+    if (this.#turned) {
+      // Upright again; the place is guessed from where it was.
+      this.#turned = false;
+      this.#turnedByBurst = false;
+      this.#orientationLook = false;
+      this.#guess();
+      this.#returned = true;
+      return;
+    }
+    this.#turned = true;
+    this.#turnedByBurst = true;
+  }
+
+  #take(viewport: PdfViewerViewport, elapsed: number): PdfViewerTrack {
     // A new movement, with all that the view came back with read (a report
     // held or not read is not).
     if (
@@ -1037,6 +1359,10 @@ export class PdfViewerTracker {
     if (this.#turned) {
       // A width that fits nothing is a zoom Chrome has not told of yet.
       if (!upright) return true;
+      // Turned by a burst: upright only by the burst back, unless no page
+      // turned could be this wide (D197).
+      if (this.#turnedByBurst && this.#fitsLength(viewport, this.#heights, zoom)) return true;
+      this.#turnedByBurst = false;
       // Upright again; the place is guessed from where it was.
       this.#turned = false;
       this.#guess();
@@ -1317,6 +1643,14 @@ export class PdfViewerTracker {
    * panel stays.
    */
   settle(): PdfReadingPosition | undefined {
+    const pending = this.#turnPending;
+    if (pending) {
+      // No page top followed: no turn, and the report is read as before.
+      this.#turnPending = undefined;
+      const track = this.#takeAll(pending.reports);
+      if (track.kind === 'hold') return this.settle();
+      return track.kind === 'move' ? track.position : undefined;
+    }
     const keyStep = this.#keyStep;
     if (keyStep) {
       // No frame followed: a key, or Home or End, which a capture confirms.

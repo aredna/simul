@@ -329,8 +329,8 @@ export class PdfViewerFollower {
     }
     const doubt = tracker.doubt;
     if (!doubt) return;
-    // A turned view is never captured, and without the tab's zoom it cannot
-    // be told from an upright one. Chrome is asked; a look follows the answer.
+    // A turned view is captured only to tell which way it stands (D197),
+    // and without the tab's zoom it cannot be told from an upright one. Chrome is asked; a look follows the answer.
     if (!tracker.zoomKnown) {
       try {
         this.#dependencies.askViewerZoom?.(session.target);

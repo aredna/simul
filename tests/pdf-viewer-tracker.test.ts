@@ -2263,6 +2263,141 @@ describe('PdfViewerTracker and a view turned a quarter (D123)', () => {
     tracker.settle();
   }
 
+  it('tells a turn on a Letter PDF with one landscape page by its burst (D197)', () => {
+    // Page 20 of 40 is landscape: turned, every portrait page is as wide as
+    // it is upright, and turned back, as wide as it is turned.
+    const sizes = pages(40).map((size, index) => (index === 19 ? LANDSCAPE : size));
+    const viewer = new FakeViewer(sizes, 0.86, 757);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(0.86);
+    viewer.scrollTo(viewer.pages[4]!.top * 0.86 + 100);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 4);
+    const before = tracker.position;
+    // Ctrl+] (Chrome for Testing 158): the new width where the view was,
+    // then the top of the page it was on 4 ms on, and its snapped report.
+    const rotated = new FakeViewer(turned(sizes), 0.86, 757);
+    rotated.time = viewer.time;
+    rotated.scrollTo(viewer.scroll);
+    expect(send(tracker, rotated, 900).kind).toBe('hold');
+    rotated.scrollTo((rotated.pages[4]!.top - 3) * 0.86);
+    expect(send(tracker, rotated, 4).kind).toBe('same');
+    expect(send(tracker, rotated, 1).kind).toBe('same');
+    expect(tracker.settle()).toBeUndefined();
+    // The page box settles which way it stands: page 5, which the report
+    // fits only turned.
+    expect(tracker.doubt?.pages).toContain(4);
+    expect(tracker.place(tracker.doubt!, 4)).toBeUndefined();
+    expect(tracker.doubt).toBeUndefined();
+    // Not followed while turned, where it read page 20 before.
+    for (let step = 0; step < 3; step += 1) {
+      rotated.scrollTo(rotated.scroll + 300);
+      expect(send(tracker, rotated, 120).kind).toBe('same');
+    }
+    expect(tracker.position).toBe(before);
+    expect(tracker.doubt).toBeUndefined();
+    // Ctrl+[: its first report, of another width, is read upright at once,
+    // and the page top after it; the place is a guess the page box settles.
+    viewer.time = rotated.time;
+    viewer.scrollTo(viewer.pages[6]!.top * 0.86 + 200);
+    send(tracker, viewer, 900);
+    viewer.scrollTo((viewer.pages[6]!.top - 3) * 0.86);
+    send(tracker, viewer, 2);
+    send(tracker, viewer, 1);
+    tracker.settle();
+    expect(tracker.doubt).toBeDefined();
+    expect(tracker.place(tracker.doubt!, 6)?.index).toBe(6);
+
+    // A wheel step onto the landscape page sends no page top after it: read
+    // as before once the wait is over.
+    const scroller = new FakeViewer(sizes, 0.86, 757);
+    const reader = new PdfViewerTracker(sizes);
+    reader.setViewerZoom(0.86);
+    scroller.scrollTo(scroller.pages[18]!.top * 0.86 + 400);
+    send(reader, scroller, 1_000);
+    reader.place(reader.doubt!, 18);
+    scroller.scrollTo(scroller.pages[19]!.top * 0.86 + 60);
+    expect(send(reader, scroller, 900).kind).toBe('hold');
+    expect(reader.settle()?.index).toBe(19);
+  });
+
+  it('takes such a burst in fit to page, with the place twice and the zoom told after (D197)', () => {
+    const sizes = pages(40).map((size, index) => (index === 19 ? LANDSCAPE : size));
+    const viewer = new FakeViewer(sizes, 0.7175, 757);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(0.7175);
+    viewer.scrollTo(viewer.pages[4]!.top * 0.7175 + 60);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 4);
+    const before = tracker.position;
+    // Ctrl+] in fit to page (letter-scan.pdf in Chrome for Testing 158): the
+    // turned pages fit at 90%; the old place twice, then page 5's top and its
+    // snap, and Chrome tells the tab of the zoom after.
+    const rotated = new FakeViewer(turned(sizes), 0.9, 757);
+    rotated.time = viewer.time;
+    rotated.scrollTo(rotated.pages[4]!.top * 0.9 + 75);
+    send(tracker, rotated, 700);
+    send(tracker, rotated, 1);
+    rotated.scrollTo((rotated.pages[4]!.top - 3) * 0.9);
+    send(tracker, rotated, 1);
+    send(tracker, rotated, 2);
+    // Until the zoom is told the reports are read at any zoom: page 5's top.
+    tracker.setViewerZoom(0.9);
+    tracker.settle();
+    const turnedAt = tracker.position;
+    expect(turnedAt?.index).toBe(before?.index);
+    // The page box names page 5, which the report fits only turned.
+    expect(tracker.place(tracker.doubt!, 4)).toBeUndefined();
+    for (let step = 0; step < 3; step += 1) {
+      rotated.scrollTo(rotated.scroll + 300);
+      send(tracker, rotated, 120);
+    }
+    tracker.settle();
+    expect(tracker.position).toBe(turnedAt);
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('lets the page box tell a turn from a page top, which sends one report there (D197)', () => {
+    // Letter pages with two landscape ones (8 and 9), as in mixed-orient.pdf.
+    const sizes = pages(32).map((size, index) => (index === 8 || index === 9 ? LANDSCAPE : size));
+    const viewer = new FakeViewer(sizes, 1, 757);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(1);
+    viewer.scrollTo(viewer.pages[2]!.top - 3);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 2);
+    const before = tracker.position;
+    // Ctrl+] at page 3's top: one report there, 1,056 px wide, as a jump
+    // to a landscape page's top would send. The look names page 3.
+    const rotated = new FakeViewer(turned(sizes), 1, 757);
+    rotated.time = viewer.time;
+    rotated.scrollTo(rotated.pages[2]!.top - 3);
+    send(tracker, rotated, 900);
+    send(tracker, rotated, 1);
+    tracker.settle();
+    expect(tracker.doubt?.pages).toContain(2);
+    // Read as page 9's top until then; the panel goes back to page 3.
+    expect(tracker.place(tracker.doubt!, 2)).toEqual(before);
+    const turnedAt = tracker.position;
+    for (let step = 0; step < 3; step += 1) {
+      rotated.scrollTo(rotated.scroll + 300);
+      expect(send(tracker, rotated, 120).kind).toBe('same');
+    }
+    expect(tracker.position).toBe(turnedAt);
+    // Ctrl+] again from page 4's top (a half turn, pages upright in shape):
+    // read upright, a guess the look settles, and followed again.
+    const half = new FakeViewer(sizes, 1, 757);
+    half.time = rotated.time;
+    half.scrollTo(half.pages[3]!.top - 3);
+    send(tracker, half, 900);
+    tracker.settle();
+    expect(tracker.place(tracker.doubt!, 3)?.index ?? tracker.position?.index).toBe(3);
+    half.scrollTo(half.scroll + 300);
+    send(tracker, half, 900);
+    tracker.settle();
+    expect(tracker.position?.index).toBe(3);
+  });
+
   it('stops following while the view is turned, at a set zoom', () => {
     const viewer = new FakeViewer(pages(40), 0.8, 700);
     const tracker = new PdfViewerTracker(pages(40));

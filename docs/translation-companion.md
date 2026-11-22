@@ -1022,6 +1022,9 @@ shell and the mirror has nothing to copy (D103).
     must not end a sentence, the block must start at once below it where
     the line starts and end no further right, and it must be the only
     block there, so two columns or a caption beside leave the line alone.
+    The block above joins the same way, as the flow's first part (D196),
+    where it does not end a sentence, starts where the line starts, ends
+    no further left, and its last line reaches its right.
     A line whose words are all covered is
     left out, and so is a piece with no letter or digit (a dash between
     typed words). Beside a line that is mostly typed text (which D111 left
@@ -1195,7 +1198,37 @@ shell and the mirror has nothing to copy (D103).
       held movement or key is dropped, and a width that fits no page at the
       zoom is taken for a zoom Chrome has not told of yet. Upright again,
       the place is guessed from the last place read, as after a jump, and
-      the page box settles it (D133). In
+      the page box settles it (D133). Where a width is a page upright and
+      another turned (a Letter PDF with a landscape page: a portrait page
+      turned is as wide as the landscape one upright), the width cannot
+      tell, and D197 lets the page box tell: the page it names fits the
+      report upright, or only turned. What raises that look is the burst a
+      turn sends: a lone report where the view was, maybe that place again,
+      then within 50 ms the top of the page it was on and its snapped
+      report (1 to 33 ms after in Chrome for Testing 158; the page most in
+      view, and so the width, may change between them). A frame that moves
+      on after that top makes it a scroll, and no look. A lone report of a
+      new width that may be such a burst's is held until that page top
+      comes, and read as before if it does not; the view is then taken as
+      turned until the look says which. Where the zoom changed with the turn (fit to page) the burst is
+      taken when Chrome tells of the zoom. A turn from a page top sends one
+      report there, as a jump does: upright, the look that every lone report
+      at a page top raises finds a page the report fits only turned, and the
+      panel goes back to where it was before that report. Turned so, any
+      lone report of another width (the turn back, the next quarter from a
+      page top, or a page of the other shape) is read upright, a guess the
+      look settles either way. Every look's pages include those the report
+      fits only turned. The D123 review's
+      `matrix.mjs turns` (copied to `~/.cache/simul-harness/d197/turns/`)
+      and `record.mjs turn`, `turnscan` and `turnmatrix` in the D177 follow
+      harness check it on a Letter PDF with one landscape page, on one with
+      landscape pages a little shorter (`letter-scan.pdf`) and on one whose
+      landscape pages are Letter turned (`mixed-orient.pdf`), at 86%, 100%,
+      fit to page and fit to width, with quarter, half, three-quarter and
+      full turns and a zoom while turned. Where the tab's zoom lags the
+      viewer's (a fit mode after a small resize) the width is not a page
+      height within 0.3 px,
+      and the view is read as before. In
       fit to page and fit to height Chrome then reports the old place and,
       about 40 ms later, a page's top; the two can read as a movement that
       stopped at the end of the PDF, because there one page and its insets
@@ -1388,7 +1421,18 @@ shell and the mirror has nothing to copy (D103).
       in, so nothing tells the step's length but the reports (D189).
       A lone report at a page key's step from the place before that also
       fits the top or the bottom of the PDF is a doubt (D177): Home or
-      End with no animation send one report, which can land there. That is
+      End with no animation send one report, which can land there. On a
+      PDF of one page size Home's report at the top fits the next page's
+      top too; where that top is not a whole pixel on screen, ArrowRight
+      and a jump send a snapped second report and Home does not, so the
+      top is read until a snapped report comes (D196). On whole pixels
+      nothing tells them apart and ArrowRight is read; both are guesses a
+      look settles. With Chrome's smooth scrolling off (`record.mjs` in the
+      D177 follow harness runs with `--disable-smooth-scrolling` unless
+      told `--smooth`) Chrome for Testing 158 sent End and Home 416 times
+      in 35 recordings, and every one replays right but the two End of a
+      recording made before the bridge measured the default zoom (D184;
+      D197). That is
       on purpose: scrolling within a page leaves a number typed into the
       page box and not entered where it is, and a look would read it; a
       jump always enters or replaces it. A doubt lasts
@@ -1493,7 +1537,9 @@ shell and the mirror has nothing to copy (D103).
       the box shows; with the caret blinked off it reads as a page, which
       is why only jumps are looked into, and why a look that finds the
       number selected or with a caret ends the looks into that doubt
-      (D177). A jump made while the viewer still scrolls whose second
+      (D177). With the caret blinked off the focused box is the unfocused
+      one pixel for pixel, the digits apart (D197), so one picture cannot
+      tell a typed number from an entered one. A jump made while the viewer still scrolls whose second
       report comes more than 12 ms after its first raises no doubt (Chrome
       138 with the companion window sent it up to 18.8 ms late on a busy
       machine), nor does a jump on a PDF so long that the snap moves its
@@ -1504,7 +1550,16 @@ shell and the mirror has nothing to copy (D103).
       within its burst after the press that was cut short by the end of
       the PDF, or a step of exactly one page within the burst of another
       step; and inside a held key's burst on a busy viewer, a Page Down
-      whose place came twice 2 ms apart. A look may wait its turn behind scanned pages being
+      whose place came twice 2 ms apart. A repeated place cannot be told
+      from a snap by its value: in the D177 recordings 51 of 104 snapped
+      second reports named exactly the place of the first (D197). Every
+      ArrowRight and ArrowLeft takes a capture too, and fewer is not to be
+      had (D197): ArrowLeft's report at the previous page's top is the
+      report ArrowRight sends at the next page's top, since the viewer
+      names only where its most visible page sits, never which page, and
+      the keys go to the viewer's own frame, out of the tab's sight; D177
+      built a turn without a look and read every ArrowLeft two pages on in
+      Chrome for Testing 158. A look may wait its turn behind scanned pages being
       read, and the Tesseract worker changes model for it when the PDF is
       not read in English. The picture goes through the OCR host's temporary
       storage like any OCR job and is deleted with it. The look runs under
