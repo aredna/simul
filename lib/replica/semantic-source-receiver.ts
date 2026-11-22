@@ -50,7 +50,13 @@ import {
   structuralMenuPanelCandidates,
   type StructuralMenuOpening,
 } from './structural-menu-shape';
-import { sourceChildNodeList, sourceLocalName, sourceNodeType } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 export interface SemanticSourceReceiverEnvironment {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -239,7 +245,7 @@ export function semanticRefreshScope(
     // Gone in the same patch: what it held is disconnected, and an entry
     // there is asked again for that.
     if (!node) continue;
-    const element = sourceNodeType(node) === 1 ? node as Element : node.parentElement;
+    const element = sourceNodeType(node) === 1 ? node as Element : sourceProperty(node, 'parentElement');
     if (element && STYLE_ELEMENT_TAGS.has(sourceLocalName(element).toLowerCase())) {
       styleChanged = true;
     }
@@ -278,7 +284,7 @@ export function changedReplicaRegion(
     for (const root of roots) {
       pending.push(root);
       if (sourceNodeType(root) === 1 && sourceLocalName((root as Element)).toLowerCase() === 'slot') {
-        const host = (root.getRootNode() as Partial<ShadowRoot>).host;
+        const host = (sourceCall(root, 'getRootNode') as Partial<ShadowRoot>).host;
         if (host) pending.push(host);
       }
     }
@@ -303,7 +309,8 @@ export function changedReplicaRegion(
       const tagName = sourceLocalName(element).toLowerCase();
       if (STYLE_ELEMENT_TAGS.has(tagName)) return undefined;
       pending.push(...sourceChildNodeList(element));
-      if (element.shadowRoot) pending.push(element.shadowRoot);
+      const shadowRoot = sourceProperty(element, 'shadowRoot');
+      if (shadowRoot) pending.push(shadowRoot);
       if (tagName === 'slot') {
         const assigned = (element as Partial<HTMLSlotElement>).assignedNodes;
         if (typeof assigned === 'function') pending.push(...assigned.call(element));
@@ -317,9 +324,9 @@ export function changedReplicaRegion(
 
 /** Simul's own sheets in the frame, which hold no rule of the page's. */
 function isSimulOwnedStyle(element: Element): boolean {
-  return element.hasAttribute('data-simul-owned-shell') ||
-    element.hasAttribute('data-simul-owned-shadow-shell') ||
-    element.hasAttribute('data-simul-owned-select-style');
+  return sourceCall(element, 'hasAttribute', 'data-simul-owned-shell') ||
+    sourceCall(element, 'hasAttribute', 'data-simul-owned-shadow-shell') ||
+    sourceCall(element, 'hasAttribute', 'data-simul-owned-select-style');
 }
 
 const DATA_CSS_PREFIX = /^data:text\/css(?:;charset=utf-8)?,/iu;
@@ -346,18 +353,19 @@ export function replicaSelectorReach(
       }
       for (const element of Array.from(owner.querySelectorAll('*'))) {
         if (reach === 'everything') return reach;
-        if (element.shadowRoot) owners.push(element.shadowRoot);
+        const shadowRoot = sourceProperty(element, 'shadowRoot');
+        if (shadowRoot) owners.push(shadowRoot);
         const tagName = sourceLocalName(element).toLowerCase();
         if (tagName === 'style') {
           if (isSimulOwnedStyle(element)) continue;
-          const text = element.textContent ?? '';
+          const text = sourceProperty(element, 'textContent') ?? '';
           const sheet = (element as Partial<HTMLStyleElement>).sheet;
           reach = widerReach(reach, /@import\b/iu.test(text) && sheet
             ? cssRulesReach(sheet)
             : styleSheetTextReach(text));
         } else if (tagName === 'link') {
-          if (!/(?:^|\s)stylesheet(?:\s|$)/iu.test(element.getAttribute('rel') ?? '')) continue;
-          const href = element.getAttribute('href') ?? '';
+          if (!/(?:^|\s)stylesheet(?:\s|$)/iu.test(sourceCall(element, 'getAttribute', 'rel') ?? '')) continue;
+          const href = sourceCall(element, 'getAttribute', 'href') ?? '';
           if (DATA_CSS_PREFIX.test(href)) {
             reach = widerReach(
               reach,
@@ -398,8 +406,8 @@ export function replicaSelectorReach(
 function withFollowingSiblings(roots: readonly Node[]): readonly Node[] {
   const widened = new Set<Node>(roots);
   for (const root of roots) {
-    const from = sourceNodeType(root) === 1 ? root : root.parentElement;
-    for (let sibling = from?.nextSibling; sibling; sibling = sibling.nextSibling) {
+    const from = sourceNodeType(root) === 1 ? root : sourceProperty(root, 'parentElement');
+    for (let sibling = from?.nextSibling; sibling; sibling = sourceProperty(sibling, 'nextSibling')) {
       if (widened.size > MAX_CHANGED_REGION_ROOTS) return [...widened];
       widened.add(sibling);
     }
@@ -417,7 +425,7 @@ export function resolvedProofTouchesRegion(
     if (Array.isArray(value)) return value.some(touches);
     if (!('nodeType' in value)) return false;
     const node = value as Node;
-    return !node.isConnected || region.inside.has(node) || region.around.has(node);
+    return !sourceProperty(node, 'isConnected') || region.inside.has(node) || region.around.has(node);
   };
   for (const [key, value] of Object.entries(resolved)) {
     if (key !== 'proof' && touches(value)) return true;
@@ -1015,7 +1023,7 @@ export class SemanticSourceReceiver {
       // changed (D185): its node, the element that shows it, the boxes
       // around it and their styles are as they were when it was checked.
       const target = entry.binding.target;
-      if (region && target.isConnected && !region.inside.has(target)) continue;
+      if (region && sourceProperty(target, 'isConnected') && !region.inside.has(target)) continue;
       if (this.#entryIsStillSafe(entry) && entry.binding.reapply()) continue;
       const rebound = this.#rebind(entry);
       if (rebound) {
@@ -1030,7 +1038,7 @@ export class SemanticSourceReceiver {
       }
       entry.binding.restore();
       this.#entries.delete(projectionNodeId);
-      if (!entry.binding.target.isConnected) {
+      if (!sourceProperty(entry.binding.target, 'isConnected')) {
         this.#missingNodeIds.add(entry.sourceRecord.nodeId);
       }
       if (!entryIsTranslated(entry)) continue;
@@ -1119,7 +1127,7 @@ export class SemanticSourceReceiver {
     const binding = this.#entries.get(nodeId)?.binding;
     if (!binding) return undefined;
     const { target, presentation } = binding;
-    if (sourceNodeType(target) === 3) return target.parentElement ?? undefined;
+    if (sourceNodeType(target) === 3) return sourceProperty(target, 'parentElement') ?? undefined;
     return sourceNodeType(target) === 1 && presentation !== 'editable'
       ? target as Element
       : undefined;
@@ -1278,8 +1286,8 @@ export class SemanticSourceReceiver {
       for (const nodeId of proof.selectedOptionNodeIds) {
         const option = this.#resolveElement(nodeId);
         if (!option || sourceLocalName(option).toLowerCase() !== 'option' ||
-          option.ownerDocument !== target.ownerDocument ||
-          !target.contains(option) || !this.#proofTargetIsSafe(option, false)) {
+          sourceProperty(option, 'ownerDocument') !== sourceProperty(target, 'ownerDocument') ||
+          !sourceCall(target, 'contains', option) || !this.#proofTargetIsSafe(option, false)) {
           return undefined;
         }
         selectedOptions.push(option as HTMLOptionElement);
@@ -1372,8 +1380,8 @@ export class SemanticSourceReceiver {
         const ref = this.#resolveElement(refNodeId);
         if (
           !ref || ref === target || seen.has(ref) ||
-          ref.ownerDocument !== target.ownerDocument ||
-          ref.getRootNode() !== target.getRootNode() ||
+          sourceProperty(ref, 'ownerDocument') !== sourceProperty(target, 'ownerDocument') ||
+          sourceCall(ref, 'getRootNode') !== sourceCall(target, 'getRootNode') ||
           !this.#proofTargetIsSafe(ref, false)
         ) continue;
         seen.add(ref);
@@ -1394,9 +1402,9 @@ export class SemanticSourceReceiver {
       const panel = this.#resolveElement(proof.panelNodeId);
       if (
         !trigger || !panel || trigger === panel ||
-        trigger.ownerDocument !== panel.ownerDocument ||
-        trigger.getRootNode() !== panel.getRootNode() ||
-        trigger.contains(panel) || panel.contains(trigger) ||
+        sourceProperty(trigger, 'ownerDocument') !== sourceProperty(panel, 'ownerDocument') ||
+        sourceCall(trigger, 'getRootNode') !== sourceCall(panel, 'getRootNode') ||
+        sourceCall(trigger, 'contains', panel) || sourceCall(panel, 'contains', trigger) ||
         !receiverTabRelationshipIsSafe(trigger, panel) ||
         !this.#proofTargetIsSafe(trigger, false) ||
         !this.#proofTargetIsSafe(panel, false) ||
@@ -1445,8 +1453,8 @@ export class SemanticSourceReceiver {
     const panel = this.#resolveElement(proof.panelNodeId);
     if (
       !trigger || !panel || trigger === panel ||
-      trigger.ownerDocument !== panel.ownerDocument ||
-      trigger.contains(panel) || panel.contains(trigger) ||
+      sourceProperty(trigger, 'ownerDocument') !== sourceProperty(panel, 'ownerDocument') ||
+      sourceCall(trigger, 'contains', panel) || sourceCall(panel, 'contains', trigger) ||
       !receiverDisclosureTriggerIsSafe(trigger) ||
       !receiverDisclosureRoleMatches(panel, proof.popupRole) ||
       !this.#proofTargetIsSafe(trigger, false) ||
@@ -1469,7 +1477,7 @@ export class SemanticSourceReceiver {
    * record again instead of losing its text until the source changes.
    */
   #rebind(entry: SemanticEntry): SemanticEntry | undefined {
-    if (entry.binding.target.isConnected) return undefined;
+    if (sourceProperty(entry.binding.target, 'isConnected')) return undefined;
     const target = this.#resolveAndValidate(entry.sourceRecord);
     if (!target || target === entry.binding.target) return undefined;
     let binding: SemanticBinding | undefined;
@@ -1509,7 +1517,7 @@ export class SemanticSourceReceiver {
       }
       if (
         !node || sourceNodeType(node) !== 3 ||
-        node.ownerDocument !== this.environment.replicaDocument
+        sourceProperty(node, 'ownerDocument') !== this.environment.replicaDocument
       ) continue;
       // Up the tree as it is drawn: text slotted into a panel of a root is
       // that panel's (D179).
@@ -1549,8 +1557,8 @@ export class SemanticSourceReceiver {
       return undefined;
     }
     if (!target?.isConnected) this.#missingNodeNotes?.add(nodeId);
-    return !!target && sourceNodeType(target) === 1 && target.isConnected &&
-        target.ownerDocument === this.environment.replicaDocument
+    return !!target && sourceNodeType(target) === 1 && sourceProperty(target, 'isConnected') &&
+        sourceProperty(target, 'ownerDocument') === this.environment.replicaDocument
       ? target as Element
       : undefined;
   }
@@ -1560,7 +1568,7 @@ export class SemanticSourceReceiver {
       const target = this.environment.resolveNode(nodeId);
       return Boolean(
         target?.isConnected &&
-        target.ownerDocument === this.environment.replicaDocument,
+        sourceProperty(target, 'ownerDocument') === this.environment.replicaDocument,
       );
     } catch {
       return false;
@@ -1585,8 +1593,8 @@ export class SemanticSourceReceiver {
     }
     if (!target?.isConnected) this.#missingNodeNotes?.add(record.nodeId);
     if (
-      !target || target.ownerDocument !== this.environment.replicaDocument ||
-      !target.isConnected
+      !target || sourceProperty(target, 'ownerDocument') !== this.environment.replicaDocument ||
+      !sourceProperty(target, 'isConnected')
     ) return undefined;
     const element = evidenceElement(target, record);
     if (!element || sourceLocalName(element).toLowerCase() !== record.tagName) {
@@ -1617,8 +1625,8 @@ export class SemanticSourceReceiver {
   #entryIsStillSafe(entry: SemanticEntry): boolean {
     const target = entry.binding.target;
     if (
-      !target.isConnected ||
-      target.ownerDocument !== this.environment.replicaDocument
+      !sourceProperty(target, 'isConnected') ||
+      sourceProperty(target, 'ownerDocument') !== this.environment.replicaDocument
     ) return false;
     const element = evidenceElement(target, entry.sourceRecord);
     if (!element || sourceLocalName(element).toLowerCase() !== entry.sourceRecord.tagName) {
@@ -1849,7 +1857,7 @@ function replicaClassificationFacts(
   secretAncestor = false,
 ): SourceClassificationFacts {
   let computedTextSecurity = '';
-  const view = element.ownerDocument.defaultView;
+  const view = sourceProperty(element, 'ownerDocument').defaultView;
   let getComputedStyle:
     ((element: Element) => CSSStyleDeclaration) | undefined;
   let computedStyleUnreadable = false;
@@ -2001,18 +2009,18 @@ function receiverStructuralMenuShape(
 } | undefined {
   if (
     container === trigger || container === panel || trigger === panel ||
-    container.ownerDocument !== trigger.ownerDocument ||
-    container.ownerDocument !== panel.ownerDocument ||
-    container.getRootNode() !== trigger.getRootNode() ||
-    container.getRootNode() !== panel.getRootNode() ||
-    trigger.parentElement !== container ||
+    sourceProperty(container, 'ownerDocument') !== sourceProperty(trigger, 'ownerDocument') ||
+    sourceProperty(container, 'ownerDocument') !== sourceProperty(panel, 'ownerDocument') ||
+    sourceCall(container, 'getRootNode') !== sourceCall(trigger, 'getRootNode') ||
+    sourceCall(container, 'getRootNode') !== sourceCall(panel, 'getRootNode') ||
+    sourceProperty(trigger, 'parentElement') !== container ||
     !isStructuralMenuPanelElement(panel) ||
     safeNullableAttribute(container, 'hidden') !== null ||
     safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true'
   ) return undefined;
   let children: Element[];
   try {
-    children = [...container.children];
+    children = [...sourceProperty(container, 'children')];
   } catch {
     return undefined;
   }
@@ -2086,7 +2094,7 @@ function receiverUniqueBoundedPanelId(panel: Element): string | undefined {
   ) {
     return undefined;
   }
-  const root = panel.getRootNode();
+  const root = sourceCall(panel, 'getRootNode');
   const pending: Node[] = sourceNodeType(root) === 9
     ? [((root as Document).documentElement as Node | null)].filter(
         (node): node is Node => Boolean(node),
@@ -2136,7 +2144,7 @@ function receiverDisclosureSubtreeIsSafe(
   let visited = 0;
   while (pending.length > 0) {
     const node = pending.pop();
-    if (!node || ++visited > maxNodes || node.ownerDocument !== panel.ownerDocument) {
+    if (!node || ++visited > maxNodes || sourceProperty(node, 'ownerDocument') !== sourceProperty(panel, 'ownerDocument')) {
       return false;
     }
     if (sourceNodeType(node) === 11) {
@@ -2158,7 +2166,8 @@ function receiverDisclosureSubtreeIsSafe(
     ) return false;
     pending.push(...sourceChildNodeList(element));
     try {
-      if (element.shadowRoot?.mode === 'open') pending.push(element.shadowRoot);
+      const shadowRoot = sourceProperty(element, 'shadowRoot');
+      if (shadowRoot?.mode === 'open') pending.push(shadowRoot);
       // What a slot is assigned is drawn in the panel, though it is the
       // host's (D179): it is asked as the panel's own nodes are.
       if (tagName === 'slot') {
@@ -2179,7 +2188,7 @@ function evidenceElement(
   if (record.presentation !== 'text') {
     return sourceNodeType(target) === 1 ? target as Element : undefined;
   }
-  if (record.category !== 'editable') return target.parentElement ?? undefined;
+  if (record.category !== 'editable') return sourceProperty(target, 'parentElement') ?? undefined;
   // The editor the text is drawn in: above it in the page's own tree, around
   // the slot that takes it, or the host of the root it sits in.
   // An editor the page made without the attribute (D192) is the nearest
@@ -2347,7 +2356,7 @@ function attributeBinding(
   let lastWritten: string | undefined;
   const write = (text: string): boolean => {
     try {
-      element.setAttribute(attribute, text);
+      sourceCall(element, 'setAttribute', attribute, text);
       lastWritten = text;
       return true;
     } catch {
@@ -2361,11 +2370,11 @@ function attributeBinding(
     write,
     restore: () => {
       try {
-        if (lastWritten !== undefined && element.getAttribute(attribute) !== lastWritten) {
+        if (lastWritten !== undefined && sourceCall(element, 'getAttribute', attribute) !== lastWritten) {
           return true;
         }
-        if (original === null) element.removeAttribute(attribute);
-        else element.setAttribute(attribute, original);
+        if (original === null) sourceCall(element, 'removeAttribute', attribute);
+        else sourceCall(element, 'setAttribute', attribute, original);
         return true;
       } catch {
         return false;
@@ -2374,7 +2383,7 @@ function attributeBinding(
     reapply: () => {
       if (lastWritten === undefined) return true;
       try {
-        const current = element.getAttribute(attribute);
+        const current = sourceCall(element, 'getAttribute', attribute);
         if (current !== lastWritten) original = current;
       } catch {
         return false;
@@ -2383,13 +2392,13 @@ function attributeBinding(
     },
     snapshot: () => {
       try {
-        const present = element.hasAttribute(attribute);
-        const value = element.getAttribute(attribute);
+        const present = sourceCall(element, 'hasAttribute', attribute);
+        const value = sourceCall(element, 'getAttribute', attribute);
         const written = lastWritten;
         return () => {
           try {
-            if (present && value !== null) element.setAttribute(attribute, value);
-            else element.removeAttribute(attribute);
+            if (present && value !== null) sourceCall(element, 'setAttribute', attribute, value);
+            else sourceCall(element, 'removeAttribute', attribute);
             lastWritten = written;
             return true;
           } catch {
@@ -2470,7 +2479,7 @@ function safeContentEditable(element: Element): string {
 
 function safeNullableAttribute(element: Element, name: string): string | null {
   try {
-    return element.getAttribute(name);
+    return sourceCall(element, 'getAttribute', name);
   } catch {
     return null;
   }

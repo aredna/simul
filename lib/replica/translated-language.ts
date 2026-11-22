@@ -3,7 +3,11 @@ import {
   pageAttribute,
   setReplicaAttributeOverride,
 } from './replica-attribute-override';
-import { sourceNodeType } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 /**
  * `lang` is also what Chrome draws by. It picks fonts by it (a generic
@@ -48,7 +52,7 @@ export function writePageXmlLanguage(element: Element, language: string): void {
   // Simul's own leaves the place first; shown again, it would write over
   // the page's value.
   clearReplicaAttributeOverride(element, PAGE_LANGUAGE_ATTRIBUTE);
-  element.setAttributeNS(XML_NAMESPACE, 'xml:lang', language);
+  sourceCall(element, 'setAttributeNS', XML_NAMESPACE, 'xml:lang', language);
   pageXmlLanguages.set(element, language);
 }
 
@@ -192,13 +196,13 @@ export function clearTranslatedLanguage(element: Element): void {
  * with the page's, a Japanese page's captions changed font (D124).
  */
 export function showOwnLanguage(element: Element, language: string): void {
-  element.setAttribute('lang', language);
-  element.setAttributeNS(XML_NAMESPACE, PAGE_LANGUAGE_ATTRIBUTE, '');
+  sourceCall(element, 'setAttribute', 'lang', language);
+  sourceCall(element, 'setAttributeNS', XML_NAMESPACE, PAGE_LANGUAGE_ATTRIBUTE, '');
 }
 
 /** Simul's own copy of a mirrored element's text says the element's language. */
 export function copyTranslatedLanguage(from: Element, to: Element): void {
-  const language = from.getAttribute('lang');
+  const language = sourceCall(from, 'getAttribute', 'lang');
   if (language !== null) showOwnLanguage(to, language);
 }
 
@@ -213,10 +217,10 @@ const namedImages = new WeakMap<Document, Map<Element, string>>();
 
 /** `image` is named in `language`: it says so, unless the page already does. */
 export function showImageLanguage(image: Element, language: string): void {
-  let images = namedImages.get(image.ownerDocument);
+  let images = namedImages.get(sourceProperty(image, 'ownerDocument'));
   if (!images) {
     images = new Map();
-    namedImages.set(image.ownerDocument, images);
+    namedImages.set(sourceProperty(image, 'ownerDocument'), images);
   }
   images.set(image, language);
   applyTranslatedLanguage(image, language);
@@ -224,9 +228,9 @@ export function showImageLanguage(image: Element, language: string): void {
 
 /** The name is gone: the image gets back exactly what the page had. */
 export function hideImageLanguage(image: Element): void {
-  const images = namedImages.get(image.ownerDocument);
+  const images = namedImages.get(sourceProperty(image, 'ownerDocument'));
   if (images?.delete(image) && images.size === 0) {
-    namedImages.delete(image.ownerDocument);
+    namedImages.delete(sourceProperty(image, 'ownerDocument'));
   }
   clearTranslatedLanguage(image);
 }
@@ -284,7 +288,7 @@ function pageLanguages(
     current = composedParentElement(current);
   }
   if (said === undefined || drawn === undefined) {
-    const ofDocument = documentContentLanguage(element.ownerDocument);
+    const ofDocument = documentContentLanguage(sourceProperty(element, 'ownerDocument'));
     said ??= ofDocument;
     drawn ??= ofDocument;
   }
@@ -314,7 +318,7 @@ export function showDocumentLanguage(document: Document, language: string): void
   if (shown?.language === language) return;
   if (shown?.pragma.isConnected) {
     shown.language = language;
-    shown.pragma.setAttribute('content', language);
+    sourceCall(shown.pragma, 'setAttribute', 'content', language);
     return;
   }
   const head = document.head;
@@ -325,10 +329,10 @@ export function showDocumentLanguage(document: Document, language: string): void
   pragma.setAttribute('content', language);
   // After the shell's own elements, before anything of the page's.
   let after: Element | null = null;
-  for (let child = head.firstElementChild; child; child = child.nextElementSibling) {
-    if (child.hasAttribute('data-simul-owned-shell')) after = child;
+  for (let child = head.firstElementChild; child; child = sourceProperty(child, 'nextElementSibling')) {
+    if (sourceCall(child, 'hasAttribute', 'data-simul-owned-shell')) after = child;
   }
-  head.insertBefore(pragma, after ? after.nextSibling : head.firstChild);
+  head.insertBefore(pragma, after ? sourceProperty(after, 'nextSibling') : head.firstChild);
   documentLanguages.set(document, { language, pragma });
 }
 
@@ -351,10 +355,10 @@ function isInside(element: Element, roots: ReadonlySet<Element>): boolean {
   let current: Element | undefined = element;
   for (let depth = 0; current && depth < MAX_LANGUAGE_DEPTH; depth += 1) {
     for (const root of roots) {
-      if (root.contains(current)) return true;
+      if (sourceCall(root, 'contains', current)) return true;
     }
     // `contains` stops at a shadow root: go on from its host.
-    const top: Node = current.getRootNode();
+    const top: Node = sourceCall(current, 'getRootNode');
     current = sourceNodeType(top) === 11 && 'host' in top
       ? (top as ShadowRoot).host
       : undefined;
@@ -363,8 +367,9 @@ function isInside(element: Element, roots: ReadonlySet<Element>): boolean {
 }
 
 function composedParentElement(node: Node): Element | undefined {
-  if (node.parentElement) return node.parentElement;
-  const root = node.parentNode;
+  const parentElement = sourceProperty(node, 'parentElement');
+  if (parentElement) return parentElement;
+  const root = sourceProperty(node, 'parentNode');
   if (root && sourceNodeType(root) === 11 && 'host' in root) {
     const host = (root as ShadowRoot).host;
     if (host && sourceNodeType(host) === 1) return host;

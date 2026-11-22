@@ -13,6 +13,10 @@ import {
   type ResolvedSemanticSourceProof,
 } from './semantic-source-receiver';
 import { semanticAriaStateAttribute } from './semantic-source-protocol';
+import {
+  sourceCall,
+  sourceProperty,
+} from './source-node-accessors';
 
 export interface SemanticProofPresenterOptions {
   readonly document: Document;
@@ -317,31 +321,31 @@ export class SemanticProofPresenter {
       if (wanted.has(element)) continue;
       this.#popovers.delete(element);
       toggleReplicaPopover(element, false);
-      if (element.getAttribute(POPOVER_OPEN_MARKER) !== 'v1') continue;
-      if (element.getAttribute('popover') === 'manual') {
+      if (sourceCall(element, 'getAttribute', POPOVER_OPEN_MARKER) !== 'v1') continue;
+      if (sourceCall(element, 'getAttribute', 'popover') === 'manual') {
         restoreAttribute(element, 'popover', original.popover);
       }
       restoreAttribute(element, POPOVER_OPEN_MARKER, original.marker);
     }
     for (const element of wanted) {
       const known = this.#popovers.get(element);
-      const marked = element.getAttribute(POPOVER_OPEN_MARKER) === 'v1';
+      const marked = sourceCall(element, 'getAttribute', POPOVER_OPEN_MARKER) === 'v1';
       if (
-        known && marked && element.getAttribute('popover') === 'manual' &&
+        known && marked && sourceCall(element, 'getAttribute', 'popover') === 'manual' &&
         replicaPopoverIsShown(element) !== false
       ) continue;
       // New, or a patch has written the page's attributes over it, which
       // hides a shown popover.
       if (!known) {
         this.#popovers.set(element, {
-          popover: element.getAttribute('popover'),
-          marker: element.getAttribute(POPOVER_OPEN_MARKER),
+          popover: sourceCall(element, 'getAttribute', 'popover'),
+          marker: sourceCall(element, 'getAttribute', POPOVER_OPEN_MARKER),
         });
       } else if (!marked) {
-        known.popover = element.getAttribute('popover');
+        known.popover = sourceCall(element, 'getAttribute', 'popover');
       }
-      element.setAttribute('popover', 'manual');
-      element.setAttribute(POPOVER_OPEN_MARKER, 'v1');
+      sourceCall(element, 'setAttribute', 'popover', 'manual');
+      sourceCall(element, 'setAttribute', POPOVER_OPEN_MARKER, 'v1');
       toggleReplicaPopover(element, true);
     }
   }
@@ -645,8 +649,8 @@ function applyTypedProof(
     const originalDisabled = typeof target.disabled === 'boolean'
       ? target.disabled
       : undefined;
-    const originalAriaDisabled = target.getAttribute('aria-disabled');
-    const originalMarker = target.getAttribute('data-simul-source-control-state');
+    const originalAriaDisabled = sourceCall(target, 'getAttribute', 'aria-disabled');
+    const originalMarker = sourceCall(target, 'getAttribute', 'data-simul-source-control-state');
     if (originalDisabled !== undefined) target.disabled = resolved.proof.disabled;
     // `aria-disabled` is written only for a disabled control, or where the
     // page's element has the attribute (D179): `aria-disabled="false"` on
@@ -656,17 +660,15 @@ function applyTypedProof(
       ? 'true'
       : originalAriaDisabled === null ? null : 'false';
     if (presentedAriaDisabled !== null) {
-      target.setAttribute('aria-disabled', presentedAriaDisabled);
+      sourceCall(target, 'setAttribute', 'aria-disabled', presentedAriaDisabled);
     }
-    target.setAttribute('data-simul-source-control-state', 'v1');
+    sourceCall(target, 'setAttribute', 'data-simul-source-control-state', 'v1');
     return () => {
-      const stillOwned = target.getAttribute(
-        'data-simul-source-control-state',
-      ) === 'v1';
+      const stillOwned = sourceCall(target, 'getAttribute', 'data-simul-source-control-state') === 'v1';
       if (
         stillOwned &&
         (originalDisabled === undefined || target.disabled === resolved.proof.disabled) &&
-        target.getAttribute('aria-disabled') === presentedAriaDisabled
+        sourceCall(target, 'getAttribute', 'aria-disabled') === presentedAriaDisabled
       ) {
         if (originalDisabled !== undefined) target.disabled = originalDisabled;
         restoreAttribute(target, 'aria-disabled', originalAriaDisabled);
@@ -679,15 +681,15 @@ function applyTypedProof(
   if (resolved.kind === 'aria-state') {
     const attribute = semanticAriaStateAttribute(resolved.proof.state);
     const marker = `data-simul-source-aria-${resolved.proof.state}-state`;
-    const original = resolved.target.getAttribute(attribute);
-    const originalMarker = resolved.target.getAttribute(marker);
-    resolved.target.setAttribute(attribute, resolved.proof.value);
-    resolved.target.setAttribute(marker, 'v1');
+    const original = sourceCall(resolved.target, 'getAttribute', attribute);
+    const originalMarker = sourceCall(resolved.target, 'getAttribute', marker);
+    sourceCall(resolved.target, 'setAttribute', attribute, resolved.proof.value);
+    sourceCall(resolved.target, 'setAttribute', marker, 'v1');
     return () => {
-      const stillOwned = resolved.target.getAttribute(marker) === 'v1';
+      const stillOwned = sourceCall(resolved.target, 'getAttribute', marker) === 'v1';
       if (
         stillOwned &&
-        resolved.target.getAttribute(attribute) === resolved.proof.value
+        sourceCall(resolved.target, 'getAttribute', attribute) === resolved.proof.value
       ) restoreAttribute(resolved.target, attribute, original);
       if (stillOwned) restoreAttribute(resolved.target, marker, originalMarker);
     };
@@ -697,7 +699,7 @@ function applyTypedProof(
   if (resolved.kind === 'aria-relationship') {
     // No represented reference resolved: leave the control untouched.
     if (resolved.references.length === 0) return () => undefined;
-    const doc = resolved.target.ownerDocument;
+    const doc = sourceProperty(resolved.target, 'ownerDocument');
     const attribute = `aria-${resolved.proof.relation}`;
     const marker =
       `data-simul-source-aria-${resolved.proof.relation}-relationship`;
@@ -706,37 +708,37 @@ function applyTypedProof(
     const assigned: Array<{ element: Element; id: string; added: boolean }> = [];
     const ids: string[] = [];
     for (const ref of resolved.references) {
-      const existing = ref.getAttribute('id');
+      const existing = sourceCall(ref, 'getAttribute', 'id');
       if (existing && doc.getElementById(existing) === ref) {
         assigned.push({ element: ref, id: existing, added: false });
         ids.push(existing);
         continue;
       }
       const id = uniqueReplicaAriaReferenceId(doc);
-      ref.setAttribute('id', id);
-      ref.setAttribute(ARIA_RELATIONSHIP_REF_MARKER, 'v1');
+      sourceCall(ref, 'setAttribute', 'id', id);
+      sourceCall(ref, 'setAttribute', ARIA_RELATIONSHIP_REF_MARKER, 'v1');
       assigned.push({ element: ref, id, added: true });
       ids.push(id);
     }
     const joined = ids.join(' ');
-    const original = resolved.target.getAttribute(attribute);
-    const originalMarker = resolved.target.getAttribute(marker);
-    resolved.target.setAttribute(attribute, joined);
-    resolved.target.setAttribute(marker, 'v1');
+    const original = sourceCall(resolved.target, 'getAttribute', attribute);
+    const originalMarker = sourceCall(resolved.target, 'getAttribute', marker);
+    sourceCall(resolved.target, 'setAttribute', attribute, joined);
+    sourceCall(resolved.target, 'setAttribute', marker, 'v1');
     return () => {
-      const stillOwned = resolved.target.getAttribute(marker) === 'v1';
-      if (stillOwned && resolved.target.getAttribute(attribute) === joined) {
+      const stillOwned = sourceCall(resolved.target, 'getAttribute', marker) === 'v1';
+      if (stillOwned && sourceCall(resolved.target, 'getAttribute', attribute) === joined) {
         restoreAttribute(resolved.target, attribute, original);
       }
       if (stillOwned) restoreAttribute(resolved.target, marker, originalMarker);
       for (const entry of assigned) {
         if (
           entry.added &&
-          entry.element.getAttribute(ARIA_RELATIONSHIP_REF_MARKER) === 'v1' &&
-          entry.element.getAttribute('id') === entry.id
+          sourceCall(entry.element, 'getAttribute', ARIA_RELATIONSHIP_REF_MARKER) === 'v1' &&
+          sourceCall(entry.element, 'getAttribute', 'id') === entry.id
         ) {
-          entry.element.removeAttribute('id');
-          entry.element.removeAttribute(ARIA_RELATIONSHIP_REF_MARKER);
+          sourceCall(entry.element, 'removeAttribute', 'id');
+          sourceCall(entry.element, 'removeAttribute', ARIA_RELATIONSHIP_REF_MARKER);
         }
       }
     };
@@ -744,16 +746,16 @@ function applyTypedProof(
   if (resolved.kind === 'tab-state') {
     const { trigger, panel, proof } = resolved;
     const controlId = resolved.panelId ?? proof.relationId;
-    const originalControls = trigger.getAttribute('aria-controls');
-    const originalSelected = trigger.getAttribute('aria-selected');
-    const originalHasPopup = trigger.getAttribute('aria-haspopup');
-    const originalPanelId = panel.getAttribute('id');
-    const originalPanelHidden = panel.getAttribute('aria-hidden');
-    if (resolved.panelId === undefined) panel.setAttribute('id', controlId);
-    panel.setAttribute('aria-hidden', proof.selected ? 'false' : 'true');
-    trigger.setAttribute('aria-controls', controlId);
-    trigger.setAttribute('aria-selected', proof.selected ? 'true' : 'false');
-    trigger.removeAttribute('aria-haspopup');
+    const originalControls = sourceCall(trigger, 'getAttribute', 'aria-controls');
+    const originalSelected = sourceCall(trigger, 'getAttribute', 'aria-selected');
+    const originalHasPopup = sourceCall(trigger, 'getAttribute', 'aria-haspopup');
+    const originalPanelId = sourceCall(panel, 'getAttribute', 'id');
+    const originalPanelHidden = sourceCall(panel, 'getAttribute', 'aria-hidden');
+    if (resolved.panelId === undefined) sourceCall(panel, 'setAttribute', 'id', controlId);
+    sourceCall(panel, 'setAttribute', 'aria-hidden', proof.selected ? 'false' : 'true');
+    sourceCall(trigger, 'setAttribute', 'aria-controls', controlId);
+    sourceCall(trigger, 'setAttribute', 'aria-selected', proof.selected ? 'true' : 'false');
+    sourceCall(trigger, 'removeAttribute', 'aria-haspopup');
     return () => {
       restoreAttribute(trigger, 'aria-controls', originalControls);
       restoreAttribute(trigger, 'aria-selected', originalSelected);
@@ -763,41 +765,33 @@ function applyTypedProof(
     };
   }
   const { trigger, panel, proof } = resolved;
-  const originalControls = trigger.getAttribute('aria-controls');
-  const originalExpanded = trigger.getAttribute('aria-expanded');
-  const originalHasPopup = trigger.getAttribute('aria-haspopup');
-  const originalPanelId = panel.getAttribute('id');
-  const originalTriggerMarker = trigger.getAttribute(
-    'data-simul-source-disclosure-state',
-  );
-  const originalPanelMarker = panel.getAttribute(
-    'data-simul-source-disclosure-state',
-  );
+  const originalControls = sourceCall(trigger, 'getAttribute', 'aria-controls');
+  const originalExpanded = sourceCall(trigger, 'getAttribute', 'aria-expanded');
+  const originalHasPopup = sourceCall(trigger, 'getAttribute', 'aria-haspopup');
+  const originalPanelId = sourceCall(panel, 'getAttribute', 'id');
+  const originalTriggerMarker = sourceCall(trigger, 'getAttribute', 'data-simul-source-disclosure-state');
+  const originalPanelMarker = sourceCall(panel, 'getAttribute', 'data-simul-source-disclosure-state');
   const presentedExpanded = proof.expanded ? 'true' : 'false';
-  panel.setAttribute('id', proof.relationId);
-  trigger.setAttribute('aria-controls', proof.relationId);
-  trigger.setAttribute('aria-expanded', presentedExpanded);
-  trigger.setAttribute('aria-haspopup', proof.popupRole);
-  trigger.setAttribute('data-simul-source-disclosure-state', 'v1');
-  panel.setAttribute('data-simul-source-disclosure-state', 'v1');
+  sourceCall(panel, 'setAttribute', 'id', proof.relationId);
+  sourceCall(trigger, 'setAttribute', 'aria-controls', proof.relationId);
+  sourceCall(trigger, 'setAttribute', 'aria-expanded', presentedExpanded);
+  sourceCall(trigger, 'setAttribute', 'aria-haspopup', proof.popupRole);
+  sourceCall(trigger, 'setAttribute', 'data-simul-source-disclosure-state', 'v1');
+  sourceCall(panel, 'setAttribute', 'data-simul-source-disclosure-state', 'v1');
   return () => {
-    const triggerStillOwned = trigger.getAttribute(
-      'data-simul-source-disclosure-state',
-    ) === 'v1';
-    const panelStillOwned = panel.getAttribute(
-      'data-simul-source-disclosure-state',
-    ) === 'v1';
+    const triggerStillOwned = sourceCall(trigger, 'getAttribute', 'data-simul-source-disclosure-state') === 'v1';
+    const panelStillOwned = sourceCall(panel, 'getAttribute', 'data-simul-source-disclosure-state') === 'v1';
     if (
       triggerStillOwned &&
-      trigger.getAttribute('aria-controls') === proof.relationId &&
-      trigger.getAttribute('aria-expanded') === presentedExpanded &&
-      trigger.getAttribute('aria-haspopup') === proof.popupRole
+      sourceCall(trigger, 'getAttribute', 'aria-controls') === proof.relationId &&
+      sourceCall(trigger, 'getAttribute', 'aria-expanded') === presentedExpanded &&
+      sourceCall(trigger, 'getAttribute', 'aria-haspopup') === proof.popupRole
     ) {
       restoreAttribute(trigger, 'aria-controls', originalControls);
       restoreAttribute(trigger, 'aria-expanded', originalExpanded);
       restoreAttribute(trigger, 'aria-haspopup', originalHasPopup);
     }
-    if (panelStillOwned && panel.getAttribute('id') === proof.relationId) {
+    if (panelStillOwned && sourceCall(panel, 'getAttribute', 'id') === proof.relationId) {
       restoreAttribute(panel, 'id', originalPanelId);
     }
     if (triggerStillOwned) {
@@ -828,7 +822,7 @@ function installStructuralMenuDisclosure(
   }>,
 ): InstalledStructuralMenu | undefined {
   const { panel, trigger, otherTriggers, proof } = resolved;
-  if (!panel.parentNode || !trigger.parentNode) return undefined;
+  if (!sourceProperty(panel, 'parentNode') || !sourceProperty(trigger, 'parentNode')) return undefined;
   const opensOnHover = resolved.opening === 'hover';
   let controller: ReadOnlyReplicaDisclosure;
   try {
@@ -864,7 +858,7 @@ function installStructuralMenuDisclosure(
 
 function isHovered(element: Element): boolean {
   try {
-    return element.matches(':hover');
+    return sourceCall(element, 'matches', ':hover');
   } catch {
     return false;
   }
@@ -911,8 +905,8 @@ function restoreAttribute(
   name: string,
   value: string | null,
 ): void {
-  if (value === null) element.removeAttribute(name);
-  else element.setAttribute(name, value);
+  if (value === null) sourceCall(element, 'removeAttribute', name);
+  else sourceCall(element, 'setAttribute', name, value);
 }
 
 const POPOVER_OPEN_MARKER = 'data-simul-source-popover-open';
@@ -920,7 +914,7 @@ const POPOVER_OPEN_MARKER = 'data-simul-source-popover-open';
 /** Whether a replica popover is in the top layer; undefined if it cannot be told. */
 function replicaPopoverIsShown(element: Element): boolean | undefined {
   try {
-    return element.matches(':popover-open');
+    return sourceCall(element, 'matches', ':popover-open');
   } catch {
     return undefined;
   }

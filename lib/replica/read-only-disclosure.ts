@@ -3,7 +3,12 @@
  * page's own panel where the page draws it, as a CSS or scripted hover menu
  * does; `list` keeps a select's options inline.
  */
-import { sourceCall, sourceLocalName, sourceNodeType, sourceProperty } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 export type ReplicaDisclosurePresentation = 'inline' | 'list' | 'popup';
 
@@ -278,11 +283,11 @@ export function installReadOnlyReplicaDisclosure(
 ): ReadOnlyReplicaDisclosure {
   if (
     options.presentation !== 'list' &&
-    (!options.trigger || options.trigger.ownerDocument !== options.anchor.ownerDocument)
+    (!options.trigger || sourceProperty(options.trigger, 'ownerDocument') !== sourceProperty(options.anchor, 'ownerDocument'))
   ) {
     throw new Error('A popup disclosure requires a same-document trigger.');
   }
-  if (options.panel.ownerDocument !== options.anchor.ownerDocument) {
+  if (sourceProperty(options.panel, 'ownerDocument') !== sourceProperty(options.anchor, 'ownerDocument')) {
     throw new Error('A replica disclosure must remain in one document.');
   }
   const controller = new ReplicaDisclosureController(options);
@@ -513,7 +518,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.openOnHover = options.openOnHover !== false;
     this.survivesRefresh = options.survivesRefresh === true;
     this.shownByPage = options.shownByPage === true;
-    this.document = options.anchor.ownerDocument;
+    this.document = sourceProperty(options.anchor, 'ownerDocument');
     this.anchor = options.anchor;
     this.panel = options.panel;
     this.trigger = options.trigger;
@@ -526,19 +531,19 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
         ? [options.trigger, ...options.additionalTriggers ?? []]
         : []
       ).map((trigger) =>
-        Object.freeze([trigger, trigger.getAttribute('style')] as const)),
+        Object.freeze([trigger, sourceCall(trigger, 'getAttribute', 'style')] as const)),
     );
-    this.originalParent = options.panel.parentNode;
-    this.originalNextSibling = options.panel.nextSibling;
+    this.originalParent = sourceProperty(options.panel, 'parentNode');
+    this.originalNextSibling = sourceProperty(options.panel, 'nextSibling');
     this.originalPanelAttributes = snapshotAttributes(
       options.panel,
       PANEL_ATTRIBUTES,
     );
-    this.originalPanelStyle = options.panel.getAttribute('style');
+    this.originalPanelStyle = sourceCall(options.panel, 'getAttribute', 'style');
     this.#wasConnected = this.#identityIsConnected();
 
-    this.anchor.setAttribute('data-simul-replica-disclosure-anchor', DISCLOSURE_MARKER);
-    this.panel.setAttribute('data-simul-replica-disclosure-panel', DISCLOSURE_MARKER);
+    sourceCall(this.anchor, 'setAttribute', 'data-simul-replica-disclosure-anchor', DISCLOSURE_MARKER);
+    sourceCall(this.panel, 'setAttribute', 'data-simul-replica-disclosure-panel', DISCLOSURE_MARKER);
     OWNED_DISCLOSURE_PANELS.add(this.panel);
     if (this.presentation === 'inline') INLINE_DISCLOSURE_PANELS.add(this.panel);
     if (this.presentation !== 'inline') {
@@ -547,21 +552,21 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       setImportant(this.panel, 'overflow-x', 'hidden');
       setImportant(this.panel, 'overflow-y', 'auto');
     }
-    this.panel.addEventListener('auxclick', this.#onPanelActivation, true);
-    this.panel.addEventListener('click', this.#onPanelActivation, true);
-    this.panel.addEventListener('contextmenu', this.#onPanelActivation, true);
-    this.panel.addEventListener('dblclick', this.#onPanelActivation, true);
-    this.panel.addEventListener('keydown', this.#onPanelKeyDown, true);
-    this.panel.addEventListener('pointerdown', this.#onPanelActivation, true);
-    this.panel.addEventListener('pointerenter', this.#onPanelPointerEnter, true);
-    this.panel.addEventListener('pointerleave', this.#onPanelPointerLeave, true);
-    this.panel.addEventListener('focusin', this.#onFocusIn, true);
-    this.panel.addEventListener('focusout', this.#onFocusOut, true);
+    sourceCall(this.panel, 'addEventListener', 'auxclick', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'addEventListener', 'click', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'addEventListener', 'contextmenu', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'addEventListener', 'dblclick', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'addEventListener', 'keydown', this.#onPanelKeyDown as EventListener, true);
+    sourceCall(this.panel, 'addEventListener', 'pointerdown', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'addEventListener', 'pointerenter', this.#onPanelPointerEnter, true);
+    sourceCall(this.panel, 'addEventListener', 'pointerleave', this.#onPanelPointerLeave, true);
+    sourceCall(this.panel, 'addEventListener', 'focusin', this.#onFocusIn, true);
+    sourceCall(this.panel, 'addEventListener', 'focusout', this.#onFocusOut as EventListener, true);
 
     if (this.presentation === 'list') {
       const rows = clamp(Math.trunc(options.visibleRows ?? 8), 2, 20);
-      this.panel.removeAttribute('hidden');
-      this.panel.removeAttribute('popover');
+      sourceCall(this.panel, 'removeAttribute', 'hidden');
+      sourceCall(this.panel, 'removeAttribute', 'popover');
       setImportant(this.panel, 'display', 'block');
       setImportant(this.panel, 'max-height', `min(${rows * 1.75}em, 18rem, 70vh)`);
       setImportant(this.panel, 'position', 'static');
@@ -572,19 +577,19 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     }
 
     if (this.manageTriggerExpanded) {
-      this.trigger!.setAttribute('aria-expanded', 'false');
+      sourceCall(this.trigger!, 'setAttribute', 'aria-expanded', 'false');
     }
     for (const [trigger] of this.triggers) {
-      trigger.setAttribute('data-simul-replica-disclosure-trigger', DISCLOSURE_MARKER);
+      sourceCall(trigger, 'setAttribute', 'data-simul-replica-disclosure-trigger', DISCLOSURE_MARKER);
       OWNED_DISCLOSURE_TRIGGERS.add(trigger);
       setImportant(trigger, 'pointer-events', 'auto');
-      trigger.addEventListener('click', this.#onTriggerClick, true);
-      trigger.addEventListener('keydown', this.#onTriggerKeyDown, true);
-      trigger.addEventListener('pointerdown', this.#onTriggerPointerDown, true);
-      trigger.addEventListener('pointerenter', this.#onTriggerPointerEnter, true);
-      trigger.addEventListener('pointerleave', this.#onTriggerPointerLeave, true);
-      trigger.addEventListener('focusin', this.#onFocusIn, true);
-      trigger.addEventListener('focusout', this.#onFocusOut, true);
+      sourceCall(trigger, 'addEventListener', 'click', this.#onTriggerClick, true);
+      sourceCall(trigger, 'addEventListener', 'keydown', this.#onTriggerKeyDown as EventListener, true);
+      sourceCall(trigger, 'addEventListener', 'pointerdown', this.#onTriggerPointerDown, true);
+      sourceCall(trigger, 'addEventListener', 'pointerenter', this.#onTriggerPointerEnter, true);
+      sourceCall(trigger, 'addEventListener', 'pointerleave', this.#onTriggerPointerLeave, true);
+      sourceCall(trigger, 'addEventListener', 'focusin', this.#onFocusIn, true);
+      sourceCall(trigger, 'addEventListener', 'focusout', this.#onFocusOut as EventListener, true);
     }
     if (this.presentation === 'inline') {
       // Closed, the panel keeps the page's own state (a scripted menu the
@@ -592,8 +597,8 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       // invisible panel cannot catch the pointer or the wheel.
       setImportant(this.panel, 'pointer-events', 'none');
     } else {
-      this.panel.setAttribute('hidden', '');
-      this.panel.setAttribute('popover', 'manual');
+      sourceCall(this.panel, 'setAttribute', 'hidden', '');
+      sourceCall(this.panel, 'setAttribute', 'popover', 'manual');
       setImportant(this.panel, 'display', 'none');
       setImportant(this.panel, 'pointer-events', 'auto');
       setImportant(this.panel, 'position', 'fixed');
@@ -634,7 +639,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   }
 
   isAnchoredWithin(root: Node): boolean {
-    return root === this.anchor || root.contains(this.anchor);
+    return root === this.anchor || sourceCall(root, 'contains', this.anchor);
   }
 
   ownsEventPath(path: readonly EventTarget[]): boolean {
@@ -644,9 +649,9 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   identityIntersects(root: Node): boolean {
     return root === this.anchor || root === this.panel ||
-      root.contains(this.anchor) || root.contains(this.panel) ||
+      sourceCall(root, 'contains', this.anchor) || sourceCall(root, 'contains', this.panel) ||
       this.triggers.some(([trigger]) =>
-        root === trigger || root.contains(trigger));
+        root === trigger || sourceCall(root, 'contains', trigger));
   }
 
   /**
@@ -698,25 +703,25 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     }
     this.#open = true;
     if (this.manageTriggerExpanded) {
-      this.trigger!.setAttribute('aria-expanded', 'true');
+      sourceCall(this.trigger!, 'setAttribute', 'aria-expanded', 'true');
     }
-    this.anchor.setAttribute('data-simul-replica-disclosure-open', DISCLOSURE_MARKER);
+    sourceCall(this.anchor, 'setAttribute', 'data-simul-replica-disclosure-open', DISCLOSURE_MARKER);
     if (this.presentation === 'inline') {
       this.#revealInline();
       return;
     }
-    this.panel.setAttribute('data-simul-replica-disclosure-overlay', DISCLOSURE_MARKER);
-    this.panel.removeAttribute('hidden');
+    sourceCall(this.panel, 'setAttribute', 'data-simul-replica-disclosure-overlay', DISCLOSURE_MARKER);
+    sourceCall(this.panel, 'removeAttribute', 'hidden');
     setImportant(this.panel, 'display', 'block');
     // A site that collapses its menu with opacity as well as display (freee's
     // header menus) would otherwise open an invisible panel.
     setImportant(this.panel, 'opacity', '1');
     // A page's own root on `<body>` draws only what it slots, and draws that
     // inside its own boxes: there the list hangs beside the body (D135).
-    const overlayParent = body.shadowRoot
+    const overlayParent = sourceProperty(body, 'shadowRoot')
       ? this.document.documentElement ?? body
       : body;
-    overlayParent.append(this.panel);
+    sourceCall(overlayParent, 'append', this.panel);
     tryShowPopover(this.panel);
     this.#position();
     this.#revealSelectedOption();
@@ -760,7 +765,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     if (this.manageTriggerExpanded) {
       this.trigger?.setAttribute('aria-expanded', 'false');
     }
-    this.anchor.removeAttribute('data-simul-replica-disclosure-open');
+    sourceCall(this.anchor, 'removeAttribute', 'data-simul-replica-disclosure-open');
     if (this.presentation === 'inline') {
       for (const [element, style] of this.#inlineRevealed) {
         restoreAttribute(element, 'style', style);
@@ -770,10 +775,10 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       setImportant(this.panel, 'pointer-events', 'none');
       return;
     }
-    this.panel.removeAttribute('data-simul-replica-disclosure-overlay');
-    this.panel.removeAttribute('data-simul-replica-disclosure-placement');
+    sourceCall(this.panel, 'removeAttribute', 'data-simul-replica-disclosure-overlay');
+    sourceCall(this.panel, 'removeAttribute', 'data-simul-replica-disclosure-placement');
     tryHidePopover(this.panel);
-    this.panel.setAttribute('hidden', '');
+    sourceCall(this.panel, 'setAttribute', 'hidden', '');
     setImportant(this.panel, 'display', 'none');
     restorePanelPosition(this.panel, this.originalParent, this.originalNextSibling);
   }
@@ -825,30 +830,30 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
     for (const [trigger] of this.triggers) {
-      trigger.removeEventListener('click', this.#onTriggerClick, true);
-      trigger.removeEventListener('keydown', this.#onTriggerKeyDown, true);
-      trigger.removeEventListener('pointerdown', this.#onTriggerPointerDown, true);
-      trigger.removeEventListener('pointerenter', this.#onTriggerPointerEnter, true);
-      trigger.removeEventListener('pointerleave', this.#onTriggerPointerLeave, true);
-      trigger.removeEventListener('focusin', this.#onFocusIn, true);
-      trigger.removeEventListener('focusout', this.#onFocusOut, true);
+      sourceCall(trigger, 'removeEventListener', 'click', this.#onTriggerClick, true);
+      sourceCall(trigger, 'removeEventListener', 'keydown', this.#onTriggerKeyDown as EventListener, true);
+      sourceCall(trigger, 'removeEventListener', 'pointerdown', this.#onTriggerPointerDown, true);
+      sourceCall(trigger, 'removeEventListener', 'pointerenter', this.#onTriggerPointerEnter, true);
+      sourceCall(trigger, 'removeEventListener', 'pointerleave', this.#onTriggerPointerLeave, true);
+      sourceCall(trigger, 'removeEventListener', 'focusin', this.#onFocusIn, true);
+      sourceCall(trigger, 'removeEventListener', 'focusout', this.#onFocusOut as EventListener, true);
     }
-    this.panel.removeEventListener('auxclick', this.#onPanelActivation, true);
-    this.panel.removeEventListener('click', this.#onPanelActivation, true);
-    this.panel.removeEventListener('contextmenu', this.#onPanelActivation, true);
-    this.panel.removeEventListener('dblclick', this.#onPanelActivation, true);
-    this.panel.removeEventListener('keydown', this.#onPanelKeyDown, true);
-    this.panel.removeEventListener('pointerdown', this.#onPanelActivation, true);
-    this.panel.removeEventListener('pointerenter', this.#onPanelPointerEnter, true);
-    this.panel.removeEventListener('pointerleave', this.#onPanelPointerLeave, true);
-    this.panel.removeEventListener('focusin', this.#onFocusIn, true);
-    this.panel.removeEventListener('focusout', this.#onFocusOut, true);
-    this.anchor.removeAttribute('data-simul-replica-disclosure-anchor');
-    this.anchor.removeAttribute('data-simul-replica-disclosure-open');
+    sourceCall(this.panel, 'removeEventListener', 'auxclick', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'removeEventListener', 'click', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'removeEventListener', 'contextmenu', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'removeEventListener', 'dblclick', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'removeEventListener', 'keydown', this.#onPanelKeyDown as EventListener, true);
+    sourceCall(this.panel, 'removeEventListener', 'pointerdown', this.#onPanelActivation, true);
+    sourceCall(this.panel, 'removeEventListener', 'pointerenter', this.#onPanelPointerEnter, true);
+    sourceCall(this.panel, 'removeEventListener', 'pointerleave', this.#onPanelPointerLeave, true);
+    sourceCall(this.panel, 'removeEventListener', 'focusin', this.#onFocusIn, true);
+    sourceCall(this.panel, 'removeEventListener', 'focusout', this.#onFocusOut as EventListener, true);
+    sourceCall(this.anchor, 'removeAttribute', 'data-simul-replica-disclosure-anchor');
+    sourceCall(this.anchor, 'removeAttribute', 'data-simul-replica-disclosure-open');
     OWNED_DISCLOSURE_PANELS.delete(this.panel);
     INLINE_DISCLOSURE_PANELS.delete(this.panel);
     for (const [trigger] of this.triggers) {
-      trigger.removeAttribute('data-simul-replica-disclosure-trigger');
+      sourceCall(trigger, 'removeAttribute', 'data-simul-replica-disclosure-trigger');
       OWNED_DISCLOSURE_TRIGGERS.delete(trigger);
     }
     if (this.manageTriggerExpanded && this.trigger) {
@@ -909,7 +914,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
         const faded = style.opacity === '0';
         const hidden = style.visibility === 'hidden';
         if (!faded && !hidden) continue;
-        this.#inlineRevealed.push([element, element.getAttribute('style')]);
+        this.#inlineRevealed.push([element, sourceCall(element, 'getAttribute', 'style')]);
         if (faded) setImportant(element, 'opacity', '1');
         if (hidden) setImportant(element, 'visibility', 'visible');
       } catch {
@@ -935,9 +940,9 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   #containsInteractiveNode(candidate: EventTarget | null): boolean {
     if (!candidate || !('nodeType' in candidate)) return false;
     const node = candidate as Node;
-    return node === this.panel || this.panel.contains(node) ||
+    return node === this.panel || sourceCall(this.panel, 'contains', node) ||
       this.triggers.some(([trigger]) =>
-        node === trigger || trigger.contains(node));
+        node === trigger || sourceCall(trigger, 'contains', node));
   }
 
   #focusFirstPanelItem(): void {
@@ -954,7 +959,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       const candidate = candidates.item(index);
       if (!candidate || !replicaFocusTargetIsSafe(candidate, this.panel)) continue;
       try {
-        candidate.focus({ preventScroll: true });
+        sourceCall(candidate, 'focus', { preventScroll: true });
         return;
       } catch {
         // Continue to the next bounded candidate.
@@ -969,7 +974,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
         '[role="option"][aria-selected="true"]',
       );
       if (typeof selected?.scrollIntoView !== 'function') return;
-      selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      sourceCall(selected, 'scrollIntoView', { block: 'nearest', inline: 'nearest' });
     } catch {
       // Selection remains readable even when synthetic layout APIs fail.
     }
@@ -1034,7 +1039,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     const documentElement = this.document.documentElement;
     let anchorRect: DOMRect;
     try {
-      anchorRect = this.anchor.getBoundingClientRect();
+      anchorRect = sourceCall(this.anchor, 'getBoundingClientRect');
     } catch {
       this.close();
       return;
@@ -1049,7 +1054,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     setImportant(this.panel, 'max-width', 'calc(100vw - 16px)');
     let panelRect: DOMRect;
     try {
-      panelRect = this.panel.getBoundingClientRect();
+      panelRect = sourceCall(this.panel, 'getBoundingClientRect');
     } catch {
       panelRect = anchorRect;
     }
@@ -1097,10 +1102,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       '--simul-replica-disclosure-visibility',
       'visible',
     );
-    this.panel.setAttribute(
-      'data-simul-replica-disclosure-placement',
-      placement.placement,
-    );
+    sourceCall(this.panel, 'setAttribute', 'data-simul-replica-disclosure-placement', placement.placement);
   }
 }
 
@@ -1243,7 +1245,7 @@ function snapshotAttributes(
 ): ReadonlyMap<string, string | null> {
   const snapshots = new Map<string, string | null>();
   for (const attribute of attributes) {
-    snapshots.set(attribute, element.getAttribute(attribute));
+    snapshots.set(attribute, sourceCall(element, 'getAttribute', attribute));
   }
   return snapshots;
 }
@@ -1262,8 +1264,8 @@ function restoreAttribute(
   attribute: string,
   value: string | null,
 ): void {
-  if (value === null) element.removeAttribute(attribute);
-  else element.setAttribute(attribute, value);
+  if (value === null) sourceCall(element, 'removeAttribute', attribute);
+  else sourceCall(element, 'setAttribute', attribute, value);
 }
 
 function blockReplicaActivation(event: Event): void {
@@ -1274,7 +1276,7 @@ function blockReplicaActivation(event: Event): void {
 function elementHasNoBox(element: Element): boolean {
   try {
     return typeof element.getClientRects === 'function' &&
-      element.getClientRects().length === 0;
+      sourceCall(element, 'getClientRects').length === 0;
   } catch {
     return false;
   }
@@ -1282,7 +1284,7 @@ function elementHasNoBox(element: Element): boolean {
 
 function elementIsOutOfSight(element: Element): boolean {
   try {
-    return element.ownerDocument.defaultView
+    return sourceProperty(element, 'ownerDocument').defaultView
       ?.getComputedStyle(element).visibility === 'hidden';
   } catch {
     return false;
@@ -1303,7 +1305,7 @@ function pointerStaysWithin(event: Event): boolean {
     typeof sourceNodeType(entered as Node) !== 'number'
   ) return false;
   try {
-    return (surface as Node).contains(entered as Node);
+    return sourceCall((surface as Node), 'contains', entered as Node);
   } catch {
     return false;
   }
@@ -1340,21 +1342,21 @@ function clickChoosesPanelItem(event: Event, panel: HTMLElement): boolean {
     if (
       typeof node === 'object' && node !== null && 'nodeType' in node &&
       sourceNodeType((node as Node)) === 1 &&
-      (node as Element).matches(PANEL_ITEM_SELECTOR)
+      sourceCall((node as Element), 'matches', PANEL_ITEM_SELECTOR)
     ) {
-      return (node as Element).getAttribute('aria-disabled') !== 'true';
+      return sourceCall((node as Element), 'getAttribute', 'aria-disabled') !== 'true';
     }
   }
   for (const option of panel.querySelectorAll<HTMLElement>(
     '[data-simul-owned-select-option="v1"]',
   )) {
-    const rect = option.getBoundingClientRect();
+    const rect = sourceCall(option, 'getBoundingClientRect');
     if (
       rect.width > 0 && rect.height > 0 &&
       mouse.clientX >= rect.left && mouse.clientX < rect.right &&
       mouse.clientY >= rect.top && mouse.clientY < rect.bottom
     ) {
-      return option.getAttribute('aria-disabled') !== 'true';
+      return sourceCall(option, 'getAttribute', 'aria-disabled') !== 'true';
     }
   }
   return false;
@@ -1368,7 +1370,7 @@ function keyboardTargetCanActivate(target: EventTarget | null): boolean {
     tagName === 'button' || tagName === 'input' || tagName === 'select' ||
     tagName === 'summary' || tagName === 'textarea'
   ) return true;
-  const role = element.getAttribute('role')?.trim().toLowerCase() ?? '';
+  const role = sourceCall(element, 'getAttribute', 'role')?.trim().toLowerCase() ?? '';
   return KEYBOARD_ACTIVATION_ROLES.has(role);
 }
 
@@ -1379,7 +1381,7 @@ function keyboardTargetTakesText(target: EventTarget | null): boolean {
   if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
     return true;
   }
-  const editable = element.getAttribute('contenteditable')?.trim().toLowerCase();
+  const editable = sourceCall(element, 'getAttribute', 'contenteditable')?.trim().toLowerCase();
   return editable !== undefined && editable !== 'false';
 }
 
@@ -1388,12 +1390,12 @@ function replicaFocusTargetIsSafe(
   panel: HTMLElement,
 ): boolean {
   if (
-    !candidate.isConnected ||
+    !sourceProperty(candidate, 'isConnected') ||
     typeof candidate.focus !== 'function' ||
-    candidate.hasAttribute('disabled') ||
+    sourceCall(candidate, 'hasAttribute', 'disabled') ||
     safelyMatches(candidate, ':disabled')
   ) return false;
-  const rawTabIndex = candidate.getAttribute('tabindex');
+  const rawTabIndex = sourceCall(candidate, 'getAttribute', 'tabindex');
   if (rawTabIndex !== null) {
     const tabIndex = Number(rawTabIndex.trim());
     if (!Number.isInteger(tabIndex) || tabIndex < 0) return false;
@@ -1404,21 +1406,21 @@ function replicaFocusTargetIsSafe(
     inspected += 1;
     if (inspected > 64) return false;
     if (
-      current.hasAttribute('hidden') || current.hasAttribute('inert') ||
-      current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true' ||
+      sourceCall(current, 'hasAttribute', 'hidden') || sourceCall(current, 'hasAttribute', 'inert') ||
+      sourceCall(current, 'getAttribute', 'aria-hidden')?.trim().toLowerCase() === 'true' ||
       elementHasCollapsedPaint(current)
     ) return false;
     if (current === panel) return true;
-    current = current.parentElement;
+    current = sourceProperty(current, 'parentElement');
   }
   return false;
 }
 
 function elementHasCollapsedPaint(element: Element): boolean {
-  const getComputedStyle = element.ownerDocument.defaultView?.getComputedStyle;
+  const getComputedStyle = sourceProperty(element, 'ownerDocument').defaultView?.getComputedStyle;
   if (typeof getComputedStyle !== 'function') return false;
   try {
-    const style = getComputedStyle.call(element.ownerDocument.defaultView, element);
+    const style = getComputedStyle.call(sourceProperty(element, 'ownerDocument').defaultView, element);
     const contentVisibility = style.getPropertyValue('content-visibility')
       .trim().toLowerCase();
     const opacity = style.opacity.trim();
@@ -1433,7 +1435,7 @@ function elementHasCollapsedPaint(element: Element): boolean {
 
 function safelyMatches(element: Element, selector: string): boolean {
   try {
-    return element.matches(selector);
+    return sourceCall(element, 'matches', selector);
   } catch {
     return true;
   }
@@ -1444,12 +1446,12 @@ function setImportant(
   property: string,
   value: string,
 ): void {
-  element.style.setProperty(property, value, 'important');
+  sourceProperty(element, 'style').setProperty(property, value, 'important');
 }
 
 function isReplicaNodeConnected(node: Node): boolean {
-  if (node.isConnected) return true;
-  const document = node.ownerDocument;
+  if (sourceProperty(node, 'isConnected')) return true;
+  const document = sourceProperty(node, 'ownerDocument');
   return Boolean(document?.documentElement?.contains(node));
 }
 
@@ -1460,10 +1462,10 @@ function restorePanelPosition(
 ): void {
   if (!parent) return;
   try {
-    if (nextSibling?.parentNode === parent) parent.insertBefore(panel, nextSibling);
-    else parent.appendChild(panel);
+    if (nextSibling?.parentNode === parent) sourceCall(parent, 'insertBefore', panel, nextSibling);
+    else sourceCall(parent, 'appendChild', panel);
   } catch {
-    panel.remove();
+    sourceCall(panel, 'remove');
   }
 }
 
@@ -1500,9 +1502,9 @@ function composedRevealDescendants(panel: Element): readonly Element[] {
   const pending: Node[] = [];
   const pushChildrenOf = (parent: Element | ShadowRoot): void => {
     for (
-      let child = parent.lastElementChild;
+      let child = sourceProperty(parent, 'lastElementChild');
       child;
-      child = child.previousElementSibling
+      child = sourceProperty(child, 'previousElementSibling')
     ) pending.push(child);
   };
   const pushRootAndChildren = (element: Element): void => {
@@ -1510,8 +1512,8 @@ function composedRevealDescendants(panel: Element): readonly Element[] {
     // reverse: the stack pops the root's content first).
     pushChildrenOf(element);
     // `shadowRoot` is null for a closed root: only open ones are entered.
-    const root = element.shadowRoot;
-    if (root && !element.hasAttribute('data-simul-owned-select-host')) {
+    const root = sourceProperty(element, 'shadowRoot');
+    if (root && !sourceCall(element, 'hasAttribute', 'data-simul-owned-select-host')) {
       pushChildrenOf(root);
     }
   };

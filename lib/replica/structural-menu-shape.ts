@@ -1,5 +1,10 @@
 import { readSourceFlatTreeElementPath } from './source-privacy-policy';
-import { sourceChildNodeList, sourceLocalName, sourceNodeType } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceChildNodeList,
+  sourceLocalName,
+  sourceNodeType,
+} from './source-node-accessors';
 
 /**
  * Where a menu without ARIA relations is recognized from its shape: inside
@@ -105,7 +110,7 @@ export function isPlainStructuralMenuTrigger(element: Element): boolean {
     readRole(element) !== ''
   ) return false;
   try {
-    return element.querySelector(NESTED_CONTROL_SELECTOR) === null;
+    return sourceCall(element, 'querySelector', NESTED_CONTROL_SELECTOR) === null;
   } catch {
     return false;
   }
@@ -183,7 +188,7 @@ function readLocalName(element: Element): string {
 
 function readRole(element: Element): string {
   try {
-    return (element.getAttribute('role') ?? '').trim().toLowerCase();
+    return (sourceCall(element, 'getAttribute', 'role') ?? '').trim().toLowerCase();
   } catch {
     return 'unreadable';
   }

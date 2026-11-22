@@ -4,7 +4,12 @@
  * moves, and translated text that no longer fits is shrunk until it does.
  */
 
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 /** One translated text the lock can show in either language. */
 export interface TranslatedGeometryEntry {
@@ -131,7 +136,7 @@ export class TranslatedGeometryLock {
   }
 
   #lockBox(box: HTMLElement, source: SourceBox): void {
-    const style = box.style;
+    const style = sourceProperty(box, 'style');
     // A restored style attribute (a disclosure closing, a patch rollback) can
     // bring back an earlier lock; its page values are the ones saved then.
     const earlier = this.#pageDeclarations.get(box);
@@ -163,7 +168,7 @@ export class TranslatedGeometryLock {
   }
 
   #unlock(element: HTMLElement): void {
-    const style = element.style;
+    const style = sourceProperty(element, 'style');
     // A patch that rewrote the style attribute already put the page's
     // current declarations back; restoring older ones would undo them.
     if (!hasLockMarker(style)) return;
@@ -176,7 +181,7 @@ export class TranslatedGeometryLock {
         style.removeProperty(property);
       }
     }
-    if (!element.getAttribute('style')?.trim()) element.removeAttribute('style');
+    if (!sourceCall(element, 'getAttribute', 'style')?.trim()) sourceCall(element, 'removeAttribute', 'style');
   }
 
   /** Shrinks translated text until it fits the page's box, a few layouts at most. */
@@ -200,13 +205,13 @@ export class TranslatedGeometryLock {
         if (!source) continue;
         if (!scales.has(box)) {
           for (const [property, value] of source.spacing) {
-            setImportant(box.style, property, value);
+            setImportant(sourceProperty(box, 'style'), property, value);
           }
         }
         scales.set(box, scale);
-        setImportant(box.style, 'font-size', px(source.fontSize * scale));
+        setImportant(sourceProperty(box, 'style'), 'font-size', px(source.fontSize * scale));
         if (source.lineHeight !== undefined) {
-          setImportant(box.style, 'line-height', px(source.lineHeight * scale));
+          setImportant(sourceProperty(box, 'style'), 'line-height', px(source.lineHeight * scale));
         }
       }
       pending = next.map(([box]) => box);
@@ -229,7 +234,7 @@ function layoutBox(
     // select facsimile and the drawing keep their own geometry.
     if (
       name === 'option' || name === 'optgroup' ||
-      current.namespaceURI === 'http://www.w3.org/2000/svg'
+      sourceProperty(current, 'namespaceURI') === 'http://www.w3.org/2000/svg'
     ) return undefined;
     let display = displays.get(current);
     if (display === undefined) {
@@ -306,8 +311,9 @@ function readDisplay(element: Element, view: TranslatedGeometryView): string {
 }
 
 function composedParentElement(node: Node): Element | undefined {
-  if (node.parentElement) return node.parentElement;
-  const root = node.parentNode;
+  const parentElement = sourceProperty(node, 'parentElement');
+  if (parentElement) return parentElement;
+  const root = sourceProperty(node, 'parentNode');
   if (root && sourceNodeType(root) === 11 && 'host' in root) {
     const host = (root as ShadowRoot).host;
     if (host && sourceNodeType(host) === 1) return host;

@@ -1,5 +1,10 @@
 import { sourceContentEditableFact } from './source-secret-classifier';
-import { sourceLocalName, sourceNodeType } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 export const PAINTED_SEMANTIC_LABEL_ATTRIBUTE =
   'data-simul-painted-semantic-label';
@@ -180,16 +185,16 @@ export function presentPaintedSemanticLabel(
   const element = current.element;
   if (
     activePresentations.has(element) ||
-    element.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE) ||
+    sourceCall(element, 'hasAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE) ||
     hasOwnedOverlayChild(element)
   ) return undefined;
 
-  const style = element.style;
+  const style = sourceProperty(element, 'style');
   const originalPointerEvents = inlineStyleSnapshot(style, 'pointer-events');
   const originalPosition = inlineStyleSnapshot(style, 'position');
-  const overlay = element.ownerDocument.createElement('span');
+  const overlay = sourceProperty(element, 'ownerDocument').createElement('span');
 
-  element.setAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE, 'v1');
+  sourceCall(element, 'setAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE, 'v1');
   style.setProperty('pointer-events', 'none', 'important');
   if (current.positionIsStatic) {
     style.setProperty('position', 'relative', 'important');
@@ -204,7 +209,7 @@ export function presentPaintedSemanticLabel(
   // its own (D178): appended to the host, the label was its last child, and
   // a rule on its last or only child changed. A link cannot have one.
   const labelRoot = ownedLabelRoot(element);
-  (labelRoot ?? element).append(overlay);
+  sourceCall((labelRoot ?? element), 'append', overlay);
   activeOverlays.set(element, overlay);
 
   let active = true;
@@ -218,8 +223,8 @@ export function presentPaintedSemanticLabel(
     if (overlay.parentNode === element || overlay.parentNode === labelRoot) {
       overlay.remove();
     }
-    if (element.getAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE) === 'v1') {
-      element.removeAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE);
+    if (sourceCall(element, 'getAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE) === 'v1') {
+      sourceCall(element, 'removeAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE);
     }
     restoreOwnedInlineStyle(
       style,
@@ -244,7 +249,7 @@ export function presentPaintedSemanticLabel(
 export function removePaintedSemanticLabelPresentation(
   element: Element | null | undefined,
 ): boolean {
-  if (!element || element.namespaceURI !== HTML_NAMESPACE) return false;
+  if (!element || sourceProperty(element, 'namespaceURI') !== HTML_NAMESPACE) return false;
   const cleanup = activePresentations.get(element as HTMLElement);
   if (!cleanup) return false;
   cleanup();
@@ -274,11 +279,11 @@ export function synchronizePaintedSemanticLabelPresentation(
     return false;
   }
   const host = candidate.element;
-  passedOverHosts.get(host.ownerDocument)?.delete(host);
+  passedOverHosts.get(sourceProperty(host, 'ownerDocument'))?.delete(host);
   const existing = activeOverlays.get(host);
   if (
     activePresentations.has(host) &&
-    host.getAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE) === 'v1' &&
+    sourceCall(host, 'getAttribute', PAINTED_SEMANTIC_LABEL_ATTRIBUTE) === 'v1' &&
     existing?.namespaceURI === HTML_NAMESPACE
   ) {
     existing.textContent = text;
@@ -305,13 +310,13 @@ export function paintedSemanticLabelHostsToLookAgain(
   if (sheetsChangedIn) {
     const hosts = passedOverHosts.get(sheetsChangedIn);
     for (const host of hosts ?? []) {
-      if (host.isConnected) found.add(host);
+      if (sourceProperty(host, 'isConnected')) found.add(host);
       else hosts!.delete(host);
     }
   }
   const byDocument = new Map<Document, Set<Element>>();
   for (const element of changed) {
-    const document = element.ownerDocument;
+    const document = sourceProperty(element, 'ownerDocument');
     if (!document || document === sheetsChangedIn) continue;
     if (!passedOverHosts.get(document)?.size) continue;
     let elements = byDocument.get(document);
@@ -321,7 +326,7 @@ export function paintedSemanticLabelHostsToLookAgain(
   for (const [document, elements] of byDocument) {
     const hosts = passedOverHosts.get(document)!;
     for (const host of hosts) {
-      if (!host.isConnected) {
+      if (!sourceProperty(host, 'isConnected')) {
         hosts.delete(host);
         continue;
       }
@@ -331,9 +336,10 @@ export function paintedSemanticLabelHostsToLookAgain(
           found.add(host);
           break;
         }
-        current = current.parentNode && sourceNodeType(current.parentNode) === 11
-          ? (current.parentNode as ShadowRoot).host ?? null
-          : current.parentNode;
+        const parent: Node | null = sourceProperty(current, 'parentNode');
+        current = parent && sourceNodeType(parent) === 11
+          ? (parent as ShadowRoot).host ?? null
+          : parent;
       }
     }
   }
@@ -342,7 +348,7 @@ export function paintedSemanticLabelHostsToLookAgain(
 
 function notePassedOverHost(element: Element): void {
   if (!isConnectedHtmlElement(element)) return;
-  const document = element.ownerDocument;
+  const document = sourceProperty(element, 'ownerDocument');
   let hosts = passedOverHosts.get(document);
   if (!hosts) passedOverHosts.set(document, hosts = new Set());
   hosts.delete(element);
@@ -356,14 +362,14 @@ function resolveEnvironment(
   input: Element,
   environment: PaintedSemanticLabelEnvironment,
 ): ResolvedEnvironment | undefined {
-  const view = input.ownerDocument?.defaultView;
+  const view = sourceProperty(input, 'ownerDocument')?.defaultView;
   let getComputedStyle = environment.getComputedStyle;
   if (!getComputedStyle && view && typeof view.getComputedStyle === 'function') {
     getComputedStyle = (element) => view.getComputedStyle(element);
   }
   if (!getComputedStyle) return undefined;
   const getBoundingClientRect = environment.getBoundingClientRect ??
-    ((element: HTMLElement) => element.getBoundingClientRect());
+    ((element: HTMLElement) => sourceCall(element, 'getBoundingClientRect'));
   return {
     getComputedStyle,
     getBoundingClientRect,
@@ -393,7 +399,7 @@ function inspectPaintedSemanticLabel(
     !style ||
     !safePaintedBackgroundImage(
       styleValue(style, 'background-image', 'backgroundImage'),
-      element.ownerDocument.baseURI,
+      sourceProperty(element, 'ownerDocument').baseURI,
     ) ||
     !hasHorizontalOverflowClipping(style) ||
     !hasLargeNegativeTextIndent(style, rect.width) ||
@@ -415,9 +421,9 @@ function inspectPaintedSemanticLabel(
 }
 
 function isConnectedHtmlElement(input: Element): input is HTMLElement {
-  return input.namespaceURI === HTML_NAMESPACE &&
-    input.isConnected === true &&
-    typeof (input as HTMLElement).style?.setProperty === 'function';
+  return sourceProperty(input, 'namespaceURI') === HTML_NAMESPACE &&
+    sourceProperty(input, 'isConnected') === true &&
+    typeof sourceProperty((input as HTMLElement), 'style')?.setProperty === 'function';
 }
 
 function isVisiblePaintedBox(
@@ -468,8 +474,8 @@ function hasHiddenOrMaskedAncestor(
     if (inspected > MAX_STRUCTURAL_ANCESTORS) return true;
     try {
       if (
-        current.hasAttribute('hidden') ||
-        current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true'
+        sourceCall(current, 'hasAttribute', 'hidden') ||
+        sourceCall(current, 'getAttribute', 'aria-hidden')?.trim().toLowerCase() === 'true'
       ) return true;
       const style = environment.getComputedStyle(current);
       if (
@@ -486,7 +492,7 @@ function hasHiddenOrMaskedAncestor(
     } catch {
       return true;
     }
-    current = current.parentElement;
+    current = sourceProperty(current, 'parentElement');
   }
   return false;
 }
@@ -507,11 +513,11 @@ function hasSensitiveStructuralBoundary(element: HTMLElement): boolean {
       inspectedAncestors > MAX_STRUCTURAL_ANCESTORS ||
       elementHasSensitiveStructure(ancestor)
     ) return true;
-    ancestor = ancestor.parentElement;
+    ancestor = sourceProperty(ancestor, 'parentElement');
   }
 
   const pending: Element[] = [];
-  for (let child = element.lastElementChild; child; child = child.previousElementSibling) {
+  for (let child = sourceProperty(element, 'lastElementChild'); child; child = sourceProperty(child, 'previousElementSibling')) {
     pending.push(child);
   }
   let inspectedDescendants = 0;
@@ -523,9 +529,9 @@ function hasSensitiveStructuralBoundary(element: HTMLElement): boolean {
       elementHasSensitiveStructure(descendant)
     ) return true;
     for (
-      let child = descendant.lastElementChild;
+      let child = sourceProperty(descendant, 'lastElementChild');
       child;
-      child = child.previousElementSibling
+      child = sourceProperty(child, 'previousElementSibling')
     ) pending.push(child);
   }
   return false;
@@ -554,7 +560,7 @@ function elementHasSensitiveStructure(element: Element): boolean {
 
 function safelyHasAttribute(element: Element, name: string): boolean {
   try {
-    return element.hasAttribute(name);
+    return sourceCall(element, 'hasAttribute', name);
   } catch {
     // Unreadable structural metadata is not proof that text is public.
     return true;
@@ -563,7 +569,7 @@ function safelyHasAttribute(element: Element, name: string): boolean {
 
 function safelyReadAttribute(element: Element, name: string): string {
   try {
-    return element.getAttribute(name)?.trim() ?? '';
+    return sourceCall(element, 'getAttribute', name)?.trim() ?? '';
   } catch {
     // Unreadable structural metadata is not proof that text is public.
     return name === 'type' ? 'password' : 'current-password';
@@ -657,7 +663,7 @@ function cssLengthInPixels(
 
 function readDirectSemanticText(element: HTMLElement): string | undefined {
   let output = '';
-  for (let child = element.firstChild; child; child = child.nextSibling) {
+  for (let child = sourceProperty(element, 'firstChild'); child; child = sourceProperty(child, 'nextSibling')) {
     if (sourceNodeType(child) !== 3) continue;
     const value = child.nodeValue ?? '';
     const remaining = MAX_PAINTED_SEMANTIC_LABEL_TEXT + 1 - output.length;
@@ -672,7 +678,7 @@ function readDirectSemanticText(element: HTMLElement): string | undefined {
 export function readPaintedSemanticLabelOverlayText(
   element: Element | null | undefined,
 ): string | undefined {
-  if (!element || element.namespaceURI !== HTML_NAMESPACE) return undefined;
+  if (!element || sourceProperty(element, 'namespaceURI') !== HTML_NAMESPACE) return undefined;
   return activeOverlays.get(element as HTMLElement)?.textContent ?? undefined;
 }
 
@@ -688,22 +694,22 @@ function ownedLabelRoot(element: HTMLElement): ShadowRoot | undefined {
   if (kept) return kept;
   if (
     !LABEL_ROOT_HOST_TAGS.has(sourceLocalName(element).toLowerCase()) ||
-    element.shadowRoot
+    sourceProperty(element, 'shadowRoot')
   ) return undefined;
   let root: ShadowRoot;
   try {
-    root = element.attachShadow({ mode: 'closed' });
+    root = sourceCall(element, 'attachShadow', { mode: 'closed' });
   } catch {
     return undefined;
   }
-  root.append(element.ownerDocument.createElement('slot'));
+  root.append(sourceProperty(element, 'ownerDocument').createElement('slot'));
   ownedLabelRoots.set(element, root);
   return root;
 }
 
 function hasOwnedOverlayChild(element: HTMLElement): boolean {
-  for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
-    if (child.hasAttribute(PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE)) return true;
+  for (let child = sourceProperty(element, 'firstElementChild'); child; child = sourceProperty(child, 'nextElementSibling')) {
+    if (sourceCall(child, 'hasAttribute', PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE)) return true;
   }
   return false;
 }

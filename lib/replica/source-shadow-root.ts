@@ -27,7 +27,12 @@
  * (`probeSourceShadowRoot`).
  */
 
-import { sourceLocalName, sourceNodeType, sourceProperty } from './source-node-accessors';
+import {
+  sourceCall,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 /** `chrome.dom.openOrClosedShadowRoot`, or a stand-in under test. */
 export type SourceShadowRootReader = (
@@ -150,10 +155,10 @@ export function chromeSourceShadowRootReader(): SourceShadowRootReader | undefin
  * `body` of a PDF document: its closed root is Chrome's PDF viewer.
  */
 export function canHostAuthorShadowRoot(element: Element): boolean {
-  if (element.namespaceURI !== HTML_NAMESPACE) return false;
+  if (sourceProperty(element, 'namespaceURI') !== HTML_NAMESPACE) return false;
   const name = sourceLocalName(element);
   if (name === 'body') {
-    return element.ownerDocument?.contentType !== 'application/pdf';
+    return sourceProperty(element, 'ownerDocument')?.contentType !== 'application/pdf';
   }
   return AUTHOR_SHADOW_HOST_TAGS.has(name) || name.includes('-');
 }
@@ -164,7 +169,7 @@ export function canHostAuthorShadowRoot(element: Element): boolean {
  * fails closed as it did before. The extension call is guarded here.
  */
 export function readSourceShadowRoot(element: Element): ShadowRoot | undefined {
-  const own = element.shadowRoot;
+  const own = sourceProperty(element, 'shadowRoot');
   if (own) {
     if (installedLedgers !== 0 && !activeLedger?.noted.has(own)) {
       noteOwnSourceShadowRoot(element, own);
@@ -183,7 +188,7 @@ export function readSourceShadowRoot(element: Element): ShadowRoot | undefined {
  * root: a root can be attached later, once. For the periodic discovery.
  */
 export function probeSourceShadowRoot(element: Element): ShadowRoot | undefined {
-  const own = element.shadowRoot;
+  const own = sourceProperty(element, 'shadowRoot');
   if (own) {
     if (installedLedgers !== 0 && !activeLedger?.noted.has(own)) {
       noteOwnSourceShadowRoot(element, own);
@@ -249,7 +254,7 @@ export function askAboutSourceShadowRootsAbove(
   for (let steps = 0; current && steps < MAX_SOURCE_ROOT_CHAIN; steps += 1) {
     if (asked.has(current)) return found;
     asked.add(current);
-    const own = sourceNodeType(current) === 1 ? (current as Element).shadowRoot : null;
+    const own = sourceNodeType(current) === 1 ? sourceProperty((current as Element), 'shadowRoot') : null;
     if (own) {
       if (!activeLedger?.noted.has(own) && noteOwnSourceShadowRoot(current as Element, own)) {
         found.push(own);
@@ -300,7 +305,7 @@ export function askAboutSourceShadowRootsWithin(
     asked.add(current);
     if (sourceNodeType(current) === 1) {
       const element = current as Element;
-      let root = element.shadowRoot ?? undefined;
+      let root = sourceProperty(element, 'shadowRoot') ?? undefined;
       if (root) {
         if (!activeLedger?.noted.has(root)) noteOwnSourceShadowRoot(element, root);
       } else {
@@ -313,7 +318,7 @@ export function askAboutSourceShadowRootsWithin(
       }
       if (root) stack.push(root);
     }
-    for (let child = current.lastChild; child; child = child.previousSibling) {
+    for (let child = sourceProperty(current, 'lastChild'); child; child = sourceProperty(child, 'previousSibling')) {
       stack.push(child);
     }
   }
@@ -337,9 +342,9 @@ export function isSourceShadowRoot(node: Node): node is ShadowRoot {
  * too many slots to search; callers treat that as an unreadable ancestry.
  */
 export function readSourceAssignedSlot(node: Node): Element | null | undefined {
-  const own = (node as Node & {
+  const own = sourceProperty((node as Node & {
     readonly assignedSlot?: Element | null;
-  }).assignedSlot;
+  }), 'assignedSlot');
   if (own !== null || installedLedgers === 0) return own;
   const parent = sourceProperty(node, 'parentNode');
   if (!parent || sourceNodeType(parent) !== 1) return null;
@@ -374,7 +379,7 @@ export function readSourceAssignedSlot(node: Node): Element | null | undefined {
     return assigned.get(node) ?? null;
   }
   const name = sourceNodeType(node) === 1
-    ? (node as Element).getAttribute('slot') ?? ''
+    ? sourceCall((node as Element), 'getAttribute', 'slot') ?? ''
     : '';
   for (const slot of slots) {
     if ((slot.getAttribute('name') ?? '') === name) return slot;

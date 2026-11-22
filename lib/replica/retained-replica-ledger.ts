@@ -19,7 +19,12 @@
  * ledger slower, never let it keep a replica the walk would refuse.
  */
 
-import { sourceAttributeList, sourceLocalName, sourceNodeType, sourceProperty } from './source-node-accessors';
+import {
+  sourceAttributeList,
+  sourceLocalName,
+  sourceNodeType,
+  sourceProperty,
+} from './source-node-accessors';
 
 /** The walk's measure of one node, without what is counted when asked. */
 export function retainedNodeBytes(node: Node): number {
@@ -84,7 +89,7 @@ export function walkRetainedReplica(
     visit?.(node, own);
     if (
       sourceNodeType(node) === 3 &&
-      ownedAdoptedStyles.has(node.parentNode as Node)
+      ownedAdoptedStyles.has(sourceProperty(node, 'parentNode') as Node)
     ) {
       const text = node.nodeValue ?? '';
       bytes += 48;
@@ -98,10 +103,10 @@ export function walkRetainedReplica(
     if (sourceNodeType(node) === 1) {
       const element = node as Element;
       if (isRetainedTextControl(element)) bytes += controlBytes(element);
-      const shadow = element.shadowRoot;
+      const shadow = sourceProperty(element, 'shadowRoot');
       if (shadow) pending.push(shadow);
     }
-    for (let child = node.firstChild; child; child = child.nextSibling) {
+    for (let child = sourceProperty(node, 'firstChild'); child; child = sourceProperty(child, 'nextSibling')) {
       pending.push(child);
     }
     if (bytes > maxBytes) return undefined;
@@ -216,7 +221,7 @@ export class RetainedReplicaLedger {
     const adoptedTexts = new Set<string>();
     for (const style of this.#ownedAdoptedStyles) {
       if (!this.#counted.has(style)) continue;
-      for (let child = style.firstChild; child; child = child.nextSibling) {
+      for (let child = sourceProperty(style, 'firstChild'); child; child = sourceProperty(child, 'nextSibling')) {
         if (sourceNodeType(child) !== 3) continue;
         const text = child.nodeValue ?? '';
         bytes -= text.length * 2;
@@ -356,10 +361,10 @@ export class RetainedReplicaLedger {
       this.#count(node, retainedNodeBytes(node));
       if (sourceNodeType(node) === 1) {
         this.#noteAriaElement(node as Element);
-        const shadow = (node as Element).shadowRoot;
+        const shadow = sourceProperty((node as Element), 'shadowRoot');
         if (shadow) pending.push(shadow);
       }
-      for (let child = node.firstChild; child; child = child.nextSibling) {
+      for (let child = sourceProperty(node, 'firstChild'); child; child = sourceProperty(child, 'nextSibling')) {
         pending.push(child);
       }
     }
@@ -377,10 +382,10 @@ export class RetainedReplicaLedger {
       }
       if (sourceNodeType(node) === 1) {
         this.#noteAriaElement(node as Element);
-        const shadow = (node as Element).shadowRoot;
+        const shadow = sourceProperty((node as Element), 'shadowRoot');
         if (shadow) pending.push(shadow);
       }
-      for (let child = node.firstChild; child; child = child.nextSibling) {
+      for (let child = sourceProperty(node, 'firstChild'); child; child = sourceProperty(child, 'nextSibling')) {
         pending.push(child);
       }
     }

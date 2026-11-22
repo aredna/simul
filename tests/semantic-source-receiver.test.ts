@@ -569,6 +569,61 @@ describe('semantic source receiver', () => {
       }
     });
 
+    it('reads a mirror form past fields named for its other properties (D206)', () => {
+      // Every name a field can stand in front of on a form, each on its own.
+      // Chrome's own DOM code never meets the field, so linkedom's reads
+      // still get the property.
+      const names = [
+        'localName', 'nodeType', 'nodeName', 'tagName', 'namespaceURI', 'id', 'attributes',
+        'childNodes', 'children', 'firstChild', 'lastChild', 'nextSibling', 'previousSibling',
+        'parentNode', 'parentElement', 'ownerDocument', 'isConnected', 'shadowRoot',
+        'getAttribute', 'hasAttribute', 'getAttributeNames', 'textContent', 'style',
+        'contains', 'closest', 'matches', 'querySelector', 'querySelectorAll', 'getRootNode',
+        'firstElementChild', 'lastElementChild', 'nextElementSibling', 'previousElementSibling',
+      ];
+      const failed: string[] = [];
+      for (const name of names) {
+        const { document } = parseHTML(
+          '<html><body><form id="f" contenteditable="true"><input id="field">' +
+            '<p id="typed">*</p></form></body></html>',
+        );
+        const form = document.getElementById('f')!;
+        const field = document.getElementById('field')!;
+        const own = Object.getOwnPropertyDescriptor(form, name);
+        const prototype = Object.create(Object.getPrototypeOf(form) as object, own
+          ? { [name]: own.get || own.set ? { ...own, configurable: true } : { configurable: true, get: () => own.value } }
+          : {}) as object;
+        Object.setPrototypeOf(form, prototype);
+        Object.defineProperty(form, name, {
+          configurable: true,
+          get() {
+            const caller = new Error().stack?.split('\n')[2] ?? '';
+            return caller.includes('/node_modules/') ? Reflect.get(prototype, name, form) : field;
+          },
+        });
+        const text = document.getElementById('typed')!.firstChild!;
+        try {
+          const receiver = new SemanticSourceReceiver({
+            document: identity,
+            replicaDocument: document as unknown as Document,
+            resolveNode: (nodeId) => (nodeId === 7 ? text : undefined),
+          });
+          receiver.applyBatch(createSemanticSourceBatch(
+            identity, 'read-v1-111111', 1,
+            [editorRecord(7, 'typed words', { tagName: 'form' })],
+          ));
+          const kept = text.nodeValue;
+          const dropped = receiver.refreshBindings();
+          if (kept !== 'typed words' || dropped.length > 0 || text.nodeValue !== 'typed words') {
+            failed.push(name);
+          }
+        } catch {
+          failed.push(name);
+        }
+      }
+      expect(failed).toEqual([]);
+    });
+
     it('takes an editor the page made without the attribute, by the page\'s mark (D192)', () => {
       const take = (markup: string, overrides: Partial<SemanticSourceRecord>) => {
         const { document } = parseHTML(`<html><body>${markup}</body></html>`);
