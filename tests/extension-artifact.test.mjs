@@ -1248,7 +1248,7 @@ describe('public and dev editions', () => {
     await writeFile(path.join(privateCheckout, '_dev', 'public-exclude.txt'), 'dist/chrome-dev\n');
     expect(await defaultArtifactEditions(privateCheckout)).toEqual(['public', 'dev']);
 
-    const devBuildCheckout = await createTemporaryDirectory('simul-dev-checkout-');
+    const devBuildCheckout = await createTemporaryDirectory('simul-edition-dev-checkout-');
     await mkdir(canonicalArtifactDirectory(devBuildCheckout, 'dev'), { recursive: true });
     expect(await defaultArtifactEditions(devBuildCheckout)).toEqual(['public', 'dev']);
   });
@@ -1300,7 +1300,7 @@ describe('public and dev editions', () => {
   );
 
   it('syncs and checks the dev edition in its own directory only', async () => {
-    const projectRoot = await createTemporaryProjectRoot('simul-dev-sync-');
+    const projectRoot = await createTemporaryProjectRoot('simul-edition-dev-sync-');
     const publicDirectory = canonicalArtifactDirectory(projectRoot, 'public');
     await createValidArtifact(publicDirectory, { popupScript: 'console.info("public");' });
     const editions = [];

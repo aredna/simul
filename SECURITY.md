@@ -18,5 +18,6 @@ tokens, account data, URLs containing secrets, passwords, and private page
 content before submitting.
 
 Simul's critical boundaries include scriptless replica execution, masked
-private/editable controls, no remotely hosted executable code, explicit host
-access, bounded parsing, and content-free diagnostics.
+private/editable controls, no remotely hosted executable code, page access
+only while the panel shows the page, bounded parsing, and content-free
+diagnostics.

@@ -1,6 +1,6 @@
 # Simul privacy policy
 
-Last updated: 2026-11-21
+Last updated: 2026-11-23
 
 Simul is a Chrome extension that shows a translated copy of the web page or
 PDF you are reading. It works on your own computer. It has no server, no
@@ -8,13 +8,16 @@ account, no analytics and no ads, and it sends nothing to its developer.
 
 ## What Simul reads
 
-Only the tab you open Simul on, after you select the Simul icon (or a site
-you chose for automatic translation):
+Only the page that Simul's panel is showing, while the panel is open (see
+Site access below):
 
 - **The page:** its text, images and layout, so the mirror can show it. The
-  read profile in Options decides how much: page text only, or also visible
-  form fields and autofilled values. Passwords, payment-card numbers and
-  one-time codes are never read.
+  read profile in Options decides how much: page text only; also button
+  labels, button pictures and folded sections; or also what is filled in
+  visible form fields and text editors, including autofilled values.
+  Passwords, payment-card numbers and one-time codes are never read: for a
+  password field, Simul learns only how many characters it holds, to draw
+  the same number of dots.
 - **The tab's address,** to follow the tab and to remember the sites you
   chose for automatic translation.
 - **Your clicks, keys, focus and scrolling on that page,** only to keep the
@@ -38,8 +41,9 @@ Nothing Simul reads is sent to Simul's developer or to any other company.
 Translation, language detection and reading text in images all run on your
 computer. Some requests do go over the network:
 
-- The mirror loads the page's own images, styles and fonts from the page's
-  own site, as the page itself does.
+- The mirror loads the page's own images, styles and fonts from where the
+  page loads them (its own site or the sites it uses), as the page itself
+  does.
 - To read text in an image, Simul may download that image again from its
   own address, without your cookies.
 - A style sheet the page loaded from another site (a CDN) is read again,

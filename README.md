@@ -45,7 +45,7 @@ To update, replace the folder and select **Reload** on the Simul card.
 
 1. Open a web page or a PDF and select the Simul icon.
 2. Pick the **To** language and select **Translate page**.
-3. To translate text in images, select **OCR** once to allow image access.
+3. To translate text in images, select **OCR**.
 
 The mirror follows the page as you scroll and zoom it.
 

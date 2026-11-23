@@ -232,7 +232,7 @@ export default defineConfig({
       default_title: 'Simul',
     },
     // Chrome falls back to these for the toolbar action; the Web Store
-    // rejects a listing without them. Placeholders until the real mark lands.
+    // rejects a listing without them. Drawn in D161 (`docs/icon/`).
     icons: {
       16: 'icon/16.png',
       32: 'icon/32.png',

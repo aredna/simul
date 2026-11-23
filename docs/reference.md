@@ -7,9 +7,11 @@ boundary, permissions, fidelity limits, troubleshooting, and development.
 
 Simul does not run a second active copy of the website.
 
-1. **Authorize the current page.** Selecting the toolbar icon gives Simul
-   temporary `activeTab` access to that exact document. No permanent host
-   access is required for ordinary manual use.
+1. **Authorize the current page.** Simul may read the pages you open from
+   install (`<all_urls>`), so the panel follows each page and tab without a
+   click on its icon. If you limit its site access in Chrome, selecting the
+   toolbar icon gives Simul temporary `activeTab` access to that exact
+   document, and the panel offers to allow all sites again.
 2. **Capture a bounded page model.** A thin source bridge reads the
    browser-produced DOM and sends an allowlisted graph rather than raw HTML.
    Scripts, event handlers, navigation behavior, forms, active embeds, and

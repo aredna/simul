@@ -1219,7 +1219,7 @@ shell and the mirror has nothing to copy (D103).
       page top, or a page of the other shape) is read upright, a guess the
       look settles either way. Every look's pages include those the report
       fits only turned. The D123 review's
-      `matrix.mjs turns` (copied to `~/.cache/simul-harness/d197/turns/`)
+      `matrix.mjs turns`
       and `record.mjs turn`, `turnscan` and `turnmatrix` in the D177 follow
       harness check it on a Letter PDF with one landscape page, on one with
       landscape pages a little shorter (`letter-scan.pdf`) and on one whose
@@ -1736,7 +1736,8 @@ pinned pdf.js subset, and their notices, and has no remote OCR or PDF runtime
 references.
 
 The manifest must retain Chrome 141 (D176), required permissions `activeTab`,
-`scripting`, `sidePanel`, `storage`, and `offscreen`, no required host
-permissions, only the approved optional HTTP(S) patterns, and the exact local
+`scripting`, `sidePanel`, `storage`, and `offscreen`, exactly `<all_urls>`
+as its required host permission (D166) and no optional host permissions, and
+the exact local
 Wasm/Worker extension-page CSP, which every build profile carries because
 pdf.js ships in all of them.
