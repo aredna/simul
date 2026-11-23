@@ -35,7 +35,8 @@ const WORKER_MODIFICATION_NOTICE =
   `/*! Modified by Simul: tesseract.js ${TESSERACT_VERSION} dist/worker.min.js ` +
   '(Apache-2.0) with its remote fallback locations for the core and the ' +
   'language data replaced by local-only markers and its sourceMappingURL ' +
-  'line removed. */\n';
+  'line removed. Its bundled third-party license comments are in ' +
+  '../licenses/WORKER_THIRD_PARTY.txt. */\n';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = resolve(root, 'vendor/ocr/tesseract');

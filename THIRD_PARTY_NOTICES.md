@@ -6,10 +6,12 @@ see [LICENSE](LICENSE).
 
 The inventory is derived from what the Simul 0.6.7 extension artifact
 actually contains: the locked production dependency graph, the pinned OCR and
-PDF asset manifests, and the modules tesseract.js bundled into its prebuilt
-Worker (read from the Worker's published source map). Development-only npm packages
-are not included in the extension artifact and retain the licenses shipped in
-their own packages.
+PDF asset manifests, the modules tesseract.js bundled into its prebuilt
+Worker (read from the Worker's published source map), and the runtime code
+the build tools (WXT, Vite and Rolldown, themselves development dependencies)
+write into Simul's own scripts. Other development-only npm packages are not
+included in the extension artifact and retain the licenses shipped in their
+own packages.
 
 ## Runtime inventory
 
@@ -39,8 +41,10 @@ their own packages.
 | Adobe CMaps | from PDF.js 6.3.289 | BSD-3-Clause | `pdfjs/cmaps/` |
 | Foxit Symbol and Dingbats fonts | from PDF.js 6.3.289 | BSD-3-Clause | `pdfjs/standard_fonts/` |
 | CGATS001Compat-v2-micro ICC profile | from PDF.js 6.3.289 | CC0-1.0 | `pdfjs/iccs/` |
-| Vite module-preload helper | 8.2.2 | MIT | Simul's own chunks |
-| `@wxt-dev/browser` | 0.2.2 | MIT | Simul's own chunks |
+| Vite module-preload polyfill and preload helper | 8.3.8 | MIT | `chunks/trusted-types-*.js`, `chunks/sidepanel-*.js` |
+| Rolldown runtime helpers | 1.2.19 | MIT | `chunks/rolldown-runtime-*.js` |
+| `wxt` runtime | 0.21.4 | MIT | `background.js`, `page-mirror.js`, `pdf-viewer-bridge.js` |
+| `@wxt-dev/browser` | 0.2.2 | MIT | `background.js`, `page-mirror.js`, `pdf-viewer-bridge.js`, `chunks/trusted-types-*.js` |
 
 These packages are in the locked production dependency graph of tesseract.js
 but contribute no code to the extension; their notices are kept below
@@ -98,9 +102,11 @@ Copyright notices retained for MIT-licensed material:
 - `zlibjs`: Copyright (c) 2012 imaya.
 - webpack 5 runtime in the Tesseract Worker: Copyright JS Foundation and other
   contributors.
-- Vite module-preload helper: Copyright (c) 2019-present, VoidZero Inc. and
-  Vite contributors.
-- `@wxt-dev/browser`: Copyright (c) 2023 Aaron.
+- Vite module-preload polyfill and preload helper: Copyright (c)
+  2019-present, VoidZero Inc. and Vite contributors.
+- Rolldown runtime helpers: Copyright (c) 2024-present VoidZero Inc. &
+  Contributors.
+- `wxt` and `@wxt-dev/browser`: Copyright (c) 2023 Aaron.
 - `is-url` is distributed under MIT terms without a copyright line in its
   published license file.
 - Brotli decoder in the PDF.js worker: Copyright (c) 2009, 2010, 2013-2016 by
