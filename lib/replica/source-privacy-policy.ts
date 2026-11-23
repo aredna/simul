@@ -8,6 +8,8 @@ import {
 import {
   sourceDocumentSecretClassifier,
   sourceFactsAreSecret,
+  sourceFactsMarkCredentialHost,
+  sourceContentEditableFact,
   type StickySourceSecretClassifier,
 } from './source-secret-classifier';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
@@ -3144,6 +3146,11 @@ export interface SourceSecretAncestorMemo {
   classifier: StickySourceSecretClassifier | undefined;
   revision: number;
   readonly results: Map<Element, boolean>;
+  /**
+   * Whether each memoized element is or stands inside a credential host
+   * (D237), whose fields are credentials.
+   */
+  readonly hosts: Map<Element, boolean>;
   /** Each memoized element's flat-tree depth, so a lookup can stop there. */
   readonly depths: Map<Element, number>;
 }
@@ -3153,6 +3160,7 @@ export function createSourceSecretAncestorMemo(): SourceSecretAncestorMemo {
     classifier: undefined,
     revision: -1,
     results: new Map(),
+    hosts: new Map(),
     depths: new Map(),
   };
 }
@@ -3195,6 +3203,7 @@ function readSourceUnmemoizedPath(
 ): {
   readonly path: readonly Element[];
   readonly secretAncestor: boolean;
+  readonly credentialHost: boolean;
   readonly baseDepth: number;
 } | undefined {
   try {
@@ -3210,13 +3219,18 @@ function readSourceUnmemoizedPath(
           baseDepth === undefined ||
           baseDepth + path.length > MAX_SOURCE_FLAT_TREE_ANCESTORS
         ) return undefined;
-        return { path, secretAncestor: known, baseDepth };
+        return {
+          path,
+          secretAncestor: known,
+          credentialHost: memo.hosts.get(current) ?? false,
+          baseDepth,
+        };
       }
       if (path.length >= MAX_SOURCE_FLAT_TREE_ANCESTORS) return undefined;
       path.push(current);
       current = readSourceFlatTreeParentElement(current);
     }
-    return { path, secretAncestor: false, baseDepth: 0 };
+    return { path, secretAncestor: false, credentialHost: false, baseDepth: 0 };
   } catch {
     return undefined;
   }
@@ -3242,6 +3256,7 @@ export function hasSourceCredentialSecretAncestor(
     (memo.classifier !== classifier || memo.revision !== classifier.revision)
   ) {
     memo.results.clear();
+    memo.hosts.clear();
     memo.depths.clear();
     memo.classifier = classifier;
     memo.revision = classifier.revision;
@@ -3253,7 +3268,12 @@ export function hasSourceCredentialSecretAncestor(
     ? readSourceUnmemoizedPath(node, memo)
     : (() => {
         const full = readSourceFlatTreeElementPath(node);
-        return full && { path: full, secretAncestor: false, baseDepth: 0 };
+        return full && {
+          path: full,
+          secretAncestor: false,
+          credentialHost: false,
+          baseDepth: 0,
+        };
       })();
   if (!unmemoized) {
     classifier.classify(node, {
@@ -3264,6 +3284,7 @@ export function hasSourceCredentialSecretAncestor(
   }
   const { path, baseDepth } = unmemoized;
   let secretAncestor = unmemoized.secretAncestor;
+  let credentialHost = unmemoized.credentialHost;
   for (let index = path.length - 1; index >= 0; index -= 1) {
     const current = path[index]!;
     let computedTextSecurity = '';
@@ -3298,22 +3319,27 @@ export function hasSourceCredentialSecretAncestor(
     // descendants, image evidence, and value-bearing access.
     if (computedStyleUnreadable) computedTextSecurity = 'simul-unreadable';
     const attributes = readSourceStructuralAttributes(current);
-    const category = classifier.classify(current, {
+    const facts = {
       tagName: sourceLocalName(current),
       type: attributes.type,
       autocomplete: attributes.autocomplete,
       role: attributes.role,
-      contentEditable: attributes.contenteditable,
+      contentEditable: sourceContentEditableFact(attributes.contenteditable),
       computedTextSecurity,
       secretAncestor,
-    });
+      credentialHostAncestor: credentialHost,
+    };
+    const category = classifier.classify(current, facts);
     if (category === 'secret') secretAncestor = true;
+    if (sourceFactsMarkCredentialHost(facts)) credentialHost = true;
     memo?.results.set(current, secretAncestor);
+    memo?.hosts.set(current, credentialHost);
     memo?.depths.set(current, baseDepth + path.length - index);
   }
   if (memo && memo.revision !== classifier.revision) {
     // A new secret was learned on this path: start the next lookup afresh.
     memo.results.clear();
+    memo.hosts.clear();
     memo.depths.clear();
     memo.revision = classifier.revision;
   }
@@ -3558,8 +3584,10 @@ export function readSourceStructuralAttributes(
     }
     return result;
   } catch {
-    // Unreadable structural metadata is credential-secret, not public.
-    return { autocomplete: 'current-password' };
+    // Unreadable structural metadata is credential-secret, not public: a
+    // credential editor, which is a credential itself and not only the host
+    // of one (D237).
+    return { autocomplete: 'current-password', contenteditable: 'true' };
   }
 }
 

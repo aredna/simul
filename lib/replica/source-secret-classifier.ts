@@ -72,6 +72,13 @@ export interface SourceClassificationFacts {
   readonly contentEditable?: string;
   readonly computedTextSecurity?: string;
   readonly secretAncestor?: boolean;
+  /**
+   * An element above this one is a credential host (D237): it carries a
+   * credential `autocomplete` or `type="password"` without being a field
+   * itself, as a component wrapping its input does. Every field inside it is
+   * a credential.
+   */
+  readonly credentialHostAncestor?: boolean;
   readonly valueBearing?: boolean;
 }
 
@@ -115,9 +122,48 @@ export function sourceFactsAreSecret(
   }
   const textSecurity = normalized(facts.computedTextSecurity);
   if (textSecurity && textSecurity !== 'none') return true;
-  return normalizeAutocompleteTokens(facts.autocomplete).some(
+  if (facts.credentialHostAncestor === true && isSourceValueFieldFacts(facts)) {
+    return true;
+  }
+  // A component that copies its input's credential `autocomplete` onto
+  // itself is the host of a credential, not one: its label and box are
+  // drawn, and every field inside it is a credential (D237). Replaced whole,
+  // the sign-in fields of such a page vanished from the mirror.
+  return hasCredentialAutocomplete(facts.autocomplete) &&
+    !sourceFactsMarkCredentialHost(facts);
+}
+
+function hasCredentialAutocomplete(value: unknown): boolean {
+  return normalizeAutocompleteTokens(value).some(
     (token) => SECRET_AUTOCOMPLETE_SET.has(token) || token.startsWith('cc-'),
   );
+}
+
+/** An element whose text is what a person types: a form field or an editor. */
+function isSourceValueFieldFacts(facts: SourceClassificationFacts): boolean {
+  const tag = normalized(facts.tagName);
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  const editable = normalized(facts.contentEditable);
+  return editable !== '' && editable !== 'false';
+}
+
+/**
+ * Whether an element makes every field inside it a credential (D237): a
+ * custom element (a component: `faceplate-text-input`, `md-outlined-text-field`,
+ * `sl-input`) that is not a field itself and says it holds a credential, by a
+ * credential `autocomplete` token or `type="password"`. Any other element
+ * that says so is a credential region, replaced whole.
+ */
+export function sourceFactsMarkCredentialHost(
+  facts: SourceClassificationFacts,
+): boolean {
+  if (
+    SOURCE_PRIVACY_FILTERS_OFF ||
+    !normalized(facts.tagName).includes('-') ||
+    isSourceValueFieldFacts(facts)
+  ) return false;
+  return normalized(facts.type) === 'password' ||
+    hasCredentialAutocomplete(facts.autocomplete);
 }
 
 /**

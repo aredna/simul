@@ -46,6 +46,62 @@ describe('source secret classifier', () => {
     )).toBe(false);
   });
 
+  it('draws a component that names a credential, and keeps every field inside it secret (D237)', () => {
+    // A sign-in component copies its input's `autocomplete` and `type` onto
+    // itself, as reddit's `faceplate-text-input` does.
+    const { document } = parseHTML(`<html><body><form>
+      <sign-in-field id="user" autocomplete="username webauthn"><label id="user-label">Email or username</label></sign-in-field>
+      <sign-in-field id="pass" type="password" autocomplete="current-password"><label id="pass-label">Password</label></sign-in-field>
+      <card-field id="card" autocomplete="cc-number"><span id="card-label">Card number</span></card-field>
+    </form></body></html>`);
+    const userInput = document.createElement('input');
+    userInput.setAttribute('autocomplete', 'username webauthn');
+    document.querySelector('#user-label')!.append(userInput);
+    const passInput = document.createElement('input');
+    passInput.setAttribute('type', 'password');
+    document.querySelector('#pass-label')!.append(passInput);
+    // The card number's own input says nothing: its host does.
+    const cardInput = document.createElement('input');
+    const cardNote = document.createElement('textarea');
+    const cardEditor = document.createElement('div');
+    cardEditor.setAttribute('contenteditable', '');
+    document.querySelector('#card')!.append(cardInput, cardNote, cardEditor);
+    const view = { getComputedStyle: () => ({ getPropertyValue: () => '' }) };
+    const secret = (node: Node) => hasSourceCredentialSecretAncestor(
+      node,
+      new StickySourceSecretClassifier(),
+      view as unknown as Window,
+    );
+
+    for (const id of ['#user', '#pass', '#card', '#user-label', '#pass-label', '#card-label']) {
+      expect(secret(document.querySelector(id)!), id).toBe(false);
+    }
+    expect(secret(document.querySelector('#user-label')!.firstChild!)).toBe(false);
+    for (const field of [userInput, passInput, cardInput, cardNote, cardEditor]) {
+      expect(secret(field)).toBe(true);
+    }
+    // Shared memos give the same answers in any order.
+    const classifier = new StickySourceSecretClassifier();
+    const memo = createSourceSecretAncestorMemo();
+    const memoSecret = (node: Node) => hasSourceCredentialSecretAncestor(
+      node, classifier, view as unknown as Window, memo,
+    );
+    expect(memoSecret(document.querySelector('#card-label')!)).toBe(false);
+    expect(memoSecret(cardInput)).toBe(true);
+    expect(memoSecret(document.querySelector('#user-label')!)).toBe(false);
+    expect(memoSecret(userInput)).toBe(true);
+
+    // A field is still a credential by its own token, and an ordinary
+    // field outside a host stays ordinary.
+    expect(classifySourceEvidence({ tagName: 'input', autocomplete: 'current-password' })).toBe('secret');
+    expect(classifySourceEvidence({ tagName: 'select', autocomplete: 'cc-exp-month' })).toBe('secret');
+    expect(classifySourceEvidence({ tagName: 'sign-in-field', autocomplete: 'current-password' })).not.toBe('secret');
+    // Any other element that says it holds a credential is replaced whole.
+    expect(classifySourceEvidence({ tagName: 'div', autocomplete: 'current-password' })).toBe('secret');
+    expect(classifySourceEvidence({ tagName: 'input', credentialHostAncestor: true })).toBe('secret');
+    expect(classifySourceEvidence({ tagName: 'span', credentialHostAncestor: true })).not.toBe('secret');
+  });
+
   it('draws a file input as an ordinary control (D75)', () => {
     // The page shows its Choose File button; the value (a file name) is never
     // an ordinary form value, so no read scope carries it.
