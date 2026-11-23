@@ -198,10 +198,10 @@ describe('PreferenceClient', () => {
     });
     await expect(harness.client.commitView({ zoomPercent: 200 })).resolves.toBe(false);
     expect(harness.state.preferences.zoomPercent).toBe(80);
-    expect(harness.errors).toEqual(['Could not save options: service down']);
+    expect(harness.errors).toEqual(['Simul could not save the options: service down']);
 
     await harness.client.commitImageAnalysis({ skipSmallImages: false });
-    expect(harness.errors.at(-1)).toBe('Could not save image options: service down');
+    expect(harness.errors.at(-1)).toBe('Simul could not save the image options: service down');
     expect(harness.state.preferences.skipSmallImages).toBe(stored.skipSmallImages);
 
     const refused = setup({
@@ -214,7 +214,7 @@ describe('PreferenceClient', () => {
       }),
     });
     await expect(refused.client.commitView({ syncScroll: false })).resolves.toBe(false);
-    expect(refused.errors.at(-1)).toContain('Settings were reset in another companion');
+    expect(refused.errors.at(-1)).toContain('Settings were reset in another panel');
   });
 
   it('binds image-option writes to the current settings revision', async () => {
@@ -232,7 +232,7 @@ describe('PreferenceClient', () => {
     // Another companion advanced the revision first.
     harness.setStored(advanceCompanionSettingsRevision(harness.stored));
     await harness.client.commitImageAnalysis({ skipSmallImages: true });
-    expect(harness.errors.at(-1)).toContain('Image options changed in another companion');
+    expect(harness.errors.at(-1)).toContain('Image options changed in another panel');
   });
 
   it('applies zoom at once and saves once per drag, flushing on demand', async () => {

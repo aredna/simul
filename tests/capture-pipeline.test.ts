@@ -210,7 +210,7 @@ describe('CapturePipeline capture', () => {
     expect(harness.state.followedPageIdentity).toEqual(IDENTITY);
     expect(harness.state.captureInFlight).toBe(true);
     expect(harness.events).toContain('loading');
-    expect(harness.statuses[0]?.[0]).toBe('Building the initial live read-only mirror…');
+    expect(harness.statuses[0]?.[0]).toBe('Simul builds the first live read-only mirror…');
     await harness.settled();
 
     expect(harness.engine.run).toHaveBeenCalledOnce();
@@ -275,7 +275,7 @@ describe('CapturePipeline capture', () => {
     await harness.settled();
     expect(harness.state.capturedPageIdentity).toBeUndefined();
     expect(harness.statuses.at(-1)).toEqual([
-      'The mirror could not be prepared. Retry the current page.',
+      'Simul could not prepare the mirror. Try the current page again.',
       'error',
     ]);
     expect(harness.events.some((event) => event.startsWith('error:'))).toBe(true);
@@ -301,13 +301,13 @@ describe('CapturePipeline capture', () => {
     const missing = setup({ readDocument: async () => undefined });
     missing.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await missing.settled();
-    expect(missing.statuses.at(-1)?.[0]).toContain('did not expose a current document boundary');
+    expect(missing.statuses.at(-1)?.[0]).toContain('did not give a current document boundary');
     expect(missing.engine.run).not.toHaveBeenCalled();
 
     const slow = setup({ readDocument: () => new Promise(() => undefined) });
     slow.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await slow.settled();
-    expect(slow.statuses.at(-1)?.[0]).toContain('took too long');
+    expect(slow.statuses.at(-1)?.[0]).toContain('did not respond in time');
   });
 
   it('keeps the last good replica and the translation intent on a same-page rebuild', async () => {
@@ -386,14 +386,14 @@ describe('CapturePipeline commits and failures', () => {
     await harness.settled();
 
     harness.pipeline.handleReplicaLiveFailure('stream_failed');
-    expect(harness.statuses.at(-2)?.[0]).toContain('Rebuilding once');
-    expect(harness.statuses.at(-1)?.[0]).toContain('Rebuilding once while keeping the current mirror visible');
+    expect(harness.statuses.at(-2)?.[0]).toContain('Simul rebuilds the mirror once');
+    expect(harness.statuses.at(-1)?.[0]).toContain('Simul rebuilds the mirror once and shows the current mirror until then');
     await harness.settled();
     expect(harness.engine.run).toHaveBeenCalledTimes(2);
 
     harness.pipeline.handleReplicaLiveFailure('stream_failed');
     expect(harness.statuses.at(-1)).toEqual([
-      'The live mirror disconnected again. The last good mirror is kept; choose Refresh to retry.',
+      'The live mirror lost its connection again. Simul shows the last good mirror. To try again, select Refresh.',
       'error',
     ]);
   });
@@ -463,10 +463,10 @@ describe('CapturePipeline PDFs', () => {
     expect(harness.state.pdfAbortController).toBeUndefined();
     expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledWith(undefined);
     expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
-    expect(harness.events).toContain('loading:Reading the PDF…');
+    expect(harness.events).toContain('loading:Simul reads the PDF…');
     expect(harness.events.indexOf('status-hidden'))
-      .toBeGreaterThan(harness.events.indexOf('loading:Reading the PDF…'));
-    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
+      .toBeGreaterThan(harness.events.indexOf('loading:Simul reads the PDF…'));
+    expect(harness.statuses.at(-1)).toEqual(['Simul reads the PDF…', undefined]);
   });
 
   it('prepares a PDF for translation by the page rules once all its text is read', async () => {
@@ -503,7 +503,7 @@ describe('CapturePipeline PDFs', () => {
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(harness.statuses.at(-1)).toEqual([
-      'No text was found in this PDF.',
+      'Simul found no text in this PDF.',
       'warning',
     ]));
     expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
@@ -517,7 +517,7 @@ describe('CapturePipeline PDFs', () => {
     harness.state.preferences = { ...harness.state.preferences, replicaViewMode: 'source-only' };
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(harness.statuses.at(-1)).toEqual([
-      'Live source only is active. The PDF is shown without translation.',
+      'Live source only is active. Simul shows the PDF without translation.',
       'success',
     ]));
     expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
@@ -584,7 +584,7 @@ describe('CapturePipeline PDFs', () => {
     expect(harness.pdf.close).not.toHaveBeenCalled();
     expect(harness.pdf.show).toHaveBeenCalledTimes(2);
     expect(harness.events.some((event) => event.startsWith('loading'))).toBe(false);
-    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
+    expect(harness.statuses.at(-1)).toEqual(['Simul reads the PDF…', undefined]);
   });
 
   it('closes a shown PDF when the next capture is another page or a web page', async () => {
@@ -617,15 +617,15 @@ describe('CapturePipeline PDFs', () => {
     const harness = setup({
       readDocument: async () => PDF_DOCUMENT,
       showPdf: async () => {
-        if (fail) throw new PageAccessError('This PDF is password-protected. Simul cannot open it.');
+        if (fail) throw new PageAccessError('This PDF has a password. Simul cannot open it.');
         return { pageCount: 2 };
       },
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await harness.settled();
-    expect(harness.events).toContain('error:This PDF is password-protected. Simul cannot open it.');
+    expect(harness.events).toContain('error:This PDF has a password. Simul cannot open it.');
     expect(harness.statuses.at(-1)).toEqual([
-      'This PDF is password-protected. Simul cannot open it.',
+      'This PDF has a password. Simul cannot open it.',
       'error',
     ]);
     expect(harness.state.capturedPageIdentity).toBeUndefined();
@@ -633,7 +633,7 @@ describe('CapturePipeline PDFs', () => {
     fail = false;
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
     await harness.settled();
-    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
+    expect(harness.statuses.at(-1)).toEqual(['Simul reads the PDF…', undefined]);
 
     fail = true;
     harness.events.length = 0;

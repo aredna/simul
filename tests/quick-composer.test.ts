@@ -103,7 +103,7 @@ describe('QuickComposer', () => {
     // The result says its language (Translator guide; D159).
     expect(elements.output.getAttribute('lang')).toBe('ja');
     expect(elements.copyButton.disabled).toBe(false);
-    expect(elements.status.textContent).toBe('Translation is ready to copy.');
+    expect(elements.status.textContent).toBe('The translation is ready to copy.');
     expect(destroy).toHaveBeenCalledOnce();
     expect(onTranslated).toHaveBeenCalledOnce();
     expect(activity).toEqual([true, false]);
@@ -159,11 +159,11 @@ describe('QuickComposer', () => {
     elements.input.value = 'Hello';
     await composer.translate();
     expect(seen).toEqual([
-      'Downloading language pack… 0%',
-      'Downloading language pack… 0%',
-      'Downloading language pack… 10%',
-      'Downloading language pack… 50%',
-      'Downloading language pack… 50%',
+      'Chrome downloads the language pack… 0%',
+      'Chrome downloads the language pack… 0%',
+      'Chrome downloads the language pack… 10%',
+      'Chrome downloads the language pack… 50%',
+      'Chrome downloads the language pack… 50%',
     ]);
     composer.invalidate();
     expect(elements.output.hasAttribute('lang')).toBe(false);
@@ -199,7 +199,7 @@ describe('QuickComposer', () => {
     await composer.translate();
     expect(elements.output.value).toBe('');
     expect(elements.status.dataset.tone).toBe('error');
-    expect(statuses.at(-1)).toContain('unavailable');
+    expect(statuses.at(-1)).toContain('not available');
   });
 
   it('cancels and invalidates without leaving a stale status', async () => {
@@ -240,7 +240,7 @@ describe('QuickComposer', () => {
     elements.output.value = 'copy me';
     await composer.copy();
     expect(writeText).toHaveBeenCalledWith('copy me');
-    expect(statuses.at(-1)).toBe('Translated reply copied.');
+    expect(statuses.at(-1)).toBe('Simul copied the translated reply.');
 
     writeText.mockRejectedValueOnce(new Error('denied'));
     const select = vi.fn();
@@ -257,12 +257,12 @@ describe('QuickComposer', () => {
     expect(elements.fromLanguage.getAttribute('lang')).toBe('en');
     expect(elements.fromLanguage.textContent).toBe('English');
     expect(elements.toLanguage.textContent).toBe('Japanese');
-    expect(elements.guidance.textContent).toContain('not saved');
+    expect(elements.guidance.textContent).toContain('does not save it');
 
     setPair(undefined);
     composer.syncPanel();
-    expect(elements.toLanguage.textContent).toBe('Waiting for website language');
-    expect(elements.guidance.textContent).toContain('still detecting');
+    expect(elements.toLanguage.textContent).toBe('Website language not detected yet');
+    expect(elements.guidance.textContent).toContain('has not detected the website language yet');
   });
 
   it('counts the draft against its limit and submits on the shortcut', async () => {
@@ -294,9 +294,9 @@ describe('QuickComposer', () => {
     elements.input.value = 'Thanks!';
 
     await composer.translate();
-    expect(elements.status.textContent).toBe('Translation is ready to copy.');
+    expect(elements.status.textContent).toBe('The translation is ready to copy.');
 
-    translations.set('Translation is ready to copy.', 'La traducción está lista para copiar.');
+    translations.set('The translation is ready to copy.', 'La traducción está lista para copiar.');
     translations.set('{0} of {1} characters used', '{0} de {1} caracteres usados');
     composer.relocalize();
     expect(elements.status.textContent).toBe('La traducción está lista para copiar.');

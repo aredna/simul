@@ -383,7 +383,7 @@ describe('SourceFollower in the side panel', () => {
       { tabId: 4, windowId: 1, url: 'https://a.example/next' },
     );
     expect(harness.state.followedPageIdentity?.url).toBe('https://a.example/next');
-    expect(harness.setStatus).toHaveBeenCalledWith(expect.stringContaining('The source page is changing'));
+    expect(harness.setStatus).toHaveBeenCalledWith(expect.stringContaining('The source page changes'));
 
     harness.follower.handleTabUpdated(4, { status: 'complete' }, { windowId: 1, url: 'https://a.example/next', active: true });
     expect(harness.follower.navigationRefreshPending).toBe(true);
@@ -436,7 +436,7 @@ describe('SourceFollower in the side panel', () => {
       { windowId: 1, active: true },
     );
     expect(harness.invalidateCompanion).toHaveBeenCalledWith(
-      'Simul cannot read a PDF opened from this computer in a tab. Open the file here instead.',
+      'Simul cannot read a PDF from this computer that is open in a tab. Open the file here instead.',
     );
   });
 
@@ -796,7 +796,7 @@ describe('SourceFollower in a detached window', () => {
     harness.follower.handleTabRemoved(5, { windowId: 1, isWindowClosing: false });
     await vi.runAllTimersAsync();
     expect(harness.invalidateCompanion).toHaveBeenCalledWith(
-      expect.stringContaining('no neighboring readable tab'),
+      expect.stringContaining('No readable tab next to it'),
     );
     expect(harness.state.activeFollowRequest).toBeUndefined();
   });
@@ -901,7 +901,7 @@ describe('SourceFollower in a detached window', () => {
     harness.follower.handleTabActivated(6, 2);
     await vi.runAllTimersAsync();
     expect(harness.invalidateCompanion).toHaveBeenCalledWith(
-      'Simul cannot read a PDF opened from this computer in a tab. Open the file here instead.',
+      'Simul cannot read a PDF from this computer that is open in a tab. Open the file here instead.',
     );
     expect(harness.queueCapture).not.toHaveBeenCalled();
   });
@@ -948,7 +948,7 @@ describe('SourceFollower in a detached window', () => {
     harness.follower.handleTabActivated(6, 2);
     await vi.runAllTimersAsync();
     expect(harness.invalidateCompanion).toHaveBeenCalledWith(
-      'Waiting for a web page in the active tab.',
+      'Simul waits for a web page in the active tab.',
     );
     expect(harness.queueCapture).not.toHaveBeenCalled();
 
@@ -985,7 +985,7 @@ describe('SourceFollower in a detached window', () => {
     harness.follower.handleTabActivated(6, 2);
     await vi.runAllTimersAsync();
     expect(englishUiText(harness.invalidateCompanion.mock.calls.at(-1)?.[0]))
-      .toContain('Active-tab following needs page access');
+      .toContain('To follow the active tab, Simul must have page access');
   });
 
   it('does not follow a loaded tab in locked mode, in the background, or while a follow resolves', async () => {

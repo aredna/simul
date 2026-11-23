@@ -174,7 +174,7 @@ describe('ImageAnalysisPanel', () => {
     ]);
     expect(items[0]?.querySelector('.ocr-provider-status')?.textContent).toBe('No pixels');
     const detectorStatus = items[1]?.querySelector('.ocr-provider-status');
-    expect(detectorStatus?.textContent).toBe('Unavailable');
+    expect(detectorStatus?.textContent).toBe('Not available');
     expect(detectorStatus?.getAttribute('title')).toContain('does not expose');
     expect(items[2]?.querySelector('.ocr-provider-status')).toBeNull();
 
@@ -212,13 +212,13 @@ describe('ImageAnalysisPanel', () => {
     const root = panel.root!;
     const notes = () => [...root.querySelectorAll('p.microcopy')].map((p) => p.textContent);
     expect(notes().some((text) => text?.startsWith('Chrome TextDetector is experimental'))).toBe(true);
-    expect(notes().some((text) => text?.startsWith('Tesseract.js runs locally'))).toBe(true);
+    expect(notes().some((text) => text?.startsWith('Tesseract.js runs on this device'))).toBe(true);
     expect(root.querySelector('.ocr-provider-paused')).toBeNull();
 
     setView({ disabledImageTextProviderIds: ['chrome-text-detector', 'tesseract'] });
     panel.render();
     expect(root.querySelector('.ocr-provider-paused')?.textContent)
-      .toBe('OCR is paused because every compiled provider is off.');
+      .toBe('OCR is paused because all compiled providers are off.');
   });
 
   it('saves scan policy, small-image and Prompt changes from their controls', () => {
@@ -275,12 +275,12 @@ describe('ImageAnalysisPanel', () => {
     const output = root.querySelector('output.image-diagnostics-output')!;
     details.open = true;
     details.dispatchEvent(new window.Event('toggle'));
-    expect(output.textContent).toBe('No OCR activity in this companion view yet.');
+    expect(output.textContent).toBe('No OCR activity in this panel yet.');
 
     // The empty-state is written imperatively, so only relocalize() re-drives it;
     // render() is guarded by the view key and does not re-run on a language flip.
     translations.set(
-      'No OCR activity in this companion view yet.',
+      'No OCR activity in this panel yet.',
       'Aún no hay actividad de OCR en esta vista.',
     );
     panel.relocalize();

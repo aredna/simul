@@ -124,7 +124,7 @@ describe('TranslationDriver language resolution', () => {
     expect(harness.state.resolvedSourceLanguage).toBe('ja');
     expect(harness.state.resolvedSourceLanguageOrigin).toBe('page');
     expect(harness.state.pageLanguageResolutionPending).toBe(false);
-    expect(harness.notes.at(-1)).toBe('Detected Japanese from the page language.');
+    expect(harness.notes.at(-1)).toBe('Simul detected Japanese from the page language.');
     expect(harness.state.selectedPair()).toEqual({ sourceLanguage: 'ja', targetLanguage: 'en' });
   });
 
@@ -133,12 +133,12 @@ describe('TranslationDriver language resolution', () => {
     await harness.driver.resolveSelectedSourceLanguage(
       harness.driver.currentReplicaLanguageContext(),
     );
-    expect(harness.notes.at(-1)).toBe('Detected Japanese from the page language.');
+    expect(harness.notes.at(-1)).toBe('Simul detected Japanese from the page language.');
 
     // A pure To-language switch: both the frame and the embedded source-language
     // name must re-render, so storing the finished string would not suffice.
     harness.translations.set(
-      'Detected {0} from the page language.',
+      'Simul detected {0} from the page language.',
       'Se detectó {0} por el idioma de la página.',
     );
     harness.languageNames.set('ja', 'japonés');
@@ -158,7 +158,7 @@ describe('TranslationDriver language resolution', () => {
     const harness = setup();
     await harness.driver.resolveSelectedSourceLanguage();
     expect(harness.state.resolvedSourceLanguage).toBeUndefined();
-    expect(harness.notes.at(-1)).toContain('Choose a From language');
+    expect(harness.notes.at(-1)).toContain('Select a From language');
 
     const resolving = harness.driver.resolveSelectedSourceLanguage({
       documentLanguage: 'fr',
@@ -182,7 +182,7 @@ describe('TranslationDriver language resolution', () => {
     expect(harness.state.resolvedSourceLanguage).toBe('ja');
     expect(harness.state.resolvedSourceLanguageOrigin).toBe('image');
     expect(harness.notes.at(-1)).toBe(
-      'Detected Japanese from accessibility image text (script majority).',
+      'Simul detected Japanese from accessibility image text (script majority).',
     );
     await vi.waitFor(() => expect(harness.provider.availability).toHaveBeenCalled());
     await vi.waitFor(() => expect(harness.state.availability).toBe('available'));
@@ -192,7 +192,7 @@ describe('TranslationDriver language resolution', () => {
     harness.driver.handleAutoImageLanguageInvalidated(DOCUMENT);
     expect(harness.state.resolvedSourceLanguage).toBeUndefined();
     expect(harness.state.availability).toBe('unavailable');
-    expect(harness.notes.at(-1)).toContain('Image-derived language evidence was cleared');
+    expect(harness.notes.at(-1)).toContain('Simul cleared the language evidence from images');
   });
 
   it('keeps an explicit language when image evidence behind it is invalidated', async () => {
@@ -222,7 +222,7 @@ describe('TranslationDriver availability', () => {
     await harness.driver.checkAvailability(1);
     expect(harness.state.availability).toBe('downloadable');
     expect(harness.state.availabilityCheckedForPair).toBe('1:ja>en');
-    expect(harness.statuses.at(-1)).toContain('Choose Translate once');
+    expect(harness.statuses.at(-1)).toContain('Select Translate page once');
     expect(harness.coordinator.selectPair).toHaveBeenCalledWith({ sourceLanguage: 'ja', targetLanguage: 'en' });
   });
 
@@ -253,7 +253,7 @@ describe('TranslationDriver availability', () => {
 
     const noPair = setup();
     await noPair.driver.checkAvailability(1);
-    expect(noPair.statuses.at(-1)).toContain('Choose a From language');
+    expect(noPair.statuses.at(-1)).toContain('Select a From language');
   });
 });
 
@@ -344,7 +344,7 @@ describe('TranslationDriver page translation', () => {
     await partial.driver.startTranslation(false, 1);
     expect(partial.state.translationComplete).toBe(false);
     expect(partial.statuses.at(-1)).toBe(
-      'Translation remains partial: 2 failed. Original text remains for those segments; choose Translate page to retry.',
+      'Translation is not complete: 2 failed. The original text is still shown for those segments. To try again, select Translate page.',
     );
 
     const cancelled = setup({
@@ -357,7 +357,7 @@ describe('TranslationDriver page translation', () => {
     const running = cancelled.driver.startTranslation(false, 1);
     cancelled.state.activeAbortController?.abort();
     await running;
-    expect(cancelled.statuses.at(-1)).toBe('Translation cancelled. Existing translated text was kept.');
+    expect(cancelled.statuses.at(-1)).toBe('The translation was cancelled. Simul kept the text that it translated before.');
     expect(cancelled.state.translationInFlight).toBe(false);
   });
 
@@ -377,7 +377,7 @@ describe('TranslationDriver page translation', () => {
     harness.state.translationComplete = false;
     harness.state.availability = 'downloadable';
     await harness.driver.maybeTranslateAutomatically(1, IDENTITY.url);
-    expect(harness.statuses.at(-1)).toContain('needs one Translate click');
+    expect(harness.statuses.at(-1)).toContain('select Translate page once');
   });
 
   it('translates the page text when image translation is on, without a Translate click (D46)', async () => {
@@ -450,7 +450,7 @@ describe('TranslationDriver replica view mode', () => {
       replicaViewMode: 'translated',
     });
     harness.driver.applyReplicaViewMode('source-only');
-    expect(harness.statuses).toContain('Translated mode restored. Preparing the saved language settings…');
+    expect(harness.statuses).toContain('Translated mode is active again. Simul prepares the saved language settings…');
     await vi.waitFor(() => expect(harness.state.availability).toBe('available'));
     expect(harness.state.resolvedSourceLanguage).toBe('ja');
   });
@@ -501,8 +501,8 @@ describe('TranslationDriver commits', () => {
     expect(describePartialReplicaTranslation(
       { ...complete(5), completed: 2, failed: 1, stale: 1, skipped: 0, overflow: 1 },
       'Prefix',
-    )).toBe('Prefix: 1 failed, 1 became stale, 1 exceeded the bounded local queue. Original text remains for those segments; choose Translate page to retry.');
+    )).toBe('Prefix: 1 failed, 1 became out of date, 1 were more than the local queue can hold. The original text is still shown for those segments. To try again, select Translate page.');
     expect(describePartialReplicaTranslation({ ...complete(3), completed: 1 }, 'Prefix'))
-      .toContain('2 were not projected');
+      .toContain('2 were not shown');
   });
 });

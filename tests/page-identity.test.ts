@@ -376,13 +376,13 @@ describe('page error messages', () => {
     expect(readPageError(new Error('The extensions gallery cannot be scripted.')))
       .toBe(PAGE_ACCESS_LOST_GUIDANCE);
     expect(readPageError(new Error('boom'))).toBe('boom');
-    expect(readPageError('string')).toBe('Something went wrong. Retry the current step.');
+    expect(readPageError('string')).toBe('An error occurred. Try the current step again.');
   });
 
   it('reads a message only from an Error with text', () => {
-    expect(readableError(new Error('  '))).toBe('Something went wrong. Retry the current step.');
+    expect(readableError(new Error('  '))).toBe('An error occurred. Try the current step again.');
     expect(readableError(new Error('detail'))).toBe('detail');
-    expect(readableError(42)).toBe('Something went wrong. Retry the current step.');
+    expect(readableError(42)).toBe('An error occurred. Try the current step again.');
   });
 });
 
@@ -407,7 +407,7 @@ describe('withPageTimeout', () => {
       vi.advanceTimersByTime(50);
       const error = await settled;
       expect(error).toBeInstanceOf(PageAccessError);
-      expect((error as Error).message).toContain('took too long');
+      expect((error as Error).message).toContain('did not respond in time');
     } finally {
       vi.useRealTimers();
     }

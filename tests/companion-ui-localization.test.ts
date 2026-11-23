@@ -9,7 +9,7 @@ import {
 
 describe('companion UI localization', () => {
   it('keeps a translated frame only with the same placeholders (review L6)', async () => {
-    const frame = 'Ready to translate {0} to {1} on-device.';
+    const frame = 'Simul is ready to translate {0} to {1} on this device.';
     expect(repairTranslatedFrame(frame, '{0}から{1}へ翻訳できます。'))
       .toBe('{0}から{1}へ翻訳できます。');
     expect(repairTranslatedFrame(frame, '{ 0 }から｛１｝へ翻訳できます。'))

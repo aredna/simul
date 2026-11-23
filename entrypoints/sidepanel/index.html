@@ -4,16 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <title>Translation companion</title>
+    <title>Translation panel</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
+    <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation panel controls" data-ui-aria-label="Translation panel controls">
       <span
         id="toolbar-progress"
         class="toolbar-progress"
         role="progressbar"
-        aria-label="Companion processing"
+        aria-label="Panel activity"
         aria-valuemin="0"
         aria-valuemax="100"
         hidden
@@ -31,7 +31,7 @@
         <span id="refresh-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
       </button>
       <div class="toolbar-language-group" role="group" aria-label="Page translation languages" data-ui-aria-label="Page translation languages">
-        <div class="toolbar-language-control" title="Language used by the source website" data-ui-title="Language used by the source website">
+        <div class="toolbar-language-control" title="Language of the source website" data-ui-title="Language of the source website">
           <label for="source-language" data-ui-label="From">From</label>
           <button
             id="toolbar-auto-detect"
@@ -45,7 +45,7 @@
           <select id="source-language" aria-label="From language" data-ui-aria-label="From language"></select>
         </div>
         <button id="swap-languages" class="toolbar-button toolbar-swap" type="button" aria-label="Swap languages" data-ui-aria-label="Swap languages" title="Swap languages" data-ui-title="Swap languages">⇄</button>
-        <label class="toolbar-language-control" title="Language Simul translates the page into" data-ui-title="Language Simul translates the page into">
+        <label class="toolbar-language-control" title="Language that Simul translates the page into" data-ui-title="Language that Simul translates the page into">
           <span data-ui-label="To">To</span>
           <select id="target-language" aria-label="To language" data-ui-aria-label="To language"></select>
         </label>
@@ -65,7 +65,7 @@
         type="button"
         aria-label="OCR image text translation" data-ui-aria-label="OCR image text translation"
         aria-pressed="false"
-        title="Image text translation is off"
+        title="Image text translation is off. Select to enable it."
       >
         <span id="toolbar-ocr-label" data-ui-label="OCR Off">OCR Off</span>
       </button>
@@ -75,7 +75,7 @@
         type="button"
         aria-label="Follow active tab" data-ui-aria-label="Follow active tab"
         aria-pressed="true"
-        title="Following the active browser tab. Click to pin the mirror to the tab it shows."
+        title="The mirror follows the active browser tab. Select to pin the mirror to the tab that it shows."
       >
         <span id="toolbar-tab-follow-label" data-ui-label="Follow">Follow</span>
       </button>
@@ -106,7 +106,7 @@
         id="open-popout"
         class="toolbar-button"
         type="button"
-        aria-label="Open detached companion window" data-ui-aria-label="Open detached companion window"
+        aria-label="Open the panel in a detached window" data-ui-aria-label="Open the panel in a detached window"
         title="Open detached window" data-ui-title="Open detached window"
       >
         ↗
@@ -135,8 +135,8 @@
       aria-describedby="read-scope-setup-description"
     >
       <div class="setup-dialog__card">
-        <h1 id="read-scope-setup-title" data-ui-label="Choose what the mirror may read">Choose what the mirror may read</h1>
-        <p id="read-scope-setup-description" data-ui-label="Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.">Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.</p>
+        <h1 id="read-scope-setup-title" data-ui-label="Select what the mirror can read">Select what the mirror can read</h1>
+        <p id="read-scope-setup-description" data-ui-label="Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden and file inputs, and CSS-masked secrets are never read. Other visible content can be personal. Select the level that you want.">Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden and file inputs, and CSS-masked secrets are never read. Other visible content can be personal. Select the level that you want.</p>
         <label>
           <span data-ui-label="Starting profile">Starting profile</span>
           <select id="setup-read-profile" autofocus>
@@ -153,8 +153,8 @@
           aria-labelledby="setup-reset-cleanup-title"
           hidden
         >
-          <h2 id="setup-reset-cleanup-title" data-ui-label="Reset cleanup needs attention">Reset cleanup needs attention</h2>
-          <p id="setup-reset-cleanup-status" role="status" aria-live="polite">Core settings are already safe, but optional permission or runtime cleanup is still pending.</p>
+          <h2 id="setup-reset-cleanup-title" data-ui-label="Reset cleanup is not complete">Reset cleanup is not complete</h2>
+          <p id="setup-reset-cleanup-status" role="status" aria-live="polite">Core settings are already safe, but optional permission or runtime cleanup is not complete.</p>
           <button
             id="retry-setup-reset-cleanup"
             type="button"
@@ -177,7 +177,7 @@
     >
       <form method="dialog">
         <h2 id="reset-settings-dialog-title" data-ui-label="Reset all extension settings?">Reset all extension settings?</h2>
-        <p id="reset-settings-dialog-description" data-ui-label="This resets Simul settings. Site access set in Chrome, the packaged OCR files and Chrome translation models stay as they are.">This resets Simul settings. Site access set in Chrome, the packaged OCR files and Chrome translation models stay as they are.</p>
+        <p id="reset-settings-dialog-description" data-ui-label="This resets the Simul settings. It does not change the Site access set in Chrome, the packaged OCR files or the Chrome translation models.">This resets the Simul settings. It does not change the Site access set in Chrome, the packaged OCR files or the Chrome translation models.</p>
         <div class="action-row">
           <button value="cancel" type="submit" data-ui-label="Cancel">Cancel</button>
           <button id="confirm-reset-all-settings" class="danger" value="reset" type="submit" data-ui-label="Reset settings">Reset settings</button>
@@ -195,11 +195,11 @@
       </div>
 
       <!-- First under the heading: the dot on the options button points here (D240). -->
-      <p id="status" class="status" role="status" aria-live="polite">Reading the source page…</p>
+      <p id="status" class="status" role="status" aria-live="polite">Simul reads the source page…</p>
       <p id="detected-language" class="microcopy" hidden></p>
 
       <div id="settings-grid" class="settings-grid settings-grid--common">
-        <label title="Choose whether Simul translates automatically on this site or every authorized site." data-ui-title="Choose whether Simul translates automatically on this site or every authorized site.">
+        <label title="Select if Simul translates automatically on this site or on all authorized sites." data-ui-title="Select if Simul translates automatically on this site or on all authorized sites.">
           <span data-ui-label="Automatic translation">Automatic translation</span>
           <select id="auto-translate-mode">
             <option value="off" data-ui-label="Off">Off</option>
@@ -207,7 +207,7 @@
             <option value="all" data-ui-label="All sites">All sites</option>
           </select>
         </label>
-        <label title="Fit the source width, preserve its original size, or use a custom zoom." data-ui-title="Fit the source width, preserve its original size, or use a custom zoom.">
+        <label title="Fit the source width, keep its original size, or use a custom zoom." data-ui-title="Fit the source width, keep its original size, or use a custom zoom.">
           <span data-ui-label="Size">Size</span>
           <select id="mirror-display-mode">
             <option value="fit" data-ui-label="Fit width">Fit width</option>
@@ -215,14 +215,14 @@
             <option value="custom" data-ui-label="Custom zoom">Custom zoom</option>
           </select>
         </label>
-        <label data-public-move="public-slot-text-layout" title="Allow translated text to expand or preserve the source element geometry." data-ui-title="Allow translated text to expand or preserve the source element geometry.">
+        <label data-public-move="public-slot-text-layout" title="Allow translated text to expand, or keep the geometry of the source elements." data-ui-title="Allow translated text to expand, or keep the geometry of the source elements.">
           <span data-ui-label="Translated text">Translated text</span>
           <select id="text-layout-mode">
             <option value="adaptive" data-ui-label="Let boxes grow">Let boxes grow</option>
             <option value="faithful" data-ui-label="Keep geometry">Keep geometry</option>
           </select>
         </label>
-        <label class="check-label" title="Keep the mirror near the same reading position as the source page scrolls." data-ui-title="Keep the mirror near the same reading position as the source page scrolls.">
+        <label class="check-label" title="Keep the mirror near the same reading position when the source page scrolls." data-ui-title="Keep the mirror near the same reading position when the source page scrolls.">
           <input id="sync-scroll" type="checkbox" />
           <span data-ui-label="Follow source scrolling">Follow source scrolling</span>
         </label>
@@ -261,7 +261,7 @@
           <input type="radio" name="read-profile" value="full-visible" />
           <span>
             <span data-ui-label="Full visible">Full visible</span>
-            <small data-ui-label="Adds what is filled in forms and text editors.">Adds what is filled in forms and text editors.</small>
+            <small data-ui-label="Adds the values in forms and text editors.">Adds the values in forms and text editors.</small>
           </span>
         </label>
         <small class="microcopy" data-ui-label="Passwords, one-time codes and card numbers are never read.">Passwords, one-time codes and card numbers are never read.</small>
@@ -280,7 +280,7 @@
       <details class="options-group" data-edition="dev">
         <summary title="Control where Simul opens." data-ui-title="Control where Simul opens." data-ui-label="Window behavior">Window behavior</summary>
         <div class="settings-grid">
-          <label data-public-move="public-slot-launch-behavior" title="Use the last companion view or always open a particular view." data-ui-title="Use the last companion view or always open a particular view.">
+          <label data-public-move="public-slot-launch-behavior" title="Use the last view or always open a specific view." data-ui-title="Use the last view or always open a specific view.">
             <span data-ui-label="Toolbar opens">Toolbar opens</span>
             <select id="launch-behavior">
               <option value="last-used" data-ui-label="Last used view">Last used view</option>
@@ -293,7 +293,7 @@
 
       <details id="readable-content-options" class="options-group" data-edition="dev" open>
         <summary data-ui-label="Readable content & security">Readable content &amp; security</summary>
-        <p class="microcopy" data-ui-label="The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.">The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.</p>
+        <p class="microcopy" data-ui-label="With all choices, the mirror cannot act on the page. Credential secrets are still blocked. Changes apply while the panel is open.">With all choices, the mirror cannot act on the page. Credential secrets are still blocked. Changes apply while the panel is open.</p>
         <label>
           <span data-ui-label="Read profile">Read profile</span>
           <select id="read-scope-profile">
@@ -311,16 +311,16 @@
       </details>
 
       <details id="experimental-options" class="options-group options-group--experimental" data-edition="dev">
-        <summary title="Inspect untranslated source text, set the mirror's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the mirror's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
+        <summary title="Look at the source text without translation. Set the mirror fidelity, size limits and privacy filters. Configure the experimental local image OCR." data-ui-title="Look at the source text without translation. Set the mirror fidelity, size limits and privacy filters. Configure the experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
-          <label title="Show translated text or temporarily inspect the live source text without translation." data-ui-title="Show translated text or temporarily inspect the live source text without translation.">
+          <label title="Show the translated text, or look at the live source text without translation for a short time." data-ui-title="Show the translated text, or look at the live source text without translation for a short time.">
             <span data-ui-label="Mirror text">Mirror text</span>
             <select id="replica-view-mode">
               <option value="translated" data-ui-label="Translated">Translated</option>
               <option value="source-only" data-ui-label="Live source only">Live source only</option>
             </select>
           </label>
-          <label title="Choose how many safely representable visual resources Isolated HTML preserves." data-ui-title="Choose how many safely representable visual resources Isolated HTML preserves.">
+          <label title="Select how many visual resources Isolated HTML keeps from those that it can show safely." data-ui-title="Select how many visual resources Isolated HTML keeps from those that it can show safely.">
             <span data-ui-label="Mirror fidelity">Mirror fidelity</span>
             <select
               id="replica-fidelity-policy"
@@ -332,42 +332,42 @@
             <small
               id="replica-fidelity-disclosure"
               class="microcopy"
-              data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the mirror."
-            >Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the mirror.</small>
+              data-ui-label="Passive Fidelity can send more HTTP(S) requests for inert visual resources in the mirror."
+            >Passive Fidelity can send more HTTP(S) requests for inert visual resources in the mirror.</small>
           </label>
-          <label title="The largest single stylesheet, text or inline image the mirror copies. A larger one is left out and the rest of the page still shows." data-ui-title="The largest single stylesheet, text or inline image the mirror copies. A larger one is left out and the rest of the page still shows.">
+          <label title="The largest single stylesheet, text or inline image that the mirror copies. Simul leaves out a larger item, and the mirror shows the rest of the page." data-ui-title="The largest single stylesheet, text or inline image that the mirror copies. Simul leaves out a larger item, and the mirror shows the rest of the page.">
             <span data-ui-label="Largest single item (MB)">Largest single item (MB)</span>
             <input id="mirror-item-megabytes" type="number" inputmode="numeric" min="1" max="30" step="1" />
           </label>
-          <label title="The largest page the mirror copies, counted in memory, where text takes about twice its size on disk. Chrome passes at most 60 MB at once. A larger page is not mirrored." data-ui-title="The largest page the mirror copies, counted in memory, where text takes about twice its size on disk. Chrome passes at most 60 MB at once. A larger page is not mirrored.">
+          <label title="The largest page that the mirror copies, as measured in memory. In memory, text uses about 2 times its size on disk. Chrome sends a maximum of 60 MB at one time. Simul does not mirror a larger page." data-ui-title="The largest page that the mirror copies, as measured in memory. In memory, text uses about 2 times its size on disk. Chrome sends a maximum of 60 MB at one time. Simul does not mirror a larger page.">
             <span data-ui-label="Largest page (MB, up to 60)">Largest page (MB, up to 60)</span>
             <input id="mirror-page-megabytes" type="number" inputmode="numeric" min="1" max="60" step="1" />
           </label>
-          <label title="The most elements and text pieces the mirror copies. Reading a large page pauses its tab for about a second per 40,000. A larger page is not mirrored." data-ui-title="The most elements and text pieces the mirror copies. Reading a large page pauses its tab for about a second per 40,000. A larger page is not mirrored.">
+          <label title="The maximum number of elements and text pieces that the mirror copies. When Simul reads a large page, its tab pauses for about 1 second for each 40,000. Simul does not mirror a larger page." data-ui-title="The maximum number of elements and text pieces that the mirror copies. When Simul reads a large page, its tab pauses for about 1 second for each 40,000. Simul does not mirror a larger page.">
             <span data-ui-label="Most page elements">Most page elements</span>
             <input id="mirror-max-elements" type="number" inputmode="numeric" min="1000" max="1000000" step="1000" />
           </label>
           <button id="restore-mirror-limits" type="button" data-ui-label="Restore default limits">Restore default limits</button>
-          <label class="check-label" title="Copy the page with no privacy filtering, to see whether a privacy rule hides a missing part of a page." data-ui-title="Copy the page with no privacy filtering, to see whether a privacy rule hides a missing part of a page.">
+          <label class="check-label" title="Copy the page without privacy filters. Use this to find if a privacy rule hides a missing part of a page." data-ui-title="Copy the page without privacy filters. Use this to find if a privacy rule hides a missing part of a page.">
             <input id="mirror-show-everything" type="checkbox" aria-describedby="mirror-show-everything-disclosure" />
             <span data-ui-label="Show everything (testing)">Show everything (testing)</span>
           </label>
           <small
             id="mirror-show-everything-disclosure"
             class="microcopy settings-note"
-            data-ui-label="Turns off every privacy filter. Hidden text, labels, card numbers, one-time codes and form values are copied as the page holds them; typed passwords are not. The mirror still cannot act on the page."
-          >Turns off every privacy filter. Hidden text, labels, card numbers, one-time codes and form values are copied as the page holds them; typed passwords are not. The mirror still cannot act on the page.</small>
+            data-ui-label="Disables all privacy filters. The mirror copies hidden text, labels, card numbers, one-time codes and form values as the page holds them. It does not copy typed passwords. The mirror still cannot act on the page."
+          >Disables all privacy filters. The mirror copies hidden text, labels, card numbers, one-time codes and form values as the page holds them. It does not copy typed passwords. The mirror still cannot act on the page.</small>
         </div>
         <div id="image-analysis-host" data-public-move="public-slot-image-text"></div>
       </details>
 
       <div id="progress-region" class="progress-region" hidden>
-        <label id="progress-label" for="progress">Preparing translation…</label>
+        <label id="progress-label" for="progress">Simul prepares the translation…</label>
         <progress id="progress" max="1" value="0"></progress>
       </div>
       <p id="capture-notes" class="microcopy" hidden></p>
-      <p id="placement-guidance" class="microcopy" data-ui-label="Chrome places native side panels globally. Use the ↗ button for a detached companion window." hidden>
-        Chrome places native side panels globally. Use the ↗ button for a detached companion window.
+      <p id="placement-guidance" class="microcopy" data-ui-label="Chrome places native side panels globally. For a detached window, use the ↗ button." hidden>
+        Chrome places native side panels globally. For a detached window, use the ↗ button.
       </p>
     </section>
 
@@ -421,7 +421,7 @@
 
     <main>
       <section id="replica-status" class="replica-status" aria-label="Page mirror status" data-ui-aria-label="Page mirror status" aria-busy="false">
-        <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
+        <div class="empty-state"><p>Simul prepares the live read-only mirror…</p></div>
       </section>
       <section
         id="replica-preview"

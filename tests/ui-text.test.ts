@@ -39,7 +39,7 @@ describe('UI text', () => {
       uiLanguageName('fr'),
     );
     expect(renderUiText(text, spanish)).toBe('Listo para traducir japonés a francés.');
-    expect(englishUiText(text)).toBe('Ready to translate Japanese to French on-device.');
+    expect(englishUiText(text)).toBe('Simul is ready to translate Japanese to French on this device.');
   });
 
   it('renders composed text through the renderer and keeps an English form', () => {

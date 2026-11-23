@@ -248,7 +248,7 @@ describe('PermissionFlows image access', () => {
     const harness = setup({ userActivation: false });
     expect(await harness.flows.changeImageTranslationEnabled(true, true)).toBe('activation');
     expect(harness.permissions.request).not.toHaveBeenCalled();
-    expect(harness.statuses.at(-1)).toContain('Choose the image setting again');
+    expect(harness.statuses.at(-1)).toContain('Select the image setting again');
     expect(harness.state.permissionInFlight).toBe(false);
   });
 
@@ -300,7 +300,7 @@ describe('PermissionFlows image access', () => {
     expect(harness.permissions.remove).not.toHaveBeenCalled();
     expect(harness.granted.has('<all_urls>')).toBe(true);
     expect(harness.stored.imageTranslationEnabled).toBe(true);
-    expect(harness.statuses.at(-1)).toContain('Choose the image setting again');
+    expect(harness.statuses.at(-1)).toContain('Select the image setting again');
   });
 
   it('reports released access when the save fails and Chrome does not give the grant back', async () => {
@@ -321,7 +321,7 @@ describe('PermissionFlows image access', () => {
     expect(harness.stored.imageTranslationEnabled).toBe(true);
     expect(harness.state.imageCaptureAccess).toBe('missing');
     expect(harness.purgeImageCache).toHaveBeenCalled();
-    expect(harness.statuses.at(-1)).toContain('could not be saved');
+    expect(harness.statuses.at(-1)).toContain('could not save the change');
     expect(harness.statuses.at(-1)).toContain('Grant image access');
   });
 
@@ -365,7 +365,7 @@ describe('PermissionFlows automatic translation', () => {
     const harness = setup({ pageUrl: 'https://example.com/article', requestAnswer: false });
     await harness.flows.changeAutoTranslationMode('site');
     expect(harness.commands.map((command) => command.type)).toContain('simul:preferences:abort-auto');
-    expect(harness.statuses.at(-1)).toBe('Chrome did not retain the requested automatic-access scope.');
+    expect(harness.statuses.at(-1)).toBe('Chrome did not keep the requested automatic-access scope.');
     expect(harness.requestAutomaticTranslation).not.toHaveBeenCalled();
   });
 
@@ -373,7 +373,7 @@ describe('PermissionFlows automatic translation', () => {
     const harness = setup({ pageUrl: 'https://example.com/article', userActivation: false });
     await harness.flows.changeAutoTranslationMode('site');
     expect(harness.permissions.request).not.toHaveBeenCalled();
-    expect(harness.statuses.at(-1)).toContain('Choose the setting again');
+    expect(harness.statuses.at(-1)).toContain('Select the setting again');
   });
 
   it('reports whether reconciliation changed the page scope', async () => {

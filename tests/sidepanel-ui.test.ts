@@ -601,7 +601,7 @@ describe('sidepanel UI structure', () => {
     expect(select?.getAttribute('aria-describedby')).toBe(
       'replica-fidelity-disclosure',
     );
-    expect(disclosure?.textContent).toContain('additional HTTP(S) requests');
+    expect(disclosure?.textContent).toContain('more HTTP(S) requests');
     expect(disclosure?.hasAttribute('data-ui-label')).toBe(true);
     expect(script).toContain('changeReplicaFidelityPolicy(');
     expect(script).toContain(

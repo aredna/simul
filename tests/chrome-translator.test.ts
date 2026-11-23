@@ -227,7 +227,7 @@ describe('ChromeTranslatorProvider', () => {
     await expect(provider.createSession(pair)).rejects.toMatchObject({
       name: 'TranslationProviderError',
       code: 'activation-required',
-      message: expect.stringContaining('click'),
+      message: expect.stringContaining('select Translate page once'),
     });
   });
 

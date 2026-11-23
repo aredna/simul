@@ -1236,7 +1236,7 @@ describe('PdfController scanned pages', () => {
       .toEqual({ kind: 'failed', pages: 1 });
     expect(harness.surface.unreadScannedPages('fra')).toEqual([]);
     expect(englishUiText(harness.controller.scannedPagesNote()!))
-      .toBe('Scanned pages that could not be read: 1.');
+      .toBe('Simul could not read these scanned pages: 1.');
     document.render.mockClear();
     expect(await harness.controller.readScannedPages('fr', new AbortController().signal))
       .toEqual({ kind: 'complete' });
@@ -1310,7 +1310,7 @@ describe('PdfController scanned pages', () => {
     expect(harness.surface.unreadScannedPages('fra')).toEqual([2]);
     expect(harness.controller.scannedPagesState('fr')).toBe('readable');
     expect(englishUiText(harness.controller.scannedPagesNote()!))
-      .toBe('Scanned pages that could not be read: 1.');
+      .toBe('Simul could not read these scanned pages: 1.');
   });
 
   it('says when no method is on or the language has no OCR model', async () => {
@@ -1329,7 +1329,7 @@ describe('PdfController scanned pages', () => {
       .toEqual({ kind: 'unsupported', language: 'th' });
     expect(thai.controller.scannedPagesState('th')).toBe('unsupported');
     expect(englishUiText(thai.controller.noTextStatus('th')))
-      .toBe('Scanned pages were not read: Simul has no OCR model for Thai.');
+      .toBe('Simul did not read the scanned pages. Simul has no OCR model for Thai.');
     expect(thai.controller.scannedPagesState('fr')).toBe('readable');
     expect(thai.controller.noTextStatus('fr')).toBe(UI_STRINGS.statusPdfNoText);
   });

@@ -91,7 +91,7 @@ describe('ToolbarStatus', () => {
       UI_STRINGS.statusCouldNotSaveOptions,
       UI_STRINGS.statusSettingsResetElsewhere,
     ), 'error');
-    const english = `Could not save options: ${UI_STRINGS.statusSettingsResetElsewhere}`;
+    const english = `Simul could not save the options: ${UI_STRINGS.statusSettingsResetElsewhere}`;
     expect(el('status').textContent).toBe(english);
 
     translations.set(UI_STRINGS.statusCouldNotSaveOptions, 'No se pudieron guardar las opciones: {0}');
@@ -172,12 +172,12 @@ describe('ToolbarStatus', () => {
   it('presents determinate translation progress with accessible values', () => {
     const { el, status, setActivity } = setup();
     setActivity({ translationInFlight: true });
-    status.showProgress('Translating page', 3, 4);
+    status.showProgress('Page translation', 3, 4);
     const bar = el('progress');
     expect(bar.hidden).toBe(false);
     expect(el<HTMLElement>('progress').dataset.mode).toBe('determinate');
     expect(bar.getAttribute('aria-valuenow')).toBe('75');
-    expect(bar.getAttribute('aria-valuetext')).toBe('Translating page 75%');
+    expect(bar.getAttribute('aria-valuetext')).toBe('Page translation 75%');
     expect(el('toolbar').getAttribute('aria-busy')).toBe('true');
     expect(el('bar').getAttribute('max')).toBe('4');
     expect(el('bar').getAttribute('value')).toBe('3');
@@ -186,7 +186,7 @@ describe('ToolbarStatus', () => {
     status.hideProgress();
     expect(el('region').hidden).toBe(true);
     expect(bar.hidden).toBe(true);
-    expect(bar.getAttribute('aria-label')).toBe('Companion idle');
+    expect(bar.getAttribute('aria-label')).toBe('No activity');
     expect(bar.hasAttribute('aria-valuenow')).toBe(false);
     expect(el('toolbar').getAttribute('aria-busy')).toBe('false');
   });
@@ -202,20 +202,20 @@ describe('ToolbarStatus', () => {
     setActivity({ translationInFlight: false, captureInFlight: true });
     status.syncProgress();
     expect(el<HTMLElement>('progress').dataset.mode).toBe('indeterminate');
-    expect(el('progress').getAttribute('aria-label')).toBe('Building page mirror');
+    expect(el('progress').getAttribute('aria-label')).toBe('Mirror build');
     expect(el('progress').hasAttribute('aria-valuenow')).toBe(false);
   });
 
   it('keeps the image progress row while OCR still runs after translation ends', () => {
     const { el, status, setActivity } = setup();
     setActivity({ translationInFlight: true, imageTranslationInFlight: true });
-    status.showProgress('Translating page', 1, 2);
+    status.showProgress('Page translation', 1, 2);
     setActivity({ translationInFlight: false });
     status.hideProgress();
     expect(el('region').hidden).toBe(false);
     expect(el('label').textContent).toBe(IMAGE_PROGRESS_LABEL);
     expect(el<HTMLElement>('progress').dataset.mode).toBe('indeterminate');
-    expect(el('progress').getAttribute('aria-label')).toBe('Recognizing image text');
+    expect(el('progress').getAttribute('aria-label')).toBe('Image text recognition');
     expect(el('bar').hasAttribute('value')).toBe(false);
 
     setActivity({ imageTranslationInFlight: false });

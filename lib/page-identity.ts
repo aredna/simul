@@ -412,7 +412,7 @@ export function hasNonDefaultPort(url: string | undefined): boolean {
 export function readableError(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message
-    : 'Something went wrong. Retry the current step.';
+    : 'An error occurred. Try the current step again.';
 }
 
 /** Chrome's access errors are rephrased as the action that restores access. */

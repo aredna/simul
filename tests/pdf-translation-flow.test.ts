@@ -390,7 +390,7 @@ describe('PDF translation, end to end', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(harness.shown).toEqual(ALL.slice(0, 3));
     expect(harness.calls).toHaveLength(4);
-    expect(harness.statuses.at(-1)).toBe('Translation cancelled. Existing translated text was kept.');
+    expect(harness.statuses.at(-1)).toBe('The translation was cancelled. Simul kept the text that it translated before.');
     expect(harness.state.translationComplete).toBe(false);
   });
 
@@ -466,7 +466,7 @@ describe('PDF translation, end to end', () => {
     expect(downloads).toBe(3);
     expect(harness.surface.snapshot()).toBeUndefined();
     expect(harness.state.snapshot).toBeUndefined();
-    expect(harness.statuses.at(-1)).toMatch(/could not be downloaded/u);
+    expect(harness.statuses.at(-1)).toMatch(/could not download the PDF/u);
   });
 });
 
@@ -510,7 +510,7 @@ describe('Scanned PDF pages, end to end', () => {
   it('reads nothing until Translate page when translation is not automatic', async () => {
     const harness = setup({ scanned: ALL_SCANNED, automatic: false });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
-    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Ready to translate/u));
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Simul is ready to translate/u));
     expect(harness.ocrCalls).toEqual([]);
     expect(harness.driver.currentTranslationFieldCount()).toBe(1);
 
@@ -523,7 +523,7 @@ describe('Scanned PDF pages, end to end', () => {
   it('stops reading and translating at Cancel, and reads only unread pages next time', async () => {
     const harness = setup({ scanned: ALL_SCANNED, automatic: false });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
-    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Ready to translate/u));
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Simul is ready to translate/u));
     harness.ocr.hold = true;
     const run = harness.driver.startTranslation(false, harness.captureCoordinator.generation);
     await vi.waitFor(() => expect(harness.ocrWaiting).toHaveLength(1));
@@ -535,7 +535,7 @@ describe('Scanned PDF pages, end to end', () => {
 
     expect(harness.ocrCalls).toEqual([1, 2]);
     expect(harness.shown).toEqual(['EN:S1 scanned.']);
-    expect(harness.statuses.at(-1)).toBe('Translation cancelled. Existing translated text was kept.');
+    expect(harness.statuses.at(-1)).toBe('The translation was cancelled. Simul kept the text that it translated before.');
     expect(harness.state.translationComplete).toBe(false);
 
     harness.ocr.hold = false;
@@ -564,7 +564,7 @@ describe('Scanned PDF pages, end to end', () => {
     sourceOnly.state.preferences = { ...sourceOnly.state.preferences, replicaViewMode: 'source-only' };
     sourceOnly.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(sourceOnly.statuses.at(-1))
-      .toBe('Live source only is active. The PDF is shown without translation.'));
+      .toBe('Live source only is active. Simul shows the PDF without translation.'));
 
     const same = setup({ scanned: ALL_SCANNED, sourceLanguage: 'en', targetLanguage: 'en' });
     same.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
@@ -593,12 +593,12 @@ describe('Scanned PDF pages, end to end', () => {
     const scanned = setup({ scanned: ALL_SCANNED, sourceLanguage: 'th' });
     scanned.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(scanned.statuses.at(-1))
-      .toBe('Scanned pages were not read: Simul has no OCR model for Thai.'));
+      .toBe('Simul did not read the scanned pages. Simul has no OCR model for Thai.'));
 
     const mixed = setup({ scanned: [2, 4], sourceLanguage: 'th' });
     mixed.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(mixed.statuses.at(-1))
-      .toBe('Scanned pages were not read: Simul has no OCR model for Thai.'));
+      .toBe('Simul did not read the scanned pages. Simul has no OCR model for Thai.'));
     // The text pages are English, which From = Thai leaves as written (D234).
     expect(mixed.shown).toEqual([]);
     expect(scanned.ocrCalls).toEqual([]);
@@ -608,13 +608,13 @@ describe('Scanned PDF pages, end to end', () => {
   it('says when OCR finds no text anywhere, and counts pages it could not read', async () => {
     const empty = setup({ scanned: ALL_SCANNED, ocrText: () => undefined });
     empty.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
-    await vi.waitFor(() => expect(empty.statuses.at(-1)).toBe('No text was found in this PDF.'));
+    await vi.waitFor(() => expect(empty.statuses.at(-1)).toBe('Simul found no text in this PDF.'));
     expect(empty.ocrCalls).toEqual([1, 2, 3, 4]);
 
     const failing = setup({ scanned: ALL_SCANNED, ocrFails: [3] });
     failing.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(failing.statuses.at(-1))
-      .toBe('Scanned pages that could not be read: 1.'));
+      .toBe('Simul could not read these scanned pages: 1.'));
     expect(failing.shown).toHaveLength(3);
     // Translate page stays on to read that page again.
     expect(failing.state.translationComplete).toBe(false);
@@ -647,7 +647,7 @@ describe('Scanned PDF pages, end to end', () => {
         : undefined,
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
-    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/Ready to translate/u));
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/ready to translate/u));
     expect(harness.ocrCalls).toEqual([]);
 
     harness.state.preferences = { ...harness.state.preferences, sourceLanguage: 'auto' };
@@ -672,7 +672,7 @@ describe('Scanned PDF pages, end to end', () => {
     harness.state.preferences = { ...harness.state.preferences, replicaViewMode: 'source-only' };
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(harness.statuses.at(-1))
-      .toBe('Live source only is active. The PDF is shown without translation.'));
+      .toBe('Live source only is active. Simul shows the PDF without translation.'));
     expect(harness.ocrCalls).toEqual([]);
 
     harness.state.preferences = { ...harness.state.preferences, replicaViewMode: 'translated' };
@@ -802,8 +802,8 @@ describe('Scanned PDF pages, end to end', () => {
       translateFails: ['P1 first.'],
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
-    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Translation remains partial/u));
-    expect(harness.statuses.at(-1)).not.toMatch(/Scanned pages/u);
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Translation is not complete/u));
+    expect(harness.statuses.at(-1)).not.toMatch(/scanned pages/u);
   });
 });
 

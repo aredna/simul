@@ -90,7 +90,7 @@ describe('SurfaceSwitcher', () => {
     const unsaved = setup({ failRemember: true });
     unsaved.state.followedPageIdentity = IDENTITY;
     await unsaved.switcher.openDetachedWindow();
-    expect(unsaved.statuses.at(-1)).toContain('could not remember it as the last-used surface');
+    expect(unsaved.statuses.at(-1)).toContain('could not record it as the last used view');
   });
 
   it('returns to the side panel, re-authorizes the active tab and closes its window', async () => {
@@ -109,7 +109,7 @@ describe('SurfaceSwitcher', () => {
     const harness = setup({ detached: { tabId: 4, windowId: 1 } });
     harness.switcher.configureButton();
     expect(harness.document.getElementById('popout')?.getAttribute('aria-label'))
-      .toBe('Return companion to the side panel');
+      .toBe('Return this window to the side panel');
     harness.switcher.toggle();
     expect(harness.state.surfaceTransitionInFlight).toBe(true);
     harness.switcher.toggle();

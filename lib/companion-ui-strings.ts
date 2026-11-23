@@ -44,40 +44,40 @@ export const UI_STRINGS = {
   ocrOff: 'OCR Off',
 
   // Toolbar: auto-detect button aria/title.
-  autoDetectOnAria: 'From language is using Auto-detect',
+  autoDetectOnAria: 'From language uses Auto-detect',
   autoDetectOffAria: 'Set From language to Auto-detect',
-  autoDetectOnTitle: 'From language is using Auto-detect.',
+  autoDetectOnTitle: 'From language uses Auto-detect.',
   autoDetectOffTitle: 'Set From language to Auto-detect.',
 
   // Toolbar: size toggle aria/title (frames: {0} current size, {1} next size).
-  sizeToggleAria: 'Mirror size: {0}. Switch to {1}',
-  sizeToggleTitle: 'Mirror size: {0}. Click for {1}.',
+  sizeToggleAria: 'Mirror size: {0}. Change to {1}',
+  sizeToggleTitle: 'Mirror size: {0}. Select to change to {1}.',
   sizeNextActual: '1:1 size',
   sizeNextFit: 'fit width',
 
   // Toolbar: OCR toggle titles for each saved image-access state.
-  ocrTitleOn: 'Image text translation is on. Click to turn it off.',
+  ocrTitleOn: 'Image text translation is on. Select to disable it.',
   ocrTitleNoMethod:
-    'Image translation has no enabled reading method. Click to turn it off.',
-  ocrTitleAccessibilityOn: 'Accessibility image text is on. Click to turn it off.',
+    'Image translation has no enabled reading method. Select to disable it.',
+  ocrTitleAccessibilityOn: 'Accessibility image text is on. Select to disable it.',
   ocrTitleNeedsAccess:
-    'Image translation is saved but pixel OCR needs image access. Click to grant access.',
+    'Image translation is saved, but pixel OCR must have image access. Select to grant access.',
   ocrTitleAccessibilityPaused:
-    'Accessibility image text is on; pixel OCR is paused. Click to grant image access.',
+    'Accessibility image text is on. Pixel OCR is paused. Select to grant image access.',
   ocrTitleAccessDeclined:
-    'Chrome did not grant image access. Click to turn image text off.',
-  ocrTitleOff: 'Image text translation is off. Click to turn it on.',
+    'Chrome did not grant image access. Select to disable image text.',
+  ocrTitleOff: 'Image text translation is off. Select to enable it.',
 
   // Toolbar: tab-follow aria/title (side panel and detached window alike).
   tabFollowActiveTitle:
-    'Following the active browser tab. Click to pin the mirror to the tab it shows.',
+    'The mirror follows the active browser tab. Select to pin the mirror to the tab that it shows.',
   tabFollowCurrentTitle:
-    'Pinned to the tab the mirror shows. Click to follow the active browser tab.',
+    'The mirror is pinned to the tab that it shows. Select to follow the active browser tab.',
 
   // Toolbar: refresh button while a rebuild is in flight.
   rebuildMirror: 'Rebuild mirror',
-  rebuildingMirror: 'Rebuilding mirror',
-  rebuildingMirrorEllipsis: 'Rebuilding mirror…',
+  rebuildingMirror: 'Mirror rebuild in progress',
+  rebuildingMirrorEllipsis: 'Mirror rebuild in progress…',
 
   // Translate button states.
   translate: 'Translate',
@@ -86,128 +86,130 @@ export const UI_STRINGS = {
   translationCurrent: 'Translation current',
 
   // Replica empty state and mode badge.
-  preparingMirror: 'Preparing the live read-only mirror…',
+  preparingMirror: 'Simul prepares the live read-only mirror…',
 
   // Progress labels.
-  progressPreparingModel: 'Preparing Chrome’s on-device language model…',
-  progressDownloadingPack: 'Downloading language pack… {0}%',
-  progressTranslating: 'Translating {0} of {1}…',
-  progressRecognizingImageText: 'Recognizing visible image text locally…',
-  progressPdfReadingScanned: 'Reading scanned pages: {0} of {1}…',
+  progressPreparingModel: 'Chrome prepares its on-device language model…',
+  progressDownloadingPack: 'Chrome downloads the language pack… {0}%',
+  progressTranslating: 'Translation: {0} of {1}…',
+  progressRecognizingImageText: 'Simul reads the visible image text on this device…',
+  progressPdfReadingScanned: 'Simul reads the scanned pages: {0} of {1}…',
 
   // Toolbar progressbar aria-labels (one per in-flight activity; the idle and
   // determinate fallbacks). Shown to assistive tech, so they localize with the
   // rest of the UI (review finding F1).
-  activityChangingView: 'Changing companion view',
-  activityUpdatingSiteAccess: 'Updating site access',
-  activityBuildingMirror: 'Building page mirror',
-  activityTranslatingDraft: 'Translating quick draft',
-  activityTranslatingPage: 'Translating page',
-  activityRecognizingImageText: 'Recognizing image text',
-  activityIdle: 'Companion idle',
+  activityChangingView: 'Panel view change',
+  activityUpdatingSiteAccess: 'Site access update',
+  activityBuildingMirror: 'Mirror build',
+  activityTranslatingDraft: 'Quick draft translation',
+  activityTranslatingPage: 'Page translation',
+  activityRecognizingImageText: 'Image text recognition',
+  activityIdle: 'No activity',
 
   // Translation-driver: detected-language line (`#detected-language`).
-  statusDetectedFromPageLanguage: 'Detected {0} from the page language.',
-  statusDetectedFromVisibleText: 'Detected {0} from visible page text.',
-  statusDetectedFromScannedPages: 'Detected {0} from the scanned pages.',
-  statusDetectedFromImage: 'Detected {0} from {1} ({2}).',
+  statusDetectedFromPageLanguage: 'Simul detected {0} from the page language.',
+  statusDetectedFromVisibleText: 'Simul detected {0} from the visible page text.',
+  statusDetectedFromScannedPages: 'Simul detected {0} from the scanned pages.',
+  statusDetectedFromImage: 'Simul detected {0} from {1} ({2}).',
 
   // Translation-driver statuses.
   statusPreviouslyDetectedSource:
-    'Using the previously detected {0} source language.',
-  statusCouldNotDetect: 'The page language could not be detected. Choose a From language.',
+    'Simul uses the source language that it detected before: {0}.',
+  statusCouldNotDetect: 'Simul could not detect the page language. Select a From language.',
   statusImageEvidenceCleared:
-    'Image-derived language evidence was cleared. OCR is checking again with the updated settings.',
+    'Simul cleared the language evidence from images. OCR checks again with the updated settings.',
   statusLiveSourceLanguagesSaved:
-    'Live source only is active. Language choices are saved for translated mode.',
+    'Live source only is active. Simul saves your language choices for translated mode.',
   statusChooseFromInconclusive:
-    'Choose a From language because automatic detection was inconclusive.',
+    'Automatic detection did not find one clear language. Select a From language.',
   statusLanguagesMatchUnchanged:
-    'The source and target languages match, so the original text is unchanged.',
-  statusReadyToTranslate: 'Ready to translate {0} to {1} on-device.',
+    'The source and target languages are the same. The original text does not change.',
+  statusReadyToTranslate: 'Simul is ready to translate {0} to {1} on this device.',
   statusChooseTranslateOnce:
-    'Choose Translate once so Chrome can prepare this on-device language pair.',
-  statusPairUnavailable: '{0} to {1} is unavailable on this device.',
+    'Select Translate page once. Then Chrome can prepare this on-device language pair.',
+  statusPairUnavailable: '{0} to {1} is not available on this device.',
   statusAutomaticNeedsOneClick:
-    'Automatic translation is ready, but this pair needs one Translate click to prepare its local pack.',
+    'Automatic translation is ready. To prepare the local pack for this pair, select Translate page once.',
   statusAutomaticComplete:
-    'Automatic translation is complete and live updates will translate as they arrive.',
+    'Automatic translation is complete. Simul translates new live changes when they arrive.',
   statusTranslationComplete:
-    'Translation is complete and live updates will translate as they arrive.',
+    'Translation is complete. Simul translates new live changes when they arrive.',
   statusTranslationCancelledKept:
-    'Translation cancelled. Existing translated text was kept.',
+    'The translation was cancelled. Simul kept the text that it translated before.',
   statusLiveSourceRestored:
-    'Live source only is active. The current mirror remains live and all translation overlays were removed.',
+    'Live source only is active. The current mirror is still live. Simul removed all translation overlays.',
   statusTranslatedModeRestored:
-    'Translated mode restored. Preparing the saved language settings…',
+    'Translated mode is active again. Simul prepares the saved language settings…',
 
   // Partial-projection status (frame + count fragments joined into it).
-  partialPrefixRemainsPartial: 'Translation remains partial',
+  partialPrefixRemainsPartial: 'Translation is not complete',
   partialSummary:
-    '{0}: {1}. Original text remains for those segments; choose Translate page to retry.',
-  partialNoneProjected: 'no current text was projected',
+    '{0}: {1}. The original text is still shown for those segments. To try again, select Translate page.',
+  partialNoneProjected: 'no current translated text was shown',
   partialFailed: '{0} failed',
-  partialStale: '{0} became stale',
-  partialSuperseded: '{0} were superseded',
-  partialOverflow: '{0} exceeded the bounded local queue',
-  partialNotProjected: '{0} were not projected',
+  partialStale: '{0} became out of date',
+  partialSuperseded: '{0} were replaced by newer text',
+  partialOverflow: '{0} were more than the local queue can hold',
+  partialNotProjected: '{0} were not shown',
 
   // Live-change reconciliation statuses (main.ts).
-  statusLivePartiallyTranslated: 'Live page changes were only partially translated',
-  statusLiveMirroredTranslated: 'Live page changes were mirrored and translated.',
+  statusLivePartiallyTranslated: 'Simul translated only part of the live page changes',
+  statusLiveMirroredTranslated: 'Simul copied and translated the live page changes.',
   statusLiveNeedsTranslate:
-    'Live page changes were translated, but earlier incomplete text still needs Translate page.',
+    'Simul translated the live page changes. To translate the earlier text that is not complete, select Translate page.',
 
   // Cancellation / safety statuses (main.ts).
-  statusCancellingTranslation: 'Cancelling on-device translation…',
-  statusQuickCancelled: 'Quick translation cancelled.',
-  statusNothingTranslating: 'Nothing is currently being translated.',
+  statusCancellingTranslation: 'Simul cancels the on-device translation…',
+  statusQuickCancelled: 'The quick translation was cancelled.',
+  statusNothingTranslating: 'No translation is in progress.',
   statusImageProcessingStopped: 'Image text processing stopped.',
-  statusSnapshotOlder: 'The committed settings snapshot was older than this panel.',
+  statusSnapshotOlder: 'The saved settings snapshot was older than this panel.',
   statusSafetyLost:
-    'The settings safety connection was lost. Read access is Page-only while Simul reconnects…',
+    'The panel lost its settings safety connection. Read access is Page only until Simul connects again…',
   statusSnapshotInvalid:
-    'Stored settings became unavailable or invalid. Read access is Page-only until a current valid snapshot is restored…',
-  statusReadablePolicyRebuilding: 'Readable-content policy changed; rebuilding safely…',
+    'The saved settings became not available or not valid. Read access is Page only until Simul restores a current, valid snapshot…',
+  statusReadablePolicyRebuilding:
+    'The readable-content policy changed. Simul safely reads the page again…',
 
   // Capture-pipeline statuses.
   statusReconcileRebuild:
-    'A live update could not be reconciled. Rebuilding once while keeping the current mirror visible…',
-  statusBuildingNewPage: 'Building the live mirror for the newly loaded page…',
-  statusBuildingInitial: 'Building the initial live read-only mirror…',
+    'Simul could not apply a live update. Simul rebuilds the mirror once and shows the current mirror until then…',
+  statusBuildingNewPage: 'Simul builds the live mirror for the new page…',
+  statusBuildingInitial: 'Simul builds the first live read-only mirror…',
   statusLiveDisconnectedRebuild:
-    'The live mirror disconnected. Rebuilding once while keeping the last good mirror visible…',
+    'The live mirror lost its connection. Simul rebuilds the mirror once and shows the last good mirror until then…',
   statusLiveDisconnectedAgain:
-    'The live mirror disconnected again. The last good mirror is kept; choose Refresh to retry.',
-  statusNoDocumentBoundary: 'The page did not expose a current document boundary.',
+    'The live mirror lost its connection again. Simul shows the last good mirror. To try again, select Refresh.',
+  statusNoDocumentBoundary: 'The page did not give a current document boundary.',
   statusNoCommittedDocument: 'The mirror did not receive the current page.',
   statusLiveSourceKeepsUpdating:
-    'Live source only is active. The isolated mirror keeps updating without text or image translation.',
+    'Live source only is active. The isolated mirror continues to update without text or image translation.',
   statusGrantRemovedWaiting:
-    'Chrome removed a saved automatic-access grant. The mirror is waiting for page text.',
+    'Chrome removed a saved automatic-access grant. The mirror waits for page text.',
   statusMirrorLiveWaiting:
-    'The page mirror is live and will prepare translation when visible text arrives.',
+    'The page mirror is live. It will prepare the translation when visible text arrives.',
   statusGrantRemovedScopeOff:
-    'Chrome removed a saved automatic-access grant, so that scope was turned off.',
+    'Chrome removed a saved automatic-access grant. Thus, that scope is now off.',
   statusReplicaNotPrepared:
-    'The mirror could not be prepared. Retry the current page.',
+    'Simul could not prepare the mirror. Try the current page again.',
   statusReplicaTooLarge: 'This page is too large for Simul to mirror.',
 
   // PDF statuses (capture pipeline and PDF controller).
-  statusPdfReading: 'Reading the PDF…',
-  statusPdfPassword: 'This PDF is password-protected. Simul cannot open it.',
-  statusPdfTooLarge: 'This PDF is too large for Simul (over 128 MB).',
+  statusPdfReading: 'Simul reads the PDF…',
+  statusPdfPassword: 'This PDF has a password. Simul cannot open it.',
+  statusPdfTooLarge: 'This PDF is too large for Simul (more than 128 MB).',
   statusPdfDownloadFailed:
-    'The PDF could not be downloaded. Reload the tab and select Simul again.',
+    'Simul could not download the PDF. Reload the tab and select Simul again.',
   statusPdfUnreadable: 'This file is not a readable PDF.',
   statusPdfReaderFailed: 'Simul’s PDF reader could not start.',
-  statusPdfFileReadFailed: 'Simul could not read this file. Choose it again.',
-  statusPdfNoText: 'No text was found in this PDF.',
+  statusPdfFileReadFailed: 'Simul could not read this file. Select it again.',
+  statusPdfNoText: 'Simul found no text in this PDF.',
   statusPdfScannedNoMethod:
-    'Scanned pages were not read: turn on “Tesseract.js (local)” under Image reading priority in Settings.',
-  statusPdfScannedUnsupported: 'Scanned pages were not read: Simul has no OCR model for {0}.',
-  statusPdfScannedFailed: 'Scanned pages that could not be read: {0}.',
-  statusPdfSourceOnly: 'Live source only is active. The PDF is shown without translation.',
+    'Simul did not read the scanned pages. In Options, under Image reading priority, enable “Tesseract.js (local)”.',
+  statusPdfScannedUnsupported:
+    'Simul did not read the scanned pages. Simul has no OCR model for {0}.',
+  statusPdfScannedFailed: 'Simul could not read these scanned pages: {0}.',
+  statusPdfSourceOnly: 'Live source only is active. Simul shows the PDF without translation.',
   statusPdfTranslated: 'The PDF is translated.',
   pdfPageLabel: 'Page {0} of {1}',
   // A PDF on this computer, offered wherever the panel shows an error (D107).
@@ -215,69 +217,69 @@ export const UI_STRINGS = {
   openPdfFileDropHint: 'For a PDF on this computer, open it here or drop it on Simul.',
 
   // Surface-switcher: detached window / return-to-panel.
-  returnToSidePanelAria: 'Return companion to the side panel',
+  returnToSidePanelAria: 'Return this window to the side panel',
   returnToSidePanel: 'Return to side panel',
-  statusOpenRegularBeforeDetach: 'Open a regular page before detaching the companion.',
+  statusOpenRegularBeforeDetach: 'Open a regular page before you detach the panel.',
   statusDetachedCouldNotCloseOld:
-    'Detached window opened, but Chrome could not close the old side panel automatically. Close it manually.',
+    'The detached window opened. Chrome could not close the old side panel automatically. Close it manually.',
   statusDetachedCouldNotRemember:
-    'Detached window opened, but Chrome could not remember it as the last-used surface.',
+    'The detached window opened. Chrome could not record it as the last used view.',
   statusDetachedOpenError: 'Chrome could not open a detached window: {0}',
   statusReturnPanelError: 'Chrome could not return to the side panel: {0}',
 
   // Source-follower statuses (frames prepend an opaque page-error sentence).
   statusNoActiveReadableTab: 'The source browser window has no active readable tab.',
-  statusActiveTabNotWebPage: 'Waiting for a web page in the active tab.',
+  statusActiveTabNotWebPage: 'Simul waits for a web page in the active tab.',
   statusFollowNeedsAccess:
-    '{0} Active-tab following needs page access for each newly selected site.',
+    '{0} To follow the active tab, Simul must have page access for each new site that you select.',
   statusSourceRestricted:
-    'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page and select the extension again.',
+    'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page. Then select the extension again.',
   statusSourcePageChanging:
-    'The source page is changing; the current mirror stays visible until the new page is ready.',
+    'The source page changes. Simul shows the current mirror until the new page is ready.',
   statusSourceClosedNoNeighbor:
-    'The source tab was closed and no neighboring readable tab became active.',
+    'The source tab was closed. No readable tab next to it became active.',
   statusSourceClosed: 'The source tab was closed.',
   statusLockedTabMovedWindows:
-    '{0} The locked source tab could not be followed after it moved windows.',
+    '{0} Simul could not follow the pinned source tab after it moved to a different window.',
   statusReplacedTabNotFollowed:
-    '{0} Chrome replaced the source tab, but its new page could not be followed.',
+    '{0} Chrome replaced the source tab. Simul could not follow its new page.',
 
   // Permission flows: image access.
-  statusImageAccessNotRestored: 'Image access was released and could not be restored.',
+  statusImageAccessNotRestored: 'Simul released image access. Simul could not restore it.',
   statusImageAccessRemovedPixelPaused:
-    'Image access was removed. Pixel OCR is paused; open options and choose Grant image access to resume.',
+    'Image access was removed. Pixel OCR is paused. To continue, open Options and select Grant image access.',
   statusImageAccessRemovedAccessibilityActive:
-    'Image access was removed. Accessibility image text remains active; only pixel OCR is paused.',
+    'Image access was removed. Accessibility image text is still active. Only pixel OCR is paused.',
   statusChooseImageSettingAgain:
-    'Choose the image setting again so Chrome can show its access prompt.',
+    'Select the image setting again to show the Chrome access prompt.',
   statusPixelOcrRemainsPaused:
-    'Pixel OCR remains paused. Choose Grant image access when you are ready to retry.',
+    'Pixel OCR is still paused. When you are ready to try again, select Grant image access.',
   statusAccessibilityActiveNoPixel:
-    'Accessibility image text remains active without image access; pixel OCR was not enabled.',
+    'Accessibility image text is still active without image access. Pixel OCR was not enabled.',
   statusImageAccessDeniedOff:
-    'Chrome did not grant image access, so image translation remains off. You can retry from options.',
+    'Chrome did not grant image access. Thus, image translation is still off. You can try again in Options.',
   statusImageTranslationEnabled: 'Image translation is enabled for visible page images.',
   statusImageTranslationOff: 'Image translation is off.',
   statusImageTranslationOffPartialAccess:
-    'Image translation is off. Chrome did not retain some saved one-site automatic access.',
+    'Image translation is off. Chrome did not keep some saved one-site automatic access.',
   statusImageAccessReleasedNotSaved:
-    'Image access was released but the change could not be saved, and Chrome did not give the access back. Pixel OCR is paused until you choose Grant image access in options.',
+    'Simul released image access but could not save the change. Chrome did not give the access back. Pixel OCR is paused until you select Grant image access in Options.',
   statusImageAccessUpdateFailed:
-    'Chrome could not update image access. Your saved setting was left unchanged; try again from options.',
-  statusImageCaptureRetained: 'Chrome retained image capture access.',
+    'Chrome could not update image access. Your saved setting did not change. Try again in Options.',
+  statusImageCaptureRetained: 'Chrome kept image capture access.',
   statusSettingsResetElsewhereImage:
-    'Settings were reset in another companion while image access was changing.',
+    'Settings were reset in another panel while image access changed.',
 
   // Permission flows: automatic-access scope.
   statusNoNarrowPortAccess:
     'Chrome cannot grant narrow one-site access to a non-default port.',
   statusOpenRegularBeforeSiteAuto:
-    'Open a regular HTTP or HTTPS page before enabling this-site automation.',
+    'Open a regular HTTP or HTTPS page before you enable automatic translation for this site.',
   statusChooseSettingAgain:
-    'Choose the setting again so Chrome can show its access prompt.',
-  statusSavedSiteLimit: 'The saved-site limit has been reached.',
+    'Select the setting again to show the Chrome access prompt.',
+  statusSavedSiteLimit: 'The list of saved sites is full.',
   statusAutoAccessUpdateError: 'Chrome could not update automatic access: {0}',
-  statusAutoScopeNotRetained: 'Chrome did not retain the requested automatic-access scope.',
+  statusAutoScopeNotRetained: 'Chrome did not keep the requested automatic-access scope.',
   statusAutoOffForScope: 'Automatic translation is off for this scope.',
   statusAutoEnabledRegular: 'Automatic translation is enabled for regular web pages.',
   statusAutoEnabledThisSite: 'Automatic translation is enabled for this site.',
@@ -285,153 +287,153 @@ export const UI_STRINGS = {
   // Read-scope controller: profile choice labels and descriptions.
   scopeControlLabelsTitle: 'Control labels and semantics',
   scopeControlLabelsDesc:
-    'Read public button, menu, field-label, and disabled-state text.',
+    'Read the text of public buttons, menus, field labels and disabled states.',
   scopeControlImagesTitle: 'Images inside controls',
   scopeControlImagesDesc:
-    'Read non-secret navigation and control images; actions stay disabled.',
+    'Read navigation and control images that are not secret. Actions are still disabled.',
   scopeDisclosureTitle: 'Collapsed disclosure content',
   scopeDisclosureDesc:
-    'Read validated same-page menus and disclosures even while collapsed.',
+    'Read validated menus and disclosures on the same page, also when they are collapsed.',
   scopeFormValuesTitle: 'Ordinary visible form values',
   scopeFormValuesDesc:
-    'Read visible text, search, URL, number, date, time, textarea, and selection state.',
+    'Read visible text, search, URL, number, date, time, textarea and selection state.',
   scopePersonalTitle: 'Personal and autofill values',
   scopePersonalDesc:
-    'Read visible email, telephone, name, address, and username fields. Credential and card data stay blocked.',
+    'Read visible email, telephone, name, address and username fields. Credential and card data are still blocked.',
   scopeEditableTitle: 'Editable page content',
   scopeEditableDesc:
-    'Read visible non-secret contenteditable and ARIA text editor drafts.',
+    'Read visible drafts in contenteditable areas and ARIA text editors that are not secret.',
 
   // Read-scope controller: save/reset statuses.
-  statusApplyingNarrower: 'Applying narrower read settings…',
+  statusApplyingNarrower: 'Simul applies narrower read settings…',
   statusSaving: 'Saving…',
   statusReadChangedElsewhere:
-    'Settings changed in another companion. Review the current choices and try again.',
+    'Settings changed in another panel. Look at the current choices and try again.',
   statusReadableChangedElsewhere:
-    'Readable-content settings changed in another companion. Review the current choices and try again.',
+    'Readable-content settings changed in another panel. Look at the current choices and try again.',
   statusPurgeUnconfirmedChange:
-    'Another companion could not confirm its safety purge. Close it or retry the change.',
+    'Another panel could not confirm its safety purge. Close it or try the change again.',
   statusReadNotApplied: 'The read settings were not applied.',
-  statusReadableApplied: 'Readable-content settings applied. The mirror is rebuilding.',
-  statusCouldNotSaveReadable: 'Could not save readable-content settings: {0}',
-  statusResettingSettingsPermissions: 'Resetting settings and optional permissions…',
-  statusRetryingCleanup: 'Retrying optional permission and runtime cleanup…',
+  statusReadableApplied: 'Simul applied the readable-content settings. Simul now rebuilds the mirror.',
+  statusCouldNotSaveReadable: 'Simul could not save the readable-content settings: {0}',
+  statusResettingSettingsPermissions: 'Simul resets the settings and optional permissions…',
+  statusRetryingCleanup: 'Simul tries the optional permission and runtime cleanup again…',
   statusResetChangedElsewhere:
-    'Settings changed in another companion. Review the current state before resetting.',
+    'Settings changed in another panel. Look at the current state before you reset.',
   statusPurgeUnconfirmedReset:
-    'Another companion could not confirm its safety purge. Close it or retry the reset.',
-  statusResettingSettings: 'Resetting extension settings…',
+    'Another panel could not confirm its safety purge. Close it or try the reset again.',
+  statusResettingSettings: 'Simul resets the extension settings…',
   statusResetPendingOne:
-    'Core settings are reset. {0} optional permission entry remains and cleanup is still pending; choose Retry cleanup.',
+    'Core settings are reset. {0} optional permission entry is still there and cleanup is not complete. Select Retry cleanup.',
   statusResetPendingMany:
-    'Core settings are reset. {0} optional permission entries remain and cleanup is still pending; choose Retry cleanup.',
+    'Core settings are reset. {0} optional permission entries are still there and cleanup is not complete. Select Retry cleanup.',
   statusResetPendingGeneric:
-    'Core settings are reset, but permission or runtime cleanup is still pending; choose Retry cleanup.',
+    'Core settings are reset, but permission or runtime cleanup is not complete. Select Retry cleanup.',
   statusResetComplete: 'Settings and optional permissions were reset.',
-  statusResetCouldNotFinish: 'Reset could not finish: {0}',
-  statusPreparingSafeReset: 'Preparing a safe settings reset…',
-  statusPreparingNarrower: 'Preparing narrower read settings…',
+  statusResetCouldNotFinish: 'The reset could not finish: {0}',
+  statusPreparingSafeReset: 'Simul prepares a safe settings reset…',
+  statusPreparingNarrower: 'Simul prepares narrower read settings…',
   setupCleanupPending:
-    'Core settings are already safe, but optional permission or runtime cleanup is still pending.',
+    'Core settings are already safe, but optional permission or runtime cleanup is not complete.',
   retryResetCleanup: 'Retry reset cleanup',
   resetAllSettings: 'Reset all extension settings…',
 
   // Page-access guidance, raised as errors by lib/page-identity.ts and shown
   // in the status line and the mirror's error panel (review L5).
   pageAccessGuidance:
-    'Open a regular HTTP or HTTPS page, then select the extension from that page.',
+    'Open a regular HTTP or HTTPS page. Then select the extension on that page.',
   pageLocalFileGuidance:
-    'Simul cannot read a PDF opened from this computer in a tab. Open the file here instead.',
+    'Simul cannot read a PDF from this computer that is open in a tab. Open the file here instead.',
   pageChangedGuidance:
-    'The source page changed or access expired. Select the extension on the source page to authorize it again.',
-  pageTimeoutGuidance: 'The page took too long to respond. Retry the current page.',
+    'The source page changed or access expired. To give access again, select the extension on the source page.',
+  pageTimeoutGuidance: 'The page did not respond in time. Try the current page again.',
   pageAccessLostGuidance:
-    'The extension no longer has access to this page. Select its toolbar icon on the source page to authorize it again.',
+    'The extension does not have access to this page now. To give access again, select its toolbar icon on the source page.',
   // Offered under the access messages above while Simul may not read every
   // site: Chrome then asks for Simul's toolbar icon on each new site (D165).
   allSitesAccessHint:
-    'To follow every page you open without selecting the toolbar icon each time, let Simul read all sites. Chrome asks you once; Site access in Chrome’s extension settings changes it back.',
+    'If you allow Simul to read all sites, it follows all pages that you open. You do not have to select the toolbar icon each time. Chrome asks you once. To change this, use Site access in the Chrome extension settings.',
   allowAllSitesAccess: 'Allow on all sites',
 
   // Preference client statuses.
-  statusInvalidPreferenceResponse: 'The preference service returned an invalid response.',
+  statusInvalidPreferenceResponse: 'The preference service sent a response that is not valid.',
   statusSettingsResetElsewhere:
-    'Settings were reset in another companion. Review the current choices and try again.',
-  statusCouldNotSaveOptions: 'Could not save options: {0}',
+    'Settings were reset in another panel. Look at the current choices and try again.',
+  statusCouldNotSaveOptions: 'Simul could not save the options: {0}',
   statusImageOptionsChangedElsewhere:
-    'Image options changed in another companion. Review the current choices and try again.',
-  statusCouldNotSaveImageOptions: 'Could not save image options: {0}',
+    'Image options changed in another panel. Look at the current choices and try again.',
+  statusCouldNotSaveImageOptions: 'Simul could not save the image options: {0}',
 
   // Quick composer.
   composerCharacterCount: '{0} of {1} characters used',
-  composerWaitingLanguage: 'Waiting for website language',
+  composerWaitingLanguage: 'Website language not detected yet',
   composerDetecting:
-    'Simul is still detecting the website language. If detection remains inconclusive, choose From in the toolbar.',
-  composerLanguagesMatch: 'The languages match, so Simul will copy the text unchanged.',
-  composerDraftNotSaved: 'Your draft stays only in this companion window and is not saved.',
-  composerTranslatingLocally: 'Translating locally…',
-  composerReversePairUnavailable: 'The reverse language pair is unavailable on this device.',
-  composerReadyToCopy: 'Translation is ready to copy.',
-  composerReplyReadyToCopy: 'Reply translation is ready to copy. It was not saved.',
-  composerCouldNotTranslate: 'Could not translate the reply: {0}',
-  composerCopied: 'Translated text copied.',
-  composerReplyCopied: 'Translated reply copied.',
+    'Simul has not detected the website language yet. If it cannot find one clear language, select From in the toolbar.',
+  composerLanguagesMatch: 'The languages are the same. Simul will copy the text without changes.',
+  composerDraftNotSaved: 'Your draft is only in this panel. Simul does not save it.',
+  composerTranslatingLocally: 'Simul translates on this device…',
+  composerReversePairUnavailable: 'The reverse language pair is not available on this device.',
+  composerReadyToCopy: 'The translation is ready to copy.',
+  composerReplyReadyToCopy: 'The reply translation is ready to copy. Simul did not save it.',
+  composerCouldNotTranslate: 'Simul could not translate the reply: {0}',
+  composerCopied: 'Simul copied the translated text.',
+  composerReplyCopied: 'Simul copied the translated reply.',
   composerCopyFailedSelected: 'Chrome could not copy automatically. The output is selected.',
   composerCopyFailedSelectedResult:
-    'Chrome could not copy automatically. The result is selected for copying.',
+    'Chrome could not copy automatically. The result is selected and ready to copy.',
 
   // Image-analysis panel: section labels and descriptions.
   imagePanelHeading: 'Image text',
   imagePanelOptions: 'Image text options',
-  imagePanelNoActivity: 'No OCR activity in this companion view yet.',
+  imagePanelNoActivity: 'No OCR activity in this panel yet.',
   imageEnableLabel: 'Translate text inside images (local, experimental)',
   imageAccessibilityHint:
-    'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
-  imageCheckingAccess: 'Checking Chrome image access…',
+    'Accessibility text works without image access. Grant image access only if you want local pixel OCR as a fallback.',
+  imageCheckingAccess: 'Simul checks Chrome image access…',
   imageOnByDefault:
-    'On by default. Pixel OCR waits for image access; visible image pixels stay on this device and are discarded after OCR.',
+    'On by default. Pixel OCR waits for image access. Visible image pixels do not leave this device, and Simul discards them after OCR.',
   imageGrantAccess: 'Grant image access',
   imageReadingPriority: 'Image reading priority',
   imagePriorityOrderHint:
-    'This order controls which methods Simul attempts first and breaks close evidence ties.',
+    'This order sets which methods Simul tries first. It also decides between results that are almost equal.',
   imagePriorityMethodsHint:
-    'Methods are attempted from top to bottom. Uncertain accessibility text may be compared with later OCR; the saved order breaks close ties.',
+    'Simul tries the methods from top to bottom. Simul can compare uncertain accessibility text with later OCR. The saved order decides between results that are almost equal.',
   imageTextDetectorHint:
-    'Chrome TextDetector is experimental and platform-dependent. When its local detect probe is unavailable, Simul skips capture work for it and falls through to the next enabled provider.',
+    'Chrome TextDetector is experimental and changes with the platform. If its local detect probe is not available, Simul does no capture work for it. Simul then uses the next enabled provider.',
   imageTesseractNote:
-    'Tesseract.js runs locally with packaged language models. Simul loads only the language group needed for the current page.',
-  imageProvidersPaused: 'OCR is paused because every compiled provider is off.',
+    'Tesseract.js runs on this device with packaged language models. Simul loads only the language group that is necessary for the current page.',
+  imageProvidersPaused: 'OCR is paused because all compiled providers are off.',
   imageScanScopeHint:
-    'Choose whether images are recognized only when visible, after visible work, or immediately.',
+    'Select when Simul reads images: only when they are visible, after the visible work, or immediately.',
   imageScanImages: 'Scan images',
   imageSkipSmallHint:
-    'Ignore tiny images that are unlikely to contain useful readable text.',
+    'Ignore very small images that probably do not contain useful text.',
   imageSkipSmall: 'Skip very small images',
   imagePromptLanguage: 'Use local Prompt for image language',
   imagePromptInterpret: 'Use local Prompt to interpret image text',
   imageDiagnostics: 'OCR diagnostics',
-  imageDiagnosticsHint: 'Inspect content-free OCR stages and counts for this session.',
+  imageDiagnosticsHint: 'Look at OCR stages and counts for this session. They contain no page content.',
   imageDiagnosticsPrivacy:
-    'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
+    'Stages and counts are kept in memory only. They never include page text, URLs, pixels or identifiers.',
   imageClearDiagnostics: 'Clear diagnostics',
   imageConfidenceHint:
-    'Require this provider confidence before OCR text can be used without independent corroboration.',
+    'OCR text must have this provider confidence before Simul uses it without a second, independent source.',
   imageMinConfidence: 'Minimum OCR confidence',
   imageHigherConfidenceHint:
-    'Higher values reduce false text detections but may miss faint or stylized text.',
+    'Higher values give fewer incorrect text detections, but Simul can miss faint or stylized text.',
   imageMethodToggleHint:
-    'Turn this local image-reading method on or off without changing its priority.',
+    'Enable or disable this local image-reading method. Its priority does not change.',
   imageNoPixels: 'No pixels',
   imageAccessibilityUses:
-    'Uses direct image aria-label or alt text and does not require screenshot permission.',
+    'Uses the aria-label or alt text of the image directly. Screenshot permission is not necessary.',
   imageMoveEarlier: 'Move earlier',
   imageMoveLater: 'Move later',
   imageProviderChecking: 'Checking…',
   imageProviderAvailable: 'Available',
-  imageProviderUnavailable: 'Unavailable',
+  imageProviderUnavailable: 'Not available',
   imageMethodDisable: 'Disable {0}',
   imageMethodEnable: 'Enable {0}',
-  imageProbeChecking: 'Checking whether this Chrome runtime can complete a local detect call.',
+  imageProbeChecking: 'Simul checks if this Chrome runtime can complete a local detect call.',
   imageProbeAvailable: 'This Chrome runtime completed the local capability probe.',
   imageProbeUnavailable:
     'This Chrome runtime does not expose the experimental TextDetector API.',

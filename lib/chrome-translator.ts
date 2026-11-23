@@ -122,7 +122,7 @@ export class ChromeTranslatorProvider implements TranslationProvider {
       if (isDomExceptionNamed(error, 'NotAllowedError')) {
         throw new TranslationProviderError(
           'activation-required',
-          'Chrome needs a click before it downloads this language pair. Select Translate page once.',
+          'Before Chrome downloads this language pair, you must select Translate page once.',
           { cause: error },
         );
       }
@@ -321,7 +321,7 @@ class ChromeTranslationSession implements TranslationSession {
     if (this.destroyed) {
       throw new TranslationProviderError(
         'translation-failed',
-        'The local translation session is no longer available.',
+        'The local translation session is not available now.',
       );
     }
   }

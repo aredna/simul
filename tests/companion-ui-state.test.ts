@@ -76,8 +76,8 @@ describe('companion UI state', () => {
     expect(toolbarActivityLabel({
       ...IDLE_ACTIVITY,
       composerInFlight: true,
-    })).toBe('Translating quick draft');
-    expect(toolbarActivityLabel(IDLE_ACTIVITY)).toBe('Companion idle');
+    })).toBe('Quick draft translation');
+    expect(toolbarActivityLabel(IDLE_ACTIVITY)).toBe('No activity');
   });
 
   it('draws every activity label from the atomic localization set', () => {

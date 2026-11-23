@@ -215,7 +215,7 @@ describe('ReadScopeController setup', () => {
     });
     expect(harness.stored.readScopeSetupVersion).toBe(REPLICA_READ_SCOPE_SETUP_VERSION);
     expect(harness.statuses.at(-1)).toEqual([
-      'Readable-content settings applied. The mirror is rebuilding.',
+      'Simul applied the readable-content settings. Simul now rebuilds the mirror.',
       'success',
     ]);
     expect(harness.events).toContain('restart');
@@ -265,7 +265,7 @@ describe('ReadScopeController setup', () => {
       ...harness.elements.readScopeControls.querySelectorAll('small'),
       ...harness.elements.setupReadScopeControls.querySelectorAll('small'),
     ];
-    const credentialNote = 'Credential and card data stay blocked.';
+    const credentialNote = 'Credential and card data are still blocked.';
     expect(descriptions()).toHaveLength(12);
 
     // An English pass rewrites every marked element to its English label.
@@ -310,7 +310,7 @@ describe('ReadScopeController narrowing', () => {
   it('keeps the narrower ceiling when the save is refused, until a matching commit arrives', async () => {
     const harness = setup({ stored: setupComplete('full-visible'), failSaves: true });
     await harness.controller.commitReplicaReadScope(replicaReadScopeForProfile('page-only'), false);
-    expect(harness.statuses.at(-1)?.[0]).toContain('Could not save readable-content settings');
+    expect(harness.statuses.at(-1)?.[0]).toContain('Simul could not save the readable-content settings');
     expect(harness.elements.setupReadScopeStatus.dataset.tone).toBe('error');
     expect(harness.state.localReadScopeNarrowingGates.get(1)?.failed).toBe(true);
     expect(sameReplicaReadScope(
@@ -341,11 +341,11 @@ describe('ReadScopeController reset and safety', () => {
     const harness = setup({ stored: setupComplete('standard'), cleanupRemaining: 2 });
     await harness.controller.resetAllExtensionSettings();
     expect(harness.commands[0]).toMatchObject({ type: 'simul:preferences:reset-all', expectedResetRevision: 0 });
-    expect(harness.events).toContain('purge:Resetting extension settings…');
+    expect(harness.events).toContain('purge:Simul resets the extension settings…');
     expect(harness.events).toContain('reset-only-cleared');
     expect(harness.state.setupReadScopeDraft).toEqual(replicaReadScopeForProfile('standard'));
     expect(harness.elements.resetSettingsStatus.textContent)
-      .toContain('2 optional permission entries remain');
+      .toContain('2 optional permission entries are still there');
     expect(harness.state.resetInFlight).toBe(false);
     // A reset starts set up at Full visible: no setup question (D66). The
     // pending cleanup stays visible in settings.
@@ -360,12 +360,12 @@ describe('ReadScopeController reset and safety', () => {
     const harness = setup({ stored: setupComplete('standard'), cleanupRemaining: 2 });
     await harness.controller.resetAllExtensionSettings();
     expect(harness.elements.resetSettingsStatus.textContent)
-      .toContain('2 optional permission entries remain');
+      .toContain('2 optional permission entries are still there');
 
     // Storing the finished string would strand the count in the old language;
     // relocalize() re-renders the stored frame and re-fills the argument.
     harness.translations.set(
-      'Core settings are reset. {0} optional permission entries remain and cleanup is still pending; choose Retry cleanup.',
+      'Core settings are reset. {0} optional permission entries are still there and cleanup is not complete. Select Retry cleanup.',
       'Ajustes básicos restablecidos. Quedan {0} permisos opcionales; elige Reintentar limpieza.',
     );
     harness.controller.relocalize();
@@ -385,7 +385,7 @@ describe('ReadScopeController reset and safety', () => {
       targetReadScope: target,
       targetFingerprint: replicaReadScopeFingerprint(target),
     }, (message) => replies.push(message));
-    expect(harness.events).toContain('purge:Preparing narrower read settings…');
+    expect(harness.events).toContain('purge:Simul prepares narrower read settings…');
     expect(replies).toEqual([
       { kind: 'simul:preference-safety-v1:ack', version: 1, requestId: 'r1' },
     ]);
