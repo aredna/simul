@@ -345,6 +345,49 @@ describe('image file pixel reader', () => {
     expect(environment.fetched).toEqual([]);
   });
 
+  it('draws the mirror copy in its file\'s own pixels, past a srcset density (D235)', async () => {
+    // A 2x file reports a natural size of 400 while its pixels are 800.
+    const mirror = mirrorImage(
+      'https://cdn.example.test/kv-400.png 1x, https://cdn.example.test/kv-800.png 2x',
+    );
+    const readFile = vi.fn(async () => fileEvidence());
+    const bitmap = { bitmap: true } as unknown as CanvasImageSource;
+    const close = vi.fn();
+    const draws: number[][] = [];
+    const environment: ImageFilePixelReaderEnvironment = {
+      ...readerEnvironment({ readFile, mirror }),
+      bitmapOf: async () => ({ image: bitmap, width: 800, height: 800, close }),
+    };
+    const render = environment.render;
+    const surfaces = render.createSurface;
+    const recording: ImageFilePixelReaderEnvironment = {
+      ...environment,
+      render: {
+        ...render,
+        createSurface: (width, height) => {
+          const surface = surfaces(width, height);
+          return {
+            ...surface,
+            getContext: () => ({
+              drawImage: (image: CanvasImageSource, ...rest: number[]) => {
+                expect(image).toBe(bitmap);
+                draws.push(rest);
+              },
+            }),
+          } as ReturnType<typeof surfaces>;
+        },
+      },
+    };
+
+    const pixels = await readImageFilePixels(descriptor, recording);
+
+    expect(pixels?.source).toBe('mirror');
+    // The painted part measured in the file's 800 pixels, where the natural
+    // size of 400 cut the top left quarter of the picture.
+    expect(draws[0]?.slice(0, 4)).toEqual([0, 200, 800, 400]);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('asks the tab for its pixels when the mirror shows another picture', async () => {
     const mirror = mirrorImage();
     const readFile = vi.fn(async (_descriptor: SourceImageDescriptor, includePixels: boolean) =>

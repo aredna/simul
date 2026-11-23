@@ -1431,16 +1431,26 @@ export const encodeImageRegionAsPngDataUrl: ImageRegionEncoder = async (
   image,
   region,
 ) => {
+  let bitmap: ImageBitmap | undefined;
   try {
     const canvas = new OffscreenCanvas(region.width, region.height);
     const context = canvas.getContext('2d');
     if (!context) return undefined;
+    // The region is in the image's natural size, which `srcset` divides by
+    // the file's density (a 1920 px file chosen at 1.5x reports 1280), while
+    // `drawImage` reads an `<img>` in the file's own pixels: it drew the top
+    // left two thirds of the picture, stretched (D235). The decoded file's
+    // pixels are drawn instead, the region scaled to them.
+    bitmap = await createImageBitmap(image);
+    const scaleX = bitmap.width / image.naturalWidth;
+    const scaleY = bitmap.height / image.naturalHeight;
+    if (!(scaleX > 0) || !(scaleY > 0)) return undefined;
     context.drawImage(
-      image,
-      region.sourceX,
-      region.sourceY,
-      region.sourceWidth,
-      region.sourceHeight,
+      bitmap,
+      region.sourceX * scaleX,
+      region.sourceY * scaleY,
+      region.sourceWidth * scaleX,
+      region.sourceHeight * scaleY,
       0,
       0,
       region.width,
@@ -1458,6 +1468,8 @@ export const encodeImageRegionAsPngDataUrl: ImageRegionEncoder = async (
     });
   } catch {
     return undefined;
+  } finally {
+    bitmap?.close();
   }
 };
 

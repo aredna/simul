@@ -51,6 +51,12 @@ export interface ImageFilePixelReaderEnvironment {
     signal?: AbortSignal,
   ) => Promise<Blob | undefined>;
   readonly decode: (blob: Blob) => Promise<DecodedImageFile>;
+  /**
+   * The mirror's `<img>` as its file's own pixels (D235): its natural size
+   * is divided by a `srcset` density, which `drawImage` does not apply.
+   * Without it, the element is drawn at its natural size.
+   */
+  readonly bitmapOf?: (image: HTMLImageElement) => Promise<DecodedImageFile>;
   readonly render: ImageFileRenderEnvironment;
   readonly maxPixels: number;
 }
@@ -91,15 +97,28 @@ export async function readImageFilePixels(
       width: mirror.naturalWidth,
       height: mirror.naturalHeight,
     });
-    const rendered = placement && await tryRender(
-      mirror,
-      mirror.naturalWidth,
-      mirror.naturalHeight,
-      placement,
-      environment,
-      signal,
-    );
-    if (rendered) return withSource(rendered, 'mirror', language);
+    let decoded: DecodedImageFile | undefined;
+    try {
+      decoded = placement && environment.bitmapOf
+        ? await environment.bitmapOf(mirror)
+        : undefined;
+    } catch (error) {
+      if (isAbort(error, signal)) throw error;
+      decoded = undefined;
+    }
+    try {
+      const rendered = placement && await tryRender(
+        decoded?.image ?? mirror,
+        decoded?.width ?? mirror.naturalWidth,
+        decoded?.height ?? mirror.naturalHeight,
+        placement,
+        environment,
+        signal,
+      );
+      if (rendered) return withSource(rendered, 'mirror', language);
+    } finally {
+      decoded?.close();
+    }
   }
 
   if (!file.pixels && mirrorReadable) {
@@ -343,6 +362,15 @@ export function createBrowserImageFilePixelReaderEnvironment(
       });
     },
     fetchImage: fetchImageFile,
+    bitmapOf: async (image) => {
+      const bitmap = await createImageBitmap(image);
+      return {
+        image: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        close: () => bitmap.close(),
+      };
+    },
     decode: async (blob) => {
       const bitmap = await createImageBitmap(blob);
       return {
