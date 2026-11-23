@@ -801,6 +801,65 @@ describe('SourceFollower in a detached window', () => {
     expect(harness.state.activeFollowRequest).toBeUndefined();
   });
 
+  it('follows the tab Chrome brings forward after a close in a window without focus (D236)', async () => {
+    // A click on a background window's tab close button closes the tab and
+    // leaves the focus where it was, here in the companion window.
+    const harness = setup({
+      detached: { tabId: 4, windowId: 1 },
+      popoutTabMode: 'active',
+      panelWindowId: 9,
+      tabs: [page(5, 1, 'https://b.example/')],
+    });
+    vi.mocked(harness.browser.getWindow).mockImplementation(async (windowId) =>
+      ({ id: windowId, type: 'normal', focused: windowId === 9 }));
+    harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    harness.follower.handleTabRemoved(4, { windowId: 1, isWindowClosing: false });
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledExactlyOnceWith({
+      identity: { tabId: 5, windowId: 1, url: 'https://b.example/' },
+      reason: 'navigation',
+    });
+    expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+    expect(harness.state.activeFollowRequest).toBeUndefined();
+
+    // A switch to another tab of a window without focus is still not
+    // followed: only the tab that replaces a closed one is.
+    harness.tabs.set(6, page(6, 1, 'https://c.example/'));
+    harness.follower.handleTabActivated(6, 1);
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledOnce();
+
+    // Chrome reports the neighbor's activation right after the removal; that
+    // activation replaces the recovery and must not wait for focus either.
+    harness.state.followedPageIdentity = { tabId: 5, windowId: 1, url: 'https://b.example/' };
+    harness.tabs.delete(5);
+    harness.follower.handleTabRemoved(5, { windowId: 1, isWindowClosing: false });
+    harness.follower.handleTabActivated(6, 1);
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledTimes(2);
+    expect(harness.queueCapture).toHaveBeenLastCalledWith({
+      identity: { tabId: 6, windowId: 1, url: 'https://c.example/' },
+      reason: 'navigation',
+    });
+    expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+    expect(harness.state.activeFollowRequest).toBeUndefined();
+    // Once that follow is done, a switch in the window without focus is
+    // ignored again.
+    harness.tabs.set(8, page(8, 1, 'https://d.example/'));
+    harness.follower.handleTabActivated(8, 1);
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledTimes(2);
+
+    // The page left in its place is not a web page: the closed one is cleared.
+    harness.tabs.clear();
+    harness.tabs.set(7, page(7, 1, 'chrome://newtab/'));
+    harness.state.followedPageIdentity = { tabId: 5, windowId: 1, url: 'https://b.example/' };
+    harness.follower.handleTabRemoved(5, { windowId: 1, isWindowClosing: false });
+    await vi.runAllTimersAsync();
+    expect(harness.invalidateCompanion).toHaveBeenCalledOnce();
+    expect(harness.queueCapture).toHaveBeenCalledTimes(2);
+  });
+
   it('releases the follow marker when a superseded recovery reaches its microtask', async () => {
     const harness = setup({
       detached: { tabId: 4, windowId: 1 },

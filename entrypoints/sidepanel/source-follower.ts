@@ -113,6 +113,12 @@ export interface SourceFollowerEnvironment {
  */
 export class SourceFollower {
   #navigationTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The window whose followed tab just closed, while the follow that replaces
+   * it runs. Chrome reports the neighbor it brings forward there after the
+   * removal; that activation takes over without asking for focus (D236).
+   */
+  #closedSourceRecovery: { readonly windowId: number; readonly requestId: number } | undefined;
 
   constructor(private readonly environment: SourceFollowerEnvironment) {}
 
@@ -325,6 +331,7 @@ export class SourceFollower {
     windowId: number,
     knownTab?: FollowerTab,
     existingRequest?: CurrencyToken,
+    requireFocus = true,
   ): Promise<void> {
     const state = this.#state;
     const { currency, browser } = this.environment;
@@ -343,9 +350,11 @@ export class SourceFollower {
     // A pending navigation refresh stays armed (see handleWindowFocusChanged);
     // queueCapture cancels it once a different page is followed.
     try {
-      const sourceWindow = await browser.getWindow(windowId);
-      if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
-      if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
+      if (requireFocus) {
+        const sourceWindow = await browser.getWindow(windowId);
+        if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
+        if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
+      }
       const tab = knownTab ?? await browser.getTab(tabId);
       if (
         tab.url === undefined || !isSupportedPage(tab.url)
@@ -408,7 +417,17 @@ export class SourceFollower {
         windowId,
       )
     ) {
-      void this.followActivatedSourceTab(tabId, windowId);
+      const recovery = this.#closedSourceRecovery;
+      const replacesClosedSource = recovery?.windowId === windowId &&
+        state.activeFollowRequest?.id === recovery.requestId;
+      if (replacesClosedSource) this.#closedSourceRecovery = undefined;
+      void this.followActivatedSourceTab(
+        tabId,
+        windowId,
+        undefined,
+        undefined,
+        !replacesClosedSource,
+      );
     }
   }
 
@@ -554,12 +573,14 @@ export class SourceFollower {
     )) {
       const request = this.environment.currency.begin('identity');
       state.activeFollowRequest = request;
+      this.#closedSourceRecovery = { windowId: removeInfo.windowId, requestId: request.id };
       this.#clearNavigationTimer();
       queueMicrotask(() => {
         void this.#followFocusedBrowserWindow(
           removeInfo.windowId,
           request,
           UI_STRINGS.statusSourceClosedNoNeighbor,
+          true,
         );
       });
       return;
@@ -651,10 +672,18 @@ export class SourceFollower {
     }
   }
 
+  /**
+   * `sourceClosed`: the followed tab closed in this window, and the tab Chrome
+   * brings forward there replaces it whether or not the window has focus. A
+   * click on a background window's tab close button closes it without
+   * focusing that window (macOS), and the closed tab's page stayed shown as
+   * live (D236). Anything that cannot be followed clears the page.
+   */
   async #followFocusedBrowserWindow(
     windowId: number,
     request: CurrencyToken,
     missingTabMessage?: string,
+    sourceClosed = false,
   ): Promise<void> {
     const state = this.#state;
     const { currency, browser } = this.environment;
@@ -667,14 +696,16 @@ export class SourceFollower {
     }
     state.activeFollowRequest = request;
     try {
-      const sourceWindow = await browser.getWindow(windowId);
-      if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
-      if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
+      if (!sourceClosed) {
+        const sourceWindow = await browser.getWindow(windowId);
+        if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
+        if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
+      }
       const tab = await browser.queryActiveTab(windowId);
       if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
       state.detachedSourceWindowId = windowId;
       if (tab?.id !== undefined) {
-        await this.followActivatedSourceTab(tab.id, windowId, tab, request);
+        await this.followActivatedSourceTab(tab.id, windowId, tab, request, !sourceClosed);
       } else if (missingTabMessage && currency.isCurrent(request)) {
         this.environment.invalidateCompanion(missingTabMessage);
       }
@@ -691,6 +722,9 @@ export class SourceFollower {
   #finishActiveFollowRequest(request: CurrencyToken): void {
     if (this.#state.activeFollowRequest?.id === request.id) {
       this.#state.activeFollowRequest = undefined;
+    }
+    if (this.#closedSourceRecovery?.requestId === request.id) {
+      this.#closedSourceRecovery = undefined;
     }
   }
 
