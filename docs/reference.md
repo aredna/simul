@@ -595,7 +595,7 @@ executable code, or cloud translation/OCR integration.
 | `storage` | Save settings and explicit automatic-translation scopes. |
 | `offscreen` | Run packaged local OCR away from the visible companion UI. |
 
-Since 0.6.7 (D166), `<all_urls>` is a **required** host permission. Thus
+Since 0.7.0 (D166), `<all_urls>` is a **required** host permission. Thus
 the panel follows each page and tab that the reader opens, and the reader
 does not have to click the Simul icon on each new site. Chrome allows the
 reader to withhold it (Site access: On click, or chosen sites). Then Simul

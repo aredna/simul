@@ -2,6 +2,8 @@ import { SIMUL_EDITION, type SimulEdition } from './edition';
 
 export interface ExtensionBuildIdentity {
   readonly version: string;
+  /** The manifest's version_name ("0.7.0 beta"), or the version. */
+  readonly versionName: string;
   readonly label: string;
   readonly companionReadyMessage: string;
   readonly backgroundReadyMessage: string;
@@ -15,6 +17,7 @@ export function createExtensionBuildIdentity(
   const label = `Build ${versionName || version}`;
   return Object.freeze({
     version,
+    versionName: versionName || version,
     label,
     companionReadyMessage: `[Simul] Companion ready. ${label}.`,
     backgroundReadyMessage:
@@ -23,14 +26,15 @@ export function createExtensionBuildIdentity(
 }
 
 /**
- * What the options header shows: the plain version in the public edition
- * ("0.6.5"), the full build identity in the dev edition.
+ * What the options header shows: the version name in the public edition
+ * ("0.7.0 beta": the beta mark stays, D249), the full build identity in the
+ * dev edition.
  */
 export function extensionBuildHeaderText(
   identity: ExtensionBuildIdentity,
   edition: SimulEdition,
 ): string {
-  return edition === 'public' ? identity.version : identity.label;
+  return edition === 'public' ? identity.versionName : identity.label;
 }
 
 export function renderExtensionBuildIdentity(

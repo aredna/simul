@@ -15,7 +15,8 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20261121.25';
+// 0.7.0 is released as "0.7.0 beta", with no build number (owner, D249).
+const betaBuildSuffix = 'beta';
 // `SIMUL_EDITION=dev` builds the owner's edition with every option; anything
 // else builds the public edition (lib/edition.ts).
 const simulEdition = parseSimulEdition(process.env.SIMUL_EDITION);

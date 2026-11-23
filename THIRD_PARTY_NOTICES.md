@@ -4,7 +4,7 @@ This file covers third-party material distributed in Simul's ready-to-load
 Chrome extension. It does not grant a license to original Simul material;
 see [LICENSE](LICENSE).
 
-The inventory is derived from what the Simul 0.6.7 extension artifact
+The inventory is derived from what the Simul 0.7.0 extension artifact
 actually contains: the locked production dependency graph, the pinned OCR and
 PDF asset manifests, the modules tesseract.js bundled into its prebuilt
 Worker (read from the Worker's published source map), and the runtime code
