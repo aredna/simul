@@ -4,16 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
-    <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-BQBlNeOF.js"></script>
+    <title>Translation panel</title>
+    <script type="module" crossorigin src="/chunks/sidepanel-BYvBlGn1.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/rolldown-runtime-BCiCTKAo.js">
     <link rel="modulepreload" crossorigin href="/chunks/settle-Ru5p8R9i.js">
     <link rel="modulepreload" crossorigin href="/chunks/trusted-types-VJr5Joeu.js">
     <link rel="stylesheet" crossorigin href="/assets/sidepanel-CX9DmG3G.css">
   </head>
   <body>
-    <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
-      <span id="toolbar-progress" class="toolbar-progress" role="progressbar" aria-label="Companion processing" aria-valuemin="0" aria-valuemax="100" hidden>
+    <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation panel controls" data-ui-aria-label="Translation panel controls">
+      <span id="toolbar-progress" class="toolbar-progress" role="progressbar" aria-label="Panel activity" aria-valuemin="0" aria-valuemax="100" hidden>
         <span id="toolbar-progress-fill" class="toolbar-progress-fill"></span>
       </span>
       <button id="compact-refresh" class="toolbar-button" type="button" aria-label="Rebuild mirror" title="Rebuild mirror">
@@ -21,7 +21,7 @@
         <span id="refresh-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
       </button>
       <div class="toolbar-language-group" role="group" aria-label="Page translation languages" data-ui-aria-label="Page translation languages">
-        <div class="toolbar-language-control" title="Language used by the source website" data-ui-title="Language used by the source website">
+        <div class="toolbar-language-control" title="Language of the source website" data-ui-title="Language of the source website">
           <label for="source-language" data-ui-label="From">From</label>
           <button id="toolbar-auto-detect" class="toolbar-button toolbar-auto-detect" type="button" aria-pressed="false" title="Set From language to Auto-detect">
             <span aria-hidden="true">[A]</span>
@@ -29,7 +29,7 @@
           <select id="source-language" aria-label="From language" data-ui-aria-label="From language"></select>
         </div>
         <button id="swap-languages" class="toolbar-button toolbar-swap" type="button" aria-label="Swap languages" data-ui-aria-label="Swap languages" title="Swap languages" data-ui-title="Swap languages">⇄</button>
-        <label class="toolbar-language-control" title="Language Simul translates the page into" data-ui-title="Language Simul translates the page into">
+        <label class="toolbar-language-control" title="Language that Simul translates the page into" data-ui-title="Language that Simul translates the page into">
           <span data-ui-label="To">To</span>
           <select id="target-language" aria-label="To language" data-ui-aria-label="To language"></select>
         </label>
@@ -37,10 +37,10 @@
       <button id="toolbar-size-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Change mirror size" title="Change mirror size">
         <span id="toolbar-size-label" data-ui-label="Fit">Fit</span>
       </button>
-      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="OCR image text translation" data-ui-aria-label="OCR image text translation" aria-pressed="false" title="Image text translation is off">
+      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="OCR image text translation" data-ui-aria-label="OCR image text translation" aria-pressed="false" title="Image text translation is off. Select to enable it.">
         <span id="toolbar-ocr-label" data-ui-label="OCR Off">OCR Off</span>
       </button>
-      <button id="toolbar-tab-follow" class="toolbar-button toolbar-text-button" type="button" aria-label="Follow active tab" data-ui-aria-label="Follow active tab" aria-pressed="true" title="Following the active browser tab. Click to pin the mirror to the tab it shows.">
+      <button id="toolbar-tab-follow" class="toolbar-button toolbar-text-button" type="button" aria-label="Follow active tab" data-ui-aria-label="Follow active tab" aria-pressed="true" title="The mirror follows the active browser tab. Select to pin the mirror to the tab that it shows.">
         <span id="toolbar-tab-follow-label" data-ui-label="Follow">Follow</span>
       </button>
       <button id="toggle-quick-translate" class="toolbar-button toolbar-button--translate" type="button" aria-label="Open quick translation" data-ui-aria-label="Open quick translation" aria-expanded="false" aria-controls="quick-translator" title="Quick translation" data-ui-title="Quick translation">
@@ -50,7 +50,7 @@
         ⚙
         <span id="settings-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
       </button>
-      <button id="open-popout" class="toolbar-button" type="button" aria-label="Open detached companion window" data-ui-aria-label="Open detached companion window" title="Open detached window" data-ui-title="Open detached window">
+      <button id="open-popout" class="toolbar-button" type="button" aria-label="Open the panel in a detached window" data-ui-aria-label="Open the panel in a detached window" title="Open detached window" data-ui-title="Open detached window">
         ↗
       </button>
       <span id="replica-mode-badge" class="replica-state-label" role="status" aria-live="polite" hidden></span>
@@ -67,7 +67,7 @@
     <dialog id="reset-settings-dialog" class="reset-settings-dialog" aria-modal="true" aria-labelledby="reset-settings-dialog-title" aria-describedby="reset-settings-dialog-description">
       <form method="dialog">
         <h2 id="reset-settings-dialog-title" data-ui-label="Reset all extension settings?">Reset all extension settings?</h2>
-        <p id="reset-settings-dialog-description" data-ui-label="This resets Simul settings. Site access set in Chrome, the packaged OCR files and Chrome translation models stay as they are.">This resets Simul settings. Site access set in Chrome, the packaged OCR files and Chrome translation models stay as they are.</p>
+        <p id="reset-settings-dialog-description" data-ui-label="This resets the Simul settings. It does not change the Site access set in Chrome, the packaged OCR files or the Chrome translation models.">This resets the Simul settings. It does not change the Site access set in Chrome, the packaged OCR files or the Chrome translation models.</p>
         <div class="action-row">
           <button value="cancel" type="submit" data-ui-label="Cancel">Cancel</button>
           <button id="confirm-reset-all-settings" class="danger" value="reset" type="submit" data-ui-label="Reset settings">Reset settings</button>
@@ -85,11 +85,11 @@
       </div>
 
       <!-- First under the heading: the dot on the options button points here (D240). -->
-      <p id="status" class="status" role="status" aria-live="polite">Reading the source page…</p>
+      <p id="status" class="status" role="status" aria-live="polite">Simul reads the source page…</p>
       <p id="detected-language" class="microcopy" hidden></p>
 
       <div id="settings-grid" class="settings-grid settings-grid--common">
-        <label title="Choose whether Simul translates automatically on this site or every authorized site." data-ui-title="Choose whether Simul translates automatically on this site or every authorized site.">
+        <label title="Select if Simul translates automatically on this site or on all authorized sites." data-ui-title="Select if Simul translates automatically on this site or on all authorized sites.">
           <span data-ui-label="Automatic translation">Automatic translation</span>
           <select id="auto-translate-mode">
             <option value="off" data-ui-label="Off">Off</option>
@@ -97,7 +97,7 @@
             <option value="all" data-ui-label="All sites">All sites</option>
           </select>
         </label>
-        <label title="Fit the source width, preserve its original size, or use a custom zoom." data-ui-title="Fit the source width, preserve its original size, or use a custom zoom.">
+        <label title="Fit the source width, keep its original size, or use a custom zoom." data-ui-title="Fit the source width, keep its original size, or use a custom zoom.">
           <span data-ui-label="Size">Size</span>
           <select id="mirror-display-mode">
             <option value="fit" data-ui-label="Fit width">Fit width</option>
@@ -106,7 +106,7 @@
           </select>
         </label>
         
-        <label class="check-label" title="Keep the mirror near the same reading position as the source page scrolls." data-ui-title="Keep the mirror near the same reading position as the source page scrolls.">
+        <label class="check-label" title="Keep the mirror near the same reading position when the source page scrolls." data-ui-title="Keep the mirror near the same reading position when the source page scrolls.">
           <input id="sync-scroll" type="checkbox">
           <span data-ui-label="Follow source scrolling">Follow source scrolling</span>
         </label>
@@ -145,7 +145,7 @@
           <input type="radio" name="read-profile" value="full-visible">
           <span>
             <span data-ui-label="Full visible">Full visible</span>
-            <small data-ui-label="Adds what is filled in forms and text editors.">Adds what is filled in forms and text editors.</small>
+            <small data-ui-label="Adds the values in forms and text editors.">Adds the values in forms and text editors.</small>
           </span>
         </label>
         <small class="microcopy" data-ui-label="Passwords, one-time codes and card numbers are never read.">Passwords, one-time codes and card numbers are never read.</small>
@@ -158,14 +158,14 @@
       <details id="advanced-options" class="options-group">
         <summary data-ui-label="Advanced">Advanced</summary>
         <div id="advanced-options-grid" class="settings-grid">
-          <label title="Allow translated text to expand or preserve the source element geometry." data-ui-title="Allow translated text to expand or preserve the source element geometry.">
+          <label title="Allow translated text to expand, or keep the geometry of the source elements." data-ui-title="Allow translated text to expand, or keep the geometry of the source elements.">
           <span data-ui-label="Translated text">Translated text</span>
           <select id="text-layout-mode">
             <option value="adaptive" data-ui-label="Let boxes grow">Let boxes grow</option>
             <option value="faithful" data-ui-label="Keep geometry">Keep geometry</option>
           </select>
         </label>
-          <label title="Use the last companion view or always open a particular view." data-ui-title="Use the last companion view or always open a particular view.">
+          <label title="Use the last view or always open a specific view." data-ui-title="Use the last view or always open a specific view.">
             <span data-ui-label="Toolbar opens">Toolbar opens</span>
             <select id="launch-behavior">
               <option value="last-used" data-ui-label="Last used view">Last used view</option>
@@ -184,12 +184,12 @@
       
 
       <div id="progress-region" class="progress-region" hidden>
-        <label id="progress-label" for="progress">Preparing translation…</label>
+        <label id="progress-label" for="progress">Simul prepares the translation…</label>
         <progress id="progress" max="1" value="0"></progress>
       </div>
       <p id="capture-notes" class="microcopy" hidden></p>
-      <p id="placement-guidance" class="microcopy" data-ui-label="Chrome places native side panels globally. Use the ↗ button for a detached companion window." hidden>
-        Chrome places native side panels globally. Use the ↗ button for a detached companion window.
+      <p id="placement-guidance" class="microcopy" data-ui-label="Chrome places native side panels globally. For a detached window, use the ↗ button." hidden>
+        Chrome places native side panels globally. For a detached window, use the ↗ button.
       </p>
     </section>
 
@@ -224,7 +224,7 @@
 
     <main>
       <section id="replica-status" class="replica-status" aria-label="Page mirror status" data-ui-aria-label="Page mirror status" aria-busy="false">
-        <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
+        <div class="empty-state"><p>Simul prepares the live read-only mirror…</p></div>
       </section>
       <section id="replica-preview" class="replica-preview" aria-label="Live page mirror" data-ui-aria-label="Live page mirror" aria-busy="false" aria-hidden="true" hidden></section>
       <section id="pdf-view" class="pdf-view" tabindex="0" aria-label="PDF pages" data-ui-aria-label="PDF pages" aria-busy="false" hidden></section>

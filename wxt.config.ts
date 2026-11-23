@@ -15,7 +15,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20261121.20';
+const betaBuildSuffix = 'beta v.20261121.21';
 // `SIMUL_EDITION=dev` builds the owner's edition with every option; anything
 // else builds the public edition (lib/edition.ts).
 const simulEdition = parseSimulEdition(process.env.SIMUL_EDITION);
@@ -224,7 +224,7 @@ export default defineConfig({
   manifest: {
     name: 'Simul',
     description:
-      'Follow a page in a live read-only mirror and translate it on-device in Chrome.',
+      'Shows a live, read-only mirror of the page and translates it on your device in Chrome.',
     // 141 has sidePanel.close(), which closes one window's side panel
     // (D176).
     minimum_chrome_version: '141',
