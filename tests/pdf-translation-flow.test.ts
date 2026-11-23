@@ -599,7 +599,8 @@ describe('Scanned PDF pages, end to end', () => {
     mixed.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(mixed.statuses.at(-1))
       .toBe('Scanned pages were not read: Simul has no OCR model for Thai.'));
-    expect(mixed.shown).toHaveLength(4);
+    // The text pages are English, which From = Thai leaves as written (D234).
+    expect(mixed.shown).toEqual([]);
     expect(scanned.ocrCalls).toEqual([]);
     expect(mixed.ocrCalls).toEqual([]);
   });
@@ -741,7 +742,8 @@ describe('Scanned PDF pages, end to end', () => {
       expect(harness.state.resolvedSourceLanguage).toBe('ja');
       expect(harness.detected.at(-1)).toBe(UI_STRINGS.statusDetectedFromScannedPages);
       expect(harness.shown).toContain('EN:これはにほんごのぶんしょうです');
-      expect(harness.shown).toContain('EN:H1 header.');
+      // The English headers hold no Japanese letter: left as written (D234).
+      expect(harness.shown).not.toContain('EN:H1 header.');
     });
 
     it('lets the text pages name the language when the PDF has some', async () => {

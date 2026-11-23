@@ -15,6 +15,7 @@ import type {
   TranslationSession,
 } from '../translation-provider';
 import { TranslationMemory } from './translation-memory';
+import { textMayBeInSourceLanguage } from './source-script';
 import { yieldToMain } from '../browser-scheduling';
 import { settle } from '../settle';
 
@@ -290,7 +291,7 @@ export class ReplicaTranslationCoordinator {
     let candidateCount = 0;
     // In the surface's order, so the queue's caps drop the least urgent.
     for (const record of this.#ordered(snapshot.records)) {
-      if (!isTranslatableRecord(record)) continue;
+      if (!isTranslatableRecord(record, this.#pair)) continue;
       candidateCount += 1;
       this.#enqueue({
         record,
@@ -332,7 +333,7 @@ export class ReplicaTranslationCoordinator {
     const enqueueNew = (): number => {
       let added = 0;
       for (const record of this.#ordered(snapshot.records)) {
-        if (!isTranslatableRecord(record) || queued.has(record.nodeId)) continue;
+        if (!isTranslatableRecord(record, this.#pair) || queued.has(record.nodeId)) continue;
         queued.add(record.nodeId);
         added += 1;
         this.#enqueue({
@@ -386,7 +387,7 @@ export class ReplicaTranslationCoordinator {
             const before = shown.get(record.nodeId);
             if (!before || !sameTextRecord(before, record)) continue;
             queued.add(record.nodeId);
-            if (isTranslatableRecord(record)) kept += 1;
+            if (isTranslatableRecord(record, this.#pair)) kept += 1;
           }
           shown.clear();
           Object.assign(counts, {
@@ -441,7 +442,7 @@ export class ReplicaTranslationCoordinator {
     if (this.#disposed || !this.#session || !current || !pairKey) return;
     let queued = false;
     for (const record of current.records.values()) {
-      if (!isTranslatableRecord(record)) continue;
+      if (!isTranslatableRecord(record, this.#pair)) continue;
       queued = this.#enqueue({
         record,
         replayLease: current.replayLease,
@@ -501,7 +502,7 @@ export class ReplicaTranslationCoordinator {
         this.#drop(change.nodeId);
         continue;
       }
-      if (!isTranslatableRecord(change.record)) continue;
+      if (!isTranslatableRecord(change.record, this.#pair)) continue;
       queued = this.#enqueue({
         record: change.record,
         replayLease: commit.replayLease,
@@ -971,8 +972,18 @@ export function translationPairKey(pair: TranslationPair): string {
   return `${pair.sourceLanguage}>${pair.targetLanguage}`;
 }
 
-function isTranslatableRecord(record: ReplicaSourceTextRecord): boolean {
-  return record.source.trim().length > 0;
+/**
+ * Whether a text goes to the translator: not white space alone, and holding
+ * a letter of the source language's script (D234), so a text the page wrote
+ * in another script (an English label on a Japanese page) is left as written.
+ */
+function isTranslatableRecord(
+  record: ReplicaSourceTextRecord,
+  pair: TranslationPair | undefined,
+): boolean {
+  const text = record.source.trim();
+  return text.length > 0 &&
+    (!pair || textMayBeInSourceLanguage(text, pair.sourceLanguage));
 }
 
 export function splitBoundaryWhitespace(source: string): {

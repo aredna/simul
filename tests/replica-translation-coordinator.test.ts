@@ -355,6 +355,45 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(translate).toHaveBeenCalledWith('Visible', expect.anything());
   });
 
+  it('leaves a text with no letter of the source language as the page wrote it (D234)', async () => {
+    const surface = new FakeSurface([
+      record(4, 1, 'アカウントを選択'),
+      record(5, 1, 'Choose an account'),
+      record(6, 1, 'iPhone 13 Proを購入'),
+      record(7, 1, '会員登録'),
+      record(8, 1, '¥15,800'),
+    ]);
+    const translate = vi.fn(async (source: string) => `en:${source}`);
+    const { provider } = fakeProvider(translate);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+    const japanese: TranslationPair = { sourceLanguage: 'ja', targetLanguage: 'en' };
+
+    const result = await coordinator.translateCurrent(japanese);
+    coordinator.handleSourceCommit({
+      document: documentIdentity,
+      documentLanguageChanged: false,
+      replayLease: 1,
+      records: surface.records,
+      changes: [
+        { kind: 'upsert', record: record(9, 2, 'Sign in') },
+        { kind: 'upsert', record: record(10, 2, 'ログイン') },
+      ],
+      reason: 'batch',
+    });
+
+    await vi.waitFor(() => expect(translate).toHaveBeenCalledTimes(4));
+    expect(result).toMatchObject({ total: 3, completed: 3 });
+    expect(translate.mock.calls.map(([source]) => source)).toEqual([
+      'アカウントを選択', 'iPhone 13 Proを購入', '会員登録', 'ログイン',
+    ]);
+    expect(surface.projections.map(({ nodeId }) => nodeId)).not.toContain(5);
+
+    // From English, the same English label is translated.
+    translate.mockClear();
+    await coordinator.translateCurrent({ sourceLanguage: 'en', targetLanguage: 'ja' });
+    expect(translate.mock.calls.map(([source]) => source)).toEqual(['Choose an account', 'iPhone 13 Proを購入']);
+  });
+
   it('preserves exact boundary whitespace while translating only the text core', async () => {
     const source = '\n\u00a0Hola \u00a0';
     const surface = new FakeSurface([record(4, 1, source)]);
@@ -471,8 +510,8 @@ describe('ReplicaTranslationCoordinator', () => {
 
   it('reports initial job and character limit omissions as overflow', async () => {
     const surface = new FakeSurface([
-      record(4, 1, '1234'),
-      record(5, 1, '56'),
+      record(4, 1, 'abcd'),
+      record(5, 1, 'ef'),
       record(6, 1, 'a'),
     ]);
     const { provider } = fakeProvider(async (source) => `en:${source}`);
@@ -555,8 +594,8 @@ describe('ReplicaTranslationCoordinator', () => {
     await coordinator.translateCurrent(pair);
     surface.projections.length = 0;
     surface.records = [
-      record(10, 1, '1234'),
-      record(11, 1, '56'),
+      record(10, 1, 'abcd'),
+      record(11, 1, 'ef'),
       record(12, 1, 'a'),
     ];
 
