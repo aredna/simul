@@ -73,6 +73,8 @@ describe('a frame of another site in the mirror (D246)', () => {
     expect(css).toContain('height:44px!important');
     expect(css).toContain('margin:12px 0px 0px 0px!important');
     expect(css).toContain('contain:layout paint!important');
+    // Not cut to its container: Google's button frame is wider (D247).
+    expect(css).not.toContain('max-width');
     expect(htmlMirrorFrameBoxCss({ ...BOX, block: false })).toContain('display:inline-block');
   });
 

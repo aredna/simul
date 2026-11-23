@@ -2434,7 +2434,9 @@ export function protectIsolatedOpaquePlaceholder(
 /**
  * A placeholder that holds the space its element takes in the tab (D239):
  * blank, of that border box and margins, a block or an inline box as the
- * element was, never wider than what holds it. Written after the rule that
+ * element was, as wide as in the tab even where what holds it is narrower
+ * (a frame can be wider on purpose, as Google's sign-in button is, D247;
+ * an iframe does not shrink to fit). Written after the rule that
  * hides every placeholder, at the same specificity, so it wins.
  */
 function isolatedHeldBoxCss(box: HtmlMirrorHeldBox): string {
@@ -2442,7 +2444,7 @@ function isolatedHeldBoxCss(box: HtmlMirrorHeldBox): string {
   const [top, right, bottom, left] = box.margin;
   return `:host{display:${box.block ? 'block' : 'inline-block'}!important;` +
     `box-sizing:border-box!important;width:${px(box.width)}!important;` +
-    `height:${px(box.height)}!important;max-width:100%!important;` +
+    `height:${px(box.height)}!important;` +
     `margin:${px(top)} ${px(right)} ${px(bottom)} ${px(left)}!important;` +
     'vertical-align:baseline!important;overflow:hidden!important}';
 }

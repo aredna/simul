@@ -362,6 +362,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(css).toContain('width:388px!important');
     expect(css).toContain('height:44px!important');
     expect(css).toContain('margin:12px 0px 0px 0px!important');
+    expect(css).not.toContain('max-width');
 
     // A box that is not exactly the four facts is refused with the page.
     for (const bad of [

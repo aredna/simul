@@ -301,14 +301,17 @@ export function htmlMirrorFrameInsetNode(
 /**
  * The frame's box: what the tab gives the frame, and nothing the page's
  * style gives the mirror's `<div>`. Important declarations in a root
- * outrank the page's at the boundary.
+ * outrank the page's at the boundary. Its width is the tab's even where its
+ * container is narrower: a frame can be wider than its container on purpose
+ * (Google's sign-in button frame is 20 px wider, with -10 px margins), and an
+ * iframe does not shrink to fit (D247).
  */
 export function htmlMirrorFrameBoxCss(box: HtmlMirrorHeldBox): string {
   const px = (value: number) => `${Number.isFinite(value) ? value : 0}px`;
   const [top, right, bottom, left] = box.margin;
   return `:host{all:initial!important;display:${box.block ? 'block' : 'inline-block'}!important;` +
     `box-sizing:border-box!important;width:${px(box.width)}!important;` +
-    `height:${px(box.height)}!important;max-width:100%!important;` +
+    `height:${px(box.height)}!important;` +
     `margin:${px(top)} ${px(right)} ${px(bottom)} ${px(left)}!important;` +
     'vertical-align:baseline!important;overflow:hidden!important;' +
     'position:relative!important;contain:layout paint!important}';
