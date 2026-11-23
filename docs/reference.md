@@ -1,360 +1,417 @@
 # Simul reference
 
-Detail behind the [README](../README.md): how the mirror works, the privacy
-boundary, permissions, fidelity limits, troubleshooting, and development.
+This document gives the detail behind the [README](../README.md): how the
+mirror works, the privacy boundary, permissions, fidelity limits,
+troubleshooting, and development.
 
 ## How it works
 
 Simul does not run a second active copy of the website.
 
-1. **Authorize the current page.** Simul may read the pages you open from
-   install (`<all_urls>`), so the panel follows each page and tab without a
-   click on its icon. If you limit its site access in Chrome, selecting the
-   toolbar icon gives Simul temporary `activeTab` access to that exact
-   document, and the panel offers to allow all sites again.
-2. **Capture a bounded page model.** A thin source bridge reads the
-   browser-produced DOM and sends an allowlisted graph rather than raw HTML.
+1. **Authorize the current page.** From installation, Simul can read the
+   pages that you open (`<all_urls>`). Thus the panel follows each page and
+   tab, and you do not have to click its icon. If you limit its site access
+   in Chrome, select the toolbar icon. Simul then receives temporary
+   `activeTab` access to that exact document, and the panel offers to allow
+   all sites again.
+2. **Capture a bounded page model.** A thin source bridge reads the DOM
+   that the browser produced. It sends an allowlisted graph, not raw HTML.
    Scripts, event handlers, navigation behavior, forms, active embeds, and
    protected values are excluded before they cross the extension boundary.
-3. **Build an inert replica.** The extension validates the graph again and
-   creates new DOM nodes inside an iframe sandbox without scripts. Website
-   presentation is pointer-inert; companion-owned controls can adjust the view
-   but cannot click, navigate, select, or submit on the source page.
-4. **Translate locally.** Eligible text nodes are translated with Chrome's
-   on-device Translator API. Chrome may download language packs, but Simul does
-   not send page content to a Simul server or a third-party translation API.
-5. **Follow safe changes.** Ordered, bounded patches update text, attributes,
-   eligible controls, styles, images, dimensions, and scroll state. If a patch
-   stream becomes unsafe or inconsistent, Simul keeps the last good replica and
-   stages a fresh checkpoint.
+3. **Build an inert mirror.** The extension validates the graph again. Then
+   it creates new DOM nodes inside an iframe sandbox that has no scripts.
+   The website presentation is pointer-inert. Companion-owned controls can
+   adjust the view, but they cannot click, navigate, select, or submit on
+   the source page.
+4. **Translate locally.** Chrome's on-device Translator API translates
+   eligible text nodes. Chrome can download language packs. But Simul does
+   not send page content to a Simul server or to a third-party translation
+   API.
+5. **Follow safe changes.** Ordered, bounded patches update text,
+   attributes, eligible controls, styles, images, dimensions, and scroll
+   state. If a patch stream becomes unsafe or inconsistent, Simul keeps the
+   last good mirror and prepares a new checkpoint.
 
-Translations are projected onto the replica; the source DOM is not modified.
-Exact-content translations are joined and cached only in memory for the current
-extension session.
+Simul shows the translations on the mirror. It does not change the source
+DOM. Simul joins and caches exact-content translations only in memory, for
+the current extension session.
 
-A screen reader reads the mirror like the page: its headings, links and
-text, translated where a translation shows. Tab moves focus on through the
-mirror's links and out of it; no other key acts on the mirror.
+A screen reader reads the mirror as it reads the page: the headings, links
+and text, translated where a translation shows. Tab moves the focus through
+the links of the mirror and then out of the mirror. No other key has an
+effect on the mirror.
 
-- **Language.** Translated text carries the language it was translated to,
-  so a screen reader that switches voices reads it with the right one. The
-  element that shows a translation says so with `lang` for as long as the
-  translation shows, and then gets back exactly what the page had. Text the
-  translator gives back as it was (a name, a number, a word of a third
-  language that the page marks with its own `lang`) is not a translation and
-  keeps the language the page declares. Inside an element that also holds
-  translated text, text without a `lang` of its own is read in the
-  translation's language. Nothing changes for the eye: Chrome would also
-  pick fonts, quotation marks, hyphenation and the page's `:lang()` rules by
-  that attribute, so Simul keeps the page's own language beside it for
-  everything Chrome draws, and the mirror is drawn as before. Two kinds of
-  page rule do see a difference: one that selects on the attribute itself
-  (`[lang="en"]`) sees the translation's language, and one written with the
+- **Language.** Translated text has the language that it was translated
+  to. Thus a screen reader that changes voices reads it with the correct
+  voice. An element that shows a translation gives the translation's
+  language in `lang` for as long as the translation shows. After that, the
+  element has exactly what the page gave it again. Sometimes the translator
+  returns text without a change (a name, a number, or a word of a third
+  language that the page marks with its own `lang`). This text is not a
+  translation, and it keeps the language that the page declares. In an
+  element that also contains translated text, text that has no `lang` of
+  its own is read in the translation's language.
+
+  The visible mirror does not change. Chrome would also use that attribute
+  to select fonts, quotation marks, hyphenation and the page's `:lang()`
+  rules. Thus Simul keeps the page's own language beside it for all that
+  Chrome draws, and Chrome draws the mirror as before. But 2 types of page
+  rule see a difference. A rule that selects on the attribute itself
+  (`[lang="en"]`) sees the translation's language. A rule written with the
   XML namespace (`[xml|lang]`, `[*|lang]`) matches the elements that show a
-  translation. The page's own language is its `lang`; the `xml:lang` of an
-  XHTML document or of SVG and MathML, which the mirror draws by as the
-  page does; or, where the page's root declares none, the document's own
-  language, which Chrome takes from a `<meta http-equiv="content-language">`
-  or from the HTTP `Content-Language` header.
-- **No announcements.** The mirror announces nothing by itself. A page's
-  alerts, status lines and other live regions are announced by the tab; in
-  the mirror they are ordinary text that keeps its role, so they are not
-  said a second time when the mirror updates and a third time when the
-  translation lands. One case may be left: in Chrome an element with
-  `role="alert"` or `role="alertdialog"` counts as an alert at the moment it
-  appears, whatever its `aria-live` says. So a screen reader may still
-  announce an alert once more in the mirror when it is added to the page or
-  shown after being hidden while the panel is open, when the page gives an
-  existing element one of those roles, and, for every alert on the page,
-  each time the mirror is built again (**Rebuild mirror**, or a recovery
-  after the mirror lost step with the page).
-- **Images.** An image whose caption translates its own `alt` or
-  `aria-label` text is named by the translation, and the caption is not read
-  again. Text read from an image's pixels is new, so it is read as text over
-  the image, in its language; a piece the translator gives back as it was
-  read (a number, a name) says no language of its own.
+  translation.
+
+  The page's own language is one of these: its `lang`; the `xml:lang` of an
+  XHTML document or of SVG and MathML, which the mirror uses to draw as the
+  page does; or, if the page's root declares no language, the document's
+  own language. Chrome takes the document's language from a
+  `<meta http-equiv="content-language">` or from the HTTP
+  `Content-Language` header.
+- **No announcements.** The mirror does not make announcements. The tab
+  announces the page's alerts, status lines and other live regions. In the
+  mirror, they are ordinary text that keeps its role. Thus a screen reader
+  does not say them a second time when the mirror updates, and a third time
+  when the translation arrives.
+
+  1 case can possibly remain. In Chrome, an element with `role="alert"` or
+  `role="alertdialog"` is an alert at the moment it appears, whatever its
+  `aria-live` says. Thus a screen reader can still announce an alert one
+  more time in the mirror in these cases:
+  - The page adds the alert, or shows it after it was hidden, while the
+    panel is open.
+  - The page gives one of those roles to an existing element.
+  - The mirror is built again (**Rebuild mirror**, or a recovery after the
+    mirror was out of step with the page). This applies to every alert on
+    the page, each time.
+- **Images.** If the caption of an image translates the image's own `alt`
+  or `aria-label` text, the translation is the name of the image. A screen
+  reader does not read the caption again. Text read from the pixels of an
+  image is new. Thus a screen reader reads it as text over the image, in
+  its language. A piece that the translator returns as it was read (a
+  number, a name) does not declare a language of its own.
 
 ### Size
 
-The **Size** setting and the toolbar size button work the same way for web
-pages and PDFs:
+The **Size** setting and the toolbar size button work in the same way for
+web pages and PDFs:
 
-- **Fit** fills the panel width. The page grows or shrinks to fit, up to five
-  times its size.
-- **1:1** shows the page at the size the tab shows it. If you zoom the tab,
-  Simul follows.
+- **Fit** fills the panel width. The page becomes larger or smaller to fit,
+  up to 5 times its size.
+- **1:1** shows the page at the size that the tab shows it. If you zoom the
+  tab, Simul follows.
 - **Custom zoom** multiplies the 1:1 size.
 
-With **Follow source scrolling** on, a web page's mirror also follows:
+When **Follow source scrolling** is on, the mirror of a web page also
+follows these:
 
-- a pinch zoom in the tab (a trackpad pinch or a double-tap zoom). The mirror
-  magnifies the same part of the page, in every size setting; with Fit it
-  shows exactly what the tab shows. Turning following off shows the whole
-  page again.
-- the page scrolled sideways, like the page scrolled down.
-- a part of the page that scrolls on its own: a board of columns, a wide
+- A pinch zoom in the tab (a trackpad pinch or a double-tap zoom). The
+  mirror magnifies the same part of the page, in all size settings. With
+  Fit, it shows exactly what the tab shows. If you stop following, the
+  mirror shows the full page again.
+- A sideways scroll of the page, as for a scroll down.
+- A part of the page that scrolls by itself: a board of columns, a wide
   table in its own scroller, a carousel, a chat log, a code block, the main
-  pane of an app-style page. Each is put where it is in the tab, also when
-  it was already scrolled as the mirror opened. Its move leaves the rest of
-  the mirror where it is, your own scrolling of the mirror included.
-  Scrolling the mirror yourself moves the mirror as a whole, not a pane
-  inside it. Text fields keep their own scroll and are not followed. With
-  following off the panes stay where they were; on again, they go to where
-  the tab has them.
+  pane of an app-style page. The mirror puts each part where it is in the
+  tab, also when it was already scrolled when the mirror opened. When such a
+  part moves, the rest of the mirror does not move, and this includes your
+  own scroll position in the mirror. When you scroll the mirror yourself,
+  the full mirror moves, not a pane in it. Text fields keep their own scroll
+  position, and the mirror does not follow them. When following is off, the
+  panes do not move. When it is on again, they go to where the tab has
+  them.
 
 ### PDFs
 
-When the tab shows a PDF, selecting Simul shows the PDF's pages in the panel,
-in order, with the packaged pdf.js.
+When the tab shows a PDF and you select Simul, the panel shows the pages of
+the PDF in order. It uses the packaged pdf.js.
 
-A PDF saved on your computer opens in a `file://` tab, which Simul cannot
-read. Give Simul the file instead:
-- Whenever the panel shows a message and no page (such as "Simul cannot read
-  a PDF opened from this computer in a tab"), it offers **Open a PDF file…**.
-- A file dropped anywhere on Simul opens too, over a mirrored page as well,
-  and replaces what Simul showed. Of several files, the first PDF opens; a
-  file that is not a PDF leaves the message "This file is not a readable
-  PDF."
-- If Simul opens in a separate window, selecting Simul on a tab it cannot
-  read opens that window (or brings it forward) with the message and the
-  button.
-- If the side panel is already open, selecting Simul on a tab it cannot read
-  replaces the page it showed with the message and the button, also when
-  the panel is pinned to another tab. A PDF you opened from the computer
-  stays. Select Simul on a web page to show that page again.
+A PDF saved on your computer opens in a `file://` tab, and Simul cannot
+read this tab. Give the file to Simul instead:
+- When the panel shows a message and no page (for example, "Simul cannot
+  read a PDF opened from this computer in a tab"), it offers
+  **Open a PDF file…**.
+- You can also drop a file anywhere on Simul, also on a mirrored page. The
+  file opens and replaces what Simul showed. If you drop more than 1 file,
+  the first PDF opens. A file that is not a PDF gives the message "This file
+  is not a readable PDF."
+- If Simul opens in a separate window, and you select Simul on a tab that
+  it cannot read, that window opens (or comes to the front) with the
+  message and the button.
+- If the side panel is already open, and you select Simul on a tab that it
+  cannot read, the message and the button replace the page that the panel
+  showed. This also occurs when the panel is pinned to a different tab. A
+  PDF that you opened from the computer continues to show. To show a web
+  page again, select Simul on that page.
 
-A file from the computer then works like a web PDF, with one difference:
-it has no site, so automatic translation follows the all-sites setting or
-**OCR** being on. It stays until Simul shows something else: a page you
-select Simul on, a tab you switch to while Simul is set to **Follow**, or
-another file. Moving between windows or a page finishing its load keeps it.
+After this, a file from the computer works like a web PDF, with 1
+difference: it has no site. Thus automatic translation follows the
+all-sites setting, or occurs because **OCR** is on. The file continues to
+show until Simul shows a different item: a page on which you select Simul,
+a tab that you go to while Simul is set to **Follow**, or a different file.
+The file continues to show when you move between windows or when a page
+finishes its load.
 
 **Rebuild mirror** reads the file again. If the file was moved or changed
-meanwhile, the PDF closes and you choose it again. Simul keeps the file only
-in the panel or window you opened it in: the side panel's ↗ button is off
-while it shows, and returning a separate window to the side panel leaves
-the file behind.
+in the meantime, the PDF closes, and you select it again. Simul keeps the
+file only in the panel or window in which you opened it. While the file
+shows, the ↗ button of the side panel is off. If you move a separate window
+back to the side panel, the file does not go with it.
 
 **Translate page**, From/To, Auto-detect, automatic translation, Cancel and
-Live source only work as they do for web pages. Each paragraph, heading or
-list item is covered with the page's own background colour and its
-translation is written in its place, in the text's colour. A translation
-longer than the original shrinks down to half the original size; if it still
-does not fit, it runs past its block (though not past the edge of the page,
-which clips it). The page you are
-reading is translated first, then the pages after it, then those before it;
-scroll elsewhere and translation continues from there. Auto-detect uses the
-PDF's own language tag when it has one, otherwise its text. Simul reads all
-of a PDF's text first, after its pages show ("Reading the PDF…"), so
-**Translate page** turns on a moment later (about half a second for 300
-pages), or after the scanned-page language check below. Translations appear
-on a page once it is drawn.
+Live source only work as they do for web pages. Simul covers each
+paragraph, heading or list item with the page's own background colour.
+Then it writes the translation in its place, in the colour of the text. If
+a translation is longer than the original, Simul makes it smaller, to a
+minimum of half the original size. If it still does not fit, it goes past
+its block, but not past the edge of the page, which clips it.
 
-- Scanned pages (images of text) are read with Simul's on-device OCR, but
-  only while translating: **Translate page** or automatic translation reads
-  them, the page you are reading first, and **Cancel** stops the reading
-  too. Text pages never wait for scanned ones. Showing a PDF, Live source
-  only, or From and To in the same language read no scanned page, with one
-  exception: with Auto-detect and no language tag or text (or text only on
-  scanned pages, such as a header over each scan), Simul reads up to
-  three scanned pages to find the language (for about 20 seconds at most)
-  when the PDF's text has been read, when From becomes Auto-detect, or when
-  Live source only ends, once per PDF. The OCR draws each page itself (at
-  most 4 megapixels and 300 dpi), so it needs no image access, and the
-  toolbar's **OCR** switch does not apply; the image reading methods do (all
-  of them in the public edition; in the dev edition, the ones on under
-  **Advanced & experimental**), and Tesseract.js must be on (Chrome's text
-  detector alone cannot read a page). A page is read when it has no text at
-  all, or when its own text covers at most 3% of it and its pictures cover
-  at least four fifths of it: a scan under a typed header, page number or
-  stamp. That typed text stays as it is and is translated at once; OCR adds
-  the rest, without what only repeats it. Where typed text sits on a line
-  of the scan (a page number beside a scanned footer, a stamp across a
-  scanned line), the scan's own words on that line are kept and translated
-  as a piece of their own, beside the typed text. A page with more text, or
-  with smaller pictures, is never read. Such a page's pictures are looked at
-  only when it can be read: with Tesseract.js off, or a language without an
-  OCR model, it stays as it is and nothing is said about it.
-  If Tesseract.js is off, the language has no OCR model, or a page could not
-  be read, the status says so; a page that cannot be drawn is not tried again.
-  A PDF with no text at all says "No text was found in this PDF." Rotated or
-  vertical text stays as it is, on scanned pages too.
+Simul translates the page that you read first, then the pages after it,
+then the pages before it. If you scroll to a different location,
+translation continues from there. Auto-detect uses the language tag of the
+PDF if it has one. If not, it uses the text of the PDF. After the pages
+show, Simul first reads all the text of the PDF ("Simul reads the PDF…"). Thus
+**Translate page** becomes available a short time later (about half a
+second for 300 pages), or after the language check of scanned pages below.
+Translations appear on a page after the page is drawn.
+
+- Simul reads scanned pages (images of text) with its on-device OCR, but
+  only during translation. **Translate page** or automatic translation
+  reads them, and starts with the page that you read. **Cancel** also stops
+  the reading. Text pages never wait for scanned pages.
+
+  No scanned page is read when Simul only shows a PDF, with Live source
+  only, or when From and To are the same language. There is 1 exception.
+  With Auto-detect, if the PDF has no language tag and no text (or text only
+  on scanned pages, for example a header over each scan), Simul reads up to
+  3 scanned pages to find the language. This takes about 20 seconds at
+  most. It occurs 1 time for each PDF: when Simul has read the PDF's text,
+  when From changes to Auto-detect, or when Live source only ends.
+
+  The OCR draws each page itself (at most 4 megapixels and 300 dpi). Thus
+  image access is not necessary, and the **OCR** switch on the toolbar does
+  not apply. The image reading methods apply (all of them in the public
+  edition; in the dev edition, the methods that are on under
+  **Advanced & experimental**). Tesseract.js must be on, because Chrome's
+  text detector alone cannot read a page.
+
+  Simul reads a page when it has no text, or when its own text covers at
+  most 3% of it and its pictures cover at least four fifths of it. An
+  example is a scan under a typed header, page number or stamp. Simul does
+  not change that typed text, and translates it immediately. OCR adds the
+  remaining text, but not the text that only repeats the typed text. Typed
+  text can be on a line of the scan (a page number beside a scanned footer,
+  or a stamp across a scanned line). Then Simul keeps the scan's own words
+  on that line and translates them as a separate piece, beside the typed
+  text.
+
+  A page with more text, or with smaller pictures, is never read. Simul
+  examines the pictures of such a page only when it can read pages. If
+  Tesseract.js is off, or the language has no OCR model, such a page does
+  not change, and Simul says nothing about it. If Tesseract.js is off, the
+  language has no OCR model, or Simul could not read a page, the status
+  tells you. Simul does not try again to read a page that it cannot draw.
+  For a PDF with no text, Simul shows "Simul found no text in this PDF."
+  Simul does not change rotated or vertical text, also on scanned pages.
 - Screen readers read each page ("Page 2 of 10") with its text, translated
-  where a translation shows. Untranslated text is marked with the PDF's
-  language (the From language, or the detected one) and a translation with
-  the To language, so a screen reader that switches voices can pronounce
-  each in its own. One language covers the whole PDF; while it is not known,
-  the text is marked as of unknown language.
-- With **Follow source scrolling** on (in Settings, on by default), the panel
-  follows Chrome's PDF viewer in the tab. The viewer says where its most
-  visible page sits on screen but never which page it is, so Simul works the
-  page out from Chrome's page layout and from how the viewer moves.
-  - Followed: scrolling with the wheel or trackpad; the arrow keys; Page Up,
-    Page Down and Space; ArrowRight; these keys held down; Home and End.
-  - Guessed first, then read off the viewer's toolbar: anything that jumps
-    in one step, such as the page box, the outline, thumbnails, links, Find
-    and ArrowLeft. So is the first place when you open Simul with the
-    viewer already partway down, and the place after a turned view is
-    upright again or the two-page view ends. A newly opened or reloaded tab
-    is taken to be at its start (the top, or the address's `#page=N`), and
-    with following on the panel opens there too.
-  - Reading the toolbar: once the viewer has been still for a third of a
-    second after such a move, and Simul knows the tab's zoom, it takes one
-    picture of the tab, keeps only the page number and the page count that
-    Chrome's toolbar shows ("12 / 300"), reads them on your computer with
-    Tesseract.js, and moves the panel to that page. In a small window that
-    takes about a twentieth of a second; on a large high-density screen a
-    quarter of a second or more, because Chrome hands over a picture of the
-    whole tab. If you have scrolled the panel yourself since the guess, it stays
-    where you put it and follows from the right page from then on.
-  - The number is taken only when everything fits: the toolbar is where the
-    viewer says its view begins, the count beside the number is this PDF's
-    own page count, the number has as many digits as the box holds, two
-    readings of it at different sizes agree, and the page is one that fits
-    where the viewer reports its page. Otherwise the guess stays, and the
-    panel stays that many pages off as you read on until the next jump;
-    Home from far away puts it right, and so does End.
-  - A page turn that lands on a page's top looks to Simul like a jump there,
-    so it is read off the toolbar too: ArrowRight and ArrowLeft at any
-    zoom, and Page Down, Space and Page Up in fit to page. That is one
-    picture for each such turn.
-  - No picture is taken for scrolling, however fast (the wheel, a trackpad,
-    the scrollbar), for the other keys, or for zooming; none while
-    following is off, and none of a tab that is not the one showing. Steps
-    of the wheel that Chrome does not animate (its smooth scrolling
-    switched off) are followed step by step, however fast they come. A
-    single long step of the wheel, a scrollbar drag across a long PDF, or
-    a fling too fast to follow is still a guess.
-  - The guess stays, as in 0.6.2, when Tesseract.js is switched off in
-    Settings (nothing is captured then); when the tab is narrower than
-    about 420 px (Chrome's toolbar then has no page box); when the toolbar
-    is hidden (an address with `#toolbar=0`, or presenting: such a tab is
-    not captured); when a menu of the toolbar is open; when Chrome does not allow a
-    picture of the tab (the access the Simul icon gave has lapsed and
-    all-sites access is off; Simul asks for nothing); and while the page
-    box's number is selected or being typed: once a picture shows that,
-    Simul does not look again until the next jump. A toolbar that showed
-    no page box three times running is left alone for a minute. Chrome's
-    toolbar in forced high-contrast colours is read too; it was checked
-    with Chrome's own forced colours on Linux, not yet with a Windows
-    high-contrast theme.
-  - A jump made while the viewer is still scrolling (an outline entry
-    clicked during a fling) is looked into as well. On a slow or busy
-    computer it can still pass for part of the scrolling, and the panel
-    then stays on the page it was following.
-  - A jump that also changes the zoom (an outline entry or a link that
-    sets its own zoom) is looked into as well, also from the top of one
-    page to the top of another: Chrome reports it more often than it
-    reports a zoom.
-  - Pressing a key where the viewer cannot go on (Page Down at the end of
-    the PDF) takes no picture. Two such presses within a tenth of a second
-    right after the press that reached the end can take one.
-  - Simul needs the tab's zoom to tell which pages a place fits, and a view
-    turned a quarter cannot be told from an upright one without it. While
-    the zoom is unknown, Simul does not look into a place it is unsure of:
-    it asks Chrome for the tab's zoom once the viewer is still, and looks
-    once it has it. Chrome tells of the zoom as it changes, and when what
-    the viewer reports fits no page at the zoom Simul was told, it asks
-    again. Asking asks nothing of the page and takes no picture.
-  - While Simul is reading scanned pages, a look may wait its turn.
-  - Setting the viewer's zoom to what it already is, or switching it to fit
-    to page, at the top of a page looks the same as ArrowRight; the panel
-    goes a page down and the toolbar puts it right. A half turn (two
-    quarter turns) is guessed and read the same way.
-  - Pages of different sizes help Simul tell them apart.
-  - Sideways scrolling in the viewer is followed too, exactly: the panel is
-    scrolled across the page as far as the viewer is. It shows when the
-    page is wider than the panel, as it usually is at 1:1.
-  - The panel moves only when the viewer moves, so your own scrolling of the
-    panel stays until then. That holds each way: scrolling the viewer down
-    leaves the panel where you put it sideways.
-  - Not followed: a PDF opened from the computer, the viewer's two-page view,
-    and a view turned a quarter (Rotate, Ctrl+[ and Ctrl+]): the panel stays
-    where it is and scrolls on its own until the view is one page wide and
-    upright again. Where the viewer is then is guessed and read off the
-    toolbar, as after a jump; a turned view is never captured.
-    Simul tells a turned view by the tab's zoom. A PDF that has a page about
-    as wide as another is tall (within 1%, as portrait and landscape pages
-    of one size) is not noticed as turned, and is then followed wrongly.
-    Microsoft Edge's viewer sends nothing.
-- Without a remembered place, a PDF opens at the page its address names
-  (`#page=3`).
-- Only the pages near the view are drawn. In a very long PDF (more than
-  about 12,000 paragraphs, typically several hundred pages), the pages near
-  the view and those read first carry their text for screen readers and
-  find; the others are announced by their page number only and get their
-  text when you scroll to them. Translation covers every page either way,
-  up to 50,000 paragraphs or about 8 million characters waiting at once
-  (upwards of a thousand pages); past that the status says the translation
-  is partial.
-  Text-only pages are released after their text is read, and the document is
-  swept every 32 pages. On the test computer, reading the text of 3,000
-  pages took 1.3 seconds and of 10,000 pages 5.4 seconds.
-- If you come back to a PDF, or rebuild it, it opens where you left it.
-- Simul opens PDFs of up to 128 MB. A download that stalls for 60 seconds
-  fails; a slow one that keeps going does not.
-- A password-protected, oversized, broken or undownloadable PDF shows one
-  status that says why.
+  where a translation shows. Simul marks text that is not translated with
+  the language of the PDF (the From language, or the detected language). It
+  marks a translation with the To language. Thus a screen reader that
+  changes voices can pronounce each text in its own language. 1 language
+  applies to the full PDF. While Simul does not know this language, it
+  marks the text as of unknown language.
+- When **Follow source scrolling** is on (in Options, on by default), the
+  panel follows Chrome's PDF viewer in the tab. The viewer tells where its
+  most visible page is on the screen, but it never tells which page it is.
+  Thus Simul calculates the page from Chrome's page layout and from the
+  movement of the viewer.
+  - Followed: a scroll with the wheel or trackpad; the arrow keys; Page Up,
+    Page Down and Space; ArrowRight; these keys when you hold them down;
+    Home and End.
+  - Guessed first, then read from the toolbar of the viewer: all moves that
+    jump in 1 step, for example the page box, the outline, thumbnails,
+    links, Find and ArrowLeft. Simul does the same for the first position
+    when you open Simul and the viewer is already partway down. It also does
+    this for the position after a turned view is upright again, or after
+    the two-page view ends. Simul assumes that a newly opened or reloaded
+    tab is at its start (the top, or the `#page=N` of the address). When
+    following is on, the panel also opens there.
+  - How Simul reads the toolbar: after such a move, the viewer must be
+    still for a third of a second, and Simul must know the zoom of the tab.
+    Then Simul takes 1 picture of the tab. It keeps only the page number and
+    the page count that Chrome's toolbar shows ("12 / 300"). It reads them
+    on your computer with Tesseract.js, and moves the panel to that page. In
+    a small window, this takes about a twentieth of a second. On a large
+    high-density screen, it takes a quarter of a second or more, because
+    Chrome gives a picture of the full tab. If you scrolled the panel
+    yourself after the guess, the panel does not move from where you put
+    it. From then on, it follows from the correct page.
+  - Simul uses the number only when all of these conditions are true: the
+    toolbar is where the viewer says its view starts; the count beside the
+    number is the page count of this PDF; the number has as many digits as
+    the box holds; 2 readings of it at different sizes agree; and the page
+    fits the position where the viewer reports its page. If not, Simul
+    keeps the guess. The panel is then that many pages wrong while you
+    continue to read, until the next jump. Home from far away corrects it,
+    and End also corrects it.
+  - To Simul, a page turn that stops at the top of a page looks like a jump
+    to that page. Thus Simul also reads it from the toolbar: ArrowRight and
+    ArrowLeft at all zoom levels, and Page Down, Space and Page Up in fit to
+    page. Simul takes 1 picture for each such turn.
+  - Simul takes no picture when you scroll, at any speed (the wheel, a
+    trackpad, the scrollbar), when you use the other keys, or when you
+    zoom. It takes no picture while following is off, and no picture of a
+    tab that is not visible. Simul follows each step of the wheel that
+    Chrome does not animate (when smooth scrolling is off in Chrome), at any
+    speed. A single long step of the wheel, a drag of the scrollbar across a
+    long PDF, or a fling that is too fast to follow is still a guess.
+  - Simul keeps the guess, as in 0.6.2, in these conditions:
+    - Tesseract.js is off in Options. Simul then captures nothing.
+    - The tab is narrower than about 420 px. Chrome's toolbar then has no
+      page box.
+    - The toolbar is hidden (an address with `#toolbar=0`, or the viewer in
+      presentation mode). Simul does not capture such a tab.
+    - A menu of the toolbar is open.
+    - Chrome does not allow a picture of the tab: the access from the Simul
+      icon has expired and all-sites access is off. Simul does not ask for
+      access.
+    - The number in the page box is selected, or you type in it. After a
+      picture shows this, Simul does not look again until the next jump.
+
+    If the toolbar showed no page box 3 times in sequence, Simul does not
+    examine it for 1 minute. Simul also reads Chrome's toolbar in forced
+    high-contrast colours. This was checked with Chrome's own forced
+    colours on Linux, but not yet with a Windows high-contrast theme.
+  - Simul also examines a jump that occurs while the viewer still scrolls
+    (an outline entry clicked during a fling). On a slow or heavily loaded
+    computer, the jump can still look like part of the scroll. The panel
+    then does not move from the page that it followed.
+  - Simul also examines a jump that also changes the zoom (an outline entry
+    or a link that sets its own zoom). This includes a jump from the top of
+    one page to the top of a different page. Chrome reports such a jump more
+    frequently than it reports a zoom.
+  - When you press a key and the viewer cannot move farther (Page Down at
+    the end of the PDF), Simul takes no picture. But 2 such presses in a
+    tenth of a second, immediately after the press that reached the end,
+    can cause 1 picture.
+  - Simul must have the zoom of the tab to know which pages fit a position.
+    Without the zoom, Simul cannot tell a view turned a quarter from an
+    upright view. While the zoom is not known, Simul does not examine a
+    position that it is not sure of. When the viewer is still, Simul asks
+    Chrome for the zoom of the tab, and examines the position when it has
+    the zoom. Chrome tells Simul when the zoom changes. If the viewer
+    reports a position that fits no page at the zoom that Simul knows,
+    Simul asks again. This request asks nothing of the page and takes no
+    picture.
+  - While Simul reads scanned pages, a look at the toolbar can wait for its
+    turn.
+  - At the top of a page, 2 actions look the same as ArrowRight: you set
+    the zoom of the viewer to its current value, or you change it to fit to
+    page. The panel goes down 1 page, and the toolbar corrects it. Simul
+    guesses and reads a half turn (2 quarter turns) in the same way.
+  - Pages of different sizes help Simul to know which page is which.
+  - Simul also follows a sideways scroll in the viewer exactly: it scrolls
+    the panel across the page as far as the viewer. You can see this when
+    the page is wider than the panel, which is usual at 1:1.
+  - The panel moves only when the viewer moves. Thus, if you scroll the
+    panel yourself, it does not move until then. This applies to each
+    direction: when you scroll the viewer down, the panel keeps the
+    sideways position that you gave it.
+  - Not followed: a PDF opened from the computer, the two-page view of the
+    viewer, and a view turned a quarter (Rotate, Ctrl+[ and Ctrl+]). The
+    panel does not move, and scrolls independently, until the view is 1 page
+    wide and upright again. Then Simul guesses the position of the viewer
+    and reads it from the toolbar, as after a jump. Simul never captures a
+    turned view. Simul identifies a turned view from the zoom of the tab.
+    Some PDFs have a page that is about as wide as a different page is tall
+    (within 1%, for example portrait and landscape pages of 1 size). If
+    such a PDF is turned, Simul does not see this, and then follows it
+    incorrectly. The viewer of Microsoft Edge sends nothing.
+- If Simul has no remembered position, a PDF opens at the page that its
+  address names (`#page=3`).
+- Simul draws only the pages near the view. In a very long PDF (more than
+  about 12,000 paragraphs, usually several hundred pages), only some pages
+  contain their text for screen readers and find: the pages near the view
+  and the pages read first. A screen reader announces the other pages by
+  their page number only. They receive their text when you scroll to them.
+  Translation covers all pages in both cases, up to 50,000 paragraphs or
+  about 8 million characters waiting at the same time (more than a thousand
+  pages). Above that, the status says that the translation is partial.
+  Simul releases text-only pages after it reads their text, and it sweeps
+  the document every 32 pages. On the test computer, Simul read the text of
+  3,000 pages in 1.3 seconds and the text of 10,000 pages in 5.4 seconds.
+- If you go back to a PDF, or rebuild it, it opens at the position where
+  you left it.
+- Simul opens PDFs of up to 128 MB. A download that stops for 60 seconds
+  fails. A slow download that continues does not fail.
+- If a PDF is password-protected, too large, damaged, or cannot be
+  downloaded, Simul shows 1 status that tells why.
 
 ### Image text
 
-Image translation is **on by default** and saved with your settings; pixel OCR
-waits until you grant image access from the **OCR** button. While on, it also
-translates the page text of the mirrored page, and for images Simul:
+Image translation is **on by default**, and Simul saves it with your
+settings. Pixel OCR waits until you grant image access from the **OCR**
+button. While image translation is on, it also translates the page text of
+the mirrored page. For images, Simul does these steps:
 
-1. inspects policy-approved top-frame `<img>` elements on the whole page,
-   the ones on screen first and the rest in the background;
-2. first tries direct `aria-label` or `alt` text, which needs no pixel access
-   and is shown as a caption band along the bottom edge of the image (this
-   method is on from the start, so images with alt text get a translated
-   caption before image access is granted); for a screen reader that
-   translation is the image's name;
-3. for pixel OCR, reads an image on screen from a crop of the visible tab
-   (after checking its geometry is stable); an image off screen, moving, in
-   a background tab, or in a tab that is pinch-zoomed (the tab's pixels then
-   show the magnified view) is read from its own file instead: the copy the mirror has
-   already loaded, then the page's own copy for same-site images, then (Passive
-   fidelity only) a cache-first download of the same URL without cookies. An
-   image whose file cannot be read while the tab is pinch-zoomed is read from
-   the tab as soon as the pinch ends. An image whose picture CSS alone decides
-   (`content: url()` of another picture, or an `object-view-box` that shows
-   a part of the file) is read from the screen only: its file is not what it
-   shows. Each crop is reduced to at most 4 megapixels;
-4. tries Chrome TextDetector only when the platform already has the model
-   installed (a model Chrome could download counts as unavailable), then the
-   packaged Tesseract.js 7.0.0 fallback according to the saved method order;
-5. rejects blank, punctuation-only, and insufficient-confidence results, and
-   when alt text and OCR text are too close to call, lets Gemini Nano (or
-   Chrome's Language Detector) pick, but only if Chrome already has it
-   installed; Simul never downloads a model; and
-6. translates accepted lines and places inert overlays over the replica image.
+1. It examines policy-approved top-frame `<img>` elements on the full page:
+   first the elements on the screen, then the others in the background.
+2. It first tries direct `aria-label` or `alt` text. Pixel access is not
+   necessary for this method, and it shows the text as a caption band along
+   the bottom edge of the image. This method is on from the start. Thus
+   images with alt text receive a translated caption before image access is
+   granted. For a screen reader, that translation is the name of the image.
+3. For pixel OCR, it reads an image on the screen from a crop of the
+   visible tab, after it makes sure that the geometry of the image is
+   stable. Some images are read from their own file instead: an image off
+   the screen, an image that moves, an image in a background tab, or an
+   image in a pinch-zoomed tab (the pixels of the tab then show the
+   magnified view). Simul tries these files in this sequence: the copy that
+   the mirror already loaded, then the page's own copy for same-site
+   images, then (Passive fidelity only) a cache-first download of the same
+   URL without cookies. If Simul cannot read the file of an image while the
+   tab is pinch-zoomed, it reads the image from the tab immediately when the
+   pinch ends. For some images, only CSS decides the picture
+   (`content: url()` of a different picture, or an `object-view-box` that
+   shows a part of the file). Simul reads these images from the screen
+   only, because the file is not what the image shows. Simul makes each crop
+   smaller, to a maximum of 4 megapixels.
+4. It tries Chrome TextDetector only when the platform already has the
+   model installed. A model that Chrome could download counts as
+   unavailable. Then it tries the packaged Tesseract.js 7.0.0 fallback, in
+   the saved method order.
+5. It rejects blank results, results with only punctuation, and results
+   with insufficient confidence. Sometimes alt text and OCR text are too
+   close to decide between them. Then Simul allows Gemini Nano (or Chrome's
+   Language Detector) to select, but only if Chrome already has it
+   installed. Simul never downloads a model.
+6. It translates the accepted lines and puts inert overlays over the mirror
+   image.
 
-The Tesseract worker, WebAssembly cores, notices, and 22 pinned
+The Tesseract worker, the WebAssembly cores, the notices, and 22 pinned
 `tessdata_fast` language files are packaged with the extension. No OCR code,
-model, image pixel, or recognized text is fetched from or sent to a remote OCR
-service. Crops use short-lived extension storage for the offscreen handoff and
-are deleted after the job; OCR and translation caches are bounded and
-memory-only.
+model, image pixel, or recognized text is fetched from a remote OCR service
+or sent to one. Crops use short-lived extension storage for the offscreen
+handoff, and Simul deletes them after the job. OCR and translation caches
+are bounded and memory-only.
 
-OCR reads top-frame `<img>` images, on screen or not. It does not read CSS
-backgrounds, canvas, video frames, embedded documents (a PDF tab is shown
-instead; see [PDFs](#pdfs)), hidden images, or
-credential-overlapping pixels, and text a page draws over an off-screen image
-is not part of its file. A public text field, button, or link that
-overlaps an image does not block capture; only password and other credential
-fields do, wherever they sit over the image. Text from another element over
-the image holds the capture back when the look finds it, but the look
-samples a few fixed points on the image, so a thin caption between them can
-still be read. See
-[Image text translation](image-translation-research.md) for the detailed
-boundary.
+OCR reads top-frame `<img>` images, on the screen or off it. It does not
+read CSS backgrounds, canvas, video frames, embedded documents (Simul shows
+a PDF tab instead; see [PDFs](#pdfs)), hidden images, or pixels that overlap
+credential fields. Text that a page draws over an off-screen image is not
+part of the image file. A public text field, button, or link that overlaps
+an image does not block capture. Only password fields and other credential
+fields block it, at all positions over the image. Text from a different
+element over the image prevents the capture when the check finds it. But
+the check examines only a few fixed points on the image, so Simul can still
+read a thin caption between them. For the detailed boundary, see
+[Image text translation](image-translation-research.md).
 
 ### Options
 
-The toolbar holds what is used most: From (with Auto-detect) and To, swap,
-**Rebuild mirror** (↻), Size, the **OCR** switch, Follow or Pinned, quick
-translation, the detached window, and the options (⚙). The options panel
-lists:
+The toolbar contains the controls that you use most: From (with
+Auto-detect) and To, swap, **Rebuild mirror** (↻), Size, the **OCR**
+switch, Follow or Pinned, quick translation, the detached window, and the
+options (⚙). The Options panel contains:
 
 - **Automatic translation**: Off, This site, or All sites.
 - **Size** and the zoom slider.
@@ -362,131 +419,147 @@ lists:
 - **Translate page**, and **Cancel** while a translation runs.
 - **Read profile**: **Page only** (the page's text and pictures only),
   **Standard** (adds button labels, button pictures and folded sections), or
-  **Full visible** (adds what is filled in forms and text editors), the
-  default. Passwords, one-time codes and card numbers are never read. See
-  [Privacy and security boundary](#privacy-and-security-boundary).
+  **Full visible** (adds the content of forms and text editors), which is
+  the default. Passwords, one-time codes and card numbers are never read.
+  See [Privacy and security boundary](#privacy-and-security-boundary).
 - **Image text**: on or off, and the button that grants image access when
-  Chrome needs it.
+  Chrome requires it.
 - **Reset all extension settings**.
-- **Advanced** (closed until opened): **Translated text** (Let boxes grow or
-  Keep geometry), **Toolbar opens** (Last used view, Always side panel, or
-  Always detached window), and **Minimum OCR confidence**.
+- **Advanced** (closed until you open it): **Translated text** (Let boxes
+  grow or Keep geometry), **Toolbar opens** (Last used view, Always side
+  panel, or Always detached window), and **Minimum OCR confidence**.
 
-The To language starts as Chrome's own language when Simul can translate
-into it (a regional variant such as `pt-BR` or `zh-TW` counts as Portuguese
-or Traditional Chinese), and as English otherwise. A To language you have
-chosen is kept.
+At the start, the To language is Chrome's own language if Simul can
+translate into it. A regional variant, for example `pt-BR` or `zh-TW`,
+counts as Portuguese or Traditional Chinese. If Simul cannot translate into
+Chrome's language, the To language is English. Simul keeps a To language
+that you selected.
 
-Everything else is fixed at its default: Passive Fidelity, the mirror's
-default size limits, every image reading method in the default order,
+All other settings have fixed default values: Passive Fidelity, the default
+size limits of the mirror, every image reading method in the default order,
 visible images read first, small images skipped, and no local Prompt for
-image text. The release zips and the Chrome Web Store carry this edition.
-A separate dev edition, built for testing (see [Development](#development)),
-adds those settings: the per-item read choices, Mirror text and fidelity,
-the size limits, **Show everything (testing)**, the image reading methods,
-scan order, small images, the Prompt options, and OCR diagnostics, all under
-**Advanced & experimental**, as well as a first-run read-profile question for
-settings saved before that question was dropped. A value set in the dev
-edition is not used by the public one.
+image text. The release zips and the Chrome Web Store contain this edition.
+
+A separate dev edition for tests (see [Development](#development)) adds
+those settings, all under **Advanced & experimental**: the per-item read
+choices, Mirror text and fidelity, the size limits,
+**Show everything (testing)**, the image reading methods, scan order, small
+images, the Prompt options, and OCR diagnostics. It also adds a first-run
+read-profile question for settings saved before that question was removed.
+The public edition does not use a value set in the dev edition.
 
 ## Privacy and security boundary
 
-Reading and acting are separate contracts. Broader readable-content settings
-never make the replica interactive.
+Reading and acting are separate contracts. Wider readable-content settings
+never make the mirror interactive.
 
-Simul starts at **Full visible**, with no setup question: the mirror shows
-what the page shows. You can narrow it with **Read profile** in the options.
-The Page-only, Standard, and Full visible profiles (and, in the dev edition,
-custom choices per item) control whether the mirror may read public control
-semantics, non-secret images in controls, validated disclosure content,
-visible text/search/URL/textarea values and selection state,
-personal/autofill values, and editable text. The public edition reads custom
-choices saved by the dev edition as the widest profile that reads nothing
-more than they did.
+Simul starts at **Full visible**, without a setup question: the mirror
+shows what the page shows. To make it narrower, use **Read profile** in
+Options. The Page-only, Standard, and Full visible profiles (and, in the dev
+edition, custom choices for each item) control which of these the mirror
+can read: public control semantics, non-secret images in controls,
+validated disclosure content, visible text/search/URL/textarea values and
+selection state, personal/autofill values, and editable text. The public
+edition reads custom choices saved by the dev edition as the widest profile
+that reads nothing more than they did.
 
-Passwords, authentication and one-time-code fields, WebAuthn and payment-card
-autocomplete classes, hidden inputs, file names, and CSS-masked text are
-blocked under every profile. A file input shows as the empty field the page
-draws. Password, card and one-time-code inputs show one dot per character,
-as the page does; only the number of characters is read, and only when form
-values are allowed. A node
-classified as secret remains secret for that document. Narrowing
-the scope clears the current replica, translations, and image overlays before
-rebuilding.
+All profiles block passwords, authentication and one-time-code fields,
+WebAuthn and payment-card autocomplete classes, hidden inputs, file names,
+and CSS-masked text. A file input shows as the empty field that the page
+draws. Password, card and one-time-code inputs show 1 dot for each
+character, as the page does. Simul reads only the number of characters, and
+only when form values are allowed. A node classified as secret continues to
+be secret for that document. When you make the scope narrower, Simul clears
+the current mirror, translations, and image overlays before it rebuilds.
 
-**Show everything (testing)**, in the dev edition only, under **Advanced &
-experimental**, turns every privacy filter off, to find out whether a privacy
-rule hides a missing part of a page: hidden text, labels, card numbers,
-one-time codes, and form values are copied as the page holds them (typed
-passwords are not). The mirror still cannot act on the page. It is off by
-default. The public edition does not contain it, and ignores it if a dev
-build saved it on.
+**Show everything (testing)** is only in the dev edition, under
+**Advanced & experimental**. It sets all privacy filters to off, so that you
+can find out whether a privacy rule hides a missing part of a page. Hidden
+text, labels, card numbers, one-time codes, and form values are then copied
+as the page holds them (typed passwords are not). The mirror still cannot
+act on the page. The setting is off by default. The public edition does not
+contain it, and ignores it if a dev build saved it as on.
 
-**Closed shadow roots.** A page component can close its shadow root, which
-hides its inside from the page's own scripts. Chrome lets an extension read
-such a root, and the mirror does: a closed component shows with its text,
-images, menus and scrolling parts like the rest of the page, and every rule
-above applies inside it. Password, card and one-time-code fields are
-recognized there and show as dots. One case remains: nothing tells Simul
-when a component attaches a new root to an element that is already on the
-page. Simul asks about it when a person clicks, types or moves the focus
-inside it, before the page's own handlers on the component run, and, while
-the panel is open, when anything changes there and in turn with the rest of
-the page. A root found that way is used from then on, and the page is read
-again at that point, so text Simul had already sent as public is corrected
-rather than waiting for another change. Until a reader finds the root,
-nothing knows it is there. A password field in such a root that the page
-shows in clear before Simul has asked, with no input from a person inside
-the component (the page fills it after a click elsewhere, or handles every
-click and key for the whole window before Simul sees them), is read as the
-plain text field it then is, as a field shown in clear before Simul was
-first opened would be. Other extensions often draw their own parts of a page inside closed roots (a password manager's
-suggestion list, a grammar checker's bubble): while the tab shows them, the
-mirror shows them too. The insides of the browser's own
-controls (a text field's editor, a video's buttons) are not read.
+**Closed shadow roots.** A page component can close its shadow root. This
+hides the inside of the component from the page's own scripts. Chrome
+allows an extension to read such a root, and the mirror reads it. A closed
+component shows with its text, images, menus and scrolling parts, as the
+rest of the page does. All the rules above apply inside it. Simul
+identifies password, card and one-time-code fields there and shows them as
+dots.
 
-A PDF opened from the computer is read from the file you chose and makes no
-request; the panel keeps only a reference to the file, never past closing it.
+1 case remains. Nothing tells Simul when a component attaches a new root to
+an element that is already on the page. Simul asks about it when a person
+clicks, types or moves the focus inside it, before the page's own handlers
+on the component run. While the panel is open, Simul also asks when
+something changes there, in turn with the rest of the page. Simul uses a
+root that it finds in this way from then on. It also reads the page again
+at that time. Thus Simul corrects text that it already sent as public, and
+does not wait for a different change.
 
-To follow Chrome's PDF viewer, Simul adds a small script to the PDF tab
-that asks the viewer for its scroll reports and passes on five numbers (where
-the most visible page sits and the viewport's size), the time of each, how
-wide the tab draws a scrollbar and how its screen is scaled, nothing else.
+Until a reader finds the root, nothing knows that it is there. A password
+field in such a root can show in clear text before Simul asks, with no
+input from a person inside the component. (For example, the page fills it
+after a click at a different location, or it handles all clicks and keys
+for the full window before Simul sees them.) Simul then reads the field as
+the plain text field that it is at that time. This is the same as for a
+field that showed in clear text before Simul was first opened. Other
+extensions frequently draw their own parts of a page inside closed roots (a
+password manager's suggestion list, a grammar checker's bubble). While the
+tab shows them, the mirror also shows them. Simul does not read the insides
+of the browser's own controls (the editor of a text field, the buttons of a
+video).
 
-The viewer never says which page it shows; its toolbar does. After a move
-Simul can only guess (a jump, the first place, a view turned back), and only
-on a PDF tab it shows and follows, Simul takes one picture of the tab with
-the same call as image text (`tabs.captureVisibleTab`, under the access the
-Simul icon gave or all-sites access; it asks for nothing more). From the
-picture it keeps the top 56 px for a moment, finds the page box there, and
-makes a small grey picture of two things only: the page number and the page
-count ("12 / 300"). The picture of the tab is let go before anything is
-read, and nothing below the toolbar is ever looked at. The small picture is
-read by the local OCR host as any image is (through the same temporary
-storage, deleted when the reading ends) and what was read stays in memory.
-Nothing is saved, and nothing leaves the computer. A tab whose toolbar is
-hidden is not captured at all. This look does not wait for the image access
-that image text on web pages asks for, and the OCR button does not switch
-it (the button's words are about images on web pages); switching
-Tesseract.js off in Settings does.
+Simul reads a PDF opened from the computer from the file that you selected,
+and makes no request. The panel keeps only a reference to the file, and
+never after it is closed.
 
-On a PDF tab Simul makes one extra request: it downloads the PDF's own URL,
-which the tab has already loaded. Chrome keeps the extension's cache separate
-from the tab's, so this is a second download of the same file; Simul's own
-copy is reused while it is fresh. The site's cookies go along, as they did for
-the tab. Simul requests nothing else for a PDF. Scanned pages are read on
-the computer, by the same local OCR as images: as for an image, each page's
-drawing goes to the local OCR host through extension-origin temporary
-storage, and the recognized text stays in memory. A crop is refused after
-two minutes; an expired one is deleted by the OCR host's sweep every 30
-seconds while a host lives, by the service worker when it starts, or by a
-new host when it is built. A browser restart that never starts the service
-worker is not covered.
+To follow Chrome's PDF viewer, Simul adds a small script to the PDF tab.
+The script asks the viewer for its scroll reports. It passes on 5 numbers
+(the position of the most visible page and the size of the viewport), the
+time of each, the width of the scrollbar that the tab draws, and the
+scaling of its screen, and nothing else.
+
+The viewer never tells which page it shows, but its toolbar does. After a
+move that Simul can only guess (a jump, the first position, a view turned
+back), and only on a PDF tab that it shows and follows, Simul takes 1
+picture of the tab. It uses the same call as image text
+(`tabs.captureVisibleTab`, with the access that the Simul icon gave or
+all-sites access). It does not ask for more. From the picture, Simul keeps
+the top 56 px for a short time and finds the page box there. Then it makes
+a small grey picture of only 2 items: the page number and the page count
+("12 / 300"). Simul releases the picture of the tab before it reads
+anything, and it never looks at the area below the toolbar.
+
+The local OCR host reads the small picture as it reads all images (through
+the same temporary storage, which is deleted when the reading ends). The
+text that it reads is kept in memory. Nothing is saved, and nothing leaves
+the computer. Simul does not capture a tab whose toolbar is hidden. This
+look does not wait for the image access that image text on web pages asks
+for. The OCR button does not switch it on or off (the words of the button
+are about images on web pages). If you switch Tesseract.js off in Options,
+this look stops too.
+
+On a PDF tab, Simul makes 1 more request: it downloads the PDF's own URL,
+which the tab already loaded. Chrome keeps the cache of the extension
+separate from the cache of the tab. Thus this is a second download of the
+same file. Simul uses its own copy again while that copy is fresh. The
+site's cookies go with the request, as they did for the tab. Simul requests
+nothing else for a PDF.
+
+Scanned pages are read on the computer, by the same local OCR as images. As
+for an image, the drawing of each page goes to the local OCR host through
+extension-origin temporary storage. The recognized text is kept in memory.
+A crop is refused after 2 minutes. An expired crop is deleted in one of
+these ways: by the sweep of the OCR host every 30 seconds while a host is
+alive, by the service worker when it starts, or by a new host when it is
+built. This does not cover a browser restart that never starts the service
+worker.
 
 Diagnostics contain bounded stages, dimensions, and counts. They do not log
-page text, recognized text, URLs, pixels, hashes, DOM IDs, or attribute values.
-Simul includes no analytics, credentials, remotely hosted executable code, or
-cloud translation/OCR integration.
+page text, recognized text, URLs, pixels, hashes, DOM IDs, or attribute
+values. Simul includes no analytics, credentials, remotely hosted
+executable code, or cloud translation/OCR integration.
 
 ### Permissions
 
@@ -498,73 +571,86 @@ cloud translation/OCR integration.
 | `storage` | Save settings and explicit automatic-translation scopes. |
 | `offscreen` | Run packaged local OCR away from the visible companion UI. |
 
-`<all_urls>` is a **required** host permission since 0.6.7 (D166), so the panel
-follows each page and tab the reader opens without a click on the Simul icon
-on every new site. Chrome lets the reader withhold it (Site access: On click,
-or chosen sites); Simul then reads a tab after its icon is selected there, a
-saved feature that needs the access stays paused, and the panel's message
-that asks for the icon offers **Allow on all sites**, which asks Chrome from
-that click. Simul never removes the required access (Chrome would refuse);
-it releases only narrower site access it asked for and no longer needs, and
-**Reset all** clears those.
+Since 0.6.7 (D166), `<all_urls>` is a **required** host permission. Thus
+the panel follows each page and tab that the reader opens, and the reader
+does not have to click the Simul icon on each new site. Chrome allows the
+reader to withhold it (Site access: On click, or chosen sites). Then Simul
+reads a tab after the reader selects its icon on that tab. A saved feature
+that must have the access is paused. The panel's message that asks for the
+icon offers **Allow on all sites**, which asks Chrome for the access from
+that click. Simul never removes the required access (Chrome would refuse).
+It releases only narrower site access that it asked for and that is no
+longer necessary, and **Reset all** clears those.
 
 ## Fidelity
 
-The default **Passive Fidelity** policy preserves a broad, bounded set of
-passive CSS, images, fonts, responsive sources, static posters, and static SVG
-presentation. Those references can make ordinary HTTP(S) requests to their
-existing hosts. **Conservative** admits fewer passive semantics but is not a
-zero-network mode. Both policies keep the same scriptless sandbox and
-active-content blocks. The public edition uses Passive Fidelity and the
-default size limits. In the dev edition, the policy, the mirror's size limits
-(largest single item, largest page, most page elements), and **Show everything
-(testing)** are under **Advanced & experimental**.
+The default **Passive Fidelity** policy keeps a wide, bounded set of
+passive CSS, images, fonts, responsive sources, static posters, and static
+SVG presentation. Those references can make ordinary HTTP(S) requests to
+their existing hosts. **Conservative** accepts fewer passive semantics, but
+it is not a zero-network mode. Both policies keep the same sandbox without
+scripts and the same blocks on active content. The public edition uses
+Passive Fidelity and the default size limits. In the dev edition, the
+policy, the mirror's size limits (largest single item, largest page, most
+page elements), and **Show everything (testing)** are under
+**Advanced & experimental**.
 
-Simul is a safe reconstruction, not a browser clone. Current limitations
-include script-only custom-element state, virtualized DOM that the page has
-not created, inaccessible cross-origin CSSOM, generated pseudo-element text,
-canvas/video pixels, protected media, active embedded documents, and
-cross-origin frame contents. A dropdown that an unreadable stylesheet
-(another origin without CORS) may hide, or one that a sheet with more rules
-than Simul reads may hide, is withheld when its panel opens: Simul does not
-show what it cannot prove the page would show. Exact pixel parity is not
-claimed.
+Simul is a safe reconstruction, not a browser clone. These are the current
+limits: script-only custom-element state, virtualized DOM that the page has
+not created, inaccessible cross-origin CSSOM, generated pseudo-element
+text, canvas/video pixels, protected media, active embedded documents, and
+cross-origin frame contents. A stylesheet that Simul cannot read (a
+different origin without CORS) can hide a dropdown. A sheet with more rules
+than Simul reads can also hide a dropdown. Simul does not show such a
+dropdown when its panel opens, because Simul does not show what it cannot
+prove that the page would show. Simul does not claim exact pixel parity.
 
-See [Mirror fidelity](replica-fidelity.md) and the
-[translation companion architecture](translation-companion.md) for the
-complete design and browser-boundary rationale.
+For the complete design and the reasons for the browser boundary, see
+[Mirror fidelity](replica-fidelity.md) and the
+[translation companion architecture](translation-companion.md).
 
 ## Troubleshooting
 
-- **Chrome says the manifest is missing:** select `dist/chrome-unpacked`
-  itself, not the repository root.
-- **The icon does not work:** try a normal HTTP(S) page; Chrome blocks extension
-  access on some internal and protected URLs.
-- **A PDF on the computer (a `file://` tab) does not open:** Simul cannot read
-  `file://` tabs, even with **Allow access to file URLs** on. Select
-  **Open a PDF file…** in the panel, or drop the file on it.
-- **Nothing translates at all:** the browser must have the Translator API
-  (Chrome 141 or newer, Edge 148 or newer, or Opera 125 or newer, on a
-  computer; https://caniuse.com/mdn-api_translator lists them). Other
-  browsers can load Simul but cannot translate with it.
-- **A language pair is unavailable:** update Chrome and allow its on-device
-  Translator to prepare that pair.
-- **Automatic translation paused after navigation:** temporary `activeTab`
-  access does not transfer between sites. Select Simul again or explicitly
-  grant the intended site/all-sites scope.
-- **Image text is unchanged:** OCR is on by default, but pixel reading waits
-  for image access; select the **OCR** button to grant it. Keep the image
-  visible in the source tab and use a supported source language. Small images are skipped by default, and an image inside a link or
-  button is read only under the **Standard** or **Full visible** readable-content
-  scope (Page-only leaves images in controls alone).
-- **The mirror is stale:** use **Rebuild mirror** (↻ in the toolbar). Some closed-root, opaque
-  resource, CSSOM, and script-only changes cannot be observed safely.
-- **An update still looks old:** reload Simul at `chrome://extensions`, then
-  reload the source tab and reopen the companion.
+- **Chrome says the manifest is missing.** The folder that you selected is
+  not `dist/chrome-unpacked` itself (for example, it is the repository
+  root). Select `dist/chrome-unpacked` itself.
+- **The icon does not work.** Chrome blocks extension access on some
+  internal and protected URLs. Try a normal HTTP(S) page.
+- **A PDF on the computer (a `file://` tab) does not open.** Simul cannot
+  read `file://` tabs, even when **Allow access to file URLs** is on.
+  Select **Open a PDF file…** in the panel. As an alternative, drop the
+  file on the panel.
+- **Nothing translates at all.** The browser must have the Translator API:
+  Chrome 141 or newer, Edge 148 or newer, or Opera 125 or newer, on a
+  computer (https://caniuse.com/mdn-api_translator lists them). Other
+  browsers can load Simul, but they cannot translate with it.
+- **A language pair is unavailable.** Chrome's on-device Translator has not
+  prepared that pair.
+  1. Update Chrome.
+  2. Allow its on-device Translator to prepare that pair.
+- **Automatic translation paused after navigation.** Temporary `activeTab`
+  access does not go from one site to another. Select Simul again. As an
+  alternative, explicitly grant the intended site or all-sites scope.
+- **Image text is unchanged.** OCR is on by default, but pixel reading
+  waits for image access. Small images are skipped by default. An image
+  inside a link or button is read only under the **Standard** or
+  **Full visible** readable-content scope (Page-only does not read images in
+  controls).
+  1. Select the **OCR** button to grant image access.
+  2. Keep the image visible in the source tab.
+  3. Use a supported source language.
+- **The mirror is out of date.** Simul cannot safely observe some
+  closed-root, opaque resource, CSSOM, and script-only changes. Select
+  **Rebuild mirror** (↻ in the toolbar).
+- **An update still looks old.** Chrome, the source tab or the panel can
+  still use the earlier version of Simul.
+  1. Reload Simul at `chrome://extensions`.
+  2. Reload the source tab.
+  3. Open the panel again.
 
 ## Development
 
-Prerequisites are Node.js 24 LTS and npm 12. Install the locked dependencies:
+You must have Node.js 24 LTS and npm 12. Install the locked dependencies:
 
 ```sh
 npm ci
@@ -579,24 +665,30 @@ Useful commands:
 | `npm run artifact:sync` | Validate and refresh `dist/chrome-unpacked/` (and the dev edition where the checkout keeps it). |
 | `npm run artifact:check` | Rebuild, validate, and byte-compare the checked-in artifacts. |
 | `npm run typecheck` | Type-check source and tests. |
-| `npm test` | Run the Vitest suite once on Node 24. |
+| `npm test` | Run the Vitest suite one time on Node 24. |
 | `npm run check` | Run typechecking, all tests, and the artifact check. |
 | `npm run zip` | Create WXT's Chrome distribution archive. |
 
-Do not edit `dist/chrome-unpacked` by hand. Change source, run
-`npm run artifact:sync`, then run `npm run check`.
+Do not edit `dist/chrome-unpacked` by hand. To make a change:
 
-Simul builds in two editions from the same source. `SIMUL_EDITION` picks one
-at build time (`lib/edition.ts`): unset or anything else builds the public
-edition, `dev` builds the dev edition, whose version name ends in `dev`. The
-public edition leaves the dev-only controls out of its pages and bundles,
-and reads every setting it does not show as its default (in
-`lib/preferences.ts`); storage keeps whatever was saved. The tests run as
-the dev edition and pass the edition explicitly where the public one
-differs. `npm run check` is the
-required handoff gate. The test suite needs Node 24: the vendored pdf.js uses
-`Promise.try`, and a run on another major stops at startup with a message.
+1. Change the source.
+2. Run `npm run artifact:sync`.
+3. Run `npm run check`.
 
-Runtime entrypoints live under `entrypoints/`; browser-independent logic lives
-under `lib/`; tests live under `tests/`; and durable project knowledge lives
+Simul builds in 2 editions from the same source. `SIMUL_EDITION` selects
+the edition at build time (`lib/edition.ts`). If it is not set, or has a
+different value, the build is the public edition. If it is `dev`, the build
+is the dev edition, and its version name ends in `dev`. The public edition
+does not include the dev-only controls in its pages and bundles. It reads
+each setting that it does not show as its default (in
+`lib/preferences.ts`). Storage keeps all values that were saved.
+
+The tests run as the dev edition. Where the public edition is different,
+they pass the edition explicitly. `npm run check` is the required handoff
+gate. The test suite must have Node 24, because the vendored pdf.js uses
+`Promise.try`. On a different major version, a test run stops at startup
+with a message.
+
+Runtime entrypoints are under `entrypoints/`, browser-independent logic is
+under `lib/`, tests are under `tests/`, and durable project knowledge is
 under `docs/`.

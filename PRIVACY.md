@@ -2,97 +2,113 @@
 
 Last updated: 2026-11-23
 
-Simul is a Chrome extension that shows a translated copy of the web page or
-PDF you are reading. It works on your own computer. It has no server, no
-account, no analytics and no ads, and it sends nothing to its developer.
+Simul is a Chrome extension. It shows a translated copy of the web page or
+PDF that you read. It operates on your computer. It has no server, no
+account, no analytics and no advertisements. It sends nothing to its
+developer.
 
 ## What Simul reads
 
-Only the page that Simul's panel is showing, while the panel is open (see
-Site access below):
+Simul reads only the page that its panel shows, and only while the panel is
+open (see "Site access" below):
 
-- **The page:** its text, images and layout, so the mirror can show it. The
-  read profile in Options decides how much: page text only; also button
-  labels, button pictures and folded sections; or also what is filled in
-  visible form fields and text editors, including autofilled values.
-  Passwords, payment-card numbers and one-time codes are never read: for a
-  password field, Simul learns only how many characters it holds, to draw
-  the same number of dots.
-- **The tab's address,** to follow the tab and to remember the sites you
-  chose for automatic translation.
-- **Your clicks, keys, focus and scrolling on that page,** only to keep the
-  mirror in step with it. Keystrokes are not recorded.
-- **Pictures for image text:** when you turn on image text, Simul takes a
-  picture of the visible tab and keeps only the parts with images, to read
-  the text in them.
-- **PDFs** you open in Chrome or choose from your computer.
+- **The page:** its text, images and layout. The mirror must have these to
+  show the page. The read profile in Options sets how much Simul reads:
+  - Page only: the text of the page.
+  - Standard: also the labels and pictures of buttons, and folded sections.
+  - Full visible: also the content of visible form fields and text editors,
+    and values that the browser filled in automatically.
 
-## Where it is kept
+  Simul never reads passwords, payment-card numbers or one-time codes. For
+  a password field, Simul receives only the number of characters, to show the
+  same number of dots.
+- **The address of the tab:** Simul uses it to follow the tab. It also uses
+  it to remember the sites that you selected for automatic translation.
+- **Your clicks, keys, focus and scroll movements on that page:** Simul uses
+  them only to keep the mirror the same as the page. Simul does not record
+  your keystrokes.
+- **Pictures for image text:** when you start image text, Simul takes a
+  picture of the visible part of the tab. It keeps only the parts with
+  images, and it reads the text in them.
+- **PDFs** that you open in Chrome or select from your computer.
 
-- What Simul reads stays in the panel's memory while the panel is open.
-- Your settings (languages, zoom, read profile, sites for automatic
-  translation) are saved by Chrome on your computer. They are not synced.
-- Pictures of images wait in the extension's own temporary storage until
-  they are read, at most two minutes, and are then deleted.
+## Where Simul keeps the data
 
-## What leaves your computer
+- The data that Simul reads is in the memory of the panel while the panel is
+  open.
+- Chrome saves your settings on your computer: languages, zoom, read profile
+  and the sites for automatic translation. Chrome does not sync them.
+- Pictures of images are in the temporary storage of the extension until
+  Simul reads them. After a maximum of 2 minutes, Simul deletes them.
 
-Nothing Simul reads is sent to Simul's developer or to any other company.
-Translation, language detection and reading text in images all run on your
-computer. Some requests do go over the network:
+## What goes from your computer
 
-- The mirror loads the page's own images, styles and fonts from where the
-  page loads them (its own site or the sites it uses), as the page itself
-  does.
-- To read text in an image, Simul may download that image again from its
-  own address, without your cookies.
-- A style sheet the page loaded from another site (a CDN) is read again,
-  without your cookies, from the copy your browser keeps of it (or from its
-  own address, if the browser no longer has it), only to know which names it
-  mentions, so Simul can skip work the page's changes do not need. Nothing
-  else is taken from it.
-- A style sheet the page's site redirected to another address is asked for
-  once more, without your cookies, only to learn that address, so the
-  mirror finds the sheet's images and fonts.
-- On a PDF tab, Simul downloads that PDF once more from its own address,
-  with the site's cookies, as the tab did.
-- The first time you translate into a new language, Chrome may download that
-  language pack from Google. This is Chrome's own download; the text you
-  translate is not sent.
+Simul does not send the data that it reads to its developer or to a
+different company. Translation, language detection and the reading of text
+in images occur on your computer. Some requests go on the network:
 
-Simul uses Chrome's on-device language models (Gemini Nano and the language
-detector) only when they are already installed. It never downloads them.
+- The mirror loads the images, styles and fonts of the page from the
+  locations where the page loads them (the site of the page or the sites
+  that the page uses). The page does the same.
+- To read the text in an image, Simul can download that image again from its
+  address, without your cookies.
+- If the page loaded a style sheet from a different site (a CDN), Simul
+  reads that style sheet again, without your cookies. It reads the copy that
+  your browser keeps. If the browser does not have the copy, Simul reads the
+  style sheet from its address. Simul uses the style sheet only to find the
+  names that it contains. Then Simul can skip work that the changes of the
+  page do not make necessary. Simul takes nothing else from the style sheet.
+- If the site of the page sent a style sheet to a different address, Simul
+  asks for the style sheet one more time, without your cookies. Simul does
+  this only to find that address. Then the mirror can find the images and
+  fonts of the style sheet.
+- On a PDF tab, Simul downloads that PDF one more time from its address,
+  with the cookies of the site. The tab did the same.
+- When you translate into a new language for the first time, Chrome can
+  download the language pack for that language from Google. This is a
+  download that Chrome does. Chrome does not send the text that you
+  translate.
+
+Simul uses the on-device language models of Chrome (Gemini Nano and the
+language detector) only when they are already installed. Simul never
+downloads them.
 
 ## Site access
 
-Simul can read the pages you open from the time you install it, so the
-panel follows each page and tab without a click on its icon. It reads a page
-only while its panel shows that page, and nothing it reads leaves your
-device. You can limit it in Chrome's extension settings (Site access: On
-click, or a list of sites); Simul then reads a tab after you select its icon
-there, and its panel offers to let it read all sites again. Access to one
-site that Simul asked for, for automatic translation on that site, it gives
-back when you turn that off.
+Simul can read the pages that you open after you install it. Because of
+this, the panel follows each page and tab, and it is not necessary to click
+the Simul icon.
+Simul reads a page only while its panel shows that page. The data that it
+reads does not go from your computer.
 
-## Deleting your data
+You can limit this access in the extension settings of Chrome (Site access:
+On click, or a list of sites). Then Simul reads a tab only after you select
+the Simul icon on that tab. The panel then shows a button that allows
+Simul to read all sites again.
 
-Select **Reset all extension settings** in Simul's Options to clear your
-settings. Removing Simul from Chrome deletes everything it stored.
+For automatic translation on one site, Simul can ask for access to that
+site. When you stop automatic translation on that site, Simul gives the
+access back.
+
+## How to delete your data
+
+To delete your settings, select **Reset all extension settings** in the
+Options of Simul. When you remove Simul from Chrome, Chrome deletes all the
+data that Simul stored.
 
 ## Chrome Web Store User Data Policy
 
 The use of information received from Google APIs will adhere to the Chrome
 Web Store User Data Policy, including the Limited Use requirements. Simul
-does not sell data, does not use it for anything except showing and
-translating the page you read, and does not use it to decide credit or
-lending.
+does not sell data. Simul uses data only to show and translate the page that
+you read. Simul does not use data to make decisions about credit or loans.
 
 ## Changes
 
-Changes to this policy are made in this file; its history is public in this
-repository.
+We make changes to this policy in this file. The history of this file is
+public in this repository.
 
 ## Contact
 
-Questions about privacy: open an issue at
+For questions about privacy, open an issue at
 https://github.com/aredna/simul/issues
