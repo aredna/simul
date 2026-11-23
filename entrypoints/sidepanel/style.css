@@ -385,10 +385,17 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: .7
 .composer-character-count[data-near-limit="true"] { color: var(--warning-text); }
 #composer-output { margin-top: 7px; background: #f8faf8; }
 
-.status { min-height: 17px; margin: 10px 0 0; color: var(--muted); font-size: .65625rem; line-height: 1.4; }
+.status { min-height: 17px; margin: 2px 0 8px; color: var(--muted); font-size: .65625rem; line-height: 1.4; }
 .status[data-tone="success"] { color: var(--success-text); }
 .status[data-tone="warning"] { color: var(--warning-text); }
 .status[data-tone="error"] { color: var(--error-text); }
+/* What the dot on the options button points to (D240): a note at the top. */
+.status[data-tone="warning"],
+.status[data-tone="error"] {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
 .microcopy { margin: 7px 0 0; color: var(--muted); font-size: .59375rem; line-height: 1.4; }
 
 .progress-region { margin-top: 10px; color: var(--muted); font-size: .625rem; }
