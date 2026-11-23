@@ -83,6 +83,8 @@ import {
   type HtmlMirrorRepresentabilitySummary,
   type HtmlMirrorStyleWorkBudget,
   boundedDimension,
+  installHtmlMirrorFrameInsetReader,
+  readHtmlMirrorDocumentContent,
 } from './html-mirror-sanitizer';
 import {
   MAX_HTML_MIRROR_NODES_SETTING,
@@ -159,6 +161,18 @@ import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import { StableSignatureTracker } from './stable-signature-tracker';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 import {
+  HTML_MIRROR_FRAME_TOKEN_KEY,
+  readHtmlMirrorFrameControllerMessage,
+  readHtmlMirrorFramePortSessionId,
+  type HtmlMirrorFrameControllerMessage,
+  type HtmlMirrorFrameGraph,
+  type HtmlMirrorFramesWanted,
+} from './html-mirror-frame';
+import {
+  HtmlMirrorFrameSourceSession,
+  listenForHtmlMirrorFrameToken,
+} from './html-mirror-frame-source';
+import {
   askAboutSourceShadowRootsAbove,
   askAboutSourceShadowRootsWithin,
   beginSourceShadowRootWalk,
@@ -177,6 +191,10 @@ import {
  * page script (D169).
  */
 const FIRST_SECRET_SCAN_SLICE_MS = 10;
+/** Frames of other sites one page's reader keeps a token for (D246). */
+const MAX_TRACKED_SOURCE_FRAMES = 64;
+/** How many times the panel is asked again for a frame still blank. */
+const FRAMES_WANTED_RETRIES = 5;
 
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   readonly #ids = new WeakMap<Node, number>();
@@ -478,7 +496,33 @@ export function installHtmlMirrorSourceBridge(
   // page's style rules mention tells the image reader which changes restyle
   // nothing (D182, D201).
   let liveMirror: HtmlMirrorSourceSession | undefined;
+  // In another site's frame, the token of the page's reader is listened for
+  // from now on: the panel tells the page's reader to post it once this
+  // script has run (D246).
+  const frameTokens = listenForHtmlMirrorFrameToken(sourceWindow);
   runtime.onConnect.addListener((port) => {
+    if (readHtmlMirrorFramePortSessionId(port.name)) {
+      if (!frameTokens) {
+        port.disconnect();
+        return;
+      }
+      new HtmlMirrorFrameSourceSession({
+        port,
+        document: sourceDocument,
+        window: sourceWindow,
+        registry,
+        tokens: frameTokens,
+        secretScan,
+        now,
+        createMutationObserver: environment.createMutationObserver ??
+          ((callback) => new MutationObserver(callback)),
+        setTimer: environment.setTimer ??
+          ((callback, milliseconds) => setTimeout(callback, milliseconds)),
+        clearTimer: environment.clearTimer ??
+          ((handle) => clearTimeout(Number(handle))),
+      });
+      return;
+    }
     if (readHtmlMirrorPortSessionId(port.name)) {
       liveMirror = new HtmlMirrorSourceSession({
         port,
@@ -1017,6 +1061,11 @@ interface HeldChanges {
   /** Slots, filled by a script, whose list of nodes is to be sent. */
   readonly slotLists: readonly Element[];
   readonly dimensions: boolean;
+  /**
+   * Hosts sent again (D190, D246) whose parent's list a later turn reads:
+   * sent again then, not dropped with this turn's patch.
+   */
+  readonly hosts?: readonly Element[];
 }
 
 type StylePollResult = 'changed' | 'unchanged' | 'capacity';
@@ -1036,6 +1085,22 @@ export class HtmlMirrorSourceSession {
   readonly #sessionId: string;
   #identity: ReplicaDocumentIdentity | undefined;
   #fidelityPolicy: SelectableReplicaFidelityPolicy | undefined;
+  /**
+   * The frames of other sites the mirror holds a box for, by the token
+   * posted to each, and what each frame's own reader read (D246).
+   */
+  readonly #frames = new Map<string, {
+    readonly element: WeakRef<Element>;
+    graph?: HtmlMirrorFrameGraph;
+    text?: string;
+    /** The `text` the frame was last read with for the mirror. */
+    readText?: string;
+    /** Sent again for this `text` after a read had it blank, once. */
+    retried?: boolean;
+  }>();
+  #frameTokens = new WeakMap<Element, string>();
+  #framesWantedTimer: unknown;
+  #framesWantedAsks = 0;
   #observer: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined;
   #resizeObserver: Pick<ResizeObserver, 'observe' | 'disconnect'> | undefined;
   #pendingChildren = new Set<Node>();
@@ -1401,6 +1466,13 @@ export class HtmlMirrorSourceSession {
     this.#disposed = true;
     // A read in slices that is running stops at its next turn (D163).
     this.#checkpointRead = undefined;
+    installHtmlMirrorFrameInsetReader(
+      this.environment.document,
+      undefined,
+      this.#frameInset,
+    );
+    this.environment.clearTimer(this.#framesWantedTimer);
+    this.#frames.clear();
     this.environment.port.onMessage.removeListener(this.#onMessage);
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
     this.#stopListeningForShadowRoots?.();
@@ -1530,6 +1602,13 @@ export class HtmlMirrorSourceSession {
 
   readonly #onMessage = (input: unknown): void => {
     if (this.#disposed) return;
+    const frameMessage = this.#identity
+      ? readHtmlMirrorFrameControllerMessage(input, this.#sessionId)
+      : undefined;
+    if (frameMessage) {
+      this.#onFrameMessage(frameMessage);
+      return;
+    }
     const message = readHtmlMirrorControllerMessage(
       input,
       this.#sessionId,
@@ -1632,6 +1711,7 @@ export class HtmlMirrorSourceSession {
     }
     this.#identity = identity;
     this.#fidelityPolicy = fidelityPolicy;
+    installHtmlMirrorFrameInsetReader(this.environment.document, this.#frameInset);
     try {
       this.#observer = this.environment.createMutationObserver(
         (records) => this.#onMutations(records),
@@ -2677,6 +2757,8 @@ export class HtmlMirrorSourceSession {
       }
     }
     for (const target of read.loaded) this.#queueCapturedResourceRefresh(target);
+    // A frame's reading that came while the page was read (D246).
+    this.#sendStaleFramesAgain();
   }
 
   #onMutations(records: MutationRecord[]): void {
@@ -3541,6 +3623,7 @@ export class HtmlMirrorSourceSession {
     if (!frame) return false;
     this.#sequence = frame.lastSequence;
     this.#post(frame);
+    this.#sendStaleFramesAgain();
     return true;
   }
 
@@ -3578,13 +3661,14 @@ export class HtmlMirrorSourceSession {
         held.children.length + held.attributes.length + held.text.length +
           held.sheets.length + held.slotLists.length === 0
       ) return undefined;
+      const lists = this.#holdHostsSentAgain(held);
       for (const node of held.children) this.#pendingChildren.delete(node);
       for (const node of held.attributes) this.#pendingAttributes.delete(node);
       for (const node of held.text) this.#pendingText.delete(node);
       for (const node of held.slotLists) this.#pendingSlotLists.delete(node);
       this.#pendingSheets.clear();
       this.#pendingDimensions = false;
-      return held;
+      return lists;
     }
     if (!html || !this.#pendingChildren.has(html)) return undefined;
     const held: HeldChanges = {
@@ -3599,6 +3683,7 @@ export class HtmlMirrorSourceSession {
       held.children.length + held.attributes.length + held.text.length +
         held.sheets.length + held.slotLists.length === 0
     ) return undefined;
+    const document = this.#holdHostsSentAgain(held);
     this.#pendingChildren.clear();
     this.#pendingAttributes.clear();
     this.#pendingText.clear();
@@ -3606,7 +3691,26 @@ export class HtmlMirrorSourceSession {
     this.#pendingSlotLists.clear();
     this.#pendingChildren.add(html);
     this.#pendingDimensions = false;
-    return held;
+    return document;
+  }
+
+  /**
+   * Takes out the hosts sent again whose parent's list is held: the patch
+   * of this turn clears the hosts it was to send, and the list comes back
+   * in a later turn without them. A frame in a component's root, drawn
+   * when its reader's reading came in the frame the page's frame next to
+   * it did, stayed blank (D246).
+   */
+  #holdHostsSentAgain(held: HeldChanges): HeldChanges {
+    if (this.#hostsSentAgain.size === 0) return held;
+    const lists = new Set(held.children);
+    const hosts = [...this.#hostsSentAgain].filter((host) => {
+      const parent = this.#emittedParent.get(host);
+      return parent !== undefined && lists.has(parent);
+    });
+    if (hosts.length === 0) return held;
+    for (const host of hosts) this.#hostsSentAgain.delete(host);
+    return { ...held, hosts };
   }
 
   /**
@@ -3683,6 +3787,11 @@ export class HtmlMirrorSourceSession {
     for (const node of held.sheets) this.#queuePending(this.#pendingSheets, node);
     for (const node of held.slotLists) this.#pendingSlotLists.add(node);
     this.#pendingDimensions ||= held.dimensions;
+    // A host whose list was sent whole went with it.
+    for (const host of held.hosts ?? []) {
+      const parent = this.#emittedParent.get(host);
+      if (parent && this.#pendingChildren.has(parent)) this.#hostsSentAgain.add(host);
+    }
   }
 
   /**
@@ -6599,6 +6708,140 @@ export class HtmlMirrorSourceSession {
    * mirror would not take that: a host right under `<html>`, one held in
    * another list than its own, one inside a dropdown, a placeholder.
    */
+  /**
+   * What a frame of another site holds, for the sanitizer (D246). A frame
+   * met for the first time is given a token, and the panel is asked to run
+   * a reader in the page's frames; until its reader sends what it read, the
+   * frame is a blank box.
+   */
+  readonly #frameInset = (element: Element): HtmlMirrorFrameGraph | undefined => {
+    if (this.#disposed || !this.#identity) return undefined;
+    const known = this.#frameTokens.get(element);
+    let entry = known === undefined ? undefined : this.#frames.get(known);
+    if (!entry) {
+      if (this.#frames.size >= MAX_TRACKED_SOURCE_FRAMES) {
+        for (const [token, frame] of this.#frames) {
+          if (!frame.element.deref()?.isConnected) this.#frames.delete(token);
+        }
+        if (this.#frames.size >= MAX_TRACKED_SOURCE_FRAMES) return undefined;
+      }
+      const token = crypto.randomUUID();
+      entry = { element: new WeakRef(element) };
+      this.#frameTokens.set(element, token);
+      this.#frames.set(token, entry);
+      // A new frame: the panel is asked again, from the first wait.
+      this.#framesWantedAsks = 0;
+    }
+    if (!entry.graph) this.#askForFrames();
+    entry.readText = entry.text;
+    return entry.graph;
+  };
+
+  /**
+   * Sends again, once, each frame whose reading came while the page was
+   * read and that the mirror holds as it was before (D246): a frame met by
+   * a read in slices, its reading in between, stayed blank.
+   */
+  #sendStaleFramesAgain(): void {
+    for (const frame of this.#frames.values()) {
+      if (frame.readText === frame.text || frame.retried) continue;
+      const element = frame.element.deref();
+      if (!element?.isConnected) continue;
+      frame.retried = true;
+      this.#sendFrameAgain(element);
+    }
+  }
+
+  /**
+   * Asks the panel for the page's frames, at once and then after 1, 2, 4,
+   * 8 and 16 seconds while a frame is still blank: a frame added late is
+   * still loading when it is first met, and Chrome runs no reader in it yet.
+   */
+  #askForFrames(): void {
+    if (
+      this.#disposed || this.#framesWantedTimer !== undefined ||
+      this.#framesWantedAsks > FRAMES_WANTED_RETRIES
+    ) return;
+    const delay = this.#framesWantedAsks === 0
+      ? 0
+      : 1_000 * 2 ** (this.#framesWantedAsks - 1);
+    this.#framesWantedTimer = this.environment.setTimer(() => {
+      this.#framesWantedTimer = undefined;
+      if (this.#disposed) return;
+      this.#framesWantedAsks += 1;
+      const wanted: HtmlMirrorFramesWanted = {
+        protocolVersion: 2,
+        kind: 'simul:html-mirror-v2:frames',
+      };
+      this.#post(wanted);
+      // Asked again while a frame is still blank.
+      for (const frame of this.#frames.values()) {
+        if (!frame.graph && frame.element.deref()?.isConnected) {
+          this.#askForFrames();
+          break;
+        }
+      }
+    }, delay);
+  }
+
+  #onFrameMessage(message: HtmlMirrorFrameControllerMessage): void {
+    if (message.kind === 'simul:html-mirror-v2:frames-ready') {
+      // The readers run in the frames: each blank frame is posted its token,
+      // the only thing that goes into the frame. What it reads comes back
+      // through the panel, never through the page.
+      for (const [token, frame] of this.#frames) {
+        const element = frame.element.deref();
+        if (!element) {
+          this.#frames.delete(token);
+          continue;
+        }
+        if (frame.graph || !element.isConnected) continue;
+        try {
+          (element as HTMLIFrameElement).contentWindow?.postMessage(
+            { [HTML_MIRROR_FRAME_TOKEN_KEY]: token },
+            '*',
+          );
+        } catch {
+          // A frame that takes no message stays blank.
+        }
+      }
+      return;
+    }
+    const frame = this.#frames.get(message.token);
+    const fidelityPolicy = this.#fidelityPolicy;
+    if (!frame || !fidelityPolicy) return;
+    const input = message.graph as { root?: unknown; adoptedStyleSheets?: unknown } | null;
+    const graph = input === null
+      ? undefined
+      : readHtmlMirrorDocumentContent(input.root, input.adoptedStyleSheets, fidelityPolicy);
+    const text = graph ? JSON.stringify(graph) : undefined;
+    if (text === frame.text) return;
+    frame.graph = graph;
+    frame.text = text;
+    frame.retried = false;
+    const element = frame.element.deref();
+    if (element) this.#sendFrameAgain(element);
+  }
+
+  /**
+   * Sends a frame's box again, in its parent's list, under the ID it has:
+   * what its reader read is drawn in it, or it is blank again (D246). A
+   * frame the mirror does not hold now is drawn at the next read.
+   */
+  #sendFrameAgain(frame: Element): void {
+    const parent = frame.parentNode;
+    if (
+      !parent || !frame.isConnected ||
+      parent === sourceProperty(this.environment.document, 'documentElement') ||
+      !this.#mirroredNodes.has(parent) ||
+      this.#emittedParent.get(frame) !== parent ||
+      !isSourceStructuralChildOf(frame, parent)
+    ) return;
+    this.#hostsSentAgain.add(frame);
+    this.#queuePending(this.#pendingChildren, parent);
+    this.#scheduleFlush();
+  }
+
   #sendHostAgain(host: Element): boolean {
     const parent = host.parentNode;
     if (

@@ -25,6 +25,8 @@ import {
   type HtmlMirrorLimitSettings,
 } from './html-mirror-limits';
 import { createReplicaIdentity } from './replica-identity';
+import { isHtmlMirrorFramesWanted } from './html-mirror-frame';
+import { HtmlMirrorFrameRelay } from './html-mirror-frame-relay';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
 export interface HtmlMirrorStreamObserver {
@@ -153,6 +155,8 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   #checkpointSequence: number | undefined;
   /** A preview was handed on and its full copy has not come yet (D163). */
   #copyPending = false;
+  /** The readers in the page's frames of other sites (D246). */
+  readonly #frames: HtmlMirrorFrameRelay;
 
   constructor(
     private readonly port: Browser.runtime.Port,
@@ -167,6 +171,14 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     this.initialCheckpoint = initial.promise;
     this.#resolveInitial = initial.resolve;
     this.#rejectInitial = initial.reject;
+    this.#frames = new HtmlMirrorFrameRelay({
+      tabId: request.tabId,
+      sessionId: request.sessionId,
+      fidelityPolicy,
+      limits,
+      showEverything,
+      post: (message) => port.postMessage(message),
+    });
     port.onMessage.addListener(this.#onMessage);
     port.onDisconnect.addListener(this.#onDisconnect);
     signal?.addEventListener('abort', this.#onAbort, { once: true });
@@ -230,6 +242,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     this.#explicitlyDisposed = true;
     this.#queue.splice(0);
     this.#parts = undefined;
+    this.#frames.dispose();
     if (this.#disposed) return;
     this.#disposed = true;
     this.#clearInitialTimer();
@@ -250,6 +263,11 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   readonly #onMessage = (input: unknown): void => {
     if (this.#disposed || !this.request.isCurrent()) {
       this.dispose();
+      return;
+    }
+    // The page's reader holds a frame of another site it has nothing for.
+    if (isHtmlMirrorFramesWanted(input)) {
+      this.#frames.look();
       return;
     }
     const received = readHtmlMirrorSourceMessage(
@@ -507,6 +525,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   #closeTransport(disconnect: boolean): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#frames.dispose();
     this.#parts = undefined;
     this.#clearInitialTimer();
     this.port.onMessage.removeListener(this.#onMessage);

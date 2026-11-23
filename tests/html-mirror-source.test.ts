@@ -37,7 +37,12 @@ import {
   installHtmlMirrorSourceBridge,
   type HtmlMirrorSourceBridgeEnvironment,
 } from '../lib/replica/html-mirror-source';
-import { MAX_HTML_MIRROR_NODES } from '../lib/replica/html-mirror-sanitizer';
+import {
+  MAX_HTML_MIRROR_NODES,
+  type HtmlMirrorElementNode,
+  type HtmlMirrorNode,
+} from '../lib/replica/html-mirror-sanitizer';
+import { HTML_MIRROR_FRAME_TOKEN_KEY } from '../lib/replica/html-mirror-frame';
 import { applyHtmlMirrorLimitSettings } from '../lib/replica/html-mirror-limits';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { sourceDocumentIdentity } from '../lib/replica/source-identity';
@@ -50,7 +55,10 @@ import {
   createSourceControlledContentPolicy,
   sourceControlledContentMutationsMayChange,
 } from '../lib/replica/source-privacy-policy';
-import { sourceDocumentSecretClassifier } from '../lib/replica/source-secret-classifier';
+import {
+  sourceDocumentSecretClassifier,
+  sourceSecretPlaceholderTagName,
+} from '../lib/replica/source-secret-classifier';
 import {
   askAboutSourceShadowRootsAbove,
   installSourceShadowRootReader,
@@ -3494,6 +3502,103 @@ describe('HtmlMirrorSourceSession', () => {
     while (fixture.frames.length > 0) fixture.flushFrame();
     expect(fixture.checkpoints()).toHaveLength(1);
     expect(JSON.stringify(fixture.patches().at(-1))).toContain('the example, changed');
+  });
+
+  it('draws a frame of another site in its box once the frame\'s own reader read it, and blanks it when the frame goes (D246)', () => {
+    const fixture = sourceFixture(
+      '<main id="page"><p>before</p><iframe id="gsi" src="https://accounts.google.com/gsi/button"></iframe><p>after</p></main>',
+    );
+    const frames = giveFramesBoxes(fixture, ['#gsi']);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const page = fixture.document.querySelector('#page')!;
+    const gsi = fixture.document.querySelector('#gsi')!;
+    const id = (node: Node) => fixture.registry.peekId(node);
+    const held = findMirrorNode(fixture.checkpoints()[0]!.payload.root, id(gsi)!);
+    expect(held).toMatchObject({ opaquePlaceholder: true, leftOutTagName: 'iframe' });
+
+    // The panel is asked for the page's frames; once their readers run,
+    // each blank frame is posted its token, and nothing else.
+    runTimersUntil(fixture, () => fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:frames'));
+    fixture.port.emitMessage(framesReady());
+    expect(frames.get('#gsi')!.postMessage).toHaveBeenCalledTimes(1);
+    const [posted, origin] = frames.get('#gsi')!.postMessage.mock.calls[0]!;
+    expect(origin).toBe('*');
+    expect(Object.keys(posted as object)).toEqual([HTML_MIRROR_FRAME_TOKEN_KEY]);
+    const token = (posted as Record<string, string>)[HTML_MIRROR_FRAME_TOKEN_KEY]!;
+
+    fixture.port.emitMessage(frameContent(token, frameGraph('Sign in with Google')));
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
+    const drawn = fixture.patches().at(-1)!;
+    const operation = drawn.operations.find(
+      (entry) => entry.kind === 'reconcile-children',
+    ) as Extract<HtmlMirrorPatchBatch['operations'][number], { kind: 'reconcile-children' }>;
+    expect(operation).toMatchObject({ nodeId: id(page) });
+    const inset = (operation.children.find((entry) => entry.kind === 'graph') as {
+      node: HtmlMirrorElementNode;
+    }).node;
+    expect(inset).toMatchObject({ id: id(gsi), tagName: 'div', children: [] });
+    expect(inset.opaquePlaceholder).toBeUndefined();
+    expect(inset.shadowRoot!.children[0]).toMatchObject({ tagName: 'html' });
+    expect(inset.shadowRoot!.adoptedStyleSheets[0]).toContain('width:300px!important');
+    expect(JSON.stringify(inset)).toContain('Sign in with Google');
+    expect(JSON.stringify(inset)).not.toContain('accounts.google.com');
+
+    // A frame that changes is drawn again; one that went is blank again.
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, drawn.identity.sequence));
+    fixture.port.emitMessage(frameContent(token, frameGraph('Continue as Joe')));
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    const changed = fixture.patches().at(-1)!;
+    expect(JSON.stringify(changed)).toContain('Continue as Joe');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, changed.identity.sequence));
+    fixture.port.emitMessage(frameContent(token, null));
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    const blank = fixture.patches().at(-1)!;
+    expect(JSON.stringify(blank)).not.toContain('Continue as Joe');
+    expect(JSON.stringify(blank)).toContain('"leftOutTagName":"iframe"');
+    // A token the page's reader did not give is not taken.
+    const before = fixture.port.posts.length;
+    fixture.port.emitMessage(frameContent('0123456789abcdef0123', frameGraph('Forged')));
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    expect(JSON.stringify(fixture.port.posts.slice(before))).not.toContain('Forged');
+    expect(fixture.checkpoints()).toHaveLength(1);
+  });
+
+  it('draws two frames whose readings come in one frame, one of them in a component\'s root (D246)', () => {
+    const fixture = sourceFixture(
+      '<main id="page"><iframe id="light" src="https://a.test/"></iframe><div id="host"></div></main>',
+    );
+    const host = fixture.document.querySelector('#host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(root, 'mode', { value: 'open' });
+    Object.defineProperty(root, 'isConnected', { get: () => host.isConnected });
+    root.innerHTML = '<iframe id="inside" src="https://b.test/"></iframe>';
+    const frames = giveFramesBoxes(fixture, ['#light'], root);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    runTimersUntil(fixture, () => fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:frames'));
+    fixture.port.emitMessage(framesReady());
+    const tokenOf = (selector: string) => (
+      frames.get(selector)!.postMessage.mock.calls[0]![0] as Record<string, string>
+    )[HTML_MIRROR_FRAME_TOKEN_KEY]!;
+    fixture.port.emitMessage(frameContent(tokenOf('#light'), frameGraph('Light frame')));
+    fixture.port.emitMessage(frameContent(tokenOf('#inside'), frameGraph('Frame in a root')));
+    for (let turn = 0; turn < 6 && fixture.frames.length > 0; turn += 1) {
+      fixture.flushFrame();
+      const patch = fixture.patches().at(-1);
+      if (patch) fixture.port.emitMessage(createHtmlMirrorAck(identity, patch.identity.sequence));
+    }
+    // In one message: the root's list, read in a later turn of the same
+    // frame, keeps its frame to send (it was dropped with the first turn).
+    expect(fixture.patches()).toHaveLength(1);
+    const sent = JSON.stringify(fixture.patches());
+    expect(sent).toContain('Light frame');
+    expect(sent).toContain('Frame in a root');
+    expect(fixture.checkpoints()).toHaveLength(1);
   });
 
   it('patches a component the page made, gave an open root and filled before it put it in the page (D180)', () => {
@@ -9663,6 +9768,109 @@ const identity = createReplicaIdentity({
 const PAGE_AT_START = Object.freeze({
   scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_400,
 });
+
+/**
+ * Gives the frames named a box in the flow (D239) and a window that takes
+ * messages (D246): linkedom lays nothing out and loads no frame.
+ */
+function giveFramesBoxes(
+  fixture: ReturnType<typeof sourceFixture>,
+  selectors: readonly string[],
+  ...roots: ShadowRoot[]
+): Map<string, { readonly postMessage: ReturnType<typeof vi.fn> }> {
+  const windows = new Map<string, { readonly postMessage: ReturnType<typeof vi.fn> }>();
+  const frames = [
+    ...selectors.map((selector) => [selector, fixture.document.querySelector(selector)!] as const),
+    ...roots.flatMap((root) => [...root.querySelectorAll('iframe')].map(
+      (frame) => [`#${frame.id}`, frame] as const,
+    )),
+  ];
+  for (const [selector, frame] of frames) {
+    const window = { postMessage: vi.fn() };
+    windows.set(selector, window);
+    Object.defineProperty(frame, 'contentWindow', { configurable: true, value: window });
+    Object.defineProperty(frame, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 0, top: 0, width: 300, height: 44, right: 300, bottom: 44 }),
+    });
+  }
+  const previous = Object.getOwnPropertyDescriptor(fixture.window, 'getComputedStyle');
+  Object.defineProperty(fixture.window, 'getComputedStyle', {
+    configurable: true,
+    value: () => ({
+      display: 'block',
+      position: 'static',
+      visibility: 'visible',
+      opacity: '1',
+      backgroundColor: 'rgba(0, 0, 0, 0)',
+      overflowY: 'visible',
+      getPropertyValue: (name: string) =>
+        name === 'float' ? 'none' : name.startsWith('margin-') ? '0px' : '',
+    }),
+  });
+  onTestFinished(() => {
+    if (previous) Object.defineProperty(fixture.window, 'getComputedStyle', previous);
+    else delete (fixture.window as { getComputedStyle?: unknown }).getComputedStyle;
+  });
+  return windows;
+}
+
+function runTimersUntil(
+  fixture: ReturnType<typeof sourceFixture>,
+  done: () => boolean,
+): void {
+  for (let turn = 0; turn < 20 && !done(); turn += 1) fixture.runTimer();
+  expect(done()).toBe(true);
+}
+
+function framesReady() {
+  return {
+    protocolVersion: 2,
+    kind: 'simul:html-mirror-v2:frames-ready',
+    sessionId: identity.sessionId,
+  };
+}
+
+function frameContent(token: string, graph: unknown) {
+  return {
+    protocolVersion: 2,
+    kind: 'simul:html-mirror-v2:frame-content',
+    sessionId: identity.sessionId,
+    token,
+    graph,
+  };
+}
+
+/** What a frame's reader sends: its document, with a script's place held. */
+function frameGraph(text: string) {
+  const element = (id: number, tagName: string, children: unknown[] = []) => ({
+    kind: 'element', id, namespace: 'html', tagName, attributes: [], children,
+  });
+  return {
+    root: element(1, 'html', [
+      element(2, 'head'),
+      element(3, 'body', [
+        element(4, 'div', [{ kind: 'text', id: 5, text, translatable: true }]),
+        {
+          ...element(6, sourceSecretPlaceholderTagName(6)),
+          opaquePlaceholder: true,
+          leftOutTagName: 'script',
+        },
+      ]),
+    ]),
+    adoptedStyleSheets: [],
+  };
+}
+
+function findMirrorNode(root: HtmlMirrorNode, id: number): HtmlMirrorNode | undefined {
+  if (root.id === id) return root;
+  if (root.kind === 'text') return undefined;
+  for (const child of [...root.children, ...(root.shadowRoot?.children ?? [])]) {
+    const found = findMirrorNode(child, id);
+    if (found) return found;
+  }
+  return undefined;
+}
 
 /**
  * Gives every element a plain computed style, so that no pane of a test is

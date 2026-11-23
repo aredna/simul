@@ -703,6 +703,19 @@ describe('one way to a shadow root (D125)', () => {
       // A list read in place, against what was sent (D222).
       'const graphRoot = node.shadowRoot;',
     ],
+    // What another site's frame read, given IDs of the page (D246).
+    'lib/replica/html-mirror-frame.ts': [
+      'if (current.shadowRoot) {',
+      'pending.push(...current.shadowRoot.children);',
+      'for (const child of current.shadowRoot.children) pending.push([child, depth + 2]);',
+      'const shadowRoot = node.shadowRoot && (() => {',
+      'ids.set(node.shadowRoot.id, rootId);',
+      '...node.shadowRoot,',
+      'children: Object.freeze(node.shadowRoot.children.map(copy)),',
+      'const shadowRoot = node.shadowRoot && Object.freeze({',
+      'children: Object.freeze(node.shadowRoot.children.map(rename)),',
+      '(node.shadowRoot?.children.some(hasAssigned) ?? false)',
+    ],
     'lib/replica/html-mirror-sanitizer.ts': [
       'input.shadowRoot !== undefined',
       '(isNativeSelectSemanticTag(input.tagName) && input.shadowRoot !== undefined) ||',

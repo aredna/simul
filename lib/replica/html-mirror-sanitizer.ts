@@ -52,6 +52,14 @@ import {
   sourceSecretPlaceholderTagName,
 } from './source-secret-classifier';
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
+import {
+  MAX_HTML_MIRROR_FRAME_BYTES,
+  MAX_HTML_MIRROR_FRAME_NODES,
+  countHtmlMirrorNodes,
+  htmlMirrorFrameInsetNode,
+  htmlMirrorGraphDepth,
+  type HtmlMirrorFrameGraph,
+} from './html-mirror-frame';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 import {
   beginSourceHeldAnimationPass,
@@ -8403,6 +8411,87 @@ export function isHtmlMirrorLeftOutTagName(
   return typeof value === 'string' && LEFT_OUT_PLACEHOLDER_TAGS.has(value);
 }
 
+/**
+ * What another site's frame shows, as its own reader read it (D246): set by
+ * the page's reader for its document, asked for each frame that holds a box.
+ */
+export type HtmlMirrorFrameInsetReader = (
+  frame: Element,
+) => HtmlMirrorFrameGraph | undefined;
+
+const FRAME_INSET_READERS = new WeakMap<Document, HtmlMirrorFrameInsetReader>();
+
+/** `reader` undefined takes away `installed`, if it is the one installed. */
+export function installHtmlMirrorFrameInsetReader(
+  sourceDocument: Document,
+  reader: HtmlMirrorFrameInsetReader | undefined,
+  installed?: HtmlMirrorFrameInsetReader,
+): void {
+  if (reader) FRAME_INSET_READERS.set(sourceDocument, reader);
+  else if (FRAME_INSET_READERS.get(sourceDocument) === installed) {
+    FRAME_INSET_READERS.delete(sourceDocument);
+  }
+}
+
+/**
+ * A frame drawn in its box (D246), or undefined where it stays blank: no
+ * reading of it yet, a frame in a region whose text is withheld, or one
+ * that would take the page past its limits. Never a reason to fail the read.
+ */
+function serializeFrameInset(
+  id: number,
+  context: SerializeContext,
+  element: Element,
+  heldBox: HtmlMirrorHeldBox,
+): HtmlMirrorElementNode | undefined {
+  if (
+    context.privateRegion || context.privacyRegion ||
+    context.privateAttributeRegion || context.activationRegion ||
+    context.nonContentRegion || context.styleRegion ||
+    context.hardSecretRegion || context.visibilityHidden
+  ) return undefined;
+  const ownerDocument = element.ownerDocument;
+  const reader = ownerDocument && FRAME_INSET_READERS.get(ownerDocument);
+  let graph: HtmlMirrorFrameGraph | undefined;
+  try {
+    graph = reader?.(element);
+  } catch {
+    return undefined;
+  }
+  if (!graph) return undefined;
+  const nodes = countHtmlMirrorNodes(graph.root) + 2;
+  if (
+    nodes > MAX_HTML_MIRROR_FRAME_NODES ||
+    context.depth + 2 + htmlMirrorGraphDepth(graph.root) > MAX_HTML_MIRROR_DEPTH
+  ) return undefined;
+  const inset = htmlMirrorFrameInsetNode(id, heldBox, graph);
+  // Checked as the panel will check it: a frame it would refuse stays blank
+  // instead of failing the page's patch.
+  if (!readHtmlMirrorNode(
+    inset,
+    new Set(),
+    context.depth,
+    undefined,
+    false,
+    false,
+    false,
+    false,
+    false,
+    context.fidelityPolicy,
+  )) return undefined;
+  const bytes = htmlMirrorJsonBytes(inset) * 2;
+  const { budget } = context;
+  if (
+    bytes > MAX_HTML_MIRROR_FRAME_BYTES * 2 ||
+    budget.nodes + nodes > MAX_HTML_MIRROR_NODES ||
+    budget.bytes + bytes > MAX_HTML_MIRROR_BYTES
+  ) return undefined;
+  budget.nodes += nodes;
+  budget.bytes += bytes;
+  budget.ids.add(id);
+  return inset;
+}
+
 function serializeLeftOutPlaceholder(
   id: number,
   context: SerializeContext,
@@ -8413,6 +8502,11 @@ function serializeLeftOutPlaceholder(
   // A frame or a plugin holds its space (D239): Google's sign-in button is
   // another site's frame, and the form under it moved up without it.
   const heldBox = readSourceHeldBox(element);
+  // A frame whose own reader read it is drawn in that space (D246).
+  if (leftOutTagName === 'iframe' && heldBox) {
+    const inset = serializeFrameInset(id, context, element, heldBox);
+    if (inset) return inset;
+  }
   admitNode(
     context.budget,
     id,
