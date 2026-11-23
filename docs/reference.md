@@ -510,6 +510,28 @@ tab shows them, the mirror also shows them. Simul does not read the insides
 of the browser's own controls (the editor of a text field, the buttons of a
 video).
 
+**Frames from other sites.** A page can show a frame from a different
+site, for example a "Continue with Google" button or the output of a code
+example. Chrome does not let Simul's reader in the page read inside that
+frame. Simul runs the same reader in the frame itself, with the same read
+profile and the same rules for passwords and card numbers. The reader in
+the page holds the frame's box at its size, and the mirror draws what the
+frame shows in that box. Simul translates its text as it translates the
+page. When the frame changes, the mirror changes too.
+
+To find which box a frame goes in, the reader in the page sends each frame
+a random token, and nothing else. What the frame's reader reads goes to the
+panel, and never through the page. Simul reads only the page's own frames
+(not a frame inside a frame), at most 12 frames of a page. These frames
+stay as blank boxes of the same size:
+
+- A frame inside a frame.
+- A frame that the page places outside the flow (fixed or absolute).
+- A frame with more than 4,000 nodes.
+- A frame on a site that Simul cannot read (Site access set to On click).
+
+Simul does not read text in images inside a frame.
+
 Simul reads a PDF opened from the computer from the file that you selected,
 and makes no request. The panel keeps only a reference to the file, and
 never after it is closed.
@@ -599,10 +621,11 @@ Simul is a safe reconstruction, not a browser clone. These are the current
 limits: script-only custom-element state, virtualized DOM that the page has
 not created, inaccessible cross-origin CSSOM, generated pseudo-element
 text, canvas/video pixels, protected media, active embedded documents, and
-cross-origin frame contents. A stylesheet that Simul cannot read (a
-different origin without CORS) can hide a dropdown. A sheet with more rules
-than Simul reads can also hide a dropdown. Simul does not show such a
-dropdown when its panel opens, because Simul does not show what it cannot
+the frames listed under "Frames from other sites" in
+[Privacy and security boundary](#privacy-and-security-boundary). A
+stylesheet that Simul cannot read (a different origin without CORS) can
+hide a dropdown. A sheet with more rules than Simul reads can also hide a
+dropdown. Simul does not show such a dropdown when its panel opens, because Simul does not show what it cannot
 prove that the page would show. Simul does not claim exact pixel parity.
 
 For the complete design and the reasons for the browser boundary, see

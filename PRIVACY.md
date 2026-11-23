@@ -13,7 +13,9 @@ Simul reads only the page that its panel shows, and only while the panel is
 open (see "Site access" below):
 
 - **The page:** its text, images and layout. The mirror must have these to
-  show the page. The read profile in Options sets how much Simul reads:
+  show the page. This includes the frames in the page that come from a
+  different site, for example a sign-in button. The read profile in Options
+  sets how much Simul reads:
   - Page only: the text of the page.
   - Standard: also the labels and pictures of buttons, and folded sections.
   - Full visible: also the content of visible form fields and text editors,
