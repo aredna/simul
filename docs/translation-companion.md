@@ -294,7 +294,7 @@ Password fields, CSS text-security fields, hidden inputs, file names and
 paths, password/authentication/one-time-code/WebAuthn autocomplete, and every
 `cc-*` autocomplete token are a floor no read scope lifts; only the Advanced
 **Show everything (testing)** switch does (D75, see
-[Replica fidelity](replica-fidelity.md)). A file input is drawn as the empty
+[Mirror fidelity](replica-fidelity.md)). A file input is drawn as the empty
 field the page shows (D75). A credential input is drawn with one dot per
 character, as the page draws it (D76, D91): only the length of its value
 travels, under the form-values setting, and never its characters.
@@ -737,7 +737,7 @@ creates. External SVG references may still be refused by Chrome's fetch/CORS
 rules. Canvas pixels, current video/audio frames, protected media, and embedded
 document contents are not reconstructed.
 
-See [Replica fidelity](replica-fidelity.md) for the policy matrix, diagnostic
+See [Mirror fidelity](replica-fidelity.md) for the policy matrix, diagnostic
 meaning, no-network follow-up, and the complete browser-boundary rationale.
 
 ## Reddit-class troubleshooting and submission limits

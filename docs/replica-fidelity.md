@@ -1,4 +1,4 @@
-# Replica fidelity
+# Mirror fidelity
 
 Simul reconstructs a web page for visual comparison and translation. The
 replica is not a second running copy of the site: website JavaScript never runs

@@ -382,7 +382,7 @@ default size limits, every image reading method in the default order,
 visible images read first, small images skipped, and no local Prompt for
 image text. The release zips and the Chrome Web Store carry this edition.
 A separate dev edition, built for testing (see [Development](#development)),
-adds those settings: the per-item read choices, Replica text and fidelity,
+adds those settings: the per-item read choices, Mirror text and fidelity,
 the size limits, **Show everything (testing)**, the image reading methods,
 scan order, small images, the Prompt options, and OCR diagnostics, all under
 **Advanced & experimental**, as well as a first-run read-profile question for
@@ -530,7 +530,7 @@ than Simul reads may hide, is withheld when its panel opens: Simul does not
 show what it cannot prove the page would show. Exact pixel parity is not
 claimed.
 
-See [Replica fidelity](replica-fidelity.md) and the
+See [Mirror fidelity](replica-fidelity.md) and the
 [translation companion architecture](translation-companion.md) for the
 complete design and browser-boundary rationale.
 
@@ -557,7 +557,7 @@ complete design and browser-boundary rationale.
   visible in the source tab and use a supported source language. Small images are skipped by default, and an image inside a link or
   button is read only under the **Standard** or **Full visible** readable-content
   scope (Page-only leaves images in controls alone).
-- **The replica is stale:** use **Rebuild mirror** (↻ in the toolbar). Some closed-root, opaque
+- **The mirror is stale:** use **Rebuild mirror** (↻ in the toolbar). Some closed-root, opaque
   resource, CSSOM, and script-only changes cannot be observed safely.
 - **An update still looks old:** reload Simul at `chrome://extensions`, then
   reload the source tab and reopen the companion.

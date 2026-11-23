@@ -215,7 +215,7 @@ describe('ReadScopeController setup', () => {
     });
     expect(harness.stored.readScopeSetupVersion).toBe(REPLICA_READ_SCOPE_SETUP_VERSION);
     expect(harness.statuses.at(-1)).toEqual([
-      'Readable-content settings applied. The replica is rebuilding.',
+      'Readable-content settings applied. The mirror is rebuilding.',
       'success',
     ]);
     expect(harness.events).toContain('restart');

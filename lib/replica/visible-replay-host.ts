@@ -13,8 +13,8 @@ import {
   sourceProperty,
 } from './source-node-accessors';
 
-export const STATIC_REPLAY_LABEL = 'Replica reconnecting';
-export const LIVE_REPLAY_LABEL = 'Live page replica';
+export const STATIC_REPLAY_LABEL = 'Mirror reconnecting';
+export const LIVE_REPLAY_LABEL = 'Live page mirror';
 
 const MAX_REPLAY_DIMENSION = 1_000_000;
 const MAX_REPLAY_SCALE = 3;

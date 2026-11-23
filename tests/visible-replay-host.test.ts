@@ -22,8 +22,8 @@ describe('visible isolated replay host', () => {
   });
 
   it('uses canonical replica labels without claiming fallback bugs are fixed', () => {
-    expect(STATIC_REPLAY_LABEL).toBe('Replica reconnecting');
-    expect(LIVE_REPLAY_LABEL).toBe('Live page replica');
+    expect(STATIC_REPLAY_LABEL).toBe('Mirror reconnecting');
+    expect(LIVE_REPLAY_LABEL).toBe('Live page mirror');
     expect(`${STATIC_REPLAY_LABEL} ${LIVE_REPLAY_LABEL}`).not.toMatch(/exact|perfect/iu);
   });
 

@@ -263,16 +263,16 @@ describe('UiLocalizer', () => {
 
     const badge = document.createElement('span') as unknown as HTMLElement;
     document.body.append(badge);
-    localizer.setText(badge, 'Live page replica');
+    localizer.setText(badge, 'Live page mirror');
 
     // Unknown label: the whole interface returns to English immediately.
-    expect(badge.textContent).toBe('Live page replica');
+    expect(badge.textContent).toBe('Live page mirror');
     expect(fit().textContent).toBe('Fit');
     expect(scheduled).toHaveLength(1);
 
     scheduled.shift()?.();
     await vi.waitFor(() => expect(fit().textContent).toBe('ja:Fit'));
-    expect(badge.textContent).toBe('ja:Live page replica');
+    expect(badge.textContent).toBe('ja:Live page mirror');
     expect(badge.getAttribute('lang')).toBe('ja');
   });
 

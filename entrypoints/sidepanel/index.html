@@ -135,7 +135,7 @@
       aria-describedby="read-scope-setup-description"
     >
       <div class="setup-dialog__card">
-        <h1 id="read-scope-setup-title" data-ui-label="Choose what the replica may read">Choose what the replica may read</h1>
+        <h1 id="read-scope-setup-title" data-ui-label="Choose what the mirror may read">Choose what the mirror may read</h1>
         <p id="read-scope-setup-description" data-ui-label="Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.">Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.</p>
         <label>
           <span data-ui-label="Starting profile">Starting profile</span>
@@ -222,7 +222,7 @@
             <option value="faithful" data-ui-label="Keep geometry">Keep geometry</option>
           </select>
         </label>
-        <label class="check-label" title="Keep the replica near the same reading position as the source page scrolls." data-ui-title="Keep the replica near the same reading position as the source page scrolls.">
+        <label class="check-label" title="Keep the mirror near the same reading position as the source page scrolls." data-ui-title="Keep the mirror near the same reading position as the source page scrolls.">
           <input id="sync-scroll" type="checkbox" />
           <span data-ui-label="Follow source scrolling">Follow source scrolling</span>
         </label>
@@ -311,17 +311,17 @@
       </details>
 
       <details id="experimental-options" class="options-group options-group--experimental" data-edition="dev">
-        <summary title="Inspect untranslated source text, set the replica's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the replica's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
+        <summary title="Inspect untranslated source text, set the mirror's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the mirror's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
           <label title="Show translated text or temporarily inspect the live source text without translation." data-ui-title="Show translated text or temporarily inspect the live source text without translation.">
-            <span data-ui-label="Replica text">Replica text</span>
+            <span data-ui-label="Mirror text">Mirror text</span>
             <select id="replica-view-mode">
               <option value="translated" data-ui-label="Translated">Translated</option>
               <option value="source-only" data-ui-label="Live source only">Live source only</option>
             </select>
           </label>
           <label title="Choose how many safely representable visual resources Isolated HTML preserves." data-ui-title="Choose how many safely representable visual resources Isolated HTML preserves.">
-            <span data-ui-label="Replica fidelity">Replica fidelity</span>
+            <span data-ui-label="Mirror fidelity">Mirror fidelity</span>
             <select
               id="replica-fidelity-policy"
               aria-describedby="replica-fidelity-disclosure"
@@ -332,8 +332,8 @@
             <small
               id="replica-fidelity-disclosure"
               class="microcopy"
-              data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica."
-            >Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.</small>
+              data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the mirror."
+            >Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the mirror.</small>
           </label>
           <label title="The largest single stylesheet, text or inline image the mirror copies. A larger one is left out and the rest of the page still shows." data-ui-title="The largest single stylesheet, text or inline image the mirror copies. A larger one is left out and the rest of the page still shows.">
             <span data-ui-label="Largest single item (MB)">Largest single item (MB)</span>
@@ -426,7 +426,7 @@
       <section
         id="replica-preview"
         class="replica-preview"
-        aria-label="Live page replica" data-ui-aria-label="Live page replica"
+        aria-label="Live page mirror" data-ui-aria-label="Live page mirror"
         aria-busy="false"
         aria-hidden="true"
         hidden

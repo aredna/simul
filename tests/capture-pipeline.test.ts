@@ -275,7 +275,7 @@ describe('CapturePipeline capture', () => {
     await harness.settled();
     expect(harness.state.capturedPageIdentity).toBeUndefined();
     expect(harness.statuses.at(-1)).toEqual([
-      'The isolated replica could not be prepared. Retry the current page.',
+      'The mirror could not be prepared. Retry the current page.',
       'error',
     ]);
     expect(harness.events.some((event) => event.startsWith('error:'))).toBe(true);
@@ -393,7 +393,7 @@ describe('CapturePipeline commits and failures', () => {
 
     harness.pipeline.handleReplicaLiveFailure('stream_failed');
     expect(harness.statuses.at(-1)).toEqual([
-      'The live replica disconnected again. The last good replica is preserved; choose Refresh to retry.',
+      'The live mirror disconnected again. The last good mirror is kept; choose Refresh to retry.',
       'error',
     ]);
   });

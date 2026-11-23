@@ -176,11 +176,11 @@ export const UI_STRINGS = {
   statusBuildingNewPage: 'Building the live mirror for the newly loaded page…',
   statusBuildingInitial: 'Building the initial live read-only mirror…',
   statusLiveDisconnectedRebuild:
-    'The live mirror disconnected. Rebuilding once while keeping the last good replica visible…',
+    'The live mirror disconnected. Rebuilding once while keeping the last good mirror visible…',
   statusLiveDisconnectedAgain:
-    'The live replica disconnected again. The last good replica is preserved; choose Refresh to retry.',
+    'The live mirror disconnected again. The last good mirror is kept; choose Refresh to retry.',
   statusNoDocumentBoundary: 'The page did not expose a current document boundary.',
-  statusNoCommittedDocument: 'The isolated replica did not commit a current document.',
+  statusNoCommittedDocument: 'The mirror did not receive the current page.',
   statusLiveSourceKeepsUpdating:
     'Live source only is active. The isolated mirror keeps updating without text or image translation.',
   statusGrantRemovedWaiting:
@@ -190,7 +190,7 @@ export const UI_STRINGS = {
   statusGrantRemovedScopeOff:
     'Chrome removed a saved automatic-access grant, so that scope was turned off.',
   statusReplicaNotPrepared:
-    'The isolated replica could not be prepared. Retry the current page.',
+    'The mirror could not be prepared. Retry the current page.',
   statusReplicaTooLarge: 'This page is too large for Simul to mirror.',
 
   // PDF statuses (capture pipeline and PDF controller).
@@ -312,7 +312,7 @@ export const UI_STRINGS = {
   statusPurgeUnconfirmedChange:
     'Another companion could not confirm its safety purge. Close it or retry the change.',
   statusReadNotApplied: 'The read settings were not applied.',
-  statusReadableApplied: 'Readable-content settings applied. The replica is rebuilding.',
+  statusReadableApplied: 'Readable-content settings applied. The mirror is rebuilding.',
   statusCouldNotSaveReadable: 'Could not save readable-content settings: {0}',
   statusResettingSettingsPermissions: 'Resetting settings and optional permissions…',
   statusRetryingCleanup: 'Retrying optional permission and runtime cleanup…',

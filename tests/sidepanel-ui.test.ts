@@ -75,7 +75,7 @@ describe('sidepanel editions', () => {
     const text = document.body.textContent ?? '';
     expect(text).not.toContain('Show everything');
     expect(text).not.toContain('Window behavior');
-    expect(text).not.toContain('Replica fidelity');
+    expect(text).not.toContain('Mirror fidelity');
     expect(document.body.innerHTML).not.toContain('mirror-show-everything');
   });
 
