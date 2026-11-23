@@ -3089,14 +3089,15 @@ export class SemanticSourceSession {
           // Its placeholder is the page's own words, and is hidden text
           // like any other; inside a menu the mirror may open it is read
           // with the menu's text, as the search box of that menu shows it.
-          if (
-            classification.category === 'ordinary-form' &&
-            (!hidden || isInsidePanelTheMirrorMayOpen(element))
-          ) {
+          // An email or username field's hint is the page's words too
+          // ("Email or phone"), read under the gate its value is (D238).
+          if (!hidden || isInsidePanelTheMirrorMayOpen(element)) {
             add(
               element,
               valueClassification,
-              'formValues',
+              classification.category === 'personal'
+                ? 'personalDataValues'
+                : 'formValues',
               'placeholder',
               readControlPlaceholder(element),
             );

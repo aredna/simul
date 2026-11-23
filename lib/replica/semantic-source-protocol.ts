@@ -1478,7 +1478,8 @@ function gateMatchesRecord(
     return category === 'public-semantic' && presentation === 'text';
   }
   if (gate === 'personalDataValues') {
-    return category === 'personal' && presentation === 'value';
+    return category === 'personal' &&
+      (presentation === 'value' || presentation === 'placeholder');
   }
   if (gate === 'editableContent') {
     return category === 'editable' &&

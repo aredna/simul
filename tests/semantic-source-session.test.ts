@@ -3036,6 +3036,39 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('sends the hint of an email or username field under the gate its value travels by (D238)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><input id="mail" type="email" placeholder="Email or phone">' +
+      '<input id="user" type="text" autocomplete="username" placeholder="Username">' +
+      '<input id="pass" type="password" placeholder="Password"></body></html>',
+    );
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages[0]!.records.map(({ gate, category, presentation, text }) =>
+      [gate, category, presentation, text])).toEqual([
+      ['personalDataValues', 'personal', 'placeholder', 'Email or phone'],
+      ['personalDataValues', 'personal', 'placeholder', 'Username'],
+    ]);
+    session.dispose();
+
+    // Without personal values, neither the value nor the hint is read.
+    const narrow = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const narrowSession = createSession(narrow, document, window);
+    narrow.emit(createSemanticSourceStart('isolated-html', identity, {
+      ...FULL_VISIBLE_REPLICA_READ_SCOPE,
+      personalDataValues: false,
+    }));
+    expect(narrow.messages[0]!.records).toEqual([]);
+    narrowSession.dispose();
+  });
+
   it('states the page\'s own aria-expanded and its open popovers, apart from its menus (D132)', () => {
     // Page CSS such as `button[aria-expanded="true"] + ul` shows a dropdown,
     // and the Popover API opens one without changing any attribute. Neither
