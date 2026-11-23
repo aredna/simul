@@ -1,5 +1,10 @@
 # Image evidence ranker: model decision and training plan
 
+> **Superseded (D248, 2026-11-23).** The owner chose a simpler rule: text that
+> OCR finds in an image always wins, and alt text is shown only when no text is
+> found. The deterministic scoring and the on-device tie judge (D59) described
+> below were removed. This page is kept as the record of that design.
+
 Simul currently uses a deterministic, on-device evidence ranker rather than a
 general-purpose AI model. It compares when accessibility text is provisional,
 or when an earlier OCR result reaches a later accessibility step in the saved

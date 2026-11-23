@@ -71,10 +71,6 @@ in images occur on your computer. Some requests go on the network:
   download that Chrome does. Chrome does not send the text that you
   translate.
 
-Simul uses the on-device language models of Chrome (Gemini Nano and the
-language detector) only when they are already installed. Simul never
-downloads them.
-
 ## Site access
 
 Simul can read the pages that you open after you install it. Because of

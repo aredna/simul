@@ -360,6 +360,9 @@ the mirrored page. For images, Simul does these steps:
    the bottom edge of the image. This method is on from the start. Thus
    images with alt text receive a translated caption before image access is
    granted. For a screen reader, that translation is the name of the image.
+   When Simul then finds text in the image, that text replaces the caption.
+   The caption stays only when Simul finds no text in the image. To turn alt
+   text off, clear **Translate alt text when an image has no text**.
 3. For pixel OCR, it reads an image on the screen from a crop of the
    visible tab, after it makes sure that the geometry of the image is
    stable. Some images are read from their own file instead: an image off
@@ -380,10 +383,8 @@ the mirrored page. For images, Simul does these steps:
    unavailable. Then it tries the packaged Tesseract.js 7.0.0 fallback, in
    the saved method order.
 5. It rejects blank results, results with only punctuation, and results
-   with insufficient confidence. Sometimes alt text and OCR text are too
-   close to decide between them. Then Simul allows Gemini Nano (or Chrome's
-   Language Detector) to select, but only if Chrome already has it
-   installed. Simul never downloads a model.
+   with insufficient confidence. Text that remains is the text of the image,
+   and it is shown instead of the alt text.
 6. It translates the accepted lines and puts inert overlays over the mirror
    image.
 
@@ -422,7 +423,8 @@ options (⚙). The Options panel contains:
   **Full visible** (adds the content of forms and text editors), which is
   the default. Passwords, one-time codes and card numbers are never read.
   See [Privacy and security boundary](#privacy-and-security-boundary).
-- **Image text**: on or off, and the button that grants image access when
+- **Image text**: on or off, **Translate alt text when an image has no
+  text** (on by default), and the button that grants image access when
   Chrome requires it.
 - **Reset all extension settings**.
 - **Advanced** (closed until you open it): **Translated text** (Let boxes

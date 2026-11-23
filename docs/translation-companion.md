@@ -318,7 +318,10 @@ without screenshot access. The band takes a third of the image, growing to at
 most 60% when long text on a short image would otherwise shrink below about
 9px (D72). This method is on from the start (D66), so with image translation
 on by default every eligible image with alt text gets a translated caption
-before any image access is granted. For a screen reader that caption is the
+before any image access is granted. OCR text found later replaces the
+caption; the caption stays only when no text is found (D248), and the setting
+**Translate alt text when an image has no text** turns it off. For a screen
+reader that caption is the
 image's name and is not read as text beside it (D124); OCR overlays are read
 as text, in the target language, apart from a piece the translator gave back
 as it was read, which says no language.

@@ -20,10 +20,13 @@ All image-reading methods share one persisted priority list:
    Its Worker, three WebAssembly core loaders, language files, hashes, licenses,
    and notices are included in the extension.
 
-When alt text and OCR text are both available and the deterministic ranker
-finds them too close to call, an already-installed on-device model (Gemini
-Nano, else Chrome's Language Detector) breaks the tie; Simul never downloads
-one. See [`image-evidence-ranker-training.md`](image-evidence-ranker-training.md).
+When OCR finds admissible text, that text is shown, and the alt text is
+not (D248). The alt text caption shows while OCR runs and stays only when OCR
+finds no text, cannot read the pixels, or cannot show its result. The setting
+**Translate alt text when an image has no text** (on by default, in both
+editions) turns the accessibility method off. The earlier ranker that let alt
+text win over OCR, and the on-device tie judge (D59), were removed with D248;
+see [`image-evidence-ranker-training.md`](image-evidence-ranker-training.md).
 
 Image translation is on by default, and pixel OCR waits for the optional
 image-access grant. Turning every pixel method off pauses OCR before capture. No JavaScript, Worker, WebAssembly binary, model, image pixel,
