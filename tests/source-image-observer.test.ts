@@ -1760,11 +1760,17 @@ describe('SourceImageObserver', () => {
         nodeId: 7,
         contentChanged: false,
         observationChanged: true,
+        // What lies over the image changed, not its picture (D235): a kept
+        // reading of it stays over it while its admission is checked again.
+        captureChanged: true,
+        pictureChanged: false,
+        admissionChanged: true,
       },
     }]);
     expect(events).toHaveLength(1);
     expect(model.get(7)?.observationRevision).toBe((mainRevision ?? 0) + 1);
     expect(model.get(19)?.observationRevision).toBe(distantRevision);
+    const pictureBefore = model.get(7)?.pictureRevision;
     expect(JSON.stringify(events)).not.toMatch(/password|secret|style/iu);
 
     events.length = 0;
@@ -1779,8 +1785,10 @@ describe('SourceImageObserver', () => {
     expect(events.every((event) =>
       event.kind === 'upsert' &&
       event.input.observationChanged &&
-      event.input.captureChanged === true
+      event.input.captureChanged === true &&
+      event.input.pictureChanged === false
     )).toBe(true);
+    expect(model.get(7)?.pictureRevision).toBe(pictureBefore);
     expect(JSON.stringify(events)).not.toMatch(/password|secret|style/iu);
     stop();
   });

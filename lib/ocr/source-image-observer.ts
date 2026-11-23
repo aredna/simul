@@ -1840,11 +1840,15 @@ export class SourceImageObserver {
       const captureSafetyChanged = safetyCandidates.delete(image);
       const forceCaptureChange = captureSafetyChanged ||
         forcedCaptureCandidates.has(image);
+      // What lies over the image is a change of its admission, not of its
+      // picture (D168, D235): only a capture the change itself forced is a
+      // new picture.
       this.#refresh(
         image,
         forcedContentCandidates.has(image),
         captureSafetyChanged,
         forceCaptureChange,
+        forcedCaptureCandidates.has(image),
       );
       refreshedImages.add(image);
       if (captureSafetyChanged) renewedImages.add(image);
@@ -1852,8 +1856,9 @@ export class SourceImageObserver {
     for (const image of safetyCandidates) {
       // The emitted event contains only a boolean currentness boundary. The
       // source session performs the exact private/control overlap check before
-      // reading accessibility text or pixels.
-      this.#refresh(image, false, true, true);
+      // reading accessibility text or pixels. The picture is the one it had
+      // (D235).
+      this.#refresh(image, false, true, true, false);
       refreshedImages.add(image);
       renewedImages.add(image);
     }
@@ -2057,7 +2062,8 @@ export class SourceImageObserver {
         : undefined;
       for (const image of assessment?.changedImages ?? work.observed) {
         if (work.renewed.has(image) || !this.#states.has(image)) continue;
-        this.#refresh(image, false, true, true);
+        // What lies over it changed, not its picture (D235).
+        this.#refresh(image, false, true, true, false);
         if (expired()) yield;
       }
       this.#applyCaptureSafetyAssessment(assessment);
@@ -2120,6 +2126,8 @@ export class SourceImageObserver {
         forceContentChange,
         forceObservationChange || captureSafetyChanged,
         forceContentChange || forceCaptureChange || captureSafetyChanged,
+        // A safety change alone leaves the picture (D235).
+        forceContentChange || forceCaptureChange,
       );
     }
     const scan = this.#scanDocumentImages();
@@ -2269,6 +2277,10 @@ export class SourceImageObserver {
             false,
             captureSafetyChanged,
             captureSafetyChanged,
+            // A change around the image is a new picture only by its own
+            // style, which the layout token reads; what lies over it is not
+            // (D235).
+            false,
           );
         }
       }
