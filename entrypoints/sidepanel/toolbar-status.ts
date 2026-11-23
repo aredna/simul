@@ -60,6 +60,12 @@ export const IMAGE_PROGRESS_LABEL = UI_STRINGS.progressRecognizingImageText;
  */
 export class ToolbarStatus {
   #attention: ToolbarAttentionTarget | undefined;
+  /**
+   * The warning or error the reader has seen in Options (D241): its marker
+   * stays off once Options was open while it was the status, until another
+   * status replaces it. The same message set again meanwhile stays seen.
+   */
+  #seenSettingsAttention: string | undefined;
   #attentionTone: Extract<CompanionStatusTone, 'warning' | 'error'> = 'warning';
   #determinateRatio: number | undefined;
   #message: UiText = '';
@@ -104,6 +110,9 @@ export class ToolbarStatus {
     // Attention routing matches English keywords, never the localized text.
     this.#attention = toolbarAttentionTarget(englishMessage, tone);
     if (tone === 'warning' || tone === 'error') this.#attentionTone = tone;
+    if (this.#seenSettingsAttention !== this.#attentionKey()) {
+      this.#seenSettingsAttention = undefined;
+    }
     refreshAttention.title = this.#attention === 'refresh' ? localized : '';
     settingsAttention.title = this.#attention === 'settings' ? localized : '';
     this.#announce(tone, localized);
@@ -156,12 +165,22 @@ export class ToolbarStatus {
   renderAttention(): void {
     const { refreshAttention, settingsAttention } = this.environment.elements;
     const refreshVisible = this.#attention === 'refresh';
-    const settingsVisible =
-      this.#attention === 'settings' && !this.environment.isSettingsOpen();
+    const settingsOpen = this.environment.isSettingsOpen();
+    if (this.#attention === 'settings' && settingsOpen) {
+      this.#seenSettingsAttention = this.#attentionKey();
+    }
+    const settingsVisible = this.#attention === 'settings' && !settingsOpen &&
+      this.#seenSettingsAttention !== this.#attentionKey();
     refreshAttention.hidden = !refreshVisible;
     settingsAttention.hidden = !settingsVisible;
     refreshAttention.dataset.tone = this.#attentionTone;
     settingsAttention.dataset.tone = this.#attentionTone;
+  }
+
+  #attentionKey(): string | undefined {
+    return this.#attention === 'settings'
+      ? `${this.#attentionTone}\n${this.#englishMessage}`
+      : undefined;
   }
 
   syncProgress(): void {

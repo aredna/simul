@@ -139,6 +139,36 @@ describe('ToolbarStatus', () => {
     expect(el('settings-attention').hidden).toBe(true);
   });
 
+  it('keeps a seen warning unmarked until another status replaces it (D241)', () => {
+    const { el, status, setSettingsOpen } = setup();
+    const marked = () => !el('settings-attention').hidden;
+    status.setStatus('Choose a From language in Options.', 'warning');
+    expect(marked()).toBe(true);
+    // Seen in Options, it stays unmarked once Options closes, and the same
+    // message set again meanwhile stays seen. The status line keeps it.
+    setSettingsOpen(true);
+    status.renderAttention();
+    setSettingsOpen(false);
+    status.renderAttention();
+    expect(marked()).toBe(false);
+    status.setStatus('Choose a From language in Options.', 'warning');
+    expect(marked()).toBe(false);
+    expect(el('status').textContent).toBe('Choose a From language in Options.');
+
+    // Another warning is marked; so is the first one coming back after it.
+    status.setStatus('Grant image access in Options.', 'error');
+    expect(marked()).toBe(true);
+    status.setStatus('Choose a From language in Options.', 'warning');
+    expect(marked()).toBe(true);
+    // A healthy status in between makes it new as well.
+    setSettingsOpen(true);
+    status.renderAttention();
+    setSettingsOpen(false);
+    status.setStatus('Ready to translate.', 'success');
+    status.setStatus('Choose a From language in Options.', 'warning');
+    expect(marked()).toBe(true);
+  });
+
   it('presents determinate translation progress with accessible values', () => {
     const { el, status, setActivity } = setup();
     setActivity({ translationInFlight: true });
