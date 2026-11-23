@@ -166,6 +166,38 @@ describe('packaged Tesseract provider', () => {
     }]);
   });
 
+  it('cuts a web image line where its words lie far apart, not a PDF page line (D235)', () => {
+    const word = (text: string, x0: number, x1: number) => ({
+      text, confidence: 91, bbox: { x0, y0: 20, x1, y1: 40 }, symbols: [],
+    });
+    // Two cards side by side in one picture, read as one line 20 px tall.
+    const line = {
+      text: 'SIMロック解除済のみ 業界基準最多の28項目',
+      confidence: 80,
+      bbox: { x0: 40, y0: 20, x1: 900, y1: 40 },
+      words: [
+        word('SIMロック', 40, 140), word('解除済のみ', 145, 260),
+        word('業界基準最多の', 520, 700), word('28項目', 705, 900),
+      ],
+    };
+    const page = { text: 'x', blocks: [{ paragraphs: [{ lines: [line] }] }] };
+
+    expect(normalizeTesseractPage(page as never, 1000, 100)?.regions).toEqual([
+      { text: 'SIMロック解除済のみ', confidence: 0.8, boundingBox: { x: 40, y: 20, width: 220, height: 20 } },
+      { text: '業界基準最多の28項目', confidence: 0.8, boundingBox: { x: 520, y: 20, width: 380, height: 20 } },
+    ]);
+    // A PDF page's line is cut by its own rules (D184).
+    expect(normalizeTesseractPage(page as never, 1000, 100, true)?.regions).toHaveLength(1);
+    // Ordinary word spacing, or a word not found in the line's text, leaves it whole.
+    const close = { ...line, words: [word('SIMロック', 40, 140), word('解除済のみ', 150, 260)] };
+    const unknown = { ...line, words: [...line.words.slice(0, 2), word('???', 520, 700)] };
+    for (const whole of [close, unknown]) {
+      expect(normalizeTesseractPage(
+        { text: 'x', blocks: [{ paragraphs: [{ lines: [whole] }] }] } as never, 1000, 100,
+      )?.regions).toHaveLength(1);
+    }
+  });
+
   it('gives a job the words only when it asks for them (D121)', async () => {
     const worker = fakeWorker('hello world');
     worker.worker.recognize.mockImplementation(async () => ({

@@ -74,6 +74,22 @@ export function normalizeTesseractPage(
             )
           : undefined;
         wordCount += words?.length ?? 0;
+        // A web image's line that jumps across a wide gap is two texts side
+        // by side (D235); a PDF page's lines are cut by its own rules (D184).
+        const pieces = withWords
+          ? undefined
+          : splitLineAtWideGaps(line, text, bitmapWidth, bitmapHeight);
+        if (pieces) {
+          if (regions.length + pieces.length > 10_000) return undefined;
+          for (const piece of pieces) {
+            regions.push({
+              text: piece.text,
+              ...(confidence !== undefined ? { confidence } : {}),
+              boundingBox: piece.boundingBox,
+            });
+          }
+          continue;
+        }
         regions.push({
           text,
           ...(confidence !== undefined ? { confidence } : {}),
@@ -125,6 +141,71 @@ function normalizeWords(
     normalized.push({ text, boundingBox });
   }
   return normalized.length >= 2 ? normalized : undefined;
+}
+
+/**
+ * How much wider than the line is tall a gap between two of its words must
+ * be before the line counts as two texts (D235).
+ */
+const WIDE_GAP_LINE_HEIGHTS = 2.5;
+
+/**
+ * Tesseract reads an image as one block, so text set side by side (one
+ * picture of four cards, a label beside a price far to its right) comes out
+ * as one line running across the space between them, and its translation was
+ * drawn over both as one box (backmarket.co.jp, D235). Where two words of a
+ * line lie further apart than `WIDE_GAP_LINE_HEIGHTS` times the line's
+ * height, the line is cut there: each piece is the line's own text from its
+ * first word to its last, with the box of its words. Nothing is cut when a
+ * word cannot be placed or found in the line's text in order.
+ */
+function splitLineAtWideGaps(
+  line: TesseractLine,
+  text: string,
+  bitmapWidth: number,
+  bitmapHeight: number,
+): { text: string; boundingBox: ImageTextRegion['boundingBox'] }[] | undefined {
+  if (!Array.isArray(line.words) || line.words.length < 2) return undefined;
+  const lineBox = normalizeBbox(line.bbox, bitmapWidth, bitmapHeight);
+  if (!lineBox) return undefined;
+  const placed: { start: number; end: number; box: ImageTextRegion['boundingBox'] }[] = [];
+  let cursor = 0;
+  for (const word of line.words as readonly TesseractWord[]) {
+    const wordText = typeof word?.text === 'string' ? word.text.trim() : '';
+    if (!wordText) continue;
+    const box = normalizeBbox(word.bbox, bitmapWidth, bitmapHeight);
+    const start = text.indexOf(wordText, cursor);
+    if (!box || start < 0) return undefined;
+    cursor = start + wordText.length;
+    placed.push({ start, end: cursor, box });
+  }
+  if (placed.length < 2) return undefined;
+  const gap = lineBox.height * WIDE_GAP_LINE_HEIGHTS;
+  const groups: (typeof placed)[] = [[placed[0]!]];
+  for (let index = 1; index < placed.length; index += 1) {
+    const previous = placed[index - 1]!;
+    const current = placed[index]!;
+    const apart = current.box.x - (previous.box.x + previous.box.width);
+    if (apart > gap) groups.push([current]);
+    else groups.at(-1)!.push(current);
+  }
+  if (groups.length < 2) return undefined;
+  const pieces = [];
+  for (const group of groups) {
+    const first = group[0]!;
+    const last = group.at(-1)!;
+    const pieceText = text.slice(first.start, last.end).trim();
+    if (!pieceText) return undefined;
+    const x0 = Math.min(...group.map((word) => word.box.x));
+    const y0 = Math.min(...group.map((word) => word.box.y));
+    const x1 = Math.max(...group.map((word) => word.box.x + word.box.width));
+    const y1 = Math.max(...group.map((word) => word.box.y + word.box.height));
+    pieces.push({
+      text: pieceText,
+      boundingBox: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+    });
+  }
+  return pieces;
 }
 
 function normalizeBbox(
