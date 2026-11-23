@@ -1089,6 +1089,7 @@ const IMAGE_ANALYSIS_SETTING_KEYS = new Set([
   'disabledImageTextProviderIds',
   'imageScanPolicy',
   'skipSmallImages',
+  'imageAltTextFallback',
   'usePromptForImageLanguage',
   'usePromptForImageText',
 ]);
@@ -1146,6 +1147,7 @@ function readImageAnalysisSettingsPatch(
   }
   for (const key of [
     'skipSmallImages',
+    'imageAltTextFallback',
     'usePromptForImageLanguage',
     'usePromptForImageText',
   ] as const) {

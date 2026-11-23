@@ -409,6 +409,9 @@ export const UI_STRINGS = {
   imageSkipSmallHint:
     'Ignore very small images that probably do not contain useful text.',
   imageSkipSmall: 'Skip very small images',
+  imageAltTextFallback: 'Translate alt text when an image has no text',
+  imageAltTextFallbackHint:
+    'Alt text is the description that a page gives for an image. When Simul finds no text in the image, it shows the translated alt text at the bottom of the image.',
   imagePromptLanguage: 'Use local Prompt for image language',
   imagePromptInterpret: 'Use local Prompt to interpret image text',
   imageDiagnostics: 'OCR diagnostics',

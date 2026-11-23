@@ -20,6 +20,7 @@ import {
   runtimeReadyOcrProviderOrder,
   shouldRetryOcrProviderProbe,
 } from '../../lib/ocr/runtime-provider-readiness';
+import { effectiveDisabledImageReadingMethodIds } from '../../lib/preferences';
 import {
   REPLICA_READ_SCOPE_SETUP_VERSION,
   replicaReadScopeFingerprint,
@@ -209,10 +210,12 @@ export class ImageTranslationConfig {
   /** Accessibility text stays off until the read-scope setup has completed. */
   #disabledMethodIds(): readonly ImageReadingMethodId[] {
     const { preferences } = this.#state;
+    // Alt text is also off while its own setting is (D248).
+    const disabled = effectiveDisabledImageReadingMethodIds(preferences);
     return preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-      preferences.disabledImageReadingMethodIds.includes(ACCESSIBILITY_TEXT_METHOD_ID)
-      ? preferences.disabledImageReadingMethodIds
-      : [ACCESSIBILITY_TEXT_METHOD_ID, ...preferences.disabledImageReadingMethodIds];
+      disabled.includes(ACCESSIBILITY_TEXT_METHOD_ID)
+      ? disabled
+      : [ACCESSIBILITY_TEXT_METHOD_ID, ...disabled];
   }
 
   #usableProviderOrder(

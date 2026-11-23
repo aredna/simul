@@ -21,6 +21,7 @@ const COMPILED: readonly ImageTextProviderId[] = ['chrome-text-detector', 'tesse
 function setup(options: {
   granted?: boolean;
   imageTranslationEnabled?: boolean;
+  altText?: boolean;
   setupComplete?: boolean;
   probe?: (message: unknown) => Promise<unknown>;
 } = {}) {
@@ -37,6 +38,7 @@ function setup(options: {
     : { readScopeSetupVersion: 0 });
   preferences = withImageAnalysisSettings(preferences, {
     imageTranslationEnabled: options.imageTranslationEnabled ?? true,
+    imageAltTextFallback: options.altText ?? true,
     disabledImageReadingMethodIds: [],
   });
   state.preferences = preferences;
@@ -94,6 +96,16 @@ describe('ImageTranslationConfig', () => {
     expect(harness.configurations.at(-1)?.disabledMethodIds).toEqual(['accessibility-text']);
     expect(harness.config.autoImageLanguageConfigurationKey())
       .not.toBe(setup().config.autoImageLanguageConfigurationKey());
+  });
+
+  it('turns alt text off with its setting, and image work with it when no pixels can be read (D248)', () => {
+    const harness = setup({ altText: false });
+    harness.config.configure();
+    expect(harness.configurations.at(-1)?.disabledMethodIds).toEqual(['accessibility-text']);
+    expect(harness.configurations.at(-1)?.enabled).toBe(true);
+    const missing = setup({ altText: false, granted: false });
+    missing.config.configure();
+    expect(missing.configurations.at(-1)?.enabled).toBe(false);
   });
 
   it('disables image work when translation is off or the view is source only', () => {

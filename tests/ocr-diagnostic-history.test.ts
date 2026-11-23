@@ -28,10 +28,6 @@ describe('ImageTranslationDiagnosticHistory', () => {
       bitmapHeight: 761,
     })).toBe('job 7 recognition failed: code=provider-unavailable; rendered=603x381; bitmap=1206x761');
     expect(formatImageTranslationDiagnostic({
-      stage: 'evidence-judge',
-      judge: 'nano-image',
-    })).toBe('evidence judge: nano-image');
-    expect(formatImageTranslationDiagnostic({
       stage: 'pixel-source',
       ordinal: 3,
       source: 'mirror',
@@ -187,8 +183,8 @@ describe('ImageTranslationDiagnosticHistory', () => {
 
     const evidenceDiagnostic = {
       stage: 'evidence-selection',
-      selected: 'semantic',
-      reason: 'priority-tie',
+      selected: 'ocr',
+      reason: 'ocr-found',
       text: 'private page text',
       sourceUrl: 'https://private.example/',
       nodeId: 44,
@@ -197,7 +193,7 @@ describe('ImageTranslationDiagnosticHistory', () => {
       evidenceDiagnostic,
     );
     expect(formattedEvidence).toBe(
-      'evidence selection: selected=semantic; reason=priority-tie',
+      'evidence selection: selected=ocr; reason=ocr-found',
     );
     expect(formattedEvidence).not.toMatch(/private|44/u);
 

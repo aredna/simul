@@ -27,6 +27,7 @@ function setup(
     disabledImageTextProviderIds: [],
     imageReadingMethodOrder: ['accessibility-text', 'chrome-text-detector', 'tesseract'],
     disabledImageReadingMethodIds: [],
+    imageAltTextFallback: true,
     ocrMinimumConfidence: 0.65,
     imageScanPolicy: 'visible-only',
     skipSmallImages: true,
@@ -350,14 +351,73 @@ describe('ImageAnalysisPanel', () => {
   });
 });
 
+describe('the alt text switch (D248)', () => {
+  const altSwitch = (root: HTMLElement) => [...root.querySelectorAll<HTMLLabelElement>('label')]
+    .find((label) => label.textContent === 'Translate alt text when an image has no text')!;
+
+  it('is on by default, says what alt text is, and saves the setting in the dev edition', () => {
+    const { window, panel, commitPatch, setView } = setup({
+      imageReadingMethodOrder: ['accessibility-text', 'chrome-text-detector', 'tesseract'],
+      disabledImageReadingMethodIds: ['chrome-text-detector'],
+    });
+    panel.initialize();
+    const root = panel.root!;
+    const label = altSwitch(root);
+    expect(label.getAttribute('title')).toContain('description that a page gives for an image');
+    const input = label.querySelector('input')!;
+    expect(input.checked).toBe(true);
+    input.checked = false;
+    input.dispatchEvent(new window.Event('change'));
+    // The setting owns alt text; the list keeps only the other methods.
+    expect(commitPatch).toHaveBeenLastCalledWith({
+      imageAltTextFallback: false,
+      disabledImageReadingMethodIds: ['chrome-text-detector'],
+    });
+
+    // Off by the setting: the switch and the method row show it off, and
+    // another row's change does not write alt text into the list.
+    setView({
+      imageAltTextFallback: false,
+      disabledImageReadingMethodIds: ['accessibility-text', 'chrome-text-detector'],
+    });
+    panel.render();
+    expect(altSwitch(root).querySelector('input')!.checked).toBe(false);
+    const rows = [...root.querySelectorAll('.ocr-provider-order li')];
+    expect(rows[0]!.querySelector<HTMLInputElement>('input')!.checked).toBe(false);
+    const tesseract = rows[2]!.querySelector<HTMLInputElement>('input')!;
+    tesseract.checked = false;
+    tesseract.dispatchEvent(new window.Event('change'));
+    expect(commitPatch).toHaveBeenLastCalledWith({
+      disabledImageReadingMethodIds: ['chrome-text-detector', 'tesseract'],
+    });
+    // The alt text row turns the same setting back on.
+    const altRow = rows[0]!.querySelector<HTMLInputElement>('input')!;
+    altRow.checked = true;
+    altRow.dispatchEvent(new window.Event('change'));
+    expect(commitPatch).toHaveBeenLastCalledWith({
+      imageAltTextFallback: true,
+      disabledImageReadingMethodIds: ['chrome-text-detector'],
+    });
+  });
+
+  it('saves only the setting in the public edition, whose method list is fixed', () => {
+    const { window, panel, commitPatch } = setup({}, 'public');
+    panel.initialize();
+    const input = altSwitch(panel.root!).querySelector('input')!;
+    input.checked = false;
+    input.dispatchEvent(new window.Event('change'));
+    expect(commitPatch).toHaveBeenCalledWith({ imageAltTextFallback: false });
+  });
+});
+
 describe('ImageAnalysisPanel in the public edition', () => {
-  it('shows only the switch and the access grant, with the confidence under Advanced', () => {
+  it('shows only the switch, the alt text switch and the access grant, with the confidence under Advanced', () => {
     const { document, panel, setView } = setup({}, 'public');
     panel.initialize();
     const root = panel.root!;
     const confidence = document.getElementById('confidence')!;
 
-    expect(root.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+    expect(root.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
     expect(root.querySelector('.ocr-provider-order')).toBeNull();
     expect(root.querySelector('select')).toBeNull();
     expect(root.querySelector('details.image-diagnostics')).toBeNull();

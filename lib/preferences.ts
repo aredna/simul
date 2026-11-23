@@ -154,6 +154,11 @@ export interface CompanionPreferences {
   disabledImageTextProviderIds: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
+  /**
+   * Translate an image's alt text (or aria-label) when Simul finds no text
+   * in the image (D248). Text found in the image always wins.
+   */
+  imageAltTextFallback: boolean;
   usePromptForImageLanguage: boolean;
   usePromptForImageText: boolean;
 }
@@ -197,6 +202,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     ) as unknown as ImageTextProviderId[],
     imageScanPolicy: 'visible-first-background-prescan',
     skipSmallImages: true,
+    imageAltTextFallback: true,
     usePromptForImageLanguage: false,
     usePromptForImageText: false,
   });
@@ -447,6 +453,10 @@ export function parseStoredCompanionPreferences(
       typeof input.skipSmallImages === 'boolean'
         ? input.skipSmallImages
         : DEFAULT_COMPANION_PREFERENCES.skipSmallImages,
+    imageAltTextFallback:
+      typeof input.imageAltTextFallback === 'boolean'
+        ? input.imageAltTextFallback
+        : DEFAULT_COMPANION_PREFERENCES.imageAltTextFallback,
     usePromptForImageLanguage:
       typeof input.usePromptForImageLanguage === 'boolean'
         ? input.usePromptForImageLanguage
@@ -665,6 +675,7 @@ export interface CompanionImageAnalysisSettings {
   disabledImageTextProviderIds: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
+  imageAltTextFallback: boolean;
   usePromptForImageLanguage: boolean;
   usePromptForImageText: boolean;
 }
@@ -715,6 +726,23 @@ export function withImageAnalysisSettings(
     ];
   }
   return parseStoredCompanionPreferences(merged);
+}
+
+/**
+ * The image-reading methods that are off: the saved list, and alt text when
+ * its own setting is off (D248). Every reader of the methods uses this.
+ */
+export function effectiveDisabledImageReadingMethodIds(
+  preferences: Pick<
+    CompanionPreferences,
+    'disabledImageReadingMethodIds' | 'imageAltTextFallback'
+  >,
+): ImageReadingMethodId[] {
+  const disabled = preferences.disabledImageReadingMethodIds;
+  return preferences.imageAltTextFallback ||
+    disabled.includes(ACCESSIBILITY_TEXT_METHOD_ID)
+    ? [...disabled]
+    : [ACCESSIBILITY_TEXT_METHOD_ID, ...disabled];
 }
 
 export function withReadSettings(
@@ -889,6 +917,7 @@ function createDefaultPreferences(): CompanionPreferences {
     disabledImageTextProviderIds: [],
     imageScanPolicy: 'visible-first-background-prescan',
     skipSmallImages: true,
+    imageAltTextFallback: true,
     usePromptForImageLanguage: false,
     usePromptForImageText: false,
   };

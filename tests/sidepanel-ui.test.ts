@@ -823,7 +823,7 @@ describe('sidepanel UI structure', () => {
     );
     // PDFs make no background commits, so background results need no PDF case.
     expect(script).not.toContain('handlePdfTextCommit');
-    const background = sliceBetween('onBackgroundResult: (result) => {', 'const evidenceJudge');
+    const background = sliceBetween('onBackgroundResult: (result) => {', 'async function createImageTranslationEnvironment(');
     expect(background).not.toContain('pdfController');
     expect(script).toContain('onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),');
     expect(script).toContain('onReadingPageChange: (index) => pdfController.handleReadingPage(index),');

@@ -89,6 +89,7 @@ import {
   autoTranslationModeForPage,
   ALL_SITES_PERMISSION_ORIGINS,
   configureDefaultTargetLanguage,
+  effectiveDisabledImageReadingMethodIds,
   isCompanionLaunchBehavior,
   isAutoTranslationMode,
   isMirrorDisplayMode,
@@ -448,23 +449,13 @@ async function createImageTranslationEnvironment(): Promise<ImageTranslationCont
     { openChromeImageSource },
     { PixelAcquisitionCoordinator, createBrowserPixelAcquisitionEnvironment },
     { createBrowserImageRecognitionCoordinator },
-    { OnDeviceEvidenceJudge },
     { IndexedDbTransientImageStore },
   ] = await Promise.all([
     import('../../lib/ocr/image-source-client'),
     import('../../lib/ocr/pixel-acquisition'),
     import('../../lib/ocr/image-analysis-coordinator'),
-    import('../../lib/ocr/on-device-evidence-judge'),
     import('../../lib/ocr/transient-image-store'),
   ]);
-  // Uses Gemini Nano or the Language Detector only when already installed;
-  // never starts a model download (owner ruling, D59).
-  const evidenceJudge = new OnDeviceEvidenceJudge({
-    onResolved: (judge) => logImageTranslationDiagnostic(Object.freeze({
-      stage: 'evidence-judge' as const,
-      judge,
-    })),
-  });
   return {
     openSource: (request, onChange, signal, policy) => openChromeImageSource(
       request,
@@ -499,7 +490,6 @@ async function createImageTranslationEnvironment(): Promise<ImageTranslationCont
       replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
     translationProvider: provider,
     translationMemory: imageTranslationMemory,
-    judgeImageText: (input, signal) => evidenceJudge.judge(input, signal),
     onBusyChange: (busy) => setImageTranslationBusy(busy),
     onDiagnostic: logImageTranslationDiagnostic,
     detectLanguage: async (text) => browser.i18n.detectLanguage(text),
@@ -678,10 +668,11 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
     imageTextProviderOrder: state.preferences.imageTextProviderOrder,
     disabledImageTextProviderIds: state.preferences.disabledImageTextProviderIds,
     imageReadingMethodOrder: state.preferences.imageReadingMethodOrder,
-    disabledImageReadingMethodIds: state.preferences.disabledImageReadingMethodIds,
+    disabledImageReadingMethodIds: effectiveDisabledImageReadingMethodIds(state.preferences),
     ocrMinimumConfidence: state.preferences.ocrMinimumConfidence,
     imageScanPolicy: state.preferences.imageScanPolicy,
     skipSmallImages: state.preferences.skipSmallImages,
+    imageAltTextFallback: state.preferences.imageAltTextFallback,
     usePromptForImageLanguage: state.preferences.usePromptForImageLanguage,
     usePromptForImageText: state.preferences.usePromptForImageText,
     providerRuntimeStatuses: state.ocrProviderRuntimeStatuses,
@@ -1763,12 +1754,12 @@ function syncToolbarPreferenceControls(): void {
         : toolbarOcrAccessDeclined
           ? UI_STRINGS.ocrTitleAccessDeclined
         : imageTranslationConfig.usablePixelProviderOrder().length === 0
-          ? state.preferences.disabledImageReadingMethodIds.includes(
+          ? effectiveDisabledImageReadingMethodIds(state.preferences).includes(
               ACCESSIBILITY_TEXT_METHOD_ID,
             )
             ? UI_STRINGS.ocrTitleNoMethod
             : UI_STRINGS.ocrTitleAccessibilityOn
-          : state.preferences.disabledImageReadingMethodIds.includes(
+          : effectiveDisabledImageReadingMethodIds(state.preferences).includes(
               ACCESSIBILITY_TEXT_METHOD_ID,
             )
             ? UI_STRINGS.ocrTitleNeedsAccess

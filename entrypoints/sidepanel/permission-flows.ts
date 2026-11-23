@@ -7,6 +7,7 @@ import type { PreferenceCommandResult } from '../../lib/preference-coordinator';
 import {
   ALL_SITES_PERMISSION_ORIGINS,
   autoTranslationModeForPage,
+  effectiveDisabledImageReadingMethodIds,
   permissionOriginsForMode,
   withAutoTranslationMode,
   type AutoTranslationMode,
@@ -132,7 +133,7 @@ export class PermissionFlows {
       state.preferences.imageTranslationEnabled
     ) {
       this.environment.setStatus(
-        state.preferences.disabledImageReadingMethodIds.includes(
+        effectiveDisabledImageReadingMethodIds(state.preferences).includes(
           ACCESSIBILITY_TEXT_METHOD_ID,
         )
           ? UI_STRINGS.statusImageAccessRemovedPixelPaused
@@ -180,7 +181,7 @@ export class PermissionFlows {
         await preferenceClient.reloadFromStorage();
         setStatus(
           state.preferences.imageTranslationEnabled
-            ? state.preferences.disabledImageReadingMethodIds.includes(
+            ? effectiveDisabledImageReadingMethodIds(state.preferences).includes(
                 ACCESSIBILITY_TEXT_METHOD_ID,
               )
               ? UI_STRINGS.statusPixelOcrRemainsPaused

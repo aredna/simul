@@ -1,11 +1,8 @@
-import type { ImageTextResult } from './contracts';
 import type { SourceImageAccessibilityTextEvidence } from './image-source-protocol';
-import type { ImageTextQualitySummary } from './result-quality';
 
 export const IMAGE_EVIDENCE_RANKING_POLICY_VERSION = 'deterministic-v1';
 export const MAX_IMAGE_SEMANTIC_EVIDENCE_RECORDS = 512;
 const MAX_RANKING_TEXT = 4_000;
-const DECISIVE_SCORE_MARGIN = 2;
 const MEANINGFUL_CHARACTER = /[\p{L}\p{N}]/u;
 
 export type SemanticEvidenceAssessmentReason =
@@ -13,11 +10,14 @@ export type SemanticEvidenceAssessmentReason =
   | 'semantic-provisional-short'
   | 'semantic-provisional-repeated';
 
+/**
+ * Why one reading of an image was shown. Text found in the image always wins
+ * over alt text (D248); alt text shows when no text is found.
+ */
 export type ImageEvidenceSelectionReason =
-  | 'agreement-priority'
+  | 'ocr-found'
   | 'ocr-decisive'
-  | 'semantic-decisive'
-  | 'priority-tie';
+  | 'semantic-decisive';
 
 export interface RankableSemanticImageEvidence {
   readonly kind: 'semantic';
@@ -25,14 +25,6 @@ export interface RankableSemanticImageEvidence {
   readonly source: SourceImageAccessibilityTextEvidence['source'];
   readonly methodIndex: number;
   readonly repeated: boolean;
-}
-
-export interface RankableOcrImageEvidence {
-  readonly kind: 'ocr';
-  readonly result: ImageTextResult;
-  readonly selectedQuality: ImageTextQualitySummary;
-  readonly methodIndex: number;
-  readonly minimumConfidence: number;
 }
 
 export interface SemanticEvidenceAssessment {
@@ -199,39 +191,6 @@ export function assessSemanticImageEvidence(
 }
 
 /** Select source evidence, never translated output. Close decisions honor order. */
-export function selectImageTextEvidence(
-  semantic: RankableSemanticImageEvidence,
-  ocr: RankableOcrImageEvidence,
-): ImageEvidenceSelection {
-  const semanticText = normalizeImageEvidenceText(semantic.text);
-  const ocrText = normalizeImageEvidenceText(ocr.result.transcript);
-  const semanticComparable = comparableImageEvidenceText(semanticText);
-  if (
-    semanticComparable &&
-    semanticComparable === comparableImageEvidenceText(ocrText)
-  ) {
-    return selectByPriority(semantic, ocr, 'agreement-priority');
-  }
-
-  const semanticShape = normalizedTextShape(semanticText);
-  const semanticScore = semanticEvidenceScore(semanticShape);
-  const ocrScore = ocrEvidenceScore(
-    ocr,
-    normalizedTextShape(ocrText),
-    semanticShape,
-  );
-  if (ocrScore >= semanticScore + DECISIVE_SCORE_MARGIN) {
-    return Object.freeze({ selected: 'ocr', reason: 'ocr-decisive' });
-  }
-  if (semanticScore >= ocrScore + DECISIVE_SCORE_MARGIN) {
-    return Object.freeze({
-      selected: 'semantic',
-      reason: 'semantic-decisive',
-    });
-  }
-  return selectByPriority(semantic, ocr, 'priority-tie');
-}
-
 export function normalizeImageEvidenceText(value: string): string {
   return typeof value === 'string'
     ? value.normalize('NFKC').replace(/\s+/gu, ' ').trim().slice(0, MAX_RANKING_TEXT)
@@ -244,51 +203,6 @@ export function normalizeComparableImageEvidenceText(value: string): string {
 
 function comparableImageEvidenceText(normalized: string): string {
   return normalized.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-}
-
-function semanticEvidenceScore(shape: TextShape): number {
-  // Shortness and repetition decide whether comparison is worthwhile; they
-  // do not lower an admitted authored label's baseline credibility.
-  let score = 7;
-  if (shape.varied) score += 1;
-  return score;
-}
-
-function ocrEvidenceScore(
-  evidence: RankableOcrImageEvidence,
-  shape: TextShape,
-  semanticShape: TextShape,
-): number {
-  let score = 2;
-  const confidence = evidence.result.transcriptConfidence;
-  if (confidence !== undefined && Number.isFinite(confidence)) {
-    const decisiveThreshold = Math.min(
-      0.95,
-      Math.max(0.85, evidence.minimumConfidence + 0.15),
-    );
-    score += confidence >= decisiveThreshold ? 4 : 2;
-  }
-  if (evidence.selectedQuality.corroboratedRegions > 0) score += 4;
-  if (evidence.result.regions.length >= 2) score += 1;
-  if (
-    shape.meaningfulCharacters >= semanticShape.meaningfulCharacters + 4 ||
-    shape.tokens >= semanticShape.tokens + 2
-  ) score += 4;
-  return score;
-}
-
-function selectByPriority(
-  semantic: RankableSemanticImageEvidence,
-  ocr: RankableOcrImageEvidence,
-  reason: Extract<
-    ImageEvidenceSelectionReason,
-    'agreement-priority' | 'priority-tie'
-  >,
-): ImageEvidenceSelection {
-  return Object.freeze({
-    selected: semantic.methodIndex <= ocr.methodIndex ? 'semantic' : 'ocr',
-    reason,
-  });
 }
 
 type TextShape = Readonly<{

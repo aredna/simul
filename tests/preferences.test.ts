@@ -10,6 +10,7 @@ import {
   clampZoomPercent,
   configureDefaultTargetLanguage,
   defaultTargetLanguageForUiLanguage,
+  effectiveDisabledImageReadingMethodIds,
   isAutoTranslationEnabled,
   pageOrigin,
   parseCompanionPreferences,
@@ -88,6 +89,7 @@ describe('parseCompanionPreferences', () => {
       disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
+      imageAltTextFallback: true,
       usePromptForImageLanguage: false,
       usePromptForImageText: false,
     });
@@ -147,6 +149,7 @@ describe('parseCompanionPreferences', () => {
       disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
+      imageAltTextFallback: true,
       usePromptForImageLanguage: false,
       usePromptForImageText: false,
     });
@@ -216,6 +219,7 @@ describe('parseCompanionPreferences', () => {
       disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
+      imageAltTextFallback: true,
       usePromptForImageLanguage: false,
       usePromptForImageText: false,
     });
@@ -778,6 +782,7 @@ function testerPreferences(): CompanionPreferences {
       disabledImageReadingMethodIds: ['tesseract'],
       imageScanPolicy: 'eager-all',
       skipSmallImages: false,
+      imageAltTextFallback: false,
       usePromptForImageLanguage: true,
       usePromptForImageText: true,
     },
@@ -823,6 +828,8 @@ describe('public edition preferences', () => {
       launchBehavior: 'popout',
       ocrMinimumConfidence: 0.8,
       imageTranslationEnabled: true,
+      // Shown in both editions (D248).
+      imageAltTextFallback: false,
       syncScroll: true,
       settingsRevision: 7,
     });
@@ -942,5 +949,32 @@ describe('default To language', () => {
     });
 
     expect(resetCompanionPreferences(saved).targetLanguage).toBe('it');
+  });
+});
+
+describe('alt text when an image has no text (D248)', () => {
+  it('is on by default, keeps a saved choice, and repairs a wrong value', () => {
+    expect(DEFAULT_COMPANION_PREFERENCES.imageAltTextFallback).toBe(true);
+    expect(parseCompanionPreferences({}).imageAltTextFallback).toBe(true);
+    expect(parseCompanionPreferences({ imageAltTextFallback: false }).imageAltTextFallback).toBe(false);
+    expect(parseCompanionPreferences({ imageAltTextFallback: 'no' }).imageAltTextFallback).toBe(true);
+    expect(withImageAnalysisSettings(DEFAULT_COMPANION_PREFERENCES, {
+      imageAltTextFallback: false,
+    }).imageAltTextFallback).toBe(false);
+  });
+
+  it('turns the alt text method off with the setting, as the saved list does', () => {
+    expect(effectiveDisabledImageReadingMethodIds({
+      imageAltTextFallback: true,
+      disabledImageReadingMethodIds: ['tesseract'],
+    })).toEqual(['tesseract']);
+    expect(effectiveDisabledImageReadingMethodIds({
+      imageAltTextFallback: false,
+      disabledImageReadingMethodIds: ['tesseract'],
+    })).toEqual(['accessibility-text', 'tesseract']);
+    expect(effectiveDisabledImageReadingMethodIds({
+      imageAltTextFallback: true,
+      disabledImageReadingMethodIds: ['accessibility-text'],
+    })).toEqual(['accessibility-text']);
   });
 });

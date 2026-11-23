@@ -1345,7 +1345,7 @@ describe('ImageTranslationController', () => {
     expect(diagnostics).toContainEqual({
       stage: 'evidence-selection',
       selected: 'ocr',
-      reason: 'ocr-decisive',
+      reason: 'ocr-found',
     });
     expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('translated:Latest account security update');
     expect(JSON.stringify(diagnostics)).not.toContain('IRS Help');
@@ -1770,9 +1770,10 @@ describe('ImageTranslationController', () => {
     expect(events.indexOf(`read:${nextDescriptor.nodeId}`)).toBeLessThan(
       events.indexOf(`capture:${nextDescriptor.nodeId}`),
     );
-    expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )).not.toBeNull();
+    // The text found in each image then takes the place of its alt text (D248).
+    await vi.waitFor(() => expect(document.querySelectorAll(
+      '[data-simul-image-method="tesseract"]',
+    )).toHaveLength(2));
     controller.dispose();
   });
 
@@ -1916,78 +1917,6 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
-  it('retries the ranked semantic winner after its provisional translation fails', async () => {
-    const { document } = parseHTML('<html><body><img></body></html>');
-    const image = document.querySelector('img') as unknown as HTMLImageElement;
-    const semanticText = 'Official corporate registration and account help';
-    const translate = vi.fn()
-      .mockRejectedValueOnce(new Error('temporary translator failure'))
-      .mockImplementation(async (text: string) => `translated:${text}`);
-    const controller = new ImageTranslationController({
-      openSource: async (_request, onChange) => {
-        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
-        return {
-          measure: vi.fn(),
-          readAccessibilityText: async () => ({
-            document: sourceDocument,
-            nodeId: descriptor.nodeId,
-            contentRevision: descriptor.contentRevision,
-            observationRevision: descriptor.observationRevision,
-            text: semanticText,
-            source: 'alt' as const,
-            nearestElementLanguage: 'en' as const,
-          }),
-          dispose: vi.fn(),
-        };
-      },
-      createPixelCoordinator: () => ({
-        acquire: async () => ({
-          status: 'ready' as const,
-          pixels: autoProbePixels(descriptor, '9a'.repeat(32)),
-        }),
-      }) as unknown as PixelAcquisitionCoordinator,
-      createRecognitionCoordinator: () => ({
-        recognize: async () => ({
-          ...autoProbeRecognition('Help', 0.7),
-          selectedQuality: acceptedQualitySummary(),
-        }),
-        clear: vi.fn(),
-        advanceResetEpoch: vi.fn(() => true),
-      }) as unknown as ImageRecognitionCoordinator,
-      resolveAnchor: () => ({
-        document: sourceDocument,
-        replayLease: 1,
-        image,
-        iframe: { contentDocument: document } as HTMLIFrameElement,
-      }),
-      translationProvider: {
-        availability: async () => 'available',
-        createSession: async () => ({ translate, destroy: vi.fn() }),
-      },
-      projector: testProjectorEnvironment(),
-    });
-    controller.configure({
-      enabled: true,
-      scanPolicy: 'visible-only',
-      skipSmallImages: false,
-      providerOrder: ['tesseract'],
-      methodOrder: ['tesseract', 'accessibility-text'],
-      disabledMethodIds: [],
-      sourceLanguage: 'en',
-      targetLanguage: 'ja',
-      translationIdle: true,
-      resetEpoch: 0,
-    });
-    controller.activateReplica(request, 3, 1);
-
-    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe(`translated:${semanticText}`));
-    expect(translate.mock.calls.map(([text]) => text)).toEqual([
-      semanticText,
-      semanticText,
-    ]);
-    controller.dispose();
-  });
-
   it('returns to semantic evidence before trying an unranked OCR continuation', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
@@ -2097,7 +2026,7 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
-  it('uses saved priority when short semantic and accepted OCR evidence are close', async () => {
+  it('shows accepted OCR over a short alt label in either method order, from one capture (D248)', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
     const pixels = autoProbePixels(descriptor, '92'.repeat(32));
@@ -2181,17 +2110,14 @@ describe('ImageTranslationController', () => {
     controller.configure(configuration);
     controller.activateReplica(request, 3, 1);
 
-    await vi.waitFor(() => expect(diagnostics).toContain(
-      'accessibility-text-complete',
-    ));
-    expect(translate).toHaveBeenCalledTimes(1);
-    expect(translate.mock.calls[0]?.[0]).toBe('お知らせ');
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('NewsNews'));
+    expect(translate.mock.calls.map(([text]) => text)).not.toContain('お知らせ');
     expect(diagnostics).toContainEqual({
       stage: 'evidence-selection',
-      selected: 'semantic',
-      reason: 'priority-tie',
+      selected: 'ocr',
+      reason: 'ocr-found',
     });
-    expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe('News');
+    expect(document.querySelector('[data-simul-image-method="accessibility-text"]')).toBeNull();
 
     controller.configure({
       ...configuration,
@@ -2203,117 +2129,7 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
-  it('refers a close alt-versus-OCR call to the on-device judge once', async () => {
-    const { document } = parseHTML('<html><body><img></body></html>');
-    const image = document.querySelector('img') as unknown as HTMLImageElement;
-    const pixels = autoProbePixels(descriptor, '92'.repeat(32));
-    const translate = vi.fn(async (_text: string) => 'News');
-    const acquire = vi.fn(async () => ({ status: 'ready' as const, pixels }));
-    const recognize = vi.fn(async (): Promise<ImageRecognitionResult> => ({
-      status: 'complete',
-      cacheHit: false,
-      selectedQuality: acceptedQualitySummary(),
-      result: {
-        providerId: 'tesseract',
-        bitmapWidth: 200,
-        bitmapHeight: 100,
-        transcript: 'notice',
-        transcriptConfidence: 0.96,
-        regions: [{
-          text: 'not',
-          confidence: 0.96,
-          boundingBox: { x: 10, y: 10, width: 50, height: 40 },
-        }, {
-          text: 'ice',
-          confidence: 0.96,
-          boundingBox: { x: 65, y: 10, width: 55, height: 40 },
-        }],
-      },
-    }));
-    const diagnostics: unknown[] = [];
-    const judgeImageText = vi.fn(async () => ({
-      selected: 'ocr' as const,
-      method: 'nano-judge' as const,
-    }));
-    const controller = new ImageTranslationController({
-      judgeImageText,
-      openSource: async (_request, onChange) => {
-        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
-        return {
-          measure: vi.fn(),
-          readAccessibilityText: async () => ({
-            document: sourceDocument,
-            nodeId: descriptor.nodeId,
-            contentRevision: descriptor.contentRevision,
-            observationRevision: descriptor.observationRevision,
-            text: 'お知らせ',
-            source: 'alt' as const,
-            nearestElementLanguage: 'ja' as const,
-          }),
-          dispose: vi.fn(),
-        };
-      },
-      createPixelCoordinator: () => ({ acquire }) as unknown as
-        PixelAcquisitionCoordinator,
-      createRecognitionCoordinator: () => ({
-        recognize,
-        clear: vi.fn(),
-        advanceResetEpoch: vi.fn(() => true),
-      }) as unknown as ImageRecognitionCoordinator,
-      resolveAnchor: () => ({
-        document: sourceDocument,
-        replayLease: 1,
-        image,
-        iframe: { contentDocument: document } as HTMLIFrameElement,
-      }),
-      translationProvider: {
-        availability: async () => 'available',
-        createSession: async () => ({ translate, destroy: vi.fn() }),
-      },
-      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
-      projector: {
-        scheduleFrame: (callback) => { callback(); return 1; },
-        cancelFrame: () => undefined,
-        createResizeObserver: () => undefined,
-      },
-    });
-    const configuration = {
-      enabled: true,
-      scanPolicy: 'visible-only' as const,
-      skipSmallImages: false,
-      providerOrder: ['tesseract'] as const,
-      methodOrder: ['accessibility-text', 'tesseract'] as const,
-      disabledMethodIds: [] as const,
-      sourceLanguage: 'ja' as const,
-      targetLanguage: 'en' as const,
-      translationIdle: true,
-      resetEpoch: 0,
-    };
-    controller.configure(configuration);
-    controller.activateReplica(request, 3, 1);
-
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )).not.toBeNull());
-    expect(judgeImageText).toHaveBeenCalledOnce();
-    expect(judgeImageText.mock.calls[0]).toEqual([{
-      altText: 'お知らせ',
-      ocrText: 'notice',
-      sourceLanguage: 'ja',
-      image: pixels.encoded,
-    }, expect.any(AbortSignal)]);
-    expect(diagnostics).toContainEqual({
-      stage: 'evidence-selection',
-      selected: 'ocr',
-      reason: 'nano-judge',
-    });
-    expect(diagnostics).not.toContainEqual(expect.objectContaining({
-      reason: 'priority-tie',
-    }));
-    controller.dispose();
-  });
-
-  it('ranks later descriptive accessibility evidence after accepted OCR', async () => {
+  it('shows accepted OCR over a later descriptive alt text (D248)', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
     const pixels = autoProbePixels(descriptor, '93'.repeat(32));
@@ -2395,150 +2211,16 @@ describe('ImageTranslationController', () => {
     });
     controller.activateReplica(request, 3, 1);
 
-    await vi.waitFor(() => expect(diagnostics).toContain(
-      'accessibility-text-complete',
-    ));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('translated:News'));
     expect(events).toEqual(['accessibility-text', 'ocr:tesseract']);
-    expect(translate).toHaveBeenCalledTimes(1);
-    expect(translate).toHaveBeenCalledWith(
-      semanticText,
-      expect.any(AbortSignal),
-    );
+    // The alt text showed at once, and gave way to the image's text.
+    expect(translate).toHaveBeenCalledWith(semanticText, expect.any(AbortSignal));
+    expect(document.querySelector('[data-simul-image-method="accessibility-text"]')).toBeNull();
     expect(diagnostics).toContainEqual({
       stage: 'evidence-selection',
-      selected: 'semantic',
-      reason: 'semantic-decisive',
+      selected: 'ocr',
+      reason: 'ocr-found',
     });
-    controller.dispose();
-  });
-
-  it('does not promote a staged OCR Auto vote when later semantic evidence wins', async () => {
-    const { document } = parseHTML('<html><body><img></body></html>');
-    const image = document.querySelector('img') as unknown as HTMLImageElement;
-    const semanticText = '法人番号に関する重要なお知らせと登録情報';
-    const revisedSemanticText = `${semanticText}更新`;
-    const ocrText = 'おしらせはこちらです';
-    let emitChange: ((change: SourceImageChange) => void) | undefined;
-    const detected: string[] = [];
-    const diagnostics: unknown[] = [];
-    const translate = vi.fn(async (text: string) => {
-      if (text === revisedSemanticText) {
-        throw new Error('semantic translation unavailable');
-      }
-      return `translated:${text}`;
-    });
-    const recognize = vi.fn(async (): Promise<ImageRecognitionResult> => ({
-      status: 'complete',
-      cacheHit: false,
-      selectedQuality: acceptedQualitySummary(),
-      result: {
-        providerId: 'tesseract',
-        bitmapWidth: 200,
-        bitmapHeight: 100,
-        transcript: ocrText,
-        transcriptConfidence: 0.96,
-        regions: [{
-          text: ocrText,
-          confidence: 0.96,
-          boundingBox: { x: 10, y: 10, width: 160, height: 30 },
-        }],
-      },
-    }));
-    const timers = controlledProbeTimers();
-    const controller = new ImageTranslationController({
-      openSource: async (_request, onChange) => {
-        emitChange = onChange;
-        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
-        return {
-          measure: vi.fn(),
-          readAccessibilityText: async (current) => ({
-            document: sourceDocument,
-            nodeId: current.nodeId,
-            contentRevision: current.contentRevision,
-            observationRevision: current.observationRevision,
-            text: current.contentRevision === descriptor.contentRevision
-              ? semanticText
-              : revisedSemanticText,
-            source: 'alt' as const,
-          }),
-          dispose: vi.fn(),
-        };
-      },
-      createPixelCoordinator: () => ({
-        acquire: async (current: SourceImageDescriptor) => ({
-          status: 'ready' as const,
-          pixels: autoProbePixels(
-            current,
-            current.contentRevision === descriptor.contentRevision
-              ? '94'.repeat(32)
-              : '96'.repeat(32),
-          ),
-        }),
-      }) as unknown as PixelAcquisitionCoordinator,
-      createRecognitionCoordinator: () => ({
-        recognize,
-        clear: vi.fn(),
-        advanceResetEpoch: vi.fn(() => true),
-      }) as unknown as ImageRecognitionCoordinator,
-      resolveAnchor: () => ({
-        document: sourceDocument,
-        replayLease: 1,
-        image,
-        iframe: { contentDocument: document } as HTMLIFrameElement,
-      }),
-      translationProvider: {
-        availability: async () => 'available',
-        createSession: async () => ({ translate, destroy: vi.fn() }),
-      },
-      detectLanguage: async () => ({
-        isReliable: true,
-        languages: [{ language: 'ja', percentage: 99 }],
-      }),
-      onAutoLanguageDetected: (language) => detected.push(language),
-      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
-      setTimer: timers.setTimer,
-      clearTimer: timers.clearTimer,
-      projector: testProjectorEnvironment(),
-    });
-    controller.configure({
-      enabled: true,
-      scanPolicy: 'visible-only',
-      skipSmallImages: false,
-      providerOrder: ['tesseract'],
-      methodOrder: ['tesseract', 'accessibility-text'],
-      disabledMethodIds: [],
-      sourceLanguage: 'auto',
-      targetLanguage: 'en',
-      translationIdle: true,
-      resetEpoch: 0,
-    });
-    controller.activateReplica(request, 3, 1);
-
-    await vi.waitFor(() => expect(diagnostics).toContain(
-      'accessibility-text-complete',
-    ));
-    expect(detected).toEqual([]);
-    expect(translate).toHaveBeenCalledTimes(1);
-    expect(translate).toHaveBeenCalledWith(
-      semanticText,
-      expect.any(AbortSignal),
-    );
-    expect(diagnostics).toContainEqual({
-      stage: 'evidence-selection',
-      selected: 'semantic',
-      reason: 'semantic-decisive',
-    });
-
-    emitChange?.({
-      kind: 'upsert',
-      descriptor: {
-        ...descriptor,
-        contentRevision: 2,
-        observationRevision: 2,
-      },
-    });
-    await vi.waitFor(() => expect(detected).toEqual(['ja']));
-    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe(`translated:${ocrText}`));
     controller.dispose();
   });
 
@@ -2934,137 +2616,6 @@ describe('ImageTranslationController', () => {
       'selected' in entry && entry.selected === 'ocr'
     )).toHaveLength(2);
 
-    controller.dispose();
-  });
-
-  it('does not admit semantic Auto votes when translation fails and OCR becomes the fallback', async () => {
-    const { document } = parseHTML(
-      '<html><body><img id="first"><img id="second"></body></html>',
-    );
-    const images = [...document.querySelectorAll('img')] as unknown as
-      HTMLImageElement[];
-    const secondDescriptor = { ...descriptor, nodeId: 13 };
-    const labels = new Map([
-      [descriptor.nodeId, '重要な手続きのお知らせ一'],
-      [secondDescriptor.nodeId, '法人登録に関する更新情報二'],
-    ]);
-    const transcripts = new Map([
-      [descriptor.nodeId, '画像から読んだ手続き情報'],
-      [secondDescriptor.nodeId, '画像から読んだ登録情報'],
-    ]);
-    let emitChange: ((change: SourceImageChange) => void) | undefined;
-    const detected: string[] = [];
-    const diagnostics: unknown[] = [];
-    const translate = vi.fn(async (text: string) => {
-      if ([...labels.values()].includes(text)) {
-        throw new Error('semantic translation unavailable');
-      }
-      return `translated:${text}`;
-    });
-    const controller = new ImageTranslationController({
-      openSource: async (_request, onChange) => {
-        emitChange = onChange;
-        return {
-          measure: vi.fn(),
-          readAccessibilityText: async (current) => ({
-            document: sourceDocument,
-            nodeId: current.nodeId,
-            contentRevision: current.contentRevision,
-            observationRevision: current.observationRevision,
-            text: labels.get(current.nodeId)!,
-            source: 'alt' as const,
-          }),
-          dispose: vi.fn(),
-        };
-      },
-      createPixelCoordinator: () => ({
-        acquire: async (current: SourceImageDescriptor) => ({
-          status: 'ready' as const,
-          pixels: {
-            ...autoProbePixels(
-              current,
-              current.nodeId === descriptor.nodeId
-                ? 'a3'.repeat(32)
-                : 'b4'.repeat(32),
-            ),
-            nearestElementLanguage: 'ja' as const,
-          },
-        }),
-      }) as unknown as PixelAcquisitionCoordinator,
-      createRecognitionCoordinator: () => ({
-        recognize: async (pixels: ReturnType<typeof autoProbePixels>):
-          Promise<ImageRecognitionResult> => {
-          const transcript = transcripts.get(pixels.descriptor.nodeId)!;
-          return {
-            status: 'complete',
-            cacheHit: false,
-            selectedQuality: acceptedQualitySummary(),
-            result: {
-              providerId: 'tesseract',
-              bitmapWidth: 200,
-              bitmapHeight: 100,
-              transcript,
-              transcriptConfidence: 0.7,
-              regions: [{
-                text: transcript,
-                confidence: 0.7,
-                boundingBox: { x: 10, y: 10, width: 180, height: 40 },
-              }],
-            },
-          };
-        },
-        clear: vi.fn(),
-        advanceResetEpoch: vi.fn(() => true),
-      }) as unknown as ImageRecognitionCoordinator,
-      resolveAnchor: (_identity, nodeId) => ({
-        document: sourceDocument,
-        replayLease: 1,
-        image: images[nodeId - descriptor.nodeId]!,
-        iframe: { contentDocument: document } as HTMLIFrameElement,
-      }),
-      translationProvider: {
-        availability: async () => 'available',
-        createSession: async () => ({ translate, destroy: vi.fn() }),
-      },
-      detectLanguage: async () => ({
-        isReliable: true,
-        languages: [{ language: 'ja', percentage: 98 }],
-      }),
-      onAutoLanguageDetected: (language) => detected.push(language),
-      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
-      projector: testProjectorEnvironment(),
-    });
-    controller.configure({
-      enabled: true,
-      scanPolicy: 'visible-only',
-      skipSmallImages: false,
-      providerOrder: ['tesseract'],
-      methodOrder: ['accessibility-text', 'tesseract'],
-      disabledMethodIds: [],
-      sourceLanguage: 'auto',
-      targetLanguage: 'en',
-      translationIdle: true,
-      resetEpoch: 0,
-    });
-    controller.activateReplica(request, 3, 1);
-    await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
-
-    emitChange?.({ kind: 'upsert', descriptor });
-    emitChange?.({ kind: 'upsert', descriptor: secondDescriptor });
-    await vi.waitFor(() => expect(diagnostics.filter((entry) =>
-      entry === 'projected'
-    )).toHaveLength(2));
-
-    expect(detected).toEqual([]);
-    expect(translate.mock.calls.map(([text]) => text)).toEqual([
-      labels.get(descriptor.nodeId),
-      transcripts.get(descriptor.nodeId),
-      labels.get(secondDescriptor.nodeId),
-      transcripts.get(secondDescriptor.nodeId),
-    ]);
-    expect(diagnostics.filter((entry) =>
-      entry === 'accessibility-text-blocked'
-    )).toHaveLength(2);
     controller.dispose();
   });
 
@@ -9961,7 +9512,7 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
-  it('rolls back staged OCR when semantic selection is aborted', async () => {
+  it('rolls back staged OCR when its translation is aborted, alt text or not (D248)', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
     const ocrText = 'お知らせ';
@@ -10052,11 +9603,8 @@ describe('ImageTranslationController', () => {
       kind: 'upsert',
       descriptor: { ...descriptor, observationRevision: 2 },
     });
-    await vi.waitFor(() => expect(translate).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(diagnostics).toContain(
-      'accessibility-text-complete',
-    ));
-
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe(`translated:${ocrText}`));
+    expect(document.querySelector('[data-simul-image-method="accessibility-text"]')).toBeNull();
     expect(recognize).toHaveBeenCalledTimes(2);
     expect(diagnostics.filter((diagnostic) =>
       typeof diagnostic === 'object' && diagnostic !== null &&

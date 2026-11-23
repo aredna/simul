@@ -36,6 +36,8 @@ export interface ImageAnalysisPanelView {
   readonly ocrMinimumConfidence: number;
   readonly imageScanPolicy: ImageScanPolicyValue;
   readonly skipSmallImages: boolean;
+  /** Alt text's own setting (D248); the methods list above already has its effect. */
+  readonly imageAltTextFallback: boolean;
   readonly usePromptForImageLanguage: boolean;
   readonly usePromptForImageText: boolean;
   readonly providerRuntimeStatuses: ProviderRuntimeStatuses;
@@ -183,6 +185,7 @@ export class ImageAnalysisPanel {
       view.ocrMinimumConfidence,
       view.imageScanPolicy,
       view.skipSmallImages,
+      view.imageAltTextFallback,
       view.usePromptForImageLanguage,
       view.usePromptForImageText,
       [...view.providerRuntimeStatuses],
@@ -228,6 +231,14 @@ export class ImageAnalysisPanel {
       });
       root.append(grant);
     }
+    // In both editions (D248): alt text when no text is found in the image.
+    const altText = this.#createToggle(
+      UI_STRINGS.imageAltTextFallback,
+      !view.disabledImageReadingMethodIds.includes(ACCESSIBILITY_TEXT_METHOD_ID),
+      (checked) => this.#saveAltText(checked, view),
+    );
+    this.environment.setUiAttr(altText, 'title', UI_STRINGS.imageAltTextFallbackHint);
+    root.append(altText);
 
     const compiledOrder = this.environment.compiledProviderOrder(
       view.imageTextProviderOrder,
@@ -436,7 +447,13 @@ export class ImageAnalysisPanel {
       applyToggleLabel();
       toggleRelocalizers.push(applyToggleLabel);
       enabled.addEventListener('change', () => {
+        if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
+          void this.#saveAltText(enabled.checked, view);
+          return;
+        }
         const nextDisabled = new Set(view.disabledImageReadingMethodIds);
+        // Alt text off by its own setting stays out of the list (D248).
+        if (!view.imageAltTextFallback) nextDisabled.delete(ACCESSIBILITY_TEXT_METHOD_ID);
         if (enabled.checked) nextDisabled.delete(id);
         else nextDisabled.add(id);
         void this.environment.commitPatch({
@@ -532,6 +549,24 @@ export class ImageAnalysisPanel {
       next[currentIndex] as ImageReadingMethodId,
     ];
     void this.environment.commitPatch({ imageReadingMethodOrder: next });
+  }
+
+  /**
+   * Alt text's setting owns the method (D248). The dev edition also takes it
+   * out of the saved list, where an earlier build could have put it; the
+   * public edition, where that list is fixed, writes the setting only.
+   */
+  #saveAltText(checked: boolean, view: ImageAnalysisPanelView): Promise<void> {
+    if (this.#edition === 'public') {
+      return this.environment.commitPatch({ imageAltTextFallback: checked });
+    }
+    const disabled = new Set(view.disabledImageReadingMethodIds);
+    return this.environment.commitPatch({
+      imageAltTextFallback: checked,
+      disabledImageReadingMethodIds: view.imageReadingMethodOrder.filter(
+        (methodId) => methodId !== ACCESSIBILITY_TEXT_METHOD_ID && disabled.has(methodId),
+      ),
+    });
   }
 
   #createToggle(
