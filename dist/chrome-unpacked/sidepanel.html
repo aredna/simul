@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-CsSS69xY.js"></script>
+    <script type="module" crossorigin src="/chunks/sidepanel-BgIPnn-f.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/rolldown-runtime-BCiCTKAo.js">
     <link rel="modulepreload" crossorigin href="/chunks/settle-Ru5p8R9i.js">
     <link rel="modulepreload" crossorigin href="/chunks/trusted-types-VJr5Joeu.js">
-    <link rel="stylesheet" crossorigin href="/assets/sidepanel-COJTI7Gd.css">
+    <link rel="stylesheet" crossorigin href="/assets/sidepanel-CX9DmG3G.css">
   </head>
   <body>
     <header id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
@@ -84,6 +84,8 @@
         <button id="close-settings" class="quiet-button" type="button" aria-label="Close options" data-ui-aria-label="Close options">×</button>
       </div>
 
+      <!-- First under the heading: the dot on the options button points here (D240). -->
+      <p id="status" class="status" role="status" aria-live="polite">Reading the source page…</p>
       <p id="detected-language" class="microcopy" hidden></p>
 
       <div id="settings-grid" class="settings-grid settings-grid--common">
@@ -185,7 +187,6 @@
         <label id="progress-label" for="progress">Preparing translation…</label>
         <progress id="progress" max="1" value="0"></progress>
       </div>
-      <p id="status" class="status" role="status" aria-live="polite">Reading the source page…</p>
       <p id="capture-notes" class="microcopy" hidden></p>
       <p id="placement-guidance" class="microcopy" data-ui-label="Chrome places native side panels globally. Use the ↗ button for a detached companion window." hidden>
         Chrome places native side panels globally. Use the ↗ button for a detached companion window.
