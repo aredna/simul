@@ -77,7 +77,7 @@ export const UI_STRINGS = {
   // Toolbar: refresh button while a rebuild is in flight.
   rebuildMirror: 'Rebuild mirror',
   rebuildingMirror: 'Mirror rebuild in progress',
-  rebuildingMirrorEllipsis: 'Mirror rebuild in progress…',
+  rebuildingMirrorEllipsis: 'Rebuilding the mirror…',
 
   // Translate button states.
   translate: 'Translate',
@@ -86,14 +86,14 @@ export const UI_STRINGS = {
   translationCurrent: 'Translation current',
 
   // Replica empty state and mode badge.
-  preparingMirror: 'Simul prepares the live read-only mirror…',
+  preparingMirror: 'Preparing the live read-only mirror…',
 
   // Progress labels.
-  progressPreparingModel: 'Chrome prepares its on-device language model…',
-  progressDownloadingPack: 'Chrome downloads the language pack… {0}%',
-  progressTranslating: 'Translation: {0} of {1}…',
-  progressRecognizingImageText: 'Simul reads the visible image text on this device…',
-  progressPdfReadingScanned: 'Simul reads the scanned pages: {0} of {1}…',
+  progressPreparingModel: 'Preparing Chrome’s on-device language model…',
+  progressDownloadingPack: 'Downloading the language pack… {0}%',
+  progressTranslating: 'Translating {0} of {1}…',
+  progressRecognizingImageText: 'Reading the visible image text on this device…',
+  progressPdfReadingScanned: 'Reading the scanned pages: {0} of {1}…',
 
   // Toolbar progressbar aria-labels (one per in-flight activity; the idle and
   // determinate fallbacks). Shown to assistive tech, so they localize with the
@@ -139,7 +139,7 @@ export const UI_STRINGS = {
   statusLiveSourceRestored:
     'Live source only is active. The current mirror is still live. Simul removed all translation overlays.',
   statusTranslatedModeRestored:
-    'Translated mode is active again. Simul prepares the saved language settings…',
+    'Translated mode is active again. Preparing the saved language settings…',
 
   // Partial-projection status (frame + count fragments joined into it).
   partialPrefixRemainsPartial: 'Translation is not complete',
@@ -159,7 +159,7 @@ export const UI_STRINGS = {
     'Simul translated the live page changes. To translate the earlier text that is not complete, select Translate page.',
 
   // Cancellation / safety statuses (main.ts).
-  statusCancellingTranslation: 'Simul cancels the on-device translation…',
+  statusCancellingTranslation: 'Cancelling the on-device translation…',
   statusQuickCancelled: 'The quick translation was cancelled.',
   statusNothingTranslating: 'No translation is in progress.',
   statusImageProcessingStopped: 'Image text processing stopped.',
@@ -169,15 +169,15 @@ export const UI_STRINGS = {
   statusSnapshotInvalid:
     'The saved settings became not available or not valid. Read access is Page only until Simul restores a current, valid snapshot…',
   statusReadablePolicyRebuilding:
-    'The readable-content policy changed. Simul safely reads the page again…',
+    'The readable-content policy changed. Reading the page again safely…',
 
   // Capture-pipeline statuses.
   statusReconcileRebuild:
-    'Simul could not apply a live update. Simul rebuilds the mirror once and shows the current mirror until then…',
-  statusBuildingNewPage: 'Simul builds the live mirror for the new page…',
-  statusBuildingInitial: 'Simul builds the first live read-only mirror…',
+    'Simul could not apply a live update. Rebuilding the mirror once. The current mirror shows until then…',
+  statusBuildingNewPage: 'Building the live mirror for the new page…',
+  statusBuildingInitial: 'Building the first live read-only mirror…',
   statusLiveDisconnectedRebuild:
-    'The live mirror lost its connection. Simul rebuilds the mirror once and shows the last good mirror until then…',
+    'The live mirror lost its connection. Rebuilding the mirror once. The last good mirror shows until then…',
   statusLiveDisconnectedAgain:
     'The live mirror lost its connection again. Simul shows the last good mirror. To try again, select Refresh.',
   statusNoDocumentBoundary: 'The page did not give a current document boundary.',
@@ -195,7 +195,7 @@ export const UI_STRINGS = {
   statusReplicaTooLarge: 'This page is too large for Simul to mirror.',
 
   // PDF statuses (capture pipeline and PDF controller).
-  statusPdfReading: 'Simul reads the PDF…',
+  statusPdfReading: 'Reading the PDF…',
   statusPdfPassword: 'This PDF has a password. Simul cannot open it.',
   statusPdfTooLarge: 'This PDF is too large for Simul (more than 128 MB).',
   statusPdfDownloadFailed:
@@ -305,7 +305,7 @@ export const UI_STRINGS = {
     'Read visible drafts in contenteditable areas and ARIA text editors that are not secret.',
 
   // Read-scope controller: save/reset statuses.
-  statusApplyingNarrower: 'Simul applies narrower read settings…',
+  statusApplyingNarrower: 'Applying narrower read settings…',
   statusSaving: 'Saving…',
   statusReadChangedElsewhere:
     'Settings changed in another panel. Look at the current choices and try again.',
@@ -316,13 +316,13 @@ export const UI_STRINGS = {
   statusReadNotApplied: 'The read settings were not applied.',
   statusReadableApplied: 'Simul applied the readable-content settings. Simul now rebuilds the mirror.',
   statusCouldNotSaveReadable: 'Simul could not save the readable-content settings: {0}',
-  statusResettingSettingsPermissions: 'Simul resets the settings and optional permissions…',
-  statusRetryingCleanup: 'Simul tries the optional permission and runtime cleanup again…',
+  statusResettingSettingsPermissions: 'Resetting the settings and optional permissions…',
+  statusRetryingCleanup: 'Trying the optional permission and runtime cleanup again…',
   statusResetChangedElsewhere:
     'Settings changed in another panel. Look at the current state before you reset.',
   statusPurgeUnconfirmedReset:
     'Another panel could not confirm its safety purge. Close it or try the reset again.',
-  statusResettingSettings: 'Simul resets the extension settings…',
+  statusResettingSettings: 'Resetting the extension settings…',
   statusResetPendingOne:
     'Core settings are reset. {0} optional permission entry is still there and cleanup is not complete. Select Retry cleanup.',
   statusResetPendingMany:
@@ -331,8 +331,8 @@ export const UI_STRINGS = {
     'Core settings are reset, but permission or runtime cleanup is not complete. Select Retry cleanup.',
   statusResetComplete: 'Settings and optional permissions were reset.',
   statusResetCouldNotFinish: 'The reset could not finish: {0}',
-  statusPreparingSafeReset: 'Simul prepares a safe settings reset…',
-  statusPreparingNarrower: 'Simul prepares narrower read settings…',
+  statusPreparingSafeReset: 'Preparing a safe settings reset…',
+  statusPreparingNarrower: 'Preparing narrower read settings…',
   setupCleanupPending:
     'Core settings are already safe, but optional permission or runtime cleanup is not complete.',
   retryResetCleanup: 'Retry reset cleanup',
@@ -371,7 +371,7 @@ export const UI_STRINGS = {
     'Simul has not detected the website language yet. If it cannot find one clear language, select From in the toolbar.',
   composerLanguagesMatch: 'The languages are the same. Simul will copy the text without changes.',
   composerDraftNotSaved: 'Your draft is only in this panel. Simul does not save it.',
-  composerTranslatingLocally: 'Simul translates on this device…',
+  composerTranslatingLocally: 'Translating on this device…',
   composerReversePairUnavailable: 'The reverse language pair is not available on this device.',
   composerReadyToCopy: 'The translation is ready to copy.',
   composerReplyReadyToCopy: 'The reply translation is ready to copy. Simul did not save it.',
@@ -389,7 +389,7 @@ export const UI_STRINGS = {
   imageEnableLabel: 'Translate text inside images (local, experimental)',
   imageAccessibilityHint:
     'Accessibility text works without image access. Grant image access only if you want local pixel OCR as a fallback.',
-  imageCheckingAccess: 'Simul checks Chrome image access…',
+  imageCheckingAccess: 'Checking Chrome image access…',
   imageOnByDefault:
     'On by default. Pixel OCR waits for image access. Visible image pixels do not leave this device, and Simul discards them after OCR.',
   imageGrantAccess: 'Grant image access',

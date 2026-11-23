@@ -450,7 +450,7 @@ describe('TranslationDriver replica view mode', () => {
       replicaViewMode: 'translated',
     });
     harness.driver.applyReplicaViewMode('source-only');
-    expect(harness.statuses).toContain('Translated mode is active again. Simul prepares the saved language settings…');
+    expect(harness.statuses).toContain('Translated mode is active again. Preparing the saved language settings…');
     await vi.waitFor(() => expect(harness.state.availability).toBe('available'));
     expect(harness.state.resolvedSourceLanguage).toBe('ja');
   });

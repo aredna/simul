@@ -159,11 +159,11 @@ describe('QuickComposer', () => {
     elements.input.value = 'Hello';
     await composer.translate();
     expect(seen).toEqual([
-      'Chrome downloads the language pack… 0%',
-      'Chrome downloads the language pack… 0%',
-      'Chrome downloads the language pack… 10%',
-      'Chrome downloads the language pack… 50%',
-      'Chrome downloads the language pack… 50%',
+      'Downloading the language pack… 0%',
+      'Downloading the language pack… 0%',
+      'Downloading the language pack… 10%',
+      'Downloading the language pack… 50%',
+      'Downloading the language pack… 50%',
     ]);
     composer.invalidate();
     expect(elements.output.hasAttribute('lang')).toBe(false);

@@ -210,7 +210,7 @@ describe('CapturePipeline capture', () => {
     expect(harness.state.followedPageIdentity).toEqual(IDENTITY);
     expect(harness.state.captureInFlight).toBe(true);
     expect(harness.events).toContain('loading');
-    expect(harness.statuses[0]?.[0]).toBe('Simul builds the first live read-only mirror…');
+    expect(harness.statuses[0]?.[0]).toBe('Building the first live read-only mirror…');
     await harness.settled();
 
     expect(harness.engine.run).toHaveBeenCalledOnce();
@@ -386,8 +386,8 @@ describe('CapturePipeline commits and failures', () => {
     await harness.settled();
 
     harness.pipeline.handleReplicaLiveFailure('stream_failed');
-    expect(harness.statuses.at(-2)?.[0]).toContain('Simul rebuilds the mirror once');
-    expect(harness.statuses.at(-1)?.[0]).toContain('Simul rebuilds the mirror once and shows the current mirror until then');
+    expect(harness.statuses.at(-2)?.[0]).toContain('Rebuilding the mirror once');
+    expect(harness.statuses.at(-1)?.[0]).toContain('Rebuilding the mirror once. The current mirror shows until then');
     await harness.settled();
     expect(harness.engine.run).toHaveBeenCalledTimes(2);
 
@@ -463,10 +463,10 @@ describe('CapturePipeline PDFs', () => {
     expect(harness.state.pdfAbortController).toBeUndefined();
     expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledWith(undefined);
     expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
-    expect(harness.events).toContain('loading:Simul reads the PDF…');
+    expect(harness.events).toContain('loading:Reading the PDF…');
     expect(harness.events.indexOf('status-hidden'))
-      .toBeGreaterThan(harness.events.indexOf('loading:Simul reads the PDF…'));
-    expect(harness.statuses.at(-1)).toEqual(['Simul reads the PDF…', undefined]);
+      .toBeGreaterThan(harness.events.indexOf('loading:Reading the PDF…'));
+    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
   });
 
   it('prepares a PDF for translation by the page rules once all its text is read', async () => {
@@ -584,7 +584,7 @@ describe('CapturePipeline PDFs', () => {
     expect(harness.pdf.close).not.toHaveBeenCalled();
     expect(harness.pdf.show).toHaveBeenCalledTimes(2);
     expect(harness.events.some((event) => event.startsWith('loading'))).toBe(false);
-    expect(harness.statuses.at(-1)).toEqual(['Simul reads the PDF…', undefined]);
+    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
   });
 
   it('closes a shown PDF when the next capture is another page or a web page', async () => {
@@ -633,7 +633,7 @@ describe('CapturePipeline PDFs', () => {
     fail = false;
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
     await harness.settled();
-    expect(harness.statuses.at(-1)).toEqual(['Simul reads the PDF…', undefined]);
+    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
 
     fail = true;
     harness.events.length = 0;

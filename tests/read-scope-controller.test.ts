@@ -341,7 +341,7 @@ describe('ReadScopeController reset and safety', () => {
     const harness = setup({ stored: setupComplete('standard'), cleanupRemaining: 2 });
     await harness.controller.resetAllExtensionSettings();
     expect(harness.commands[0]).toMatchObject({ type: 'simul:preferences:reset-all', expectedResetRevision: 0 });
-    expect(harness.events).toContain('purge:Simul resets the extension settings…');
+    expect(harness.events).toContain('purge:Resetting the extension settings…');
     expect(harness.events).toContain('reset-only-cleared');
     expect(harness.state.setupReadScopeDraft).toEqual(replicaReadScopeForProfile('standard'));
     expect(harness.elements.resetSettingsStatus.textContent)
@@ -385,7 +385,7 @@ describe('ReadScopeController reset and safety', () => {
       targetReadScope: target,
       targetFingerprint: replicaReadScopeFingerprint(target),
     }, (message) => replies.push(message));
-    expect(harness.events).toContain('purge:Simul prepares narrower read settings…');
+    expect(harness.events).toContain('purge:Preparing narrower read settings…');
     expect(replies).toEqual([
       { kind: 'simul:preference-safety-v1:ack', version: 1, requestId: 'r1' },
     ]);

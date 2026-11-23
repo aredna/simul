@@ -169,7 +169,7 @@ Simul translates the page that you read first, then the pages after it,
 then the pages before it. If you scroll to a different location,
 translation continues from there. Auto-detect uses the language tag of the
 PDF if it has one. If not, it uses the text of the PDF. After the pages
-show, Simul first reads all the text of the PDF ("Simul reads the PDF…"). Thus
+show, Simul first reads all the text of the PDF ("Reading the PDF…"). Thus
 **Translate page** becomes available a short time later (about half a
 second for 300 pages), or after the language check of scanned pages below.
 Translations appear on a page after the page is drawn.
