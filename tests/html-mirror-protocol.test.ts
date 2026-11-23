@@ -1767,6 +1767,66 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('Unpainted notice words');
   });
 
+  it('measures the box a left-out frame takes in the flow, and nothing of it (D239)', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <iframe id="gsi" src="https://accounts.google.com/gsi/button?token=abc" title="Sign in with Google"></iframe>
+      <iframe id="badge" src="https://www.google.com/recaptcha/x"></iframe>
+      <p>After the frames</p>
+    </body></html>`);
+    for (const [id, width, height] of [['gsi', 388, 44], ['badge', 256, 60]] as const) {
+      Object.defineProperty(document.querySelector(`#${id}`)!, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, width, height, right: width, bottom: height }),
+      });
+    }
+    const original = window.getComputedStyle;
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: ((element: Element) => {
+        const frame = element.localName === 'iframe';
+        const badge = element.id === 'badge';
+        return {
+          display: 'block',
+          position: badge ? 'fixed' : 'static',
+          visibility: 'visible',
+          opacity: '1',
+          getPropertyValue: (name: string) => {
+            if (name === 'margin-top') return frame ? '12px' : '0px';
+            if (name.startsWith('margin-')) return '0px';
+            if (name === 'float') return 'none';
+            if (name === '-webkit-text-security') return 'none';
+            return '';
+          },
+        } as unknown as CSSStyleDeclaration;
+      }) as Window['getComputedStyle'],
+    });
+    try {
+      const graph = sanitizeSourceDocument(
+        document,
+        window as unknown as Window,
+        new WeakNodeIdRegistry(),
+      );
+      const held: unknown[] = [];
+      const visit = (node: HtmlMirrorNode) => {
+        if (node.kind !== 'element') return;
+        if (node.leftOutTagName === 'iframe') held.push(node.heldBox ?? null);
+        node.children.forEach(visit);
+      };
+      visit(graph!.root);
+      expect(held).toEqual([
+        { width: 388, height: 44, block: true, margin: [12, 0, 0, 0] },
+        // A fixed badge takes no space where it stands.
+        null,
+      ]);
+      const serialized = JSON.stringify(graph);
+      expect(serialized).not.toContain('accounts.google.com');
+      expect(serialized).not.toContain('Sign in with Google');
+      expect(serialized).toContain('After the frames');
+    } finally {
+      Object.defineProperty(window, 'getComputedStyle', { configurable: true, value: original });
+    }
+  });
+
   it('reads painted duplicate and cross-root controlled panels (D75)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <p>Ordinary page text</p>

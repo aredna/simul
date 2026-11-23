@@ -319,6 +319,59 @@ describe('IsolatedHtmlReplicaEngine', () => {
     })).toBeUndefined();
   });
 
+  it('holds the space of a frame the reader left out, blank (D239)', async () => {
+    const standard = makeCheckpoint('page', 0);
+    const frame = (heldBox: unknown): HtmlMirrorNode => ({
+      kind: 'element', id: 5, namespace: 'html',
+      tagName: sourceSecretPlaceholderTagName(5),
+      attributes: [], children: [], opaquePlaceholder: true,
+      leftOutTagName: 'iframe', heldBox,
+    } as unknown as HtmlMirrorNode);
+    const page = (heldBox: unknown) => createHtmlMirrorCheckpoint(standard.identity, {
+      ...standard.payload,
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+          { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+          { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+            frame(heldBox),
+          ] },
+        ],
+      },
+    });
+    const checkpoint = page({ width: 388, height: 44, block: true, margin: [12, 0, 0, 0] })!;
+    expect(checkpoint).toBeDefined();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(new FakeHtmlStream(checkpoint), host);
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const held = host.iframe!.contentDocument!.body.firstElementChild!;
+    expect(held.getAttribute('data-simul-left-out')).toBe('iframe');
+    expect(held.childNodes).toHaveLength(0);
+    const shell = host.iframe!.contentDocument!.createElement('span');
+    let shadow: ShadowRoot | undefined;
+    const attach = shell.attachShadow.bind(shell);
+    Object.defineProperty(shell, 'attachShadow', {
+      configurable: true,
+      value: (init: ShadowRootInit) => (shadow = attach(init)),
+    });
+    protectIsolatedOpaquePlaceholder(shell, {
+      width: 388, height: 44, block: true, margin: [12, 0, 0, 0],
+    });
+    const css = shadow?.firstChild?.textContent ?? '';
+    // Hidden by default, then given the frame's box, which wins.
+    expect(css.indexOf('display:none')).toBeLessThan(css.indexOf('display:block'));
+    expect(css).toContain('width:388px!important');
+    expect(css).toContain('height:44px!important');
+    expect(css).toContain('margin:12px 0px 0px 0px!important');
+
+    // A box that is not exactly the four facts is refused with the page.
+    for (const bad of [
+      { width: -1, height: 44, block: true, margin: [0, 0, 0, 0] },
+      { width: 388, height: 44, block: true, margin: [0, 0, 0] },
+      { width: 388, height: 44, block: 'yes', margin: [0, 0, 0, 0] },
+      { width: 388, height: 44, block: true, margin: [0, 0, 0, 0], url: 'x' },
+    ]) expect(page(bad)).toBeUndefined();
+  });
+
   it('stages a doctype-free shell for a bounded quirks-mode checkpoint', async () => {
     const standard = makeCheckpoint('standards page', 0);
     const checkpoint = createHtmlMirrorCheckpoint(standard.identity, {

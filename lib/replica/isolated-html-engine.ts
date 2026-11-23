@@ -36,6 +36,7 @@ import {
   PAGE_XML_LANGUAGE_ATTRIBUTE,
   createHtmlMirrorShellLedger,
   HTML_MIRROR_LEFT_OUT_ATTRIBUTE,
+  type HtmlMirrorHeldBox,
   hasPrivateHtmlMirrorAttribute,
   isHtmlMirrorLeftOutTagName,
   isAutonomousCustomElementName,
@@ -2315,7 +2316,7 @@ function buildNode(
       (input.leftOutTagName !== undefined &&
         !isHtmlMirrorLeftOutTagName(input.leftOutTagName))
     ) throw new Error('Non-canonical secret placeholder rejected.');
-    protectIsolatedOpaquePlaceholder(node);
+    protectIsolatedOpaquePlaceholder(node, input.heldBox);
     // The place held for an element the reader leaves out carries its name,
     // for the page's type selectors (`script + p`), as the sheets are
     // written to read it (D208).
@@ -2412,18 +2413,38 @@ function assignIsolatedManualSlots(
  * shell. Important shadow declarations outrank outer author declarations at
  * the encapsulation boundary.
  */
-export function protectIsolatedOpaquePlaceholder(node: Element): void {
+export function protectIsolatedOpaquePlaceholder(
+  node: Element,
+  heldBox?: HtmlMirrorHeldBox,
+): void {
   const host = node as Element & {
     attachShadow?: (init: ShadowRootInit) => ShadowRoot;
   };
   const shadow = host.attachShadow?.({ mode: 'closed' });
   if (!shadow) throw new Error('Secret placeholder isolation unavailable.');
   const style = sourceProperty(node, 'ownerDocument').createElement('style');
-  style.textContent = ISOLATED_SECRET_PLACEHOLDER_CSS;
+  style.textContent = ISOLATED_SECRET_PLACEHOLDER_CSS +
+    (heldBox ? isolatedHeldBoxCss(heldBox) : '');
   shadow.append(style);
   sourceCall(node, 'setAttribute', 'aria-hidden', 'true');
   sourceCall(node, 'setAttribute', 'inert', '');
   sourceCall(node, 'setAttribute', 'tabindex', '-1');
+}
+
+/**
+ * A placeholder that holds the space its element takes in the tab (D239):
+ * blank, of that border box and margins, a block or an inline box as the
+ * element was, never wider than what holds it. Written after the rule that
+ * hides every placeholder, at the same specificity, so it wins.
+ */
+function isolatedHeldBoxCss(box: HtmlMirrorHeldBox): string {
+  const px = (value: number) => `${Number.isFinite(value) ? value : 0}px`;
+  const [top, right, bottom, left] = box.margin;
+  return `:host{display:${box.block ? 'block' : 'inline-block'}!important;` +
+    `box-sizing:border-box!important;width:${px(box.width)}!important;` +
+    `height:${px(box.height)}!important;max-width:100%!important;` +
+    `margin:${px(top)} ${px(right)} ${px(bottom)} ${px(left)}!important;` +
+    'vertical-align:baseline!important;overflow:hidden!important}';
 }
 
 /**

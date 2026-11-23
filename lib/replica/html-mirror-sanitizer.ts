@@ -195,6 +195,12 @@ export interface HtmlMirrorElementNode {
    */
   readonly leftOutTagName?: HtmlMirrorLeftOutTagName;
   /**
+   * On an opaque placeholder: the box the element takes in the tab (D239),
+   * which the placeholder takes too, blank, so that what follows stays where
+   * the tab has it. Absent when it takes none (hidden, or out of the flow).
+   */
+  readonly heldBox?: HtmlMirrorHeldBox;
+  /**
    * The element's children (and its root's, which then says so too) come
    * in a part of the same checkpoint (D163): a read in slices stopped here.
    * It has none of its own until the part fills it.
@@ -205,6 +211,18 @@ export interface HtmlMirrorElementNode {
    * height, in CSS pixels, and nothing of what it holds was read.
    */
   readonly placeholder?: HtmlMirrorPlaceholder;
+}
+
+/**
+ * The space an element the mirror does not draw takes in the tab (D239): its
+ * border box in CSS pixels, its margins, and whether it is a block.
+ */
+export interface HtmlMirrorHeldBox {
+  readonly width: number;
+  readonly height: number;
+  readonly block: boolean;
+  /** Top, right, bottom and left margins, in CSS pixels. */
+  readonly margin: readonly [number, number, number, number];
 }
 
 /** What a preview keeps of an element far from the viewport: its height (D163). */
@@ -1913,6 +1931,77 @@ function readTransportedPlaceholder(
   return Object.freeze({ height: input.height });
 }
 
+/** The widest or tallest box, and the largest margin, a held box may name. */
+const MAX_HTML_MIRROR_HELD_BOX = 100_000;
+
+function readTransportedHeldBox(input: unknown): HtmlMirrorHeldBox | undefined {
+  if (
+    !isRecord(input) ||
+    !hasExactKeys(input, ['width', 'height', 'block', 'margin']) ||
+    typeof input.block !== 'boolean' ||
+    !Array.isArray(input.margin) || input.margin.length !== 4
+  ) return undefined;
+  const size = (value: unknown) => typeof value === 'number' &&
+    Number.isFinite(value) && value >= 0 && value <= MAX_HTML_MIRROR_HELD_BOX;
+  const margin = (value: unknown) => typeof value === 'number' &&
+    Number.isFinite(value) && Math.abs(value) <= MAX_HTML_MIRROR_HELD_BOX;
+  if (!size(input.width) || !size(input.height) || !input.margin.every(margin)) {
+    return undefined;
+  }
+  const [top, right, bottom, left] = input.margin as number[];
+  return Object.freeze({
+    width: input.width as number,
+    height: input.height as number,
+    block: input.block,
+    margin: Object.freeze([top!, right!, bottom!, left!] as const),
+  });
+}
+
+/**
+ * The box an element the mirror does not draw takes in the tab (D239): only
+ * its geometry, never what it holds or where it points. None for one that
+ * takes no space where it stands: hidden, `display: contents`, absolutely
+ * or fixed positioned, or floated (a floated frame's space is left out, as
+ * before, rather than guessed).
+ */
+function readSourceHeldBox(element: Element): HtmlMirrorHeldBox | undefined {
+  try {
+    const view = element.ownerDocument?.defaultView;
+    if (!view) return undefined;
+    const style = view.getComputedStyle(element);
+    const display = style.display.trim().toLowerCase();
+    const position = style.position.trim().toLowerCase();
+    const float = style.getPropertyValue('float').trim().toLowerCase();
+    if (
+      !display || display === 'none' || display === 'contents' ||
+      position === 'absolute' || position === 'fixed' ||
+      (float !== '' && float !== 'none')
+    ) return undefined;
+    const rect = element.getBoundingClientRect();
+    const clamp = (value: number, low: number) =>
+      Number.isFinite(value)
+        ? Math.max(low, Math.min(MAX_HTML_MIRROR_HELD_BOX, Math.round(value * 100) / 100))
+        : 0;
+    const width = clamp(rect.width, 0);
+    const height = clamp(rect.height, 0);
+    if (width === 0 && height === 0) return undefined;
+    const margin = (side: string) => clamp(
+      Number.parseFloat(style.getPropertyValue(`margin-${side}`)),
+      -MAX_HTML_MIRROR_HELD_BOX,
+    );
+    return Object.freeze({
+      width,
+      height,
+      block: sourceOuterDisplayIsBlockValue(display),
+      margin: Object.freeze([
+        margin('top'), margin('right'), margin('bottom'), margin('left'),
+      ] as const),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /** Revalidates a transported graph and returns an immutable safe copy. */
 export function readHtmlMirrorNode(
   input: unknown,
@@ -1970,6 +2059,7 @@ export function readHtmlMirrorNode(
       'canvasBackgroundColor', 'resolvedStyleSheetText',
       'customElementDefined', 'assignedNodeIds', 'shadowRoot',
       'opaquePlaceholder', 'leftOutTagName', 'childrenFollow', 'placeholder',
+      'heldBox',
     ]) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
@@ -1981,7 +2071,11 @@ export function readHtmlMirrorNode(
   ) return undefined;
   const opaquePlaceholder = input.opaquePlaceholder === true;
   const leftOutTagName = input.leftOutTagName;
+  const heldBox = input.heldBox !== undefined
+    ? readTransportedHeldBox(input.heldBox)
+    : undefined;
   if (
+    (input.heldBox !== undefined && (!opaquePlaceholder || !heldBox)) ||
     (leftOutTagName !== undefined &&
       (!opaquePlaceholder || !isHtmlMirrorLeftOutTagName(leftOutTagName))) ||
     (input.opaquePlaceholder !== undefined && !opaquePlaceholder) ||
@@ -2360,6 +2454,7 @@ export function readHtmlMirrorNode(
     ...(shadowRoot ? { shadowRoot } : {}),
     ...(opaquePlaceholder ? { opaquePlaceholder: true as const } : {}),
     ...(isHtmlMirrorLeftOutTagName(leftOutTagName) ? { leftOutTagName } : {}),
+    ...(heldBox ? { heldBox } : {}),
     ...(childrenFollow ? { childrenFollow: true as const } : {}),
     ...(placeholder ? { placeholder } : {}),
   });
@@ -2573,10 +2668,13 @@ function serializeNode(
     // attributes, resources, descendants, shadow root, or style hints.
     // The node ID is retained solely for exact-document mirror identity.
     const tagName = sourceSecretPlaceholderTagName(id);
+    // Blank, at the size it takes in the tab (D239): only its geometry is
+    // read, never what it holds.
+    const heldBox = readSourceHeldBox(live as Element);
     admitNode(
       context.budget,
       id,
-      tagName.length * 2 + 64,
+      tagName.length * 2 + 64 + (heldBox ? 96 : 0),
       context.representability,
     );
     incrementRepresentability(
@@ -2591,6 +2689,7 @@ function serializeNode(
       attributes: Object.freeze([]),
       children: Object.freeze([]),
       opaquePlaceholder: true as const,
+      ...(heldBox ? { heldBox } : {}),
     });
   }
   if (sourceNodeType(live) === Node.TEXT_NODE) {
@@ -2689,7 +2788,7 @@ function serializeNode(
         // HTML element there draws nothing, and `script + circle` counts.
         (tagName === 'script' &&
           liveElement.namespaceURI === 'http://www.w3.org/2000/svg'))
-    ) return serializeLeftOutPlaceholder(id, context, tagName);
+    ) return serializeLeftOutPlaceholder(id, context, tagName, liveElement);
     return undefined;
   }
   const namespace = readNamespace(liveElement.namespaceURI);
@@ -8308,9 +8407,18 @@ function serializeLeftOutPlaceholder(
   id: number,
   context: SerializeContext,
   leftOutTagName: HtmlMirrorLeftOutTagName,
+  element: Element,
 ): HtmlMirrorElementNode {
   const tagName = sourceSecretPlaceholderTagName(id);
-  admitNode(context.budget, id, tagName.length * 2 + 64, context.representability);
+  // A frame or a plugin holds its space (D239): Google's sign-in button is
+  // another site's frame, and the form under it moved up without it.
+  const heldBox = readSourceHeldBox(element);
+  admitNode(
+    context.budget,
+    id,
+    tagName.length * 2 + 64 + (heldBox ? 96 : 0),
+    context.representability,
+  );
   return Object.freeze({
     kind: 'element',
     id,
@@ -8320,6 +8428,7 @@ function serializeLeftOutPlaceholder(
     children: Object.freeze([]),
     opaquePlaceholder: true as const,
     leftOutTagName,
+    ...(heldBox ? { heldBox } : {}),
   });
 }
 
