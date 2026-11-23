@@ -8510,7 +8510,10 @@ export function readSourceHiddenRegionState(
     // `<slot aria-hidden="true">` was withheld).
     if (display === 'contents') return state(false);
     if (declaredHiddenRegionIsUnpainted(style)) return state(true);
-    return state(!hasSourcePositivePaintBox(element));
+    return state(
+      !hasSourcePositivePaintBox(element) &&
+        !sourceDescendantPaintsOutsideEmptyBox(element, style),
+    );
   } catch {
     return SOURCE_REGION_WITHHELD;
   }
@@ -8914,6 +8917,61 @@ function hasSourcePositivePaintBox(element: Element): boolean {
         Number.isFinite(rect.width) && Number.isFinite(rect.height) &&
         rect.width > 0 && rect.height > 0
       ) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How many elements under a declared-hidden element with no box of its own
+ * are asked for a box before it is taken as unpainted (D233).
+ */
+const SOURCE_EMPTY_BOX_DESCENDANT_LIMIT = 512;
+
+/**
+ * For a declared-hidden element whose own box has no size: whether
+ * something it holds is drawn all the same (D233). A box of no size does not
+ * clip, so a fixed or absolutely placed descendant paints wherever it is
+ * placed: a consent library put its dialog under a host of zero height marked
+ * `aria-hidden="true"`, and the mirror drew the dialog without a word of its
+ * text. An element that clips its overflow keeps what it holds out of sight
+ * (bar a fixed descendant, which is not looked for), so it is not asked. The
+ * walk stops at the first descendant with a box, and after
+ * `SOURCE_EMPTY_BOX_DESCENDANT_LIMIT` elements without one the element counts
+ * as unpainted, as before. Content-free: only boxes are read.
+ */
+function sourceDescendantPaintsOutsideEmptyBox(
+  element: Element,
+  style: CSSStyleDeclaration,
+): boolean {
+  try {
+    const clips = (value: unknown): boolean =>
+      typeof value === 'string' && value.trim() !== '' &&
+      value.trim().toLowerCase() !== 'visible';
+    if (clips(style.overflowX) || clips(style.overflowY)) return false;
+    const pending: Node[] = [];
+    const queueChildren = (node: Node): void => {
+      const children = sourceChildNodeList(node);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child && sourceNodeType(child) === 1) pending.push(child);
+      }
+    };
+    const queueOwnRoot = (host: Element): void => {
+      const shadow = readSourceShadowRoot(host);
+      if (shadow) queueChildren(shadow);
+    };
+    queueOwnRoot(element);
+    queueChildren(element);
+    let asked = 0;
+    while (pending.length > 0 && asked < SOURCE_EMPTY_BOX_DESCENDANT_LIMIT) {
+      const current = pending.pop() as Element;
+      asked += 1;
+      if (hasSourcePositivePaintBox(current)) return true;
+      queueOwnRoot(current);
+      queueChildren(current);
     }
     return false;
   } catch {

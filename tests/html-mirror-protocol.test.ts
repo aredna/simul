@@ -1713,6 +1713,60 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialize()).toContain('Clipped headline');
   });
 
+  it('reads what an aria-hidden box of no size holds when a descendant is drawn outside it (D233)', () => {
+    // A consent library's host: `aria-hidden="true"`, zero height, and the
+    // dialog inside it fixed over the page. The tab draws the dialog.
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <div id="host" aria-hidden="true"><div id="fixed"><p>Cookie notice words</p></div></div>
+      <div id="clipped" aria-hidden="true" data-test-overflow="hidden"><div class="inner"><p>Clipped notice words</p></div></div>
+      <div id="empty" aria-hidden="true"><div class="inner"><p>Unpainted notice words</p></div></div>
+    </body></html>`);
+    const noBox = new Set(['host', 'clipped', 'empty']);
+    for (const element of document.querySelectorAll('*')) {
+      const boxless = noBox.has(element.id) || element.closest('#empty') !== null;
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => boxless
+          ? Object.assign([], { item: () => null })
+          : sourceRectList({ left: 0, top: 0, width: 320, height: 40 }),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: ((element: Element) => {
+        const overflow = element.getAttribute('data-test-overflow') ?? 'visible';
+        return {
+          display: 'block',
+          visibility: 'visible',
+          opacity: '1',
+          overflowX: overflow,
+          overflowY: overflow,
+          backgroundColor: 'rgba(0, 0, 0, 0)',
+          getPropertyValue: (name: string) => {
+            if (name === '-webkit-text-security') return 'none';
+            if (name === 'content-visibility') return 'visible';
+            if (name === 'clip') return 'auto';
+            if (name === 'clip-path') return 'none';
+            if (name === 'overflow' || name === 'overflow-x' ||
+              name === 'overflow-y') return overflow;
+            return '';
+          },
+        } as unknown as CSSStyleDeclaration;
+      }) as Window['getComputedStyle'],
+    });
+    const serialized = JSON.stringify(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    ));
+
+    expect(serialized).toContain('Cookie notice words');
+    // A box that clips what overflows it keeps it out of sight; with nothing
+    // drawn inside, the declaration stands.
+    expect(serialized).not.toContain('Clipped notice words');
+    expect(serialized).not.toContain('Unpainted notice words');
+  });
+
   it('reads painted duplicate and cross-root controlled panels (D75)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <p>Ordinary page text</p>
